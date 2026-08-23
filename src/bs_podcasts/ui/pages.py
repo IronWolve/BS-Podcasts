@@ -1,6 +1,6 @@
 """M0 pages built from reusable, model-backed components."""
 
-from PySide6.QtCore import QEvent, Signal, Qt
+from PySide6.QtCore import QEvent, QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -56,6 +56,7 @@ class BasePage(QWidget):
 class PodcastGridPage(BasePage):
     open_requested = Signal(object)
     menu_requested = Signal(object, object)
+    near_end = Signal()
 
     def __init__(self, title="Podcasts", subtitle="Your library, at a glance", discover=False, parent=None):
         super().__init__(
@@ -99,6 +100,7 @@ class PodcastGridPage(BasePage):
         self.view.doubleClicked.connect(self._open)
         self.header.search.textChanged.connect(self._apply_filters)
         self.chips.selected.connect(self._apply_filters)
+        self.view.verticalScrollBar().valueChanged.connect(self._check_near_end)
         self.root.addWidget(self.view, 1)
         self.view.setCurrentIndex(self.model.index(0, 0))
 
@@ -107,11 +109,15 @@ class PodcastGridPage(BasePage):
         if item:
             self.context_changed.emit(item)
 
-    def set_items(self, items):
+    def set_items(self, items, preserve_scroll: bool = False):
+        scrollbar = self.view.verticalScrollBar()
+        scroll_value = scrollbar.value()
         self._all_items = list(items)
         self._apply_filters()
-        if self.model.rowCount():
+        if self.model.rowCount() and not preserve_scroll:
             self.view.setCurrentIndex(self.model.index(0, 0))
+        if preserve_scroll:
+            QTimer.singleShot(0, lambda value=scroll_value: scrollbar.setValue(value))
 
     def _apply_filters(self, *_args):
         items = list(getattr(self, "_all_items", self.model._items))
@@ -149,6 +155,11 @@ class PodcastGridPage(BasePage):
                 self.view.scrollTo(index)
                 return True
         return False
+
+    def _check_near_end(self, value: int):
+        scrollbar = self.view.verticalScrollBar()
+        if scrollbar.maximum() > 0 and value >= scrollbar.maximum() - 2:
+            self.near_end.emit()
 
 
 class EpisodeListPage(BasePage):
