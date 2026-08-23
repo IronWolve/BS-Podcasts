@@ -822,13 +822,22 @@ class MainWindow(QMainWindow):
             self._discover_loading
             or self._discover_exhausted
             or not self._discover_operation
-            or self._discover_operation == "chart"
             or self._discover_limit >= (
-                200 if self._discover_operation in {"search", "topic"} else 500
+                100
+                if self._discover_operation == "chart"
+                else 200
+                if self._discover_operation in {"search", "topic"}
+                else 500
             )
         ):
             return
-        maximum = 200 if self._discover_operation in {"search", "topic"} else 500
+        maximum = (
+            100
+            if self._discover_operation == "chart"
+            else 200
+            if self._discover_operation in {"search", "topic"}
+            else 500
+        )
         self._discover_limit = min(maximum, self._discover_limit + 30)
         label = (
             self._discover_value[1]
@@ -942,7 +951,7 @@ class MainWindow(QMainWindow):
             candidates = self.directory.topic(category, topic, limit)
         elif operation == "chart":
             chart_type, category = value
-            candidates = self.directory.chart(chart_type, category)
+            candidates = self.directory.chart(chart_type, category, limit)
         else:
             callable_ = self.directory.search if operation == "search" else self.directory.browse
             candidates = callable_(value, limit)
@@ -1018,9 +1027,7 @@ class MainWindow(QMainWindow):
         self._discover_loading = False
         _operation, _value, requested_limit = request
         if result.status != JobStatus.OK:
-            self.discover_page.set_load_more_state(
-                _operation != "chart", loading=False
-            )
+            self.discover_page.set_load_more_state(True, loading=False)
             self.discover_page.banner.show_state(
                 "error", result.message or "Directory search failed."
             )
@@ -1068,9 +1075,14 @@ class MainWindow(QMainWindow):
             )
         result_count = len(podcasts)
         self._discover_exhausted = (
-            _operation == "chart"
-            or requested_limit
-            >= (200 if self._discover_operation in {"search", "topic"} else 500)
+            requested_limit
+            >= (
+                100
+                if self._discover_operation == "chart"
+                else 200
+                if self._discover_operation in {"search", "topic"}
+                else 500
+            )
             or result_count <= self._discover_result_count
         )
         self._discover_result_count = result_count

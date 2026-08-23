@@ -27,6 +27,7 @@ class AppleCharts:
         self.session = session or requests.Session()
         self.cache_seconds = cache_seconds
         self._cache = {}
+        self._developer_token = ""
 
     def chart(self, chart_type: str, category: str = ""):
         if chart_type not in CHART_TITLES:
@@ -36,6 +37,14 @@ class AppleCharts:
         cached = self._cache.get(key)
         if cached and time.time() - cached[0] < self.cache_seconds:
             return cached[1]
+
+        try:
+            results = self._full_chart(chart_type, chart_category)
+            if results:
+                self._cache[key] = (time.time(), results)
+                return results
+        except DirectoryError:
+            pass
 
         params = {}
         genre_id = CATEGORY_IDS.get(chart_category)
@@ -79,6 +88,111 @@ class AppleCharts:
         ]
         self._cache[key] = (time.time(), results)
         return results
+
+    def _full_chart(self, chart_type: str, category: str):
+        token = self._web_developer_token()
+        chart_names = {
+            "top_shows": ("top", "podcasts"),
+            "trending": ("top", "podcast-episodes"),
+            "subscriber_shows": ("top-subscriber", "podcasts"),
+            "top_series": ("top-series", "podcasts"),
+        }
+        chart, media_type = chart_names[chart_type]
+        params = {
+            "chart": chart,
+            "genre": CATEGORY_IDS.get(category, 26),
+            "l": "en-US",
+            "limit": 100,
+            "types": media_type,
+            "extend[podcasts]": "editorialArtwork,feedUrl",
+            "include[podcast-episodes]": "podcast",
+            "with": "entitlements,hlsVideo",
+        }
+        try:
+            response = self.session.get(
+                "https://amp-api.podcasts.apple.com/v1/catalog/us/charts",
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Origin": "https://podcasts.apple.com",
+                    "User-Agent": "BS-Podcasts/0.1",
+                },
+                timeout=(8, 20),
+            )
+            response.raise_for_status()
+            data = response.json()["results"][media_type][0]["data"]
+        except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
+            self._developer_token = ""
+            raise DirectoryError(str(exc)) from exc
+        return [
+            candidate
+            for rank, item in enumerate(data, start=1)
+            if (
+                candidate := self._api_candidate(item, chart_type, rank)
+            )
+            is not None
+        ]
+
+    def _web_developer_token(self):
+        if self._developer_token:
+            return self._developer_token
+        try:
+            page = self.session.get(self.endpoint, timeout=(8, 20)).text
+            script = re.search(
+                r'<script[^>]+src="([^"]*index[^"]+\.js)', page
+            )
+            if not script:
+                raise DirectoryError("Apple web script was not present.")
+            script_url = script.group(1)
+            if script_url.startswith("/"):
+                script_url = "https://podcasts.apple.com" + script_url
+            javascript = self.session.get(script_url, timeout=(8, 20)).text
+            token = re.search(r'const al="(eyJ[^"]+)"', javascript)
+            if not token:
+                raise DirectoryError("Apple web chart token was not present.")
+            self._developer_token = token.group(1)
+            return self._developer_token
+        except requests.RequestException as exc:
+            raise DirectoryError(str(exc)) from exc
+
+    def _api_candidate(self, item, chart_type: str, rank: int):
+        attributes = item.get("attributes", {})
+        if chart_type == "trending":
+            podcast_data = (
+                item.get("relationships", {})
+                .get("podcast", {})
+                .get("data", [])
+            )
+            podcast_attributes = (
+                podcast_data[0].get("attributes", {})
+                if podcast_data
+                else {}
+            )
+            feed_url = str(podcast_attributes.get("feedUrl") or "").strip()
+            author = str(podcast_attributes.get("name") or "").strip()
+            artwork = attributes.get("artwork") or podcast_attributes.get("artwork") or {}
+            genres = podcast_attributes.get("genreNames") or attributes.get("genreNames") or []
+        else:
+            feed_url = str(attributes.get("feedUrl") or "").strip()
+            author = str(attributes.get("artistName") or "").strip()
+            artwork = attributes.get("artwork") or {}
+            genres = attributes.get("genreNames") or []
+        if not feed_url:
+            return None
+        genre = next(
+            (str(value) for value in genres if str(value) in CATEGORY_IDS),
+            str(genres[0]) if genres else "",
+        )
+        return DirectoryCandidate(
+            title=str(attributes.get("name") or "Untitled").strip(),
+            author=author,
+            feed_url=feed_url,
+            artwork_url=self._artwork_url(artwork.get("url", "")),
+            genre=genre,
+            rank=rank,
+            chart_type=chart_type,
+            apple_url=str(attributes.get("url") or ""),
+        )
 
     def _candidate(self, item, chart_type: str, position: int):
         if chart_type == "trending":

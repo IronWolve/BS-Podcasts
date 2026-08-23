@@ -153,8 +153,8 @@ class ItunesDirectory:
             params["genreId"] = genre_id
         return self._request(params)
 
-    def chart(self, chart_type: str, category: str = ""):
-        return self.charts.chart(chart_type, category)
+    def chart(self, chart_type: str, category: str = "", limit: int = 30):
+        return self.charts.chart(chart_type, category)[:limit]
 
     def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:
         excluded = {show.feed_url for show in shows}

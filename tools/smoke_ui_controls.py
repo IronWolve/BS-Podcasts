@@ -46,7 +46,7 @@ class PagedDirectory:
     def topic(self, category, topic, limit=30):
         return self._items(limit)
 
-    def chart(self, chart_type, category=""):
+    def chart(self, chart_type, category="", limit=30):
         return [
             DirectoryCandidate(
                 item.title,
@@ -55,7 +55,7 @@ class PagedDirectory:
                 rank=index + 1,
                 chart_type=chart_type,
             )
-            for index, item in enumerate(self._items(24))
+            for index, item in enumerate(self._items(min(limit, 100)))
         ]
 
 
@@ -159,15 +159,16 @@ def main() -> int:
         window.discover_page.chart.setCurrentIndex(1)
         while window._discover_loading:
             app.processEvents()
-        require(window.discover_page.model.rowCount() == 24, "Top Shows chart differs")
+        require(window.discover_page.model.rowCount() == 30, "Top Shows chart differs")
         require(
             "Apple Top Shows" in window.discover_page.result_summary.text(),
             "Top Shows chart summary is missing",
         )
-        require(
-            not window.discover_page.load_more.isVisible(),
-            "Chart incorrectly offers pagination",
-        )
+        require(window.discover_page.load_more.isVisible(), "Chart continuation is missing")
+        window._load_more_discover()
+        while window._discover_loading:
+            app.processEvents()
+        require(window.discover_page.model.rowCount() == 60, "Chart did not load more")
 
         window.close()
         jobs.shutdown(wait=True)
