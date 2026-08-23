@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from ..domain import FeedData, FeedEpisodeData
 
 
-MAX_FEED_BYTES = 5 * 1024 * 1024
+MAX_FEED_BYTES = 20 * 1024 * 1024
 MAX_EPISODES = 5000
 MIN_ENCLOSURE_BYTES = 16 * 1024
 

@@ -7,7 +7,7 @@ from urllib.parse import urljoin
 import requests
 
 
-MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 USER_AGENT = "BS-Podcasts/0.1 (+desktop podcast client)"
 
 

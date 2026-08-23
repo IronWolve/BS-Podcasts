@@ -1,6 +1,6 @@
 """M0 pages built from reusable, model-backed components."""
 
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import QEvent, Signal, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -62,13 +62,12 @@ class PodcastGridPage(BasePage):
         self.view.setSpacing(2)
         self.view.setUniformItemSizes(True)
         self.view.setMouseTracking(True)
-        self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.view.viewport().installEventFilter(self)
         self.model = PodcastModel(PODCASTS[2:] + PODCASTS[:2] if discover else PODCASTS)
         self.view.setModel(self.model)
         self.view.setItemDelegate(PodcastDelegate(self.view))
         self.view.selectionModel().currentChanged.connect(self._selected)
         self.view.doubleClicked.connect(self._open)
-        self.view.customContextMenuRequested.connect(self._menu)
         self.header.search.textChanged.connect(self._apply_filters)
         self.chips.selected.connect(self._apply_filters)
         self.root.addWidget(self.view, 1)
@@ -104,6 +103,21 @@ class PodcastGridPage(BasePage):
         self.view.setCurrentIndex(index)
         self.menu_requested.emit(index.data(ItemRoles.ITEM), self.view.viewport().mapToGlobal(position))
 
+    def eventFilter(self, watched, event):
+        if watched is self.view.viewport() and event.type() == QEvent.Type.ContextMenu:
+            self._menu(event.pos())
+            return True
+        return super().eventFilter(watched, event)
+
+    def select_show(self, show_id: int):
+        for row, item in enumerate(self.model._items):
+            if item.show_id == show_id:
+                index = self.model.index(row, 0)
+                self.view.setCurrentIndex(index)
+                self.view.scrollTo(index)
+                return True
+        return False
+
 
 class EpisodeListPage(BasePage):
     play_requested = Signal(object)
@@ -124,14 +138,13 @@ class EpisodeListPage(BasePage):
         self.view = QListView()
         self.view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.view.setMouseTracking(True)
-        self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.view.viewport().installEventFilter(self)
         self.view.setUniformItemSizes(True)
         self.model = EpisodeModel(items)
         self.view.setModel(self.model)
         self.view.setItemDelegate(EpisodeDelegate(self.view))
         self.view.selectionModel().currentChanged.connect(self._selected)
         self.view.doubleClicked.connect(self._play)
-        self.view.customContextMenuRequested.connect(self._menu)
         self.header.search.textChanged.connect(self._apply_filters)
         self.chips.selected.connect(self._set_filter)
         self._filter = "All"
@@ -180,6 +193,12 @@ class EpisodeListPage(BasePage):
             return
         self.view.setCurrentIndex(index)
         self.menu_requested.emit(index.data(ItemRoles.ITEM), self.view.viewport().mapToGlobal(position))
+
+    def eventFilter(self, watched, event):
+        if watched is self.view.viewport() and event.type() == QEvent.Type.ContextMenu:
+            self._menu(event.pos())
+            return True
+        return super().eventFilter(watched, event)
 
 
 class HomePage(BasePage):

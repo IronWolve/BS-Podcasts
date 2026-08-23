@@ -22,15 +22,15 @@ from PySide6.QtWidgets import (
 
 
 NAV_ITEMS = (
-    ("HM", "Home"),
-    ("PC", "Podcasts"),
-    ("EP", "Episodes"),
-    ("UP", "Playlist"),
-    ("DL", "Downloads"),
-    ("DS", "Discover"),
-    ("BM", "Bookmarks"),
-    ("HS", "History"),
-    ("ST", "Settings"),
+    ("⌂", "Home"),
+    ("●", "Podcasts"),
+    ("≡", "Episodes"),
+    ("▶", "Playlist"),
+    ("↓", "Downloads"),
+    ("✦", "Discover"),
+    ("◆", "Bookmarks"),
+    ("◷", "History"),
+    ("⚙", "Settings"),
 )
 
 
@@ -72,8 +72,8 @@ class NavigationRail(QFrame):
 
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
-        for index, (short, label) in enumerate(NAV_ITEMS):
-            button = QPushButton(f"{short}    {label}")
+        for index, (symbol, label) in enumerate(NAV_ITEMS):
+            button = QPushButton(label)
             button.setObjectName("navButton")
             button.setCheckable(True)
             button.setProperty("active", index == 0)
@@ -81,7 +81,7 @@ class NavigationRail(QFrame):
             button.setAccessibleName(label)
             button.clicked.connect(lambda checked=False, i=index: self.select(i))
             self.group.addButton(button, index)
-            self._buttons.append((button, short, label))
+            self._buttons.append((button, symbol, label))
             layout.addWidget(button)
 
         layout.addStretch(1)
@@ -109,8 +109,8 @@ class NavigationRail(QFrame):
         self.setFixedWidth(72 if compact else 224)
         self.brand_text.setVisible(not compact)
         self.version.setText("M0" if compact else "M0 · UI SHELL")
-        for button, short, label in self._buttons:
-            button.setText(short if compact else f"{short}    {label}")
+        for button, symbol, label in self._buttons:
+            button.setText(symbol if compact else label)
             button.setStyleSheet("text-align: center;" if compact else "")
 
 

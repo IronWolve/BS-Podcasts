@@ -333,6 +333,7 @@ class MainWindow(QMainWindow):
             return
         self._reload_library()
         self.navigation.select(1)
+        self.podcast_page.select_show(show.id)
         self.podcast_page.banner.show_state("loading", "Podcast added; refreshing feed…")
         self._submit_refresh(show.id)
 
@@ -346,6 +347,7 @@ class MainWindow(QMainWindow):
             return
         self._reload_library()
         self.navigation.select(1)
+        self.podcast_page.select_show(show.id)
         self.podcast_page.banner.show_state("loading", "Podcast added; refreshing feed…")
         self._submit_refresh(show.id)
         self.discover_page.banner.show_state("loading", "Subscription added; refreshing feed…")
@@ -685,7 +687,7 @@ class MainWindow(QMainWindow):
         future.add_done_callback(finished)
 
     def _refresh_finished(self, payload):
-        kind, _identifier, result = payload
+        kind, identifier, result = payload
         if kind == "directory":
             self._directory_finished(result)
             return
@@ -699,18 +701,19 @@ class MainWindow(QMainWindow):
                 )
             return
         self._reload_library()
+        self.podcast_page.select_show(identifier)
         if result.status != JobStatus.OK:
-            self.episode_page.banner.show_state("error", result.message or "Refresh failed.")
+            self.podcast_page.banner.show_state("error", result.message or "Refresh failed.")
             return
         report = result.value
         if report.health in {Health.ERROR, Health.SUSPENDED}:
-            self.episode_page.banner.show_state(report.health.value, report.message)
+            self.podcast_page.banner.show_state(report.health.value, report.message)
         elif report.health == Health.PARTIAL:
-            self.episode_page.banner.show_state(
+            self.podcast_page.banner.show_state(
                 "partial", "The podcast refreshed but did not contain playable episodes."
             )
         else:
-            self.episode_page.banner.clear()
+            self.podcast_page.banner.clear()
 
     def _directory_finished(self, result):
         if result.status != JobStatus.OK:
