@@ -797,11 +797,10 @@ class MainWindow(QMainWindow):
             self.discover_page.category.blockSignals(False)
         shows = self.library.shows() if self.library is not None else []
         if shows:
-            seed = shows[0].author or shows[0].title
             self.discover_page.banner.show_state(
-                "loading", f"Finding podcasts related to {shows[0].title}…"
+                "loading", "Finding podcasts from categories related to your library…"
             )
-            self._start_directory_request("search", seed)
+            self._start_directory_request("recommend", "")
         else:
             self._browse_category("")
 
@@ -823,8 +822,11 @@ class MainWindow(QMainWindow):
         future.add_done_callback(finished)
 
     def _directory_request(self, operation: str, value: str, limit: int):
-        callable_ = self.directory.search if operation == "search" else self.directory.browse
-        candidates = callable_(value, limit)
+        if operation == "recommend":
+            candidates = self.directory.recommend(self.library.shows(), limit)
+        else:
+            callable_ = self.directory.search if operation == "search" else self.directory.browse
+            candidates = callable_(value, limit)
         results = []
         artwork_cache = self.refresh.artwork if self.refresh is not None else None
         for candidate in candidates:
