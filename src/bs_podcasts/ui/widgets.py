@@ -429,7 +429,10 @@ class ContextPanel(QFrame):
         self.letters.setText("".join(word[0] for word in words[:2]).upper())
         self._set_artwork(podcast.artwork_path)
         self.title.setText(podcast.title)
-        self.meta.setText(f"{podcast.author} · {podcast.episode_count} episodes")
+        if podcast.directory_result:
+            self.meta.setText(podcast.display_meta or podcast.author)
+        else:
+            self.meta.setText(f"{podcast.author} · {podcast.episode_count} episodes")
         self._feed_url = podcast.feed_url if podcast.show_id == 0 else ""
         self._episode_id = 0
         self._show_id = podcast.show_id
