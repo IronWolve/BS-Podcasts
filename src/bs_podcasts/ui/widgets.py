@@ -126,6 +126,8 @@ class NavigationRail(QFrame):
 
 
 class PageHeader(QFrame):
+    back_requested = Signal()
+
     def __init__(
         self,
         title: str,
@@ -139,6 +141,15 @@ class PageHeader(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
+
+        self.back = QPushButton("‹")
+        self.back.setObjectName("iconButton")
+        self.back.setToolTip("Go back")
+        self.back.setAccessibleName("Go back")
+        self.back.setFixedSize(38, 38)
+        self.back.setVisible(False)
+        self.back.clicked.connect(self.back_requested)
+        layout.addWidget(self.back)
 
         text = QVBoxLayout()
         text.setSpacing(2)

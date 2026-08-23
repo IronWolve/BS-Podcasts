@@ -57,6 +57,7 @@ class PodcastGridPage(BasePage):
     open_requested = Signal(object)
     menu_requested = Signal(object, object)
     near_end = Signal()
+    load_more_requested = Signal()
 
     def __init__(self, title="Podcasts", subtitle="Your library, at a glance", discover=False, parent=None):
         super().__init__(
@@ -69,27 +70,44 @@ class PodcastGridPage(BasePage):
         self.chips = ChipRow(chips)
         if discover:
             filters = QWidget()
-            filter_layout = QHBoxLayout(filters)
+            filter_layout = QVBoxLayout(filters)
             filter_layout.setContentsMargins(0, 0, 0, 0)
-            filter_layout.setSpacing(10)
-            filter_layout.addWidget(self.chips, 1)
+            filter_layout.setSpacing(8)
+            primary_filters = QHBoxLayout()
+            primary_filters.setSpacing(10)
+            primary_filters.addWidget(self.chips, 1)
+            self.chart = QComboBox()
+            self.chart.setAccessibleName("Discover view")
+            self.chart.addItem("Explore & For You", "explore")
+            self.chart.addItem("Apple Top Shows", "top_shows")
+            self.chart.addItem("Apple Trending Episodes", "trending")
+            self.chart.addItem("Apple Top Subscriber Shows", "subscriber_shows")
+            self.chart.addItem("Apple Top Series", "top_series")
+            self.chart.setMinimumWidth(260)
+            primary_filters.addWidget(self.chart)
+            filter_layout.addLayout(primary_filters)
+            secondary_filters = QHBoxLayout()
+            secondary_filters.setSpacing(10)
+            secondary_filters.addStretch(1)
             self.category = QComboBox()
             self.category.setAccessibleName("Podcast category")
             self.category.addItem("All Categories")
             self.category.addItems(CATEGORY_IDS.keys())
             self.category.setMinimumWidth(220)
-            filter_layout.addWidget(self.category)
+            secondary_filters.addWidget(self.category)
             self.topic = QComboBox()
             self.topic.setAccessibleName("Podcast subcategory or topic")
             self.topic.setMinimumWidth(220)
             self.topic.setEnabled(False)
             self.topic.addItem("Choose a category first")
-            filter_layout.addWidget(self.topic)
+            secondary_filters.addWidget(self.topic)
+            filter_layout.addLayout(secondary_filters)
             self.root.addWidget(filters)
             self.result_summary = QLabel("Choose For You, search, or select a category.")
             self.result_summary.setObjectName("meta")
             self.root.addWidget(self.result_summary)
         else:
+            self.chart = None
             self.category = None
             self.topic = None
             self.result_summary = None
@@ -113,6 +131,14 @@ class PodcastGridPage(BasePage):
         self.chips.selected.connect(self._apply_filters)
         self.view.verticalScrollBar().valueChanged.connect(self._check_near_end)
         self.root.addWidget(self.view, 1)
+        self.load_more = QPushButton("Load more podcasts")
+        self.load_more.setObjectName("quietButton")
+        self.load_more.setAccessibleName("Load more podcasts")
+        self.load_more.clicked.connect(self.load_more_requested)
+        self.load_more.setVisible(False)
+        self.root.addWidget(
+            self.load_more, alignment=Qt.AlignmentFlag.AlignHCenter
+        )
         self.view.setCurrentIndex(self.model.index(0, 0))
 
     def _selected(self, current, previous):
@@ -156,6 +182,13 @@ class PodcastGridPage(BasePage):
         if watched is self.view.viewport() and event.type() == QEvent.Type.ContextMenu:
             self._menu(event.pos())
             return True
+        if watched is self.view.viewport() and event.type() == QEvent.Type.Wheel:
+            QTimer.singleShot(
+                0,
+                lambda: self._check_near_end(
+                    self.view.verticalScrollBar().value()
+                ),
+            )
         return super().eventFilter(watched, event)
 
     def select_show(self, show_id: int):
@@ -169,8 +202,21 @@ class PodcastGridPage(BasePage):
 
     def _check_near_end(self, value: int):
         scrollbar = self.view.verticalScrollBar()
-        if scrollbar.maximum() > 0 and value >= scrollbar.maximum() - 2:
+        preload_distance = max(2, scrollbar.pageStep() // 3)
+        if (
+            scrollbar.maximum() > 0
+            and value >= scrollbar.maximum() - preload_distance
+        ):
             self.near_end.emit()
+
+    def set_load_more_state(
+        self, available: bool, loading: bool = False
+    ):
+        self.load_more.setVisible(available or loading)
+        self.load_more.setEnabled(available and not loading)
+        self.load_more.setText(
+            "Loading more podcasts…" if loading else "Load more podcasts"
+        )
 
     def set_category_topics(self, category: str):
         if self.topic is None:
