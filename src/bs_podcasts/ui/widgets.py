@@ -309,6 +309,11 @@ class ContextPanel(QFrame):
         self.meta = QLabel("Northlight Audio · 148 episodes")
         self.meta.setObjectName("meta")
         self.meta.setWordWrap(True)
+        self.latest_heading = QLabel("LATEST EPISODE")
+        self.latest_heading.setObjectName("brandSub")
+        self.latest_episode = QLabel("The map is not the territory\nToday")
+        self.latest_episode.setObjectName("contextLatest")
+        self.latest_episode.setWordWrap(True)
         self.body = QLabel(
             "Thoughtful conversations about systems, culture, and the quiet "
             "choices that shape everyday life."
@@ -317,6 +322,8 @@ class ContextPanel(QFrame):
         self.body.setWordWrap(True)
         layout.addWidget(self.title)
         layout.addWidget(self.meta)
+        layout.addWidget(self.latest_heading)
+        layout.addWidget(self.latest_episode)
         layout.addWidget(self.body)
 
         actions = QHBoxLayout()
@@ -432,7 +439,10 @@ class ContextPanel(QFrame):
         if podcast.directory_result:
             self.meta.setText(podcast.display_meta or podcast.author)
         else:
-            self.meta.setText(f"{podcast.author} · {podcast.episode_count} episodes")
+            new_text = f" · {podcast.new_count} new" if podcast.new_count else ""
+            self.meta.setText(
+                f"{podcast.author} · {podcast.episode_count} episodes{new_text}"
+            )
         self._feed_url = podcast.feed_url if podcast.show_id == 0 else ""
         self._episode_id = 0
         self._show_id = podcast.show_id
@@ -448,14 +458,22 @@ class ContextPanel(QFrame):
         self.download.setText("Download")
         self.download.setEnabled(False)
         if self._feed_url:
+            self.latest_heading.setVisible(False)
+            self.latest_episode.setVisible(False)
             self.body.setText(
                 "Directory result. Subscribe to add this podcast and refresh "
                 "its playable episodes."
             )
         else:
+            has_latest = bool(podcast.latest_episode_title)
+            self.latest_heading.setVisible(has_latest)
+            self.latest_episode.setVisible(has_latest)
+            self.latest_episode.setText(
+                f"{podcast.latest_episode_title}\n{podcast.latest_episode_date}"
+            )
             self.body.setText(
-                f"{podcast.new_count} new episodes in your library. Select the "
-                "show to open its full episode list and listening controls."
+                podcast.description
+                or "Select the show to open its full episode list and listening controls."
             )
 
     def show_episode(self, episode):
@@ -464,6 +482,8 @@ class ContextPanel(QFrame):
         self._set_artwork(episode.artwork_path)
         self.title.setText(episode.title)
         self.meta.setText(f"{episode.show} · {episode.published} · {episode.duration}")
+        self.latest_heading.setVisible(False)
+        self.latest_episode.setVisible(False)
         self.body.setText(
             "Episode details, show notes, chapters, and playback actions will "
             "live here without losing your place in the list."
@@ -526,6 +546,8 @@ class ContextPanel(QFrame):
         self.letters.setText("—")
         self.title.setText("Nothing selected")
         self.meta.setText("")
+        self.latest_heading.setVisible(False)
+        self.latest_episode.setVisible(False)
         self.body.setText("Add a podcast or select an episode to see its details.")
         self._feed_url = ""
         self._episode_id = 0

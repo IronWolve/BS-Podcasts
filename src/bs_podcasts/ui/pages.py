@@ -78,7 +78,14 @@ class PodcastGridPage(BasePage):
         chips = () if discover else ("All", "New")
         self.chips = ChipRow(chips)
         if discover:
+            banner_policy = self.banner.sizePolicy()
+            banner_policy.setRetainSizeWhenHidden(True)
+            self.banner.setSizePolicy(banner_policy)
+            self.banner.setFixedHeight(42)
             filters = QWidget()
+            filters.setObjectName("discoverToolbar")
+            filters.setFixedHeight(88)
+            self.discover_toolbar = filters
             filter_layout = QVBoxLayout(filters)
             filter_layout.setContentsMargins(0, 0, 0, 0)
             filter_layout.setSpacing(8)
@@ -90,6 +97,7 @@ class PodcastGridPage(BasePage):
             self.chart.setExpanding(True)
             self.chart.setUsesScrollButtons(True)
             self.chart.setElideMode(Qt.TextElideMode.ElideRight)
+            self.chart.setFixedHeight(38)
             for label, value in (
                 ("For You", "explore"),
                 ("Top Shows", "top_shows"),
@@ -112,19 +120,24 @@ class PodcastGridPage(BasePage):
             primary_filters.addWidget(self.chart, 1)
             filter_layout.addLayout(primary_filters)
             self.secondary_filters_widget = QWidget()
+            self.secondary_filters_widget.setFixedHeight(42)
             secondary_filters = QHBoxLayout(self.secondary_filters_widget)
             secondary_filters.setContentsMargins(0, 0, 0, 0)
             secondary_filters.setSpacing(10)
             secondary_filters.addStretch(1)
+            self.scope_label = QLabel("All Categories · Apple chart")
+            self.scope_label.setObjectName("scopePill")
+            self.scope_label.setVisible(False)
+            secondary_filters.addWidget(self.scope_label)
             self.category = QComboBox()
             self.category.setAccessibleName("Podcast category")
             self.category.addItem("All Categories")
             self.category.addItems(CATEGORY_IDS.keys())
-            self.category.setMinimumWidth(220)
+            self.category.setFixedWidth(220)
             secondary_filters.addWidget(self.category)
             self.topic = QComboBox()
             self.topic.setAccessibleName("Podcast subcategory or topic")
-            self.topic.setMinimumWidth(220)
+            self.topic.setFixedWidth(220)
             self.topic.setEnabled(False)
             self.topic.addItem("Choose a category first")
             secondary_filters.addWidget(self.topic)
@@ -132,6 +145,7 @@ class PodcastGridPage(BasePage):
             self.root.addWidget(filters)
             self.result_summary = QLabel("Choose For You, search, or select a category.")
             self.result_summary.setObjectName("meta")
+            self.result_summary.setFixedHeight(22)
             self.root.addWidget(self.result_summary)
             self.header.search.setPlaceholderText("Search podcasts or topics")
             if self.header.action:
@@ -142,9 +156,11 @@ class PodcastGridPage(BasePage):
                 self.header.action.setFixedSize(40, 38)
         else:
             self.chart = None
+            self.discover_toolbar = None
             self.secondary_filters_widget = None
             self.category = None
             self.topic = None
+            self.scope_label = None
             self.result_summary = None
             self.root.addWidget(self.chips)
         self.view = QListView()
@@ -170,6 +186,10 @@ class PodcastGridPage(BasePage):
         self.load_more.setObjectName("quietButton")
         self.load_more.setAccessibleName("Load more podcasts")
         self.load_more.clicked.connect(self.load_more_requested)
+        load_more_policy = self.load_more.sizePolicy()
+        load_more_policy.setRetainSizeWhenHidden(True)
+        self.load_more.setSizePolicy(load_more_policy)
+        self.load_more.setFixedHeight(38)
         self.load_more.setVisible(False)
         self.root.addWidget(
             self.load_more, alignment=Qt.AlignmentFlag.AlignHCenter
@@ -273,13 +293,18 @@ class PodcastGridPage(BasePage):
             self.result_summary.setText(text)
 
     def set_discover_filter_visibility(
-        self, show_category: bool, show_topic: bool
+        self,
+        show_category: bool,
+        show_topic: bool,
+        scope_text: str = "All Categories · Apple chart",
     ):
         if self.secondary_filters_widget is None:
             return
-        self.secondary_filters_widget.setVisible(show_category or show_topic)
+        self.secondary_filters_widget.setVisible(True)
         self.category.setVisible(show_category)
         self.topic.setVisible(show_topic)
+        self.scope_label.setText(scope_text)
+        self.scope_label.setVisible(not show_category and not show_topic)
 
 
 class EpisodeListPage(BasePage):

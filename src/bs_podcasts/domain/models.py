@@ -33,6 +33,8 @@ class Show:
     last_refresh: float | None = None
     episode_count: int = 0
     new_count: int = 0
+    latest_episode_title: str = ""
+    latest_episode_published_at: str = ""
     playback_speed: float = 1.0
     skip_back: int = 15
     skip_forward: int = 30
