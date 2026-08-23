@@ -41,6 +41,12 @@ class LibraryService:
     def queue(self):
         return self.repository.list_queue()
 
+    def episode(self, episode_id: int):
+        return self.repository.get_episode(episode_id)
+
+    def dequeue(self, episode_id: int):
+        self.repository.dequeue(episode_id)
+
     def search(self, query: str, limit: int = 100):
         query = query.strip()
         if not query:

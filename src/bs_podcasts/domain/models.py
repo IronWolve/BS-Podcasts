@@ -33,6 +33,10 @@ class Show:
     last_refresh: float | None = None
     episode_count: int = 0
     new_count: int = 0
+    playback_speed: float = 1.0
+    skip_back: int = 15
+    skip_forward: int = 30
+    auto_continue: bool = True
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,7 @@ class Episode:
     played: bool = False
     is_new: bool = True
     downloaded_path: str = ""
+    last_played: float | None = None
 
 
 @dataclass(frozen=True)

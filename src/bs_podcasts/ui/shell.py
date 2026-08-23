@@ -25,15 +25,25 @@ from .widgets import ContextPanel, NavigationRail, PlayerBar
 
 class _JobBridge(QObject):
     completed = Signal(object)
+    playback_event = Signal(object)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, library=None, jobs=None, refresh=None, directory=None, parent=None):
+    def __init__(
+        self,
+        library=None,
+        jobs=None,
+        refresh=None,
+        directory=None,
+        playback=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.library = library
         self.jobs = jobs
         self.refresh = refresh
         self.directory = directory
+        self.playback = playback
         self.setObjectName("mainWindow")
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(900, 650)
@@ -42,6 +52,7 @@ class MainWindow(QMainWindow):
         self._pending_jobs = set()
         self._bridge = _JobBridge(self)
         self._bridge.completed.connect(self._refresh_finished)
+        self._bridge.playback_event.connect(self._playback_changed)
 
         root = QWidget()
         root.setObjectName("appRoot")
@@ -63,6 +74,8 @@ class MainWindow(QMainWindow):
         self.context = ContextPanel()
         self.context.close_button.clicked.connect(self._hide_context)
         self.context.subscribe_requested.connect(self._subscribe_url)
+        self.context.play_episode_requested.connect(self._play_episode)
+        self.context.queue_episode_requested.connect(self._queue_episode)
         self.splitter.addWidget(self.pages)
         self.splitter.addWidget(self.context)
         self.splitter.setStretchFactor(0, 1)
@@ -76,12 +89,18 @@ class MainWindow(QMainWindow):
 
         self.player = PlayerBar()
         self.player.context_requested.connect(self._toggle_context)
+        self.player.play_pause_requested.connect(self._play_pause)
+        self.player.skip_requested.connect(self._skip)
+        self.player.seek_requested.connect(self._seek)
+        self.player.speed_requested.connect(self._set_speed)
+        self.player.volume_requested.connect(self._set_volume)
         outer.addWidget(self.player)
         self.setCentralWidget(root)
 
         self._build_pages()
         self._build_shortcuts()
         self._wire_library()
+        self._wire_playback()
         self.navigation.select(0)
         self.resize(1440, 900)
 
@@ -131,6 +150,8 @@ class MainWindow(QMainWindow):
             if hasattr(page, "context_changed"):
                 page.context_changed.connect(self._show_item)
             self.pages.addWidget(page)
+        for page in (self.home_page, self.episode_page, self.playlist_page, self.history_page):
+            page.play_requested.connect(lambda item: self._play_episode(item.episode_id))
 
     def _build_shortcuts(self):
         for index in range(self.page_count):
@@ -154,6 +175,13 @@ class MainWindow(QMainWindow):
                 )
         self._reload_library()
 
+    def _wire_playback(self):
+        if self.playback is None:
+            return
+        self.playback.subscribe(lambda snapshot: self._bridge.playback_event.emit(snapshot))
+        self.player.set_capabilities(self.playback.engine.capabilities)
+        self.player.set_snapshot(self.playback.snapshot)
+
     def _reload_library(self):
         if self.library is None:
             return
@@ -164,6 +192,7 @@ class MainWindow(QMainWindow):
         self.episode_page.set_items(episodes)
         self.home_page.set_items(episodes)
         self.playlist_page.set_items(queued)
+        self.context.set_queue(queued)
 
         if shows:
             self.podcast_page.banner.clear()
@@ -201,6 +230,44 @@ class MainWindow(QMainWindow):
         self._reload_library()
         self._submit_refresh(show.id)
         self.discover_page.banner.show_state("loading", "Subscription added; refreshing feed…")
+
+    def _play_episode(self, episode_id: int):
+        if self.playback is None or not episode_id:
+            return
+        try:
+            self.playback.load_episode(episode_id, autoplay=True)
+        except Exception as exc:
+            self.episode_page.banner.show_state("error", str(exc))
+
+    def _queue_episode(self, episode_id: int):
+        if self.library is None or not episode_id:
+            return
+        self.library.enqueue(episode_id)
+        self._reload_library()
+        self.episode_page.banner.show_state("loaded", "Episode added to Up Next.")
+
+    def _play_pause(self):
+        if self.playback is not None:
+            self.playback.play_pause()
+
+    def _skip(self, seconds: float):
+        if self.playback is not None:
+            self.playback.skip(seconds)
+
+    def _seek(self, seconds: float):
+        if self.playback is not None:
+            self.playback.seek(seconds)
+
+    def _set_speed(self, speed: float):
+        if self.playback is not None:
+            self.playback.set_speed(speed)
+
+    def _set_volume(self, volume: float):
+        if self.playback is not None:
+            self.playback.set_volume(volume)
+
+    def _playback_changed(self, snapshot):
+        self.player.set_snapshot(snapshot)
 
     def _global_search(self):
         if self.library is None:
@@ -410,4 +477,6 @@ class MainWindow(QMainWindow):
         for future in tuple(self._pending_jobs):
             future.cancel()
         self._pending_jobs.clear()
+        if self.playback is not None:
+            self.playback.shutdown()
         super().closeEvent(event)

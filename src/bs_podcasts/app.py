@@ -14,6 +14,7 @@ from .directories import DirectoryService, ItunesDirectory
 from .feeds import FeedFetcher, RefreshService
 from .jobs import JobRunner
 from .logging_setup import configure_logging
+from .playback import ExternalPlayerEngine, MpvEngine, PlaybackService
 from .services import LibraryService
 from .ui.shell import MainWindow
 from .ui.theme import stylesheet
@@ -45,11 +46,17 @@ def main() -> int:
         artwork=ArtworkCache(root / "artwork"),
     )
     directory = DirectoryService([ItunesDirectory()])
+    try:
+        engine = MpvEngine()
+    except Exception:
+        engine = ExternalPlayerEngine()
+    playback = PlaybackService(repository, engine)
     window = MainWindow(
         library=library,
         jobs=jobs,
         refresh=refresh,
         directory=directory,
+        playback=playback,
     )
     app.aboutToQuit.connect(jobs.shutdown)
     window.show()

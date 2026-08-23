@@ -56,6 +56,15 @@ class LibraryRepository:
             rows = connection.execute(sql, params).fetchall()
         return [self._episode(row) for row in rows]
 
+    def get_episode(self, episode_id: int) -> Episode | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """SELECT e.*, s.title AS show_title FROM episodes e
+                   JOIN shows s ON s.id=e.show_id WHERE e.id=?""",
+                (episode_id,),
+            ).fetchone()
+        return self._episode(row) if row else None
+
     def import_feed(self, show_id: int, feed: FeedData) -> int:
         now = time.time()
         with self.database.connect() as connection:
@@ -190,6 +199,68 @@ class LibraryRepository:
             ).fetchall()
         return [self._episode(row) for row in rows]
 
+    def dequeue(self, episode_id: int):
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM queue WHERE episode_id=?", (episode_id,))
+            rows = connection.execute("SELECT id FROM queue ORDER BY position, id").fetchall()
+            for position, row in enumerate(rows, start=1):
+                connection.execute(
+                    "UPDATE queue SET position=? WHERE id=?", (position, row["id"])
+                )
+
+    def update_position(self, episode_id: int, seconds: float):
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE episodes SET position_seconds=?, last_played=? WHERE id=?",
+                (max(0.0, float(seconds)), time.time(), episode_id),
+            )
+
+    def mark_played(self, episode_id: int, played: bool = True):
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE episodes SET played=?, is_new=0, last_played=? WHERE id=?",
+                (int(played), time.time(), episode_id),
+            )
+
+    def set_current_playback(self, episode_id: int | None, state: str):
+        with self.database.connect() as connection:
+            connection.execute(
+                """UPDATE playback_state SET episode_id=?, state=?, updated_at=?
+                   WHERE singleton_id=1""",
+                (episode_id, state, time.time()),
+            )
+
+    def current_playback(self) -> tuple[int | None, str]:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT episode_id, state FROM playback_state WHERE singleton_id=1"
+            ).fetchone()
+        return (row["episode_id"], row["state"]) if row else (None, "idle")
+
+    def update_show_playback(
+        self,
+        show_id: int,
+        speed: float | None = None,
+        skip_back: int | None = None,
+        skip_forward: int | None = None,
+        auto_continue: bool | None = None,
+    ):
+        show = self.get_show(show_id)
+        if show is None:
+            return
+        with self.database.connect() as connection:
+            connection.execute(
+                """UPDATE shows SET playback_speed=?, skip_back=?,
+                   skip_forward=?, auto_continue=? WHERE id=?""",
+                (
+                    speed if speed is not None else show.playback_speed,
+                    skip_back if skip_back is not None else show.skip_back,
+                    skip_forward if skip_forward is not None else show.skip_forward,
+                    int(auto_continue if auto_continue is not None else show.auto_continue),
+                    show_id,
+                ),
+            )
+
     def search(self, query: str, limit: int = 100) -> tuple[list[Show], list[Episode]]:
         escaped = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         pattern = f"%{escaped}%"
@@ -243,6 +314,10 @@ class LibraryRepository:
             last_refresh=row["last_refresh"],
             episode_count=row["episode_count"],
             new_count=row["new_count"],
+            playback_speed=row["playback_speed"],
+            skip_back=row["skip_back"],
+            skip_forward=row["skip_forward"],
+            auto_continue=bool(row["auto_continue"]),
         )
 
     @staticmethod
@@ -262,4 +337,5 @@ class LibraryRepository:
             played=bool(row["played"]),
             is_new=bool(row["is_new"]),
             downloaded_path=row["downloaded_path"],
+            last_played=row["last_played"],
         )

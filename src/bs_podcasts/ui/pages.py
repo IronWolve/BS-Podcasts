@@ -73,6 +73,8 @@ class PodcastGridPage(BasePage):
 
 
 class EpisodeListPage(BasePage):
+    play_requested = Signal(object)
+
     def __init__(self, title="Episodes", subtitle="Recent episodes from your shows", items=EPISODES, parent=None):
         super().__init__(title, subtitle, "Refresh", parent)
         self.chips = ChipRow(("All", "New", "In progress", "Downloaded", "Played"))
@@ -84,6 +86,7 @@ class EpisodeListPage(BasePage):
         self.view.setModel(self.model)
         self.view.setItemDelegate(EpisodeDelegate(self.view))
         self.view.selectionModel().currentChanged.connect(self._selected)
+        self.view.doubleClicked.connect(self._play)
         self.root.addWidget(self.view, 1)
         self.view.setCurrentIndex(self.model.index(0, 0))
 
@@ -92,6 +95,11 @@ class EpisodeListPage(BasePage):
         if item:
             self.context_changed.emit(item)
 
+    def _play(self, index):
+        item = index.data(ItemRoles.ITEM)
+        if item:
+            self.play_requested.emit(item)
+
     def set_items(self, items):
         self.model.replace(items)
         if self.model.rowCount():
@@ -99,6 +107,8 @@ class EpisodeListPage(BasePage):
 
 
 class HomePage(BasePage):
+    play_requested = Signal(object)
+
     def __init__(self, parent=None):
         super().__init__("Good evening", "Pick up where you left off", parent=parent)
 
@@ -127,6 +137,7 @@ class HomePage(BasePage):
         self.view.setModel(self.model)
         self.view.setItemDelegate(EpisodeDelegate(self.view))
         self.view.selectionModel().currentChanged.connect(self._selected)
+        self.view.doubleClicked.connect(self._play)
         self.root.addWidget(self.view, 1)
         self.view.setCurrentIndex(self.model.index(0, 0))
 
@@ -134,6 +145,11 @@ class HomePage(BasePage):
         item = current.data(ItemRoles.ITEM)
         if item:
             self.context_changed.emit(item)
+
+    def _play(self, index):
+        item = index.data(ItemRoles.ITEM)
+        if item:
+            self.play_requested.emit(item)
 
     def set_items(self, items):
         self.model.replace(list(items)[:4])

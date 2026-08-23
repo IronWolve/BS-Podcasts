@@ -214,6 +214,8 @@ class EmptyState(QWidget):
 
 class ContextPanel(QFrame):
     subscribe_requested = Signal(str)
+    play_episode_requested = Signal(int)
+    queue_episode_requested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -221,6 +223,7 @@ class ContextPanel(QFrame):
         self.setMinimumWidth(300)
         self.setMaximumWidth(420)
         self._feed_url = ""
+        self._episode_id = 0
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
@@ -266,10 +269,11 @@ class ContextPanel(QFrame):
         self.primary = QPushButton("Play latest")
         self.primary.setObjectName("primaryButton")
         self.primary.clicked.connect(self._primary_clicked)
-        queue = QPushButton("Up Next")
-        queue.setObjectName("quietButton")
+        self.secondary = QPushButton("Up Next")
+        self.secondary.setObjectName("quietButton")
+        self.secondary.clicked.connect(self._secondary_clicked)
         actions.addWidget(self.primary)
-        actions.addWidget(queue)
+        actions.addWidget(self.secondary)
         layout.addLayout(actions)
 
         divider = QFrame()
@@ -278,20 +282,36 @@ class ContextPanel(QFrame):
         section = QLabel("UP NEXT")
         section.setObjectName("brandSub")
         layout.addWidget(section)
-        for title, time in (
-            ("After the last train", "31 min left"),
-            ("A quiet system that actually works", "36 min"),
-            ("What the tide brought back", "41 min"),
-        ):
-            row = QHBoxLayout()
+        self.queue_content = QWidget()
+        self.queue_layout = QVBoxLayout(self.queue_content)
+        self.queue_layout.setContentsMargins(0, 0, 0, 0)
+        self.queue_layout.setSpacing(9)
+        layout.addWidget(self.queue_content)
+        self.set_queue(())
+        layout.addStretch(1)
+
+    def set_queue(self, episodes):
+        while self.queue_layout.count():
+            item = self.queue_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for episode in episodes:
+            item = QWidget()
+            row = QHBoxLayout(item)
+            row.setContentsMargins(0, 0, 0, 0)
+            title = episode.title
+            time = episode.duration
             label = QLabel(title)
             label.setWordWrap(True)
             timing = QLabel(time)
             timing.setObjectName("meta")
             row.addWidget(label, 1)
             row.addWidget(timing)
-            layout.addLayout(row)
-        layout.addStretch(1)
+            self.queue_layout.addWidget(item)
+        if not episodes:
+            empty = QLabel("Your queue is empty")
+            empty.setObjectName("meta")
+            self.queue_layout.addWidget(empty)
 
     def show_podcast(self, podcast):
         words = podcast.title.replace("The ", "").split()
@@ -299,6 +319,7 @@ class ContextPanel(QFrame):
         self.title.setText(podcast.title)
         self.meta.setText(f"{podcast.author} · {podcast.episode_count} episodes")
         self._feed_url = podcast.feed_url if podcast.show_id == 0 else ""
+        self._episode_id = 0
         self.primary.setText("Subscribe" if self._feed_url else "Play latest")
         if self._feed_url:
             self.body.setText(
@@ -321,20 +342,37 @@ class ContextPanel(QFrame):
             "live here without losing your place in the list."
         )
         self._feed_url = ""
+        self._episode_id = episode.episode_id
         self.primary.setText("Play")
 
     def _primary_clicked(self):
         if self._feed_url:
             self.subscribe_requested.emit(self._feed_url)
+        elif self._episode_id:
+            self.play_episode_requested.emit(self._episode_id)
+
+    def _secondary_clicked(self):
+        if self._episode_id:
+            self.queue_episode_requested.emit(self._episode_id)
 
 
 class PlayerBar(QFrame):
     context_requested = Signal()
+    play_pause_requested = Signal()
+    skip_requested = Signal(float)
+    seek_requested = Signal(float)
+    speed_requested = Signal(float)
+    volume_requested = Signal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("playerBar")
         self.setFixedHeight(86)
+        self._duration = 0.0
+        self._capabilities = None
+        self._speed_steps = (0.5, 0.75, 1.0, 1.2, 1.5, 1.75, 2.0, 2.5, 3.0)
+        self._speed = 1.0
+        self._volume = 100.0
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 10, 16, 10)
         layout.setSpacing(12)
@@ -344,20 +382,20 @@ class PlayerBar(QFrame):
         art.setFixedSize(58, 58)
         art_layout = QVBoxLayout(art)
         art_layout.setContentsMargins(0, 0, 0, 0)
-        initials = QLabel("SR")
-        initials.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        initials.setStyleSheet("font-weight: 800; color: #FFB45E;")
-        art_layout.addWidget(initials)
+        self.initials = QLabel("—")
+        self.initials.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.initials.setStyleSheet("font-weight: 800; color: #FFB45E;")
+        art_layout.addWidget(self.initials)
         layout.addWidget(art)
 
         now = QVBoxLayout()
         now.setSpacing(2)
-        title = QLabel("The map is not the territory")
-        title.setObjectName("playerTitle")
-        show = QLabel("The Signal Room")
-        show.setObjectName("playerShow")
-        now.addWidget(title)
-        now.addWidget(show)
+        self.title = QLabel("Nothing playing")
+        self.title.setObjectName("playerTitle")
+        self.show = QLabel("Choose an episode to begin")
+        self.show.setObjectName("playerShow")
+        now.addWidget(self.title)
+        now.addWidget(self.show)
         now_wrap = QWidget()
         now_wrap.setLayout(now)
         now_wrap.setMinimumWidth(190)
@@ -369,40 +407,108 @@ class PlayerBar(QFrame):
         controls = QHBoxLayout()
         controls.setSpacing(7)
         controls.addStretch(1)
-        for text, tip in (("−15", "Back 15 seconds"), ("▶", "Play"), ("+30", "Forward 30 seconds")):
-            button = QPushButton(text)
-            button.setObjectName("iconButton" if text != "▶" else "primaryButton")
-            button.setToolTip(tip)
+        self.back = QPushButton("−15")
+        self.back.setObjectName("iconButton")
+        self.back.setToolTip("Back 15 seconds")
+        self.back.clicked.connect(lambda: self.skip_requested.emit(-15.0))
+        self.play = QPushButton("▶")
+        self.play.setObjectName("primaryButton")
+        self.play.setToolTip("Play or pause")
+        self.play.clicked.connect(self.play_pause_requested)
+        self.forward = QPushButton("+30")
+        self.forward.setObjectName("iconButton")
+        self.forward.setToolTip("Forward 30 seconds")
+        self.forward.clicked.connect(lambda: self.skip_requested.emit(30.0))
+        for button in (self.back, self.play, self.forward):
             button.setFixedHeight(34)
             controls.addWidget(button)
         controls.addStretch(1)
         timeline = QHBoxLayout()
-        elapsed = QLabel("19:42")
-        elapsed.setObjectName("meta")
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 1000)
-        slider.setValue(420)
-        remaining = QLabel("−28:16")
-        remaining.setObjectName("meta")
-        timeline.addWidget(elapsed)
-        timeline.addWidget(slider, 1)
-        timeline.addWidget(remaining)
+        self.elapsed = QLabel("0:00")
+        self.elapsed.setObjectName("meta")
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(0, 1000)
+        self.slider.setValue(0)
+        self.slider.sliderReleased.connect(self._seek_from_slider)
+        self.remaining = QLabel("−0:00")
+        self.remaining.setObjectName("meta")
+        timeline.addWidget(self.elapsed)
+        timeline.addWidget(self.slider, 1)
+        timeline.addWidget(self.remaining)
         transport.addLayout(controls)
         transport.addLayout(timeline)
         layout.addLayout(transport, 1)
 
-        speed = QPushButton("1.2×")
-        speed.setObjectName("quietButton")
-        speed.setToolTip("Playback speed")
-        queue = QPushButton("Up Next")
-        queue.setObjectName("quietButton")
-        queue.clicked.connect(self.context_requested)
-        volume = QPushButton("VOL")
-        volume.setObjectName("iconButton")
-        volume.setToolTip("Volume")
-        layout.addWidget(speed)
-        layout.addWidget(queue)
-        layout.addWidget(volume)
+        self.speed = QPushButton("1×")
+        self.speed.setObjectName("quietButton")
+        self.speed.setToolTip("Playback speed")
+        self.speed.clicked.connect(self._next_speed)
+        self.queue = QPushButton("Up Next")
+        self.queue.setObjectName("quietButton")
+        self.queue.clicked.connect(self.context_requested)
+        self.volume = QPushButton("VOL")
+        self.volume.setObjectName("iconButton")
+        self.volume.setToolTip("Mute or restore volume")
+        self.volume.clicked.connect(self._toggle_volume)
+        layout.addWidget(self.speed)
+        layout.addWidget(self.queue)
+        layout.addWidget(self.volume)
+
+        self.set_enabled(False)
 
     def set_compact(self, compact: bool):
         self.setFixedHeight(78 if compact else 86)
+
+    def set_enabled(self, enabled: bool):
+        self.play.setEnabled(enabled)
+        can_seek = enabled and (self._capabilities is None or self._capabilities.seek)
+        self.back.setEnabled(can_seek)
+        self.forward.setEnabled(can_seek)
+        self.slider.setEnabled(can_seek)
+        self.speed.setEnabled(
+            enabled and (self._capabilities is None or self._capabilities.speed)
+        )
+        self.volume.setEnabled(
+            enabled and (self._capabilities is None or self._capabilities.volume)
+        )
+
+    def set_capabilities(self, capabilities):
+        self._capabilities = capabilities
+
+    def set_snapshot(self, snapshot):
+        self.title.setText(snapshot.title)
+        self.show.setText(snapshot.show_title or "")
+        words = snapshot.show_title.replace("The ", "").split()
+        self.initials.setText("".join(word[0] for word in words[:2]).upper() or "—")
+        self._duration = max(0.0, float(snapshot.duration))
+        position = max(0.0, float(snapshot.position))
+        self.slider.blockSignals(True)
+        self.slider.setValue(int(1000 * position / self._duration) if self._duration else 0)
+        self.slider.blockSignals(False)
+        self.elapsed.setText(self._time(position))
+        self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
+        self._speed = float(snapshot.speed)
+        self.speed.setText(f"{self._speed:g}×")
+        self._volume = float(snapshot.volume)
+        self.volume.setText("MUTE" if self._volume == 0 else "VOL")
+        state = str(snapshot.state)
+        self.play.setText("Ⅱ" if state == "playing" else "▶")
+        self.set_enabled(snapshot.episode_id is not None and state != "shutdown")
+
+    def _seek_from_slider(self):
+        if self._duration:
+            self.seek_requested.emit(self._duration * self.slider.value() / 1000)
+
+    def _next_speed(self):
+        next_speed = next((value for value in self._speed_steps if value > self._speed), 0.5)
+        self.speed_requested.emit(next_speed)
+
+    def _toggle_volume(self):
+        self.volume_requested.emit(100.0 if self._volume == 0 else 0.0)
+
+    @staticmethod
+    def _time(seconds: float) -> str:
+        total = max(0, int(seconds))
+        hours, remainder = divmod(total, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
