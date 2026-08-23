@@ -109,6 +109,10 @@ def stylesheet() -> str:
         border-radius: 10px; padding: 9px 15px; font-weight: 750;
     }}
     QPushButton#primaryButton:hover {{ background: #FFC277; }}
+    QPushButton#primaryButton:disabled {{
+        color: {c['subtle']}; background: {c['surface']};
+        border: 1px solid {c['surface_soft']};
+    }}
     QPushButton#quietButton {{
         background: {c['surface_raised']}; border: 1px solid {c['border']};
         border-radius: 10px; padding: 8px 13px; font-weight: 650;

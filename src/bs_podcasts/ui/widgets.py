@@ -360,8 +360,10 @@ class ContextPanel(QFrame):
     def set_queue(self, episodes):
         while self.queue_layout.count():
             item = self.queue_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
+                widget.deleteLater()
         for episode in episodes:
             item = QWidget()
             row = QHBoxLayout(item)

@@ -276,6 +276,7 @@ class MainWindow(QMainWindow):
             self.discover_page.header.search.returnPressed.connect(self._directory_search)
             self.discover_page.chips.selected.connect(self._show_for_you)
             self.discover_page.category.currentTextChanged.connect(self._browse_category)
+            self.discover_page.topic.currentTextChanged.connect(self._browse_topic)
             self.discover_page.near_end.connect(self._load_more_discover)
             if self.discover_page.header.action:
                 self.discover_page.header.action.clicked.connect(
@@ -754,6 +755,7 @@ class MainWindow(QMainWindow):
             self.discover_page.banner.show_state("partial", "Enter a podcast search term.")
             return
         self.discover_page.banner.show_state("loading", f"Searching for “{query}”…")
+        self.discover_page.set_discover_summary(f"Searching Apple Podcasts for “{query}”…")
         self._start_directory_request("search", query)
 
     def _browse_category(self, category: str):
@@ -763,9 +765,25 @@ class MainWindow(QMainWindow):
         self.discover_page.category.clearFocus()
         self.discover_page.view.setFocus()
         normalized = "" if category in {"For You", "All Categories"} else category
+        self.discover_page.set_category_topics(normalized)
         label = normalized or "top podcasts"
         self.discover_page.banner.show_state("loading", f"Loading {label}…")
+        self.discover_page.set_discover_summary(f"Loading {label}…")
         self._start_directory_request("browse", normalized)
+
+    def _browse_topic(self, topic: str):
+        category = self.discover_page.category.currentText()
+        if (
+            not topic
+            or topic.startswith("All ")
+            or topic in {"Choose a category first", "No additional topics"}
+        ):
+            return
+        self.discover_page.banner.show_state("loading", f"Loading {topic}…")
+        self.discover_page.set_discover_summary(
+            f"Loading {category} › {topic}…"
+        )
+        self._start_directory_request("topic", (category, topic))
 
     def _start_directory_request(self, operation: str, value: str):
         self._discover_operation = operation
@@ -781,14 +799,19 @@ class MainWindow(QMainWindow):
             or self._discover_exhausted
             or not self._discover_operation
             or self._discover_limit >= (
-                200 if self._discover_operation == "search" else 500
+                200 if self._discover_operation in {"search", "topic"} else 500
             )
         ):
             return
-        maximum = 200 if self._discover_operation == "search" else 500
+        maximum = 200 if self._discover_operation in {"search", "topic"} else 500
         self._discover_limit = min(maximum, self._discover_limit + 30)
-        label = self._discover_value or "For You"
+        label = (
+            self._discover_value[1]
+            if isinstance(self._discover_value, tuple)
+            else self._discover_value or "For You"
+        )
         self.discover_page.banner.show_state("loading", f"Loading more {label}…")
+        self.discover_page.set_discover_summary(f"Loading more {label}…")
         self._submit_directory(
             self._discover_operation, self._discover_value, self._discover_limit
         )
@@ -798,10 +821,14 @@ class MainWindow(QMainWindow):
             self.discover_page.category.blockSignals(True)
             self.discover_page.category.setCurrentIndex(0)
             self.discover_page.category.blockSignals(False)
+        self.discover_page.set_category_topics("")
         shows = self.library.shows() if self.library is not None else []
         if shows:
             self.discover_page.banner.show_state(
                 "loading", "Finding podcasts from categories related to your library…"
+            )
+            self.discover_page.set_discover_summary(
+                "Building recommendations from your subscribed podcast categories…"
             )
             self._start_directory_request("recommend", "")
         else:
@@ -827,6 +854,9 @@ class MainWindow(QMainWindow):
     def _directory_request(self, operation: str, value: str, limit: int):
         if operation == "recommend":
             candidates = self.directory.recommend(self.library.shows(), limit)
+        elif operation == "topic":
+            category, topic = value
+            candidates = self.directory.topic(category, topic, limit)
         else:
             callable_ = self.directory.search if operation == "search" else self.directory.browse
             candidates = callable_(value, limit)
@@ -933,12 +963,22 @@ class MainWindow(QMainWindow):
                     artwork_url=candidate.artwork_url,
                     artwork_path=(saved.artwork_path if saved else "") or artwork_path,
                     health=saved.health.value if saved else "unknown",
+                    display_meta=" · ".join(
+                        value
+                        for value in (
+                            (saved.author if saved else candidate.author),
+                            candidate.genre,
+                        )
+                        if value
+                    ),
+                    directory_result=True,
+                    subscribed=bool(saved),
                 )
             )
         result_count = len(podcasts)
         self._discover_exhausted = (
             requested_limit
-            >= (200 if self._discover_operation == "search" else 500)
+            >= (200 if self._discover_operation in {"search", "topic"} else 500)
             or result_count <= self._discover_result_count
         )
         self._discover_result_count = result_count
@@ -947,8 +987,21 @@ class MainWindow(QMainWindow):
         )
         if podcasts:
             self.discover_page.banner.clear()
+            if _operation == "recommend":
+                description = "recommendations based on your library categories"
+            elif _operation == "topic":
+                description = f"{_value[0]} › {_value[1]} podcasts"
+            elif _operation == "browse":
+                description = f"{_value or 'general'} podcasts"
+            else:
+                description = f"results for “{_value}”"
+            ending = "End of available results" if self._discover_exhausted else "Scroll for more"
+            self.discover_page.set_discover_summary(
+                f"{len(podcasts)} {description}  ·  {ending}"
+            )
         else:
             self.discover_page.banner.show_state("partial", "No podcasts matched.")
+            self.discover_page.set_discover_summary("No podcasts matched this selection.")
 
     def _select_page(self, index: int):
         self.pages.setCurrentIndex(index)

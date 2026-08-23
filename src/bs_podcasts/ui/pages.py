@@ -29,7 +29,7 @@ from .models import (
     PodcastModel,
 )
 from .widgets import ChipRow, EmptyState, PageHeader, StateBanner
-from ..directories.itunes import CATEGORY_IDS
+from ..directories.itunes import CATEGORY_IDS, CATEGORY_TOPICS
 
 
 class BasePage(QWidget):
@@ -62,7 +62,7 @@ class PodcastGridPage(BasePage):
         super().__init__(
             title,
             subtitle,
-            "Add podcast" if not discover else "Browse all",
+            "Add podcast" if not discover else "Refresh For You",
             parent=parent,
         )
         chips = ("For You",) if discover else ("All", "New")
@@ -79,9 +79,20 @@ class PodcastGridPage(BasePage):
             self.category.addItems(CATEGORY_IDS.keys())
             self.category.setMinimumWidth(220)
             filter_layout.addWidget(self.category)
+            self.topic = QComboBox()
+            self.topic.setAccessibleName("Podcast subcategory or topic")
+            self.topic.setMinimumWidth(220)
+            self.topic.setEnabled(False)
+            self.topic.addItem("Choose a category first")
+            filter_layout.addWidget(self.topic)
             self.root.addWidget(filters)
+            self.result_summary = QLabel("Choose For You, search, or select a category.")
+            self.result_summary.setObjectName("meta")
+            self.root.addWidget(self.result_summary)
         else:
             self.category = None
+            self.topic = None
+            self.result_summary = None
             self.root.addWidget(self.chips)
         self.view = QListView()
         self.view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -160,6 +171,25 @@ class PodcastGridPage(BasePage):
         scrollbar = self.view.verticalScrollBar()
         if scrollbar.maximum() > 0 and value >= scrollbar.maximum() - 2:
             self.near_end.emit()
+
+    def set_category_topics(self, category: str):
+        if self.topic is None:
+            return
+        self.topic.blockSignals(True)
+        self.topic.clear()
+        topics = CATEGORY_TOPICS.get(category, ())
+        if topics:
+            self.topic.addItem(f"All {category}")
+            self.topic.addItems(topics)
+            self.topic.setEnabled(True)
+        else:
+            self.topic.addItem("No additional topics")
+            self.topic.setEnabled(False)
+        self.topic.blockSignals(False)
+
+    def set_discover_summary(self, text: str):
+        if self.result_summary is not None:
+            self.result_summary.setText(text)
 
 
 class EpisodeListPage(BasePage):

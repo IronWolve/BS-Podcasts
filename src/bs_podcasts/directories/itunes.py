@@ -28,6 +28,28 @@ CATEGORY_IDS = {
     "TV & Film": 1309,
 }
 
+CATEGORY_TOPICS = {
+    "Arts": ("Books", "Design", "Fashion & Beauty", "Food", "Performing Arts", "Visual Arts"),
+    "Business": ("Careers", "Entrepreneurship", "Investing", "Management", "Marketing", "Non-Profit"),
+    "Comedy": ("Comedy Interviews", "Improv", "Stand-Up"),
+    "Education": ("Courses", "How To", "Language Learning", "Self-Improvement"),
+    "Fiction": ("Comedy Fiction", "Drama", "Science Fiction"),
+    "Government": ("Public Policy", "Civics", "Government News"),
+    "Health & Fitness": ("Alternative Health", "Fitness", "Medicine", "Mental Health", "Nutrition", "Sexuality"),
+    "History": ("World History", "American History", "Ancient History"),
+    "Kids & Family": ("Education for Kids", "Parenting", "Pets & Animals", "Stories for Kids"),
+    "Leisure": ("Animation & Manga", "Automotive", "Aviation", "Crafts", "Games", "Hobbies", "Home & Garden", "Video Games"),
+    "Music": ("Music Commentary", "Music History", "Music Interviews"),
+    "News": ("Conservative News", "Business News", "Daily News", "Entertainment News", "News Commentary", "Politics", "Sports News", "Tech News", "World News"),
+    "Religion & Spirituality": ("Buddhism", "Christianity", "Hinduism", "Islam", "Judaism", "Religion", "Spirituality"),
+    "Science": ("Astronomy", "Chemistry", "Earth Sciences", "Life Sciences", "Mathematics", "Natural Sciences", "Nature", "Physics", "Social Sciences"),
+    "Society & Culture": ("Documentary", "Personal Journals", "Philosophy", "Places & Travel", "Relationships"),
+    "Sports": ("American Football", "Baseball", "Basketball", "Cricket", "Fantasy Sports", "Golf", "Hockey", "Rugby", "Running", "Soccer", "Swimming", "Tennis", "Volleyball", "Wilderness", "Wrestling"),
+    "Technology": ("Artificial Intelligence", "Cybersecurity", "Software", "Gadgets", "Tech News"),
+    "True Crime": ("Crime News", "Criminal Justice", "Unsolved Mysteries"),
+    "TV & Film": ("After Shows", "Film History", "Film Interviews", "Film Reviews", "TV Reviews"),
+}
+
 CATEGORY_EXPANSION_TERMS = {
     "Arts": ("Arts", "Books", "Design", "Food", "Performing Arts", "Visual Arts"),
     "Business": ("Business", "Careers", "Entrepreneurship", "Investing", "Management", "Marketing"),
@@ -113,6 +135,20 @@ class ItunesDirectory:
                 merged.append(candidate)
         self._browse_cache[cache_key] = merged
         return merged[:limit]
+
+    def topic(
+        self, category: str, topic: str, limit: int = 30
+    ) -> list[DirectoryCandidate]:
+        params = {
+            "term": topic,
+            "media": "podcast",
+            "entity": "podcast",
+            "limit": min(200, limit),
+        }
+        genre_id = CATEGORY_IDS.get(category)
+        if genre_id:
+            params["genreId"] = genre_id
+        return self._request(params)
 
     def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:
         excluded = {show.feed_url for show in shows}
