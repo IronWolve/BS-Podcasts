@@ -5,8 +5,15 @@ import sys
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
+from .artwork import ArtworkCache
 from .config import APP_ID, APP_NAME
+from .config import data_dir as application_data_dir
+from .data import Database
+from .data.repositories import LibraryRepository
+from .feeds import FeedFetcher, RefreshService
+from .jobs import JobRunner
 from .logging_setup import configure_logging
+from .services import LibraryService
 from .ui.shell import MainWindow
 from .ui.theme import stylesheet
 
@@ -26,6 +33,17 @@ def create_application(argv=None) -> QApplication:
 
 def main() -> int:
     app = create_application()
-    window = MainWindow()
+    root = application_data_dir()
+    database = Database(root / "library.db")
+    repository = LibraryRepository(database)
+    library = LibraryService(repository)
+    jobs = JobRunner(max_workers=4)
+    refresh = RefreshService(
+        repository,
+        fetcher=FeedFetcher(),
+        artwork=ArtworkCache(root / "artwork"),
+    )
+    window = MainWindow(library=library, jobs=jobs, refresh=refresh)
+    app.aboutToQuit.connect(jobs.shutdown)
     window.show()
     return app.exec()

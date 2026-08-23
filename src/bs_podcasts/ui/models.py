@@ -16,6 +16,9 @@ class Podcast:
     episode_count: int
     new_count: int
     accent: str
+    show_id: int = 0
+    feed_url: str = ""
+    health: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,9 @@ class Episode:
     progress: float
     state: str
     accent: str
+    episode_id: int = 0
+    show_id: int = 0
+    description: str = ""
 
 
 PODCASTS = (
@@ -61,6 +67,11 @@ class PodcastModel(QAbstractListModel):
         super().__init__(parent)
         self._items = list(items)
 
+    def replace(self, items):
+        self.beginResetModel()
+        self._items = list(items)
+        self.endResetModel()
+
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._items)
 
@@ -79,6 +90,11 @@ class EpisodeModel(QAbstractListModel):
     def __init__(self, items=EPISODES, parent=None):
         super().__init__(parent)
         self._items = list(items)
+
+    def replace(self, items):
+        self.beginResetModel()
+        self._items = list(items)
+        self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._items)
@@ -158,6 +174,20 @@ class PodcastDelegate(QStyledItemDelegate):
             font.setWeight(QFont.Weight.Bold)
             painter.setFont(font)
             painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, str(item.new_count))
+
+        health_colors = {
+            "ok": COLORS["success"],
+            "partial": COLORS["warning"],
+            "error": COLORS["danger"],
+            "suspended": COLORS["muted"],
+            "loading": COLORS["blue"],
+        }
+        health_color = health_colors.get(item.health)
+        if health_color:
+            dot = card.adjusted(12, card.height() - 22, -(card.width() - 20), -14)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(health_color))
+            painter.drawEllipse(dot)
 
         painter.restore()
 

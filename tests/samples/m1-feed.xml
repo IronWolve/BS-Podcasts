@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title>Workshop Radio</title>
+    <itunes:author>BS Podcasts Samples</itunes:author>
+    <description>An original local feed used for the M1 smoke flow.</description>
+    <link>https://samples.invalid/workshop</link>
+    <item>
+      <guid>workshop-002</guid>
+      <title>Measure twice</title>
+      <description>A practical conversation about careful work.</description>
+      <pubDate>Fri, 22 Aug 2026 18:00:00 +0000</pubDate>
+      <itunes:duration>00:42:18</itunes:duration>
+      <enclosure url="https://media.invalid/workshop-002.mp3" length="42000000" type="audio/mpeg" />
+    </item>
+    <item>
+      <guid>workshop-001</guid>
+      <title>Start with the foundation</title>
+      <description>How good foundations make later work easier.</description>
+      <pubDate>Fri, 15 Aug 2026 18:00:00 +0000</pubDate>
+      <itunes:duration>35:04</itunes:duration>
+      <enclosure url="https://media.invalid/workshop-001.mp3" length="35000000" type="audio/mpeg" />
+    </item>
+  </channel>
+</rss>

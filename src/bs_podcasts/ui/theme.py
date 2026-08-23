@@ -29,6 +29,10 @@ def stylesheet() -> str:
         color: {c['text']};
     }}
     QMainWindow, QWidget#appRoot {{ background: {c['canvas']}; }}
+    QDialog#styledDialog {{
+        background: {c['surface']}; border: 1px solid {c['border']};
+        border-radius: 14px;
+    }}
     QWidget {{ outline: none; }}
 
     QFrame#navigationRail {{
@@ -128,6 +132,7 @@ def stylesheet() -> str:
     }}
     QLabel#emptyTitle {{ font-size: 18px; font-weight: 720; }}
     QLabel#emptyBody {{ color: {c['muted']}; }}
+    QLabel#errorText {{ color: {c['danger']}; }}
 
     QFrame#settingCard, QFrame#summaryCard {{
         background: {c['surface']}; border: 1px solid {c['border']};

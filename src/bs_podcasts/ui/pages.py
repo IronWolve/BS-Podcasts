@@ -65,6 +65,11 @@ class PodcastGridPage(BasePage):
         if item:
             self.context_changed.emit(item)
 
+    def set_items(self, items):
+        self.model.replace(items)
+        if self.model.rowCount():
+            self.view.setCurrentIndex(self.model.index(0, 0))
+
 
 class EpisodeListPage(BasePage):
     def __init__(self, title="Episodes", subtitle="Recent episodes from your shows", items=EPISODES, parent=None):
@@ -84,6 +89,11 @@ class EpisodeListPage(BasePage):
         item = current.data(ItemRoles.ITEM)
         if item:
             self.context_changed.emit(item)
+
+    def set_items(self, items):
+        self.model.replace(items)
+        if self.model.rowCount():
+            self.view.setCurrentIndex(self.model.index(0, 0))
 
 
 class HomePage(BasePage):
@@ -122,6 +132,11 @@ class HomePage(BasePage):
         item = current.data(ItemRoles.ITEM)
         if item:
             self.context_changed.emit(item)
+
+    def set_items(self, items):
+        self.model.replace(list(items)[:4])
+        if self.model.rowCount():
+            self.view.setCurrentIndex(self.model.index(0, 0))
 
 
 class EmptyPage(BasePage):
