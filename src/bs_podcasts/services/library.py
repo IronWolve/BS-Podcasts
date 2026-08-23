@@ -24,6 +24,7 @@ class LibraryService:
             speed=float(self.setting("playback.default_speed", "1.0")),
             skip_back=int(self.setting("playback.skip_back", "15")),
             skip_forward=int(self.setting("playback.skip_forward", "30")),
+            auto_continue=self.setting("playback.auto_continue", "1") == "1",
         )
         return self.repository.get_show(show.id)
 

@@ -115,7 +115,14 @@ class NavigationRail(QFrame):
 
 
 class PageHeader(QFrame):
-    def __init__(self, title: str, subtitle: str, action: str = "", parent=None):
+    def __init__(
+        self,
+        title: str,
+        subtitle: str,
+        action: str = "",
+        show_search: bool = True,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setObjectName("pageHeader")
         layout = QHBoxLayout(self)
@@ -138,6 +145,7 @@ class PageHeader(QFrame):
         self.search.setAccessibleName(f"Search {title}")
         self.search.setClearButtonEnabled(True)
         self.search.setFixedWidth(230)
+        self.search.setVisible(show_search)
         layout.addWidget(self.search)
 
         self.action = None
@@ -155,17 +163,18 @@ class ChipRow(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(7)
-        group = QButtonGroup(self)
-        group.setExclusive(True)
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
         for index, label in enumerate(labels):
             button = QPushButton(label)
             button.setObjectName("chip")
             button.setCheckable(True)
             button.setChecked(index == 0)
             button.clicked.connect(lambda checked=False, value=label: self.selected.emit(value))
-            group.addButton(button)
+            self.group.addButton(button)
             layout.addWidget(button)
         layout.addStretch(1)
+        self.setVisible(bool(labels))
 
 
 class StateBanner(QFrame):
@@ -183,8 +192,18 @@ class StateBanner(QFrame):
         self.hide()
 
     def show_state(self, state: str, message: str):
-        self.label.setText(f"{state.upper()}  ·  {message}")
-        self.retry.setVisible(state in {"error", "offline", "partial"})
+        labels = {
+            "loading": "Loading",
+            "loaded": "Done",
+            "partial": "Needs attention",
+            "error": "Couldn’t complete that",
+            "offline": "Offline",
+            "suspended": "Refresh suspended",
+            "empty": "",
+        }
+        prefix = labels.get(state, state.replace("_", " ").title())
+        self.label.setText(f"{prefix}  ·  {message}" if prefix else message)
+        self.retry.hide()
         self.show()
 
     def clear(self):
@@ -393,6 +412,7 @@ class ContextPanel(QFrame):
         self.primary.setText("Subscribe" if self._feed_url else "Play latest")
         self.primary.setEnabled(True)
         self.secondary.setEnabled(False)
+        self.download.setText("Download")
         self.download.setEnabled(False)
         if self._feed_url:
             self.body.setText(
@@ -421,7 +441,12 @@ class ContextPanel(QFrame):
         self.primary.setText("Play")
         self.primary.setEnabled(True)
         self.secondary.setEnabled(bool(self._episode_id))
-        self.download.setEnabled(bool(self._episode_id))
+        if episode.state == "Downloaded":
+            self.download.setText("Downloaded")
+            self.download.setEnabled(False)
+        else:
+            self.download.setText("Retry" if episode.state == "Error" else "Download")
+            self.download.setEnabled(bool(self._episode_id))
 
     def _primary_clicked(self):
         if self._feed_url:

@@ -67,7 +67,7 @@ def stylesheet() -> str:
         border-radius: 11px; padding: 9px 13px; selection-background-color: {c['accent']};
     }}
     QLineEdit#searchField:focus {{ border: 1px solid {c['accent']}; }}
-    QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+    QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QKeySequenceEdit {{
         background: {c['surface']}; color: {c['text']};
         border: 1px solid {c['border']}; border-radius: 9px;
         padding: 7px 10px;
@@ -75,7 +75,9 @@ def stylesheet() -> str:
         selection-color: {c['canvas']};
     }}
     QLineEdit:focus, QTextEdit:focus, QSpinBox:focus,
-    QDoubleSpinBox:focus, QComboBox:focus {{ border-color: {c['accent']}; }}
+    QDoubleSpinBox:focus, QComboBox:focus, QKeySequenceEdit:focus {{
+        border-color: {c['accent']};
+    }}
     QComboBox::drop-down {{ border: 0; width: 24px; }}
     QAbstractItemView {{
         background: {c['surface_raised']}; color: {c['text']};
@@ -141,6 +143,11 @@ def stylesheet() -> str:
     QScrollBar:vertical {{ background: transparent; width: 8px; margin: 4px 0; }}
     QScrollBar::handle:vertical {{ background: {c['border']}; border-radius: 4px; min-height: 34px; }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+    QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 0 4px; }}
+    QScrollBar::handle:horizontal {{
+        background: {c['border']}; border-radius: 4px; min-width: 34px;
+    }}
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 
     QFrame#contextPanel {{
         background: {c['surface']}; border-left: 1px solid {c['border']};

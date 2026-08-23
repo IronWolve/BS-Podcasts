@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QDoubleSpinBox,
     QSpinBox,
+    QKeySequenceEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -34,12 +35,19 @@ from ..directories.itunes import CATEGORY_IDS
 class BasePage(QWidget):
     context_changed = Signal(object)
 
-    def __init__(self, title: str, subtitle: str, action: str = "", parent=None):
+    def __init__(
+        self,
+        title: str,
+        subtitle: str,
+        action: str = "",
+        show_search: bool = True,
+        parent=None,
+    ):
         super().__init__(parent)
         self.root = QVBoxLayout(self)
         self.root.setContentsMargins(24, 20, 22, 14)
         self.root.setSpacing(14)
-        self.header = PageHeader(title, subtitle, action)
+        self.header = PageHeader(title, subtitle, action, show_search)
         self.banner = StateBanner()
         self.root.addWidget(self.header)
         self.root.addWidget(self.banner)
@@ -50,10 +58,13 @@ class PodcastGridPage(BasePage):
     menu_requested = Signal(object, object)
 
     def __init__(self, title="Podcasts", subtitle="Your library, at a glance", discover=False, parent=None):
-        super().__init__(title, subtitle, "Add podcast" if not discover else "Browse all", parent)
-        chips = ("For You",) if discover else (
-            "All", "New", "In progress", "Downloaded", "Recently updated"
+        super().__init__(
+            title,
+            subtitle,
+            "Add podcast" if not discover else "Browse all",
+            parent=parent,
         )
+        chips = ("For You",) if discover else ("All", "New")
         self.chips = ChipRow(chips)
         if discover:
             filters = QWidget()
@@ -79,6 +90,7 @@ class PodcastGridPage(BasePage):
         self.view.setSpacing(2)
         self.view.setUniformItemSizes(True)
         self.view.setMouseTracking(True)
+        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.view.viewport().installEventFilter(self)
         self.model = PodcastModel(PODCASTS[2:] + PODCASTS[:2] if discover else PODCASTS)
         self.view.setModel(self.model)
@@ -106,6 +118,9 @@ class PodcastGridPage(BasePage):
         query = self.header.search.text().strip().lower()
         if query:
             items = [item for item in items if query in item.title.lower() or query in item.author.lower()]
+        checked = self.chips.group.checkedButton()
+        if checked and checked.text() == "New":
+            items = [item for item in items if item.new_count > 0]
         self.model.replace(items)
 
     def _open(self, index):
@@ -147,14 +162,18 @@ class EpisodeListPage(BasePage):
         subtitle="Recent episodes from your shows",
         items=EPISODES,
         reorder=False,
+        filters=("All", "New", "In progress", "Downloaded", "Played"),
+        action="Refresh",
+        show_search=True,
         parent=None,
     ):
-        super().__init__(title, subtitle, "Refresh", parent)
-        self.chips = ChipRow(("All", "New", "In progress", "Downloaded", "Played"))
+        super().__init__(title, subtitle, action, show_search, parent)
+        self.chips = ChipRow(filters)
         self.root.addWidget(self.chips)
         self.view = QListView()
         self.view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.view.setMouseTracking(True)
+        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.view.viewport().installEventFilter(self)
         self.view.setUniformItemSizes(True)
         self.model = EpisodeModel(items)
@@ -215,6 +234,16 @@ class EpisodeListPage(BasePage):
         if watched is self.view.viewport() and event.type() == QEvent.Type.ContextMenu:
             self._menu(event.pos())
             return True
+        if (
+            watched is self.view.viewport()
+            and event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            position = event.position().toPoint()
+            index = self.view.indexAt(position)
+            if index.isValid() and position.x() >= self.view.visualRect(index).right() - 44:
+                self._play(index)
+                return True
         return super().eventFilter(watched, event)
 
 
@@ -287,9 +316,15 @@ class EmptyPage(BasePage):
 
 class SettingsPage(BasePage):
     setting_changed = Signal(str, str)
+    shortcut_changed = Signal(str, str)
 
     def __init__(self, parent=None):
-        super().__init__("Settings", "Make BS Podcasts work your way", parent=parent)
+        super().__init__(
+            "Settings",
+            "Make BS Podcasts work your way",
+            show_search=False,
+            parent=parent,
+        )
         card = QFrame()
         card.setObjectName("settingCard")
         form = QFormLayout(card)
@@ -305,13 +340,25 @@ class SettingsPage(BasePage):
         self.skip_forward = QSpinBox()
         self.skip_forward.setRange(5, 300)
         self.skip_forward.setSuffix(" seconds")
+        self.auto_continue = QCheckBox("Continue with the next queued episode")
         form.addRow("Default playback speed", self.speed)
         form.addRow("Skip back", self.skip_back)
         form.addRow("Skip forward", self.skip_forward)
+        form.addRow("After an episode", self.auto_continue)
         note = QLabel("These defaults apply when a new podcast is added.")
         note.setObjectName("meta")
         form.addRow("", note)
         self.root.addWidget(card)
+        shortcut_card = QFrame()
+        shortcut_card.setObjectName("settingCard")
+        shortcut_layout = QVBoxLayout(shortcut_card)
+        shortcut_layout.setContentsMargins(20, 18, 20, 18)
+        shortcut_title = QLabel("Keyboard shortcuts")
+        shortcut_title.setObjectName("sectionTitle")
+        self.shortcut_form = QFormLayout()
+        shortcut_layout.addWidget(shortcut_title)
+        shortcut_layout.addLayout(self.shortcut_form)
+        self.root.addWidget(shortcut_card)
         self.root.addStretch(1)
         self.speed.valueChanged.connect(
             lambda value: self.setting_changed.emit("playback.default_speed", str(value))
@@ -322,12 +369,40 @@ class SettingsPage(BasePage):
         self.skip_forward.valueChanged.connect(
             lambda value: self.setting_changed.emit("playback.skip_forward", str(value))
         )
+        self.auto_continue.toggled.connect(
+            lambda value: self.setting_changed.emit(
+                "playback.auto_continue", "1" if value else "0"
+            )
+        )
 
-    def load_values(self, speed: float, skip_back: int, skip_forward: int):
-        for control in (self.speed, self.skip_back, self.skip_forward):
+    def load_values(
+        self, speed: float, skip_back: int, skip_forward: int, auto_continue: bool
+    ):
+        for control in (self.speed, self.skip_back, self.skip_forward, self.auto_continue):
             control.blockSignals(True)
         self.speed.setValue(speed)
         self.skip_back.setValue(skip_back)
         self.skip_forward.setValue(skip_forward)
-        for control in (self.speed, self.skip_back, self.skip_forward):
+        self.auto_continue.setChecked(auto_continue)
+        for control in (self.speed, self.skip_back, self.skip_forward, self.auto_continue):
             control.blockSignals(False)
+
+    def set_shortcuts(self, bindings: dict[str, str]):
+        while self.shortcut_form.rowCount():
+            self.shortcut_form.removeRow(0)
+        labels = {
+            "play_pause": "Play / Pause",
+            "skip_back": "Skip back",
+            "skip_forward": "Skip forward",
+            "search": "Focus search",
+            "bookmark": "Bookmark",
+        }
+        for name, label in labels.items():
+            editor = QKeySequenceEdit()
+            editor.setKeySequence(bindings.get(name, ""))
+            editor.keySequenceChanged.connect(
+                lambda sequence, key=name: self.shortcut_changed.emit(
+                    key, sequence.toString()
+                )
+            )
+            self.shortcut_form.addRow(label, editor)

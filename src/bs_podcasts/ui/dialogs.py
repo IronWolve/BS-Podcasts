@@ -101,3 +101,52 @@ class StartupErrorDialog(StyledDialog):
         layout.addWidget(heading)
         layout.addWidget(body)
         layout.addWidget(close, alignment=Qt.AlignmentFlag.AlignRight)
+
+
+class PathActionDialog(StyledDialog):
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        action_label: str,
+        placeholder: str,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setFixedWidth(540)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(11)
+        heading = QLabel(title)
+        heading.setObjectName("pageTitle")
+        body = QLabel(message)
+        body.setObjectName("meta")
+        body.setWordWrap(True)
+        self.path_field = QLineEdit()
+        self.path_field.setObjectName("searchField")
+        self.path_field.setPlaceholderText(placeholder)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.setObjectName("quietButton")
+        cancel.clicked.connect(self.reject)
+        action = QPushButton(action_label)
+        action.setObjectName("primaryButton")
+        action.clicked.connect(self._accept_path)
+        buttons.addWidget(cancel)
+        buttons.addWidget(action)
+        layout.addWidget(heading)
+        layout.addWidget(body)
+        layout.addWidget(self.path_field)
+        layout.addLayout(buttons)
+        self.path_field.returnPressed.connect(self._accept_path)
+        self.path_field.setFocus()
+
+    @property
+    def path(self) -> str:
+        return self.path_field.text().strip()
+
+    def _accept_path(self):
+        if self.path:
+            self.accept()
