@@ -28,6 +28,28 @@ CATEGORY_IDS = {
     "TV & Film": 1309,
 }
 
+CATEGORY_EXPANSION_TERMS = {
+    "Arts": ("Arts", "Books", "Design", "Food", "Performing Arts", "Visual Arts"),
+    "Business": ("Business", "Careers", "Entrepreneurship", "Investing", "Management", "Marketing"),
+    "Comedy": ("Comedy", "Comedy Interviews", "Improv", "Stand-Up"),
+    "Education": ("Education", "Courses", "How To", "Self-Improvement", "Language Learning"),
+    "Fiction": ("Fiction", "Comedy Fiction", "Drama", "Science Fiction"),
+    "Government": ("Government", "Public Policy", "Civics", "Government News"),
+    "Health & Fitness": ("Health & Fitness", "Mental Health", "Fitness", "Medicine", "Nutrition", "Alternative Health"),
+    "History": ("History", "World History", "American History", "Ancient History"),
+    "Kids & Family": ("Kids & Family", "Parenting", "Education for Kids", "Stories for Kids", "Pets & Animals"),
+    "Leisure": ("Leisure", "Games", "Hobbies", "Automotive", "Video Games", "Home & Garden"),
+    "Music": ("Music", "Music Commentary", "Music History", "Music Interviews"),
+    "News": ("News", "Conservative News", "Politics", "News Commentary", "Daily News", "World News"),
+    "Religion & Spirituality": ("Religion & Spirituality", "Christianity", "Spirituality", "Buddhism", "Islam", "Judaism"),
+    "Science": ("Science", "Nature", "Astronomy", "Physics", "Social Sciences", "Earth Sciences"),
+    "Society & Culture": ("Society & Culture", "Documentary", "Personal Journals", "Philosophy", "Relationships", "Places & Travel"),
+    "Sports": ("Sports", "American Football", "Basketball", "Baseball", "Hockey", "Soccer"),
+    "Technology": ("Technology", "Tech News", "Artificial Intelligence", "Cybersecurity", "Software", "Gadgets"),
+    "True Crime": ("True Crime", "Crime News", "Criminal Justice", "Unsolved Mysteries"),
+    "TV & Film": ("TV & Film", "Film Reviews", "TV Reviews", "Film Interviews", "After Shows"),
+}
+
 
 class ItunesDirectory:
     name = "Apple Podcasts"
@@ -35,24 +57,62 @@ class ItunesDirectory:
 
     def __init__(self, session=None):
         self.session = session or requests.Session()
+        self._browse_cache = {}
 
     def search(self, query: str, limit: int = 30) -> list[DirectoryCandidate]:
         query = query.strip()
         if not query:
             return []
-        return self._request({"term": query, "media": "podcast", "entity": "podcast", "limit": limit})
+        return self._request(
+            {
+                "term": query,
+                "media": "podcast",
+                "entity": "podcast",
+                "limit": min(200, limit),
+            }
+        )
 
     def browse(self, category: str = "", limit: int = 30) -> list[DirectoryCandidate]:
-        params = {
-            "term": category or "podcast",
-            "media": "podcast",
-            "entity": "podcast",
-            "limit": limit,
-        }
+        cache_key = category or "__all__"
+        if cache_key in self._browse_cache:
+            return self._browse_cache[cache_key][:limit]
+        terms = CATEGORY_EXPANSION_TERMS.get(
+            category,
+            ("podcast", "new podcasts", "popular podcasts", "independent podcasts"),
+        )
         genre_id = CATEGORY_IDS.get(category)
-        if genre_id:
-            params["genreId"] = genre_id
-        return self._request(params)
+        result_sets = []
+        errors = []
+        for term in terms:
+            params = {
+                "term": term,
+                "media": "podcast",
+                "entity": "podcast",
+                "limit": 200,
+            }
+            if genre_id:
+                params["genreId"] = genre_id
+            try:
+                result_sets.append(self._request(params))
+            except DirectoryError as exc:
+                errors.append(str(exc))
+        if not result_sets:
+            raise DirectoryError("; ".join(errors) or "Directory category unavailable")
+
+        merged = []
+        seen = set()
+        longest = max(len(results) for results in result_sets)
+        for index in range(longest):
+            for results in result_sets:
+                if index >= len(results):
+                    continue
+                candidate = results[index]
+                if candidate.feed_url in seen:
+                    continue
+                seen.add(candidate.feed_url)
+                merged.append(candidate)
+        self._browse_cache[cache_key] = merged
+        return merged[:limit]
 
     def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:
         excluded = {show.feed_url for show in shows}
