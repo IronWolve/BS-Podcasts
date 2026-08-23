@@ -16,6 +16,8 @@ class DirectoryProvider(Protocol):
 
     def browse(self, category: str = "", limit: int = 30) -> list[DirectoryCandidate]: ...
 
+    def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]: ...
+
 
 class DirectoryService:
     def __init__(self, providers: list[DirectoryProvider]):
@@ -26,6 +28,22 @@ class DirectoryService:
 
     def browse(self, category: str = "", limit: int = 30) -> list[DirectoryCandidate]:
         return self._first("browse", category, limit)
+
+    def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:
+        errors = []
+        for provider in self.providers:
+            if not hasattr(provider, "recommend"):
+                continue
+            try:
+                results = provider.recommend(shows, limit)
+            except Exception as exc:
+                errors.append(f"{provider.name}: {exc}")
+                continue
+            if results:
+                return results[:limit]
+        if errors:
+            raise DirectoryError("; ".join(errors))
+        return []
 
     def _first(self, method: str, value: str, limit: int):
         errors = []

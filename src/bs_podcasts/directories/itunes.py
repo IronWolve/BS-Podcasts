@@ -54,6 +54,43 @@ class ItunesDirectory:
             params["genreId"] = genre_id
         return self._request(params)
 
+    def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:
+        excluded = {show.feed_url for show in shows}
+        categories = []
+        for show in list(shows)[:3]:
+            matches = self.search(show.title, 10)
+            match = next(
+                (
+                    candidate
+                    for candidate in matches
+                    if candidate.feed_url == show.feed_url
+                    or candidate.title.casefold() == show.title.casefold()
+                ),
+                matches[0] if matches else None,
+            )
+            if match and match.genre in CATEGORY_IDS and match.genre not in categories:
+                categories.append(match.genre)
+
+        if not categories:
+            return [
+                candidate
+                for candidate in self.browse("", limit + len(excluded))
+                if candidate.feed_url not in excluded
+            ][:limit]
+
+        merged = []
+        seen = set(excluded)
+        per_category = max(
+            10, (limit + len(categories) - 1) // len(categories) + len(excluded)
+        )
+        for category in categories:
+            for candidate in self.browse(category, per_category):
+                if candidate.feed_url in seen:
+                    continue
+                seen.add(candidate.feed_url)
+                merged.append(candidate)
+        return merged[:limit]
+
     def _request(self, params) -> list[DirectoryCandidate]:
         try:
             response = self.session.get(self.endpoint, params=params, timeout=(8, 20))
@@ -67,6 +104,11 @@ class ItunesDirectory:
             feed_url = str(row.get("feedUrl") or "").strip()
             if not feed_url:
                 continue
+            genres = [str(value) for value in row.get("genres", [])]
+            top_level_genre = next(
+                (value for value in genres if value in CATEGORY_IDS),
+                str(row.get("primaryGenreName") or "").strip(),
+            )
             results.append(
                 DirectoryCandidate(
                     title=str(row.get("collectionName") or "Untitled podcast").strip(),
@@ -75,7 +117,7 @@ class ItunesDirectory:
                     artwork_url=str(
                         row.get("artworkUrl600") or row.get("artworkUrl100") or ""
                     ).strip(),
-                    genre=str(row.get("primaryGenreName") or "").strip(),
+                    genre=top_level_genre,
                 )
             )
         return results

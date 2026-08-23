@@ -39,6 +39,9 @@ class PagedDirectory:
     def browse(self, category="", limit=30):
         return self._items(limit)
 
+    def recommend(self, shows, limit=30):
+        return self._items(limit)
+
 
 def require(condition: bool, message: str):
     if not condition:
@@ -93,6 +96,10 @@ def main() -> int:
         require(window.episode_page.model.rowCount() == 2, "podcast episode flow differs")
 
         window.navigation.select(5)
+        window._show_for_you()
+        while window._discover_loading:
+            app.processEvents()
+        require(window.discover_page.model.rowCount() == 30, "For You did not load")
         window._start_directory_request("browse", "Technology")
         while window._discover_loading:
             app.processEvents()
