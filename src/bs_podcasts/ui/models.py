@@ -18,6 +18,7 @@ class Podcast:
     accent: str
     show_id: int = 0
     feed_url: str = ""
+    artwork_url: str = ""
     health: str = "unknown"
 
 

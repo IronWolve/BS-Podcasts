@@ -4,6 +4,8 @@ from urllib.parse import urlparse
 
 from ..data.repositories import LibraryRepository
 from ..domain import FeedData
+from ..feeds.local import LocalAudioImporter
+from ..feeds.opml import export_opml, import_opml
 
 
 class LibraryService:
@@ -38,3 +40,24 @@ class LibraryService:
 
     def queue(self):
         return self.repository.list_queue()
+
+    def search(self, query: str, limit: int = 100):
+        query = query.strip()
+        if not query:
+            return self.shows(), self.episodes(limit=limit)
+        return self.repository.search(query, limit)
+
+    def import_opml(self, content: bytes):
+        added = []
+        for entry in import_opml(content):
+            try:
+                added.append(self.add_subscription(entry.feed_url, entry.title))
+            except ValueError:
+                continue
+        return added
+
+    def export_opml(self) -> bytes:
+        return export_opml(self.shows())
+
+    def import_local_audio(self, path):
+        return LocalAudioImporter(self.repository).import_file(path)

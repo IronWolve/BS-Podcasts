@@ -45,7 +45,8 @@ class PodcastGridPage(BasePage):
         chips = ("For you", "Trending", "Technology", "Culture", "Stories") if discover else (
             "All", "New", "In progress", "Downloaded", "Recently updated"
         )
-        self.root.addWidget(ChipRow(chips))
+        self.chips = ChipRow(chips)
+        self.root.addWidget(self.chips)
         self.view = QListView()
         self.view.setViewMode(QListView.ViewMode.IconMode)
         self.view.setResizeMode(QListView.ResizeMode.Adjust)
@@ -74,7 +75,8 @@ class PodcastGridPage(BasePage):
 class EpisodeListPage(BasePage):
     def __init__(self, title="Episodes", subtitle="Recent episodes from your shows", items=EPISODES, parent=None):
         super().__init__(title, subtitle, "Refresh", parent)
-        self.root.addWidget(ChipRow(("All", "New", "In progress", "Downloaded", "Played")))
+        self.chips = ChipRow(("All", "New", "In progress", "Downloaded", "Played"))
+        self.root.addWidget(self.chips)
         self.view = QListView()
         self.view.setMouseTracking(True)
         self.view.setUniformItemSizes(True)

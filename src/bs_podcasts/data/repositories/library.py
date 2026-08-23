@@ -190,6 +190,30 @@ class LibraryRepository:
             ).fetchall()
         return [self._episode(row) for row in rows]
 
+    def search(self, query: str, limit: int = 100) -> tuple[list[Show], list[Episode]]:
+        escaped = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        with self.database.connect() as connection:
+            show_rows = connection.execute(
+                self._show_select()
+                + " WHERE (s.title LIKE ? ESCAPE '\\' OR s.author LIKE ? ESCAPE '\\')"
+                + " GROUP BY s.id ORDER BY s.title COLLATE NOCASE LIMIT ?",
+                (pattern, pattern, limit),
+            ).fetchall()
+            episode_rows = connection.execute(
+                """SELECT e.*, s.title AS show_title FROM episodes e
+                   JOIN shows s ON s.id=e.show_id
+                   WHERE e.title LIKE ? ESCAPE '\\'
+                      OR e.description LIKE ? ESCAPE '\\'
+                      OR s.title LIKE ? ESCAPE '\\'
+                   ORDER BY e.published_at DESC, e.id DESC LIMIT ?""",
+                (pattern, pattern, pattern, limit),
+            ).fetchall()
+        return (
+            [self._show(row) for row in show_rows],
+            [self._episode(row) for row in episode_rows],
+        )
+
     @staticmethod
     def _show_select() -> str:
         return (
@@ -204,6 +228,7 @@ class LibraryRepository:
             id=row["id"],
             feed_url=row["feed_url"],
             title=row["title"],
+            canonical_url=row["canonical_url"],
             author=row["author"],
             description=row["description"],
             website_url=row["website_url"],

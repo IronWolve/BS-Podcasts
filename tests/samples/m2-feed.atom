@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Bench Stories</title>
+  <subtitle>Original sample conversations from the workshop bench.</subtitle>
+  <author><name>BS Podcasts Samples</name></author>
+  <link rel="alternate" href="https://samples.invalid/bench" />
+  <entry>
+    <id>bench-002</id>
+    <title>The useful edge</title>
+    <published>2026-08-23T08:00:00Z</published>
+    <summary>Finding the edge that makes a tool useful.</summary>
+    <link rel="enclosure" type="audio/mpeg" href="https://media.invalid/bench-002.mp3" />
+  </entry>
+  <entry>
+    <id>bench-001</id>
+    <title>Clear the surface</title>
+    <updated>2026-08-16T08:00:00Z</updated>
+    <summary>Making room before beginning the next piece.</summary>
+    <link rel="enclosure" type="audio/mpeg" href="https://media.invalid/bench-001.mp3" />
+  </entry>
+</feed>

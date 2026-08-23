@@ -141,6 +141,8 @@ class PageHeader(QFrame):
 
 
 class ChipRow(QWidget):
+    selected = Signal(str)
+
     def __init__(self, labels, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
@@ -153,6 +155,7 @@ class ChipRow(QWidget):
             button.setObjectName("chip")
             button.setCheckable(True)
             button.setChecked(index == 0)
+            button.clicked.connect(lambda checked=False, value=label: self.selected.emit(value))
             group.addButton(button)
             layout.addWidget(button)
         layout.addStretch(1)
@@ -210,11 +213,14 @@ class EmptyState(QWidget):
 
 
 class ContextPanel(QFrame):
+    subscribe_requested = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("contextPanel")
         self.setMinimumWidth(300)
         self.setMaximumWidth(420)
+        self._feed_url = ""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
@@ -257,11 +263,12 @@ class ContextPanel(QFrame):
         layout.addWidget(self.body)
 
         actions = QHBoxLayout()
-        play = QPushButton("Play latest")
-        play.setObjectName("primaryButton")
+        self.primary = QPushButton("Play latest")
+        self.primary.setObjectName("primaryButton")
+        self.primary.clicked.connect(self._primary_clicked)
         queue = QPushButton("Up Next")
         queue.setObjectName("quietButton")
-        actions.addWidget(play)
+        actions.addWidget(self.primary)
         actions.addWidget(queue)
         layout.addLayout(actions)
 
@@ -291,10 +298,18 @@ class ContextPanel(QFrame):
         self.letters.setText("".join(word[0] for word in words[:2]).upper())
         self.title.setText(podcast.title)
         self.meta.setText(f"{podcast.author} · {podcast.episode_count} episodes")
-        self.body.setText(
-            f"{podcast.new_count} new episodes in your library. Select the "
-            "show to open its full episode list and listening controls."
-        )
+        self._feed_url = podcast.feed_url if podcast.show_id == 0 else ""
+        self.primary.setText("Subscribe" if self._feed_url else "Play latest")
+        if self._feed_url:
+            self.body.setText(
+                "Directory result. Subscribe to add this podcast and refresh "
+                "its playable episodes."
+            )
+        else:
+            self.body.setText(
+                f"{podcast.new_count} new episodes in your library. Select the "
+                "show to open its full episode list and listening controls."
+            )
 
     def show_episode(self, episode):
         words = episode.show.replace("The ", "").split()
@@ -305,6 +320,12 @@ class ContextPanel(QFrame):
             "Episode details, show notes, chapters, and playback actions will "
             "live here without losing your place in the list."
         )
+        self._feed_url = ""
+        self.primary.setText("Play")
+
+    def _primary_clicked(self):
+        if self._feed_url:
+            self.subscribe_requested.emit(self._feed_url)
 
 
 class PlayerBar(QFrame):

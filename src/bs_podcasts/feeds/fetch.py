@@ -1,6 +1,8 @@
 """Bounded direct-feed HTTP fetcher."""
 
 from dataclasses import dataclass
+from html.parser import HTMLParser
+from urllib.parse import urljoin
 
 import requests
 
@@ -22,13 +24,48 @@ class FeedResponse:
     not_modified: bool = False
 
 
+class _FeedLinkParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.href = ""
+
+    def handle_starttag(self, tag, attrs):
+        if self.href or tag.lower() != "link":
+            return
+        values = {key.lower(): value for key, value in attrs if value is not None}
+        relations = {part.lower() for part in values.get("rel", "").split()}
+        mime = values.get("type", "").lower()
+        if "alternate" in relations and mime in {
+            "application/rss+xml",
+            "application/atom+xml",
+            "application/xml",
+            "text/xml",
+        }:
+            self.href = values.get("href", "").strip()
+
+
 class FeedFetcher:
     def __init__(self, session=None):
         self.session = session or requests.Session()
         self.session.max_redirects = 5
 
     def fetch(self, url: str, etag: str = "", last_modified: str = "") -> FeedResponse:
-        headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.2"}
+        return self._fetch(url, etag, last_modified, allow_discovery=True)
+
+    def _fetch(
+        self,
+        url: str,
+        etag: str = "",
+        last_modified: str = "",
+        allow_discovery: bool = True,
+    ) -> FeedResponse:
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": (
+                "application/rss+xml, application/atom+xml, application/xml, "
+                "text/xml;q=0.9, text/html;q=0.5, */*;q=0.2"
+            ),
+        }
         if etag:
             headers["If-None-Match"] = etag
         if last_modified:
@@ -54,6 +91,16 @@ class FeedFetcher:
                 body.extend(chunk)
                 if len(body) > MAX_RESPONSE_BYTES:
                     raise FeedFetchError("Feed response exceeds the size limit.")
+            content_type = response.headers.get("Content-Type", "").lower()
+            if allow_discovery and (
+                "text/html" in content_type or bytes(body[:256]).lstrip().lower().startswith(b"<!doctype html")
+            ):
+                parser = _FeedLinkParser()
+                parser.feed(bytes(body).decode(response.encoding or "utf-8", "replace"))
+                if not parser.href:
+                    raise FeedFetchError("HTML page does not advertise a podcast feed.")
+                discovered = urljoin(response.url, parser.href)
+                return self._fetch(discovered, allow_discovery=False)
             return FeedResponse(
                 content=bytes(body),
                 final_url=response.url,

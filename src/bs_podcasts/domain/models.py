@@ -18,6 +18,7 @@ class Show:
     id: int
     feed_url: str
     title: str
+    canonical_url: str = ""
     author: str = ""
     description: str = ""
     website_url: str = ""
@@ -71,3 +72,12 @@ class FeedData:
     website_url: str = ""
     artwork_url: str = ""
     episodes: tuple[FeedEpisodeData, ...] = ()
+
+
+@dataclass(frozen=True)
+class DirectoryCandidate:
+    title: str
+    author: str
+    feed_url: str
+    artwork_url: str = ""
+    genre: str = ""

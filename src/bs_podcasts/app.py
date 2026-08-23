@@ -10,6 +10,7 @@ from .config import APP_ID, APP_NAME
 from .config import data_dir as application_data_dir
 from .data import Database
 from .data.repositories import LibraryRepository
+from .directories import DirectoryService, ItunesDirectory
 from .feeds import FeedFetcher, RefreshService
 from .jobs import JobRunner
 from .logging_setup import configure_logging
@@ -43,7 +44,13 @@ def main() -> int:
         fetcher=FeedFetcher(),
         artwork=ArtworkCache(root / "artwork"),
     )
-    window = MainWindow(library=library, jobs=jobs, refresh=refresh)
+    directory = DirectoryService([ItunesDirectory()])
+    window = MainWindow(
+        library=library,
+        jobs=jobs,
+        refresh=refresh,
+        directory=directory,
+    )
     app.aboutToQuit.connect(jobs.shutdown)
     window.show()
     return app.exec()

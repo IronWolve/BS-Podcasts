@@ -38,7 +38,9 @@ class RefreshService:
 
         self.repository.set_health(show_id, Health.LOADING)
         try:
-            response = self.fetcher.fetch(show.feed_url, show.etag, show.last_modified)
+            response = self.fetcher.fetch(
+                show.canonical_url or show.feed_url, show.etag, show.last_modified
+            )
             if response.not_modified:
                 health = Health.OK if show.episode_count else Health.PARTIAL
                 self.repository.record_refresh_success(

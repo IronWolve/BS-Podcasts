@@ -28,16 +28,18 @@ class _JobBridge(QObject):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, library=None, jobs=None, refresh=None, parent=None):
+    def __init__(self, library=None, jobs=None, refresh=None, directory=None, parent=None):
         super().__init__(parent)
         self.library = library
         self.jobs = jobs
         self.refresh = refresh
+        self.directory = directory
         self.setObjectName("mainWindow")
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(900, 650)
         self._context_forced = False
         self._last_mode = None
+        self._pending_jobs = set()
         self._bridge = _JobBridge(self)
         self._bridge.completed.connect(self._refresh_finished)
 
@@ -60,6 +62,7 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.context = ContextPanel()
         self.context.close_button.clicked.connect(self._hide_context)
+        self.context.subscribe_requested.connect(self._subscribe_url)
         self.splitter.addWidget(self.pages)
         self.splitter.addWidget(self.context)
         self.splitter.setStretchFactor(0, 1)
@@ -141,6 +144,14 @@ class MainWindow(QMainWindow):
             self.podcast_page.header.action.clicked.connect(self._add_podcast)
         if self.episode_page.header.action:
             self.episode_page.header.action.clicked.connect(self._refresh_all)
+        self.home_page.header.search.returnPressed.connect(self._global_search)
+        if self.directory is not None and self.jobs is not None:
+            self.discover_page.header.search.returnPressed.connect(self._directory_search)
+            self.discover_page.chips.selected.connect(self._browse_category)
+            if self.discover_page.header.action:
+                self.discover_page.header.action.clicked.connect(
+                    lambda: self._browse_category("")
+                )
         self._reload_library()
 
     def _reload_library(self):
@@ -179,6 +190,62 @@ class MainWindow(QMainWindow):
         self._reload_library()
         self._submit_refresh(show.id)
 
+    def _subscribe_url(self, feed_url: str):
+        if self.library is None:
+            return
+        try:
+            show = self.library.add_subscription(feed_url)
+        except ValueError as exc:
+            self.discover_page.banner.show_state("error", str(exc))
+            return
+        self._reload_library()
+        self._submit_refresh(show.id)
+        self.discover_page.banner.show_state("loading", "Subscription added; refreshing feed…")
+
+    def _global_search(self):
+        if self.library is None:
+            return
+        query = self.home_page.header.search.text().strip()
+        shows, episodes = self.library.search(query)
+        self.podcast_page.set_items([self._ui_podcast(show) for show in shows])
+        self.episode_page.set_items([self._ui_episode(episode) for episode in episodes])
+        self.navigation.select(2 if episodes else 1)
+        target = self.episode_page if episodes else self.podcast_page
+        target.banner.show_state(
+            "loaded", f"{len(shows)} podcast(s) and {len(episodes)} episode(s) matched."
+        )
+
+    def _directory_search(self):
+        query = self.discover_page.header.search.text().strip()
+        if not query:
+            self.discover_page.banner.show_state("partial", "Enter a podcast search term.")
+            return
+        self.discover_page.banner.show_state("loading", f"Searching for “{query}”…")
+        self._submit_directory("search", query)
+
+    def _browse_category(self, category: str):
+        if self.directory is None or self.jobs is None:
+            return
+        normalized = "" if category in {"For you", "Trending"} else category
+        label = normalized or "top podcasts"
+        self.discover_page.banner.show_state("loading", f"Loading {label}…")
+        self._submit_directory("browse", normalized)
+
+    def _submit_directory(self, operation: str, value: str):
+        callable_ = self.directory.search if operation == "search" else self.directory.browse
+        future = self.jobs.submit(callable_, value, 30)
+        self._pending_jobs.add(future)
+
+        def finished(completed):
+            self._pending_jobs.discard(completed)
+            try:
+                result = completed.result()
+            except Exception as exc:
+                result = JobResult(JobStatus.ERROR, message=str(exc))
+            self._bridge.completed.emit(("directory", operation, result))
+
+        future.add_done_callback(finished)
+
     def _refresh_all(self):
         if self.library is None:
             return
@@ -194,18 +261,23 @@ class MainWindow(QMainWindow):
         if self.jobs is None or self.refresh is None:
             return
         future = self.jobs.submit(self.refresh.refresh, show_id)
+        self._pending_jobs.add(future)
 
         def finished(completed):
+            self._pending_jobs.discard(completed)
             try:
                 result = completed.result()
             except Exception as exc:
                 result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._bridge.completed.emit((show_id, result))
+            self._bridge.completed.emit(("refresh", show_id, result))
 
         future.add_done_callback(finished)
 
     def _refresh_finished(self, payload):
-        _show_id, result = payload
+        kind, _identifier, result = payload
+        if kind == "directory":
+            self._directory_finished(result)
+            return
         self._reload_library()
         if result.status != JobStatus.OK:
             self.episode_page.banner.show_state("error", result.message or "Refresh failed.")
@@ -219,6 +291,33 @@ class MainWindow(QMainWindow):
             )
         else:
             self.episode_page.banner.clear()
+
+    def _directory_finished(self, result):
+        if result.status != JobStatus.OK:
+            self.discover_page.banner.show_state(
+                "error", result.message or "Directory search failed."
+            )
+            return
+        candidates = result.value or []
+        podcasts = []
+        accents = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
+        for index, candidate in enumerate(candidates):
+            podcasts.append(
+                UiPodcast(
+                    title=candidate.title,
+                    author=candidate.author or candidate.genre or "Podcast directory",
+                    episode_count=0,
+                    new_count=0,
+                    accent=accents[index % len(accents)],
+                    feed_url=candidate.feed_url,
+                    artwork_url=candidate.artwork_url,
+                )
+            )
+        self.discover_page.set_items(podcasts)
+        if podcasts:
+            self.discover_page.banner.clear()
+        else:
+            self.discover_page.banner.show_state("partial", "No podcasts matched.")
 
     def _select_page(self, index: int):
         self.pages.setCurrentIndex(index)
@@ -240,6 +339,7 @@ class MainWindow(QMainWindow):
             accent=accents[show.id % len(accents)],
             show_id=show.id,
             feed_url=show.feed_url,
+            artwork_url=show.artwork_url,
             health=show.health.value,
         )
 
@@ -305,3 +405,9 @@ class MainWindow(QMainWindow):
                 self.context.hide()
             self._last_mode = mode
         super().resizeEvent(event)
+
+    def closeEvent(self, event):
+        for future in tuple(self._pending_jobs):
+            future.cancel()
+        self._pending_jobs.clear()
+        super().closeEvent(event)
