@@ -67,6 +67,39 @@ def stylesheet() -> str:
         border-radius: 11px; padding: 9px 13px; selection-background-color: {c['accent']};
     }}
     QLineEdit#searchField:focus {{ border: 1px solid {c['accent']}; }}
+    QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+        background: {c['surface']}; color: {c['text']};
+        border: 1px solid {c['border']}; border-radius: 9px;
+        padding: 7px 10px;
+        selection-background-color: {c['accent']};
+        selection-color: {c['canvas']};
+    }}
+    QLineEdit:focus, QTextEdit:focus, QSpinBox:focus,
+    QDoubleSpinBox:focus, QComboBox:focus {{ border-color: {c['accent']}; }}
+    QComboBox::drop-down {{ border: 0; width: 24px; }}
+    QAbstractItemView {{
+        background: {c['surface_raised']}; color: {c['text']};
+        selection-background-color: {c['accent']};
+        selection-color: {c['canvas']};
+        border: 1px solid {c['border']};
+    }}
+
+    QMenu {{
+        background: {c['surface_raised']}; color: {c['text']};
+        border: 1px solid {c['border']}; border-radius: 10px;
+        padding: 6px;
+    }}
+    QMenu::item {{
+        background: transparent; color: {c['text']};
+        border-radius: 7px; margin: 2px; padding: 8px 28px 8px 12px;
+    }}
+    QMenu::item:selected {{
+        background: {c['accent']}; color: {c['canvas']};
+    }}
+    QMenu::item:disabled {{ color: {c['subtle']}; }}
+    QMenu::separator {{
+        background: {c['border']}; height: 1px; margin: 5px 8px;
+    }}
 
     QPushButton#primaryButton {{
         background: {c['accent']}; color: {c['canvas']}; border: 0;

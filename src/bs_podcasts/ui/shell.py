@@ -723,19 +723,27 @@ class MainWindow(QMainWindow):
             return
         candidates = result.value or []
         podcasts = []
+        subscribed = {
+            show.feed_url: show for show in self.library.shows()
+        } if self.library is not None else {}
         accents = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
         for index, candidate_data in enumerate(candidates):
             candidate, artwork_path = candidate_data
+            saved = subscribed.get(candidate.feed_url)
             podcasts.append(
                 UiPodcast(
-                    title=candidate.title,
-                    author=candidate.author or candidate.genre or "Podcast directory",
-                    episode_count=0,
-                    new_count=0,
+                    title=saved.title if saved else candidate.title,
+                    author=(saved.author if saved else candidate.author)
+                    or candidate.genre
+                    or "Podcast directory",
+                    episode_count=saved.episode_count if saved else 0,
+                    new_count=saved.new_count if saved else 0,
                     accent=accents[index % len(accents)],
+                    show_id=saved.id if saved else 0,
                     feed_url=candidate.feed_url,
                     artwork_url=candidate.artwork_url,
-                    artwork_path=artwork_path,
+                    artwork_path=(saved.artwork_path if saved else "") or artwork_path,
+                    health=saved.health.value if saved else "unknown",
                 )
             )
         self.discover_page.set_items(podcasts)
