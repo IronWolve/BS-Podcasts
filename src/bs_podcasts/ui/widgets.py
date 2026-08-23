@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..assets import icon_path
+
 
 NAV_ITEMS = (
     ("⌂", "Home"),
@@ -51,8 +53,17 @@ class NavigationRail(QFrame):
 
         brand = QHBoxLayout()
         brand.setSpacing(10)
-        self.mark = QLabel("BS")
-        self.mark.setObjectName("brandMark")
+        self.mark = QLabel()
+        self.mark.setObjectName("brandIcon")
+        self.mark.setPixmap(
+            QPixmap(str(icon_path(64))).scaled(
+                42,
+                42,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        self.mark.setAccessibleName("BS Podcasts")
         self.mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.mark.setFixedSize(42, 42)
         self.brand_text = QWidget()

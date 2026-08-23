@@ -249,7 +249,7 @@ class PodcastDelegate(QStyledItemDelegate):
 
 class EpisodeDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
-        return QSize(option.rect.width(), 88)
+        return QSize(1, 88)
 
     def paint(self, painter: QPainter, option, index):
         item = index.data(ItemRoles.ITEM)

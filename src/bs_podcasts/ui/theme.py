@@ -44,6 +44,7 @@ def stylesheet() -> str:
         border-radius: 12px; font-size: 17px; font-weight: 800;
         padding: 5px;
     }}
+    QLabel#brandIcon {{ background: transparent; }}
     QLabel#brandName {{ font-size: 16px; font-weight: 750; }}
     QLabel#brandSub, QLabel#muted, QLabel#meta {{ color: {c['muted']}; }}
 

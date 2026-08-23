@@ -4,9 +4,11 @@ import sys
 import sqlite3
 
 from PySide6.QtCore import QCoreApplication
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from .artwork import ArtworkCache
+from .assets import icon_path
 from .config import APP_ID, APP_NAME, AppSettings
 from .config import data_dir as application_data_dir
 from .data import Database
@@ -32,6 +34,7 @@ def create_application(argv=None) -> QApplication:
     app.setOrganizationName("BS Podcasts")
     app.setOrganizationDomain(APP_ID)
     app.setStyle("Fusion")
+    app.setWindowIcon(QIcon(str(icon_path(256))))
     app.setStyleSheet(stylesheet())
     QCoreApplication.setApplicationVersion("0.1.0")
     return app
