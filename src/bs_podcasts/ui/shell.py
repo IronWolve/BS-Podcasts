@@ -626,6 +626,9 @@ class MainWindow(QMainWindow):
     def _browse_category(self, category: str):
         if self.directory is None or self.jobs is None:
             return
+        self.discover_page.category.hidePopup()
+        self.discover_page.category.clearFocus()
+        self.discover_page.view.setFocus()
         normalized = "" if category in {"For You", "All Categories"} else category
         label = normalized or "top podcasts"
         self.discover_page.banner.show_state("loading", f"Loading {label}…")
