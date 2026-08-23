@@ -780,10 +780,13 @@ class MainWindow(QMainWindow):
             self._discover_loading
             or self._discover_exhausted
             or not self._discover_operation
-            or self._discover_limit >= 200
+            or self._discover_limit >= (
+                200 if self._discover_operation == "search" else 500
+            )
         ):
             return
-        self._discover_limit = min(200, self._discover_limit + 30)
+        maximum = 200 if self._discover_operation == "search" else 500
+        self._discover_limit = min(maximum, self._discover_limit + 30)
         label = self._discover_value or "For You"
         self.discover_page.banner.show_state("loading", f"Loading more {label}…")
         self._submit_directory(
@@ -934,7 +937,9 @@ class MainWindow(QMainWindow):
             )
         result_count = len(podcasts)
         self._discover_exhausted = (
-            requested_limit >= 200 or result_count <= self._discover_result_count
+            requested_limit
+            >= (200 if self._discover_operation == "search" else 500)
+            or result_count <= self._discover_result_count
         )
         self._discover_result_count = result_count
         self.discover_page.set_items(
