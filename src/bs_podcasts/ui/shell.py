@@ -253,7 +253,8 @@ class MainWindow(QMainWindow):
                 "empty", "Search or choose a category to discover podcasts."
             )
             self.discover_page.header.search.returnPressed.connect(self._directory_search)
-            self.discover_page.chips.selected.connect(self._browse_category)
+            self.discover_page.chips.selected.connect(self._show_for_you)
+            self.discover_page.category.currentTextChanged.connect(self._browse_category)
             if self.discover_page.header.action:
                 self.discover_page.header.action.clicked.connect(
                     lambda: self._browse_category("")
@@ -625,10 +626,17 @@ class MainWindow(QMainWindow):
     def _browse_category(self, category: str):
         if self.directory is None or self.jobs is None:
             return
-        normalized = "" if category in {"For you", "Trending"} else category
+        normalized = "" if category in {"For You", "All Categories"} else category
         label = normalized or "top podcasts"
         self.discover_page.banner.show_state("loading", f"Loading {label}…")
         self._submit_directory("browse", normalized)
+
+    def _show_for_you(self, _label: str = "For You"):
+        if self.discover_page.category.currentIndex() != 0:
+            self.discover_page.category.blockSignals(True)
+            self.discover_page.category.setCurrentIndex(0)
+            self.discover_page.category.blockSignals(False)
+        self._browse_category("")
 
     def _submit_directory(self, operation: str, value: str):
         future = self.jobs.submit(self._directory_request, operation, value)

@@ -4,6 +4,7 @@ from PySide6.QtCore import QEvent, Signal, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QFrame,
     QFormLayout,
     QGridLayout,
@@ -27,6 +28,7 @@ from .models import (
     PodcastModel,
 )
 from .widgets import ChipRow, EmptyState, PageHeader, StateBanner
+from ..directories.itunes import CATEGORY_IDS
 
 
 class BasePage(QWidget):
@@ -49,11 +51,26 @@ class PodcastGridPage(BasePage):
 
     def __init__(self, title="Podcasts", subtitle="Your library, at a glance", discover=False, parent=None):
         super().__init__(title, subtitle, "Add podcast" if not discover else "Browse all", parent)
-        chips = ("For you", "Trending", "Technology", "Culture", "Stories") if discover else (
+        chips = ("For You",) if discover else (
             "All", "New", "In progress", "Downloaded", "Recently updated"
         )
         self.chips = ChipRow(chips)
-        self.root.addWidget(self.chips)
+        if discover:
+            filters = QWidget()
+            filter_layout = QHBoxLayout(filters)
+            filter_layout.setContentsMargins(0, 0, 0, 0)
+            filter_layout.setSpacing(10)
+            filter_layout.addWidget(self.chips, 1)
+            self.category = QComboBox()
+            self.category.setAccessibleName("Podcast category")
+            self.category.addItem("All Categories")
+            self.category.addItems(CATEGORY_IDS.keys())
+            self.category.setMinimumWidth(220)
+            filter_layout.addWidget(self.category)
+            self.root.addWidget(filters)
+        else:
+            self.category = None
+            self.root.addWidget(self.chips)
         self.view = QListView()
         self.view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.view.setViewMode(QListView.ViewMode.IconMode)

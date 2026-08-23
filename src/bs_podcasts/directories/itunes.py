@@ -12,17 +12,20 @@ CATEGORY_IDS = {
     "Comedy": 1303,
     "Education": 1304,
     "Fiction": 1483,
-    "Health": 1512,
+    "Government": 1511,
+    "Health & Fitness": 1512,
     "History": 1487,
-    "Kids": 1305,
+    "Kids & Family": 1305,
     "Leisure": 1502,
     "Music": 1310,
     "News": 1489,
+    "Religion & Spirituality": 1314,
     "Science": 1533,
-    "Society": 1324,
+    "Society & Culture": 1324,
     "Sports": 1545,
     "Technology": 1318,
     "True Crime": 1488,
+    "TV & Film": 1309,
 }
 
 
@@ -40,7 +43,12 @@ class ItunesDirectory:
         return self._request({"term": query, "media": "podcast", "entity": "podcast", "limit": limit})
 
     def browse(self, category: str = "", limit: int = 30) -> list[DirectoryCandidate]:
-        params = {"term": "podcast", "media": "podcast", "entity": "podcast", "limit": limit}
+        params = {
+            "term": category or "podcast",
+            "media": "podcast",
+            "entity": "podcast",
+            "limit": limit,
+        }
         genre_id = CATEGORY_IDS.get(category)
         if genre_id:
             params["genreId"] = genre_id
