@@ -30,7 +30,7 @@ def main() -> int:
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        checks["migrations 1-4"] = versions == [1, 2, 3, 4]
+        checks["migrations 1-5"] = versions == [1, 2, 3, 4, 5]
         corrupt = root / "config.json"
         corrupt.write_text("{not valid json", encoding="utf-8")
         checks["corrupt config fallback"] = AppSettings.load(corrupt).recovered_from_error

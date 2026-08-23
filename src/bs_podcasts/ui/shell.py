@@ -2,8 +2,10 @@
 
 from datetime import datetime
 from pathlib import Path
+import os
 
-from PySide6.QtCore import QEvent, QObject, Signal, Qt
+from PySide6.QtCore import QEvent, QObject, QUrl, Signal, Qt
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -67,6 +69,7 @@ class MainWindow(QMainWindow):
         self._back_stack = []
         self._forward_stack = []
         self._history_navigation = False
+        self._episode_navigation_prepared = False
         self._bridge = _JobBridge(self)
         self._bridge.completed.connect(self._refresh_finished)
         self._bridge.playback_event.connect(self._playback_changed)
@@ -252,6 +255,12 @@ class MainWindow(QMainWindow):
         self.home_page.header.search.returnPressed.connect(self._global_search)
         self.settings_page.setting_changed.connect(self._save_setting)
         self.settings_page.shortcut_changed.connect(self._rebind_shortcut)
+        self.settings_page.open_data_requested.connect(self._open_data_folder)
+        self.settings_page.refresh_storage_requested.connect(
+            self._refresh_storage_settings
+        )
+        self.settings_page.import_opml_requested.connect(self._import_opml)
+        self.settings_page.export_opml_requested.connect(self._export_opml)
         self.settings_page.load_values(
             float(self.library.setting("playback.default_speed", "1.0")),
             int(self.library.setting("playback.skip_back", "15")),
@@ -259,6 +268,7 @@ class MainWindow(QMainWindow):
             self.library.setting("playback.auto_continue", "1") == "1",
         )
         self.settings_page.set_shortcuts(self.shortcuts.bindings())
+        self._refresh_storage_settings()
         self.home_page.new_requested.connect(self._show_new_episodes)
         self.home_page.queue_requested.connect(lambda: self.navigation.select(3))
         self.home_page.downloads_requested.connect(lambda: self.navigation.select(4))
@@ -301,6 +311,54 @@ class MainWindow(QMainWindow):
             self.library.set_setting(key, value)
             self.settings_page.banner.show_state("loaded", "Setting saved.")
 
+    def _refresh_storage_settings(self):
+        if self.library is None:
+            return
+        database_path = str(self.library.repository.database.path)
+        data_root = str(self.library.repository.database.path.parent)
+        settings_path = str(self.library.repository.database.path.parent / "config.json")
+        download_path = "—"
+        download_text = "No download service"
+        if self.downloads is not None:
+            download_path = str(self.downloads.directory)
+            used, free, _total = self.downloads.storage()
+            download_text = f"{self._format_bytes(used)} used · {self._format_bytes(free)} free"
+        artwork_bytes = 0
+        artwork_path = "—"
+        if self.refresh is not None and self.refresh.artwork is not None:
+            directory = self.refresh.artwork.directory
+            artwork_path = str(directory)
+            if directory.exists():
+                artwork_bytes = sum(
+                    path.stat().st_size
+                    for path in directory.iterdir()
+                    if path.is_file()
+                )
+        self.settings_page.set_storage_info(
+            data_root,
+            settings_path,
+            database_path,
+            download_path,
+            download_text,
+            artwork_path,
+            self._format_bytes(artwork_bytes),
+            os.environ.get("TMPDIR", "System temporary directory"),
+        )
+
+    def _open_data_folder(self):
+        if self.library is None:
+            return
+        folder = self.library.repository.database.path.parent
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    @staticmethod
+    def _format_bytes(value: int) -> str:
+        amount = float(max(0, value))
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if amount < 1024 or unit == "TB":
+                return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+            amount /= 1024
+
     def _rebind_shortcut(self, name: str, sequence: str):
         try:
             self.shortcuts.rebind(name, sequence)
@@ -330,12 +388,21 @@ class MainWindow(QMainWindow):
             return
         stored_shows = self.library.shows()
         shows = [self._ui_podcast(show) for show in stored_shows]
-        episodes = [self._ui_episode(episode) for episode in self.library.episodes(limit=5000)]
+        stored_episodes = self.library.episodes(limit=5000)
+        episodes = [self._ui_episode(episode) for episode in stored_episodes]
+        in_progress = [
+            self._ui_episode(episode)
+            for episode in stored_episodes
+            if episode.position_seconds > 0 and not episode.played
+        ]
         queued = [self._ui_episode(episode) for episode in self.library.queue()]
         history = [self._ui_episode(episode) for episode in self.library.history()]
         self.podcast_page.set_items(shows)
         self.episode_page.set_items(episodes)
-        self.home_page.set_items(episodes)
+        self.home_page.set_items(
+            in_progress if in_progress else episodes,
+            "Continue listening" if in_progress else "Latest episodes",
+        )
         self.playlist_page.set_items(queued)
         self.context.set_queue(queued)
         self.history_page.set_items(history)
@@ -473,7 +540,9 @@ class MainWindow(QMainWindow):
         self.discover_page.banner.show_state("loading", "Subscription added; refreshing feed…")
 
     def _show_new_episodes(self):
+        self._show_all_episodes()
         self.episode_page.set_filter("New")
+        self._episode_navigation_prepared = True
         self.navigation.select(2)
 
     def _open_podcast(self, podcast):
@@ -489,6 +558,7 @@ class MainWindow(QMainWindow):
         )
         self.episode_page.set_filter("All")
         self.episode_page.set_items(episodes)
+        self._episode_navigation_prepared = True
         self.navigation.select(2)
 
     def _play_latest(self, show_id: int):
@@ -755,6 +825,7 @@ class MainWindow(QMainWindow):
         shows, episodes = self.library.search(query)
         self.podcast_page.set_items([self._ui_podcast(show) for show in shows])
         self.episode_page.set_items([self._ui_episode(episode) for episode in episodes])
+        self._episode_navigation_prepared = bool(episodes)
         self.navigation.select(2 if episodes else 1)
         target = self.episode_page if episodes else self.podcast_page
         target.banner.show_state(
@@ -1134,6 +1205,11 @@ class MainWindow(QMainWindow):
             self._back_stack.append(previous)
             self._forward_stack.clear()
         self.pages.setCurrentIndex(index)
+        if index == 2:
+            if self._episode_navigation_prepared:
+                self._episode_navigation_prepared = False
+            else:
+                self._show_all_episodes()
         self._update_navigation_controls()
         if index == 8:
             self.context.hide()
@@ -1148,8 +1224,23 @@ class MainWindow(QMainWindow):
             self._show_item(selected)
         else:
             self.context.show_empty()
-        if self._last_mode == "wide":
+            self.context.hide()
+        if self._last_mode == "wide" and selected is not None:
             self.context.show()
+
+    def _show_all_episodes(self):
+        if self.library is None:
+            return
+        episodes = [
+            self._ui_episode(episode)
+            for episode in self.library.episodes(limit=5000)
+        ]
+        self.episode_page.header.title_label.setText("Episodes")
+        self.episode_page.header.subtitle_label.setText(
+            "Recent episodes from your shows"
+        )
+        self.episode_page.set_filter("All")
+        self.episode_page.set_items(episodes)
 
     def navigate_back(self):
         if not self._back_stack:
@@ -1206,6 +1297,8 @@ class MainWindow(QMainWindow):
         elif isinstance(item, UiEpisode):
             self.context.show_episode(item)
             self._load_listening_details(item.episode_id)
+        if self._last_mode == "wide":
+            self.context.show()
 
     def _load_listening_details(self, episode_id: int, query: str = ""):
         if self.listening is None or not episode_id:

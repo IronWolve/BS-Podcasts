@@ -67,6 +67,16 @@ def main() -> int:
             output = OUTPUT / f"{name}-{width}x{height}.png"
             window.grab().save(str(output), "PNG")
             print(output)
+    window.resize(1000, 700)
+    window.navigation.select(8)
+    app.processEvents()
+    window.settings_page.settings_scroll.verticalScrollBar().setValue(
+        window.settings_page.settings_scroll.verticalScrollBar().maximum()
+    )
+    app.processEvents()
+    storage_output = OUTPUT / "settings-storage-1000x700.png"
+    window.grab().save(str(storage_output), "PNG")
+    print(storage_output)
     window.close()
     jobs.shutdown(wait=True)
     app.quit()

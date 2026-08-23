@@ -19,10 +19,25 @@ class ShortcutManager:
     def rebind(self, name: str, sequence: str):
         if name not in self._shortcuts:
             raise KeyError(name)
+        normalized = QKeySequence(sequence).toString()
+        if normalized:
+            conflict = next(
+                (
+                    other_name
+                    for other_name, (other, _default) in self._shortcuts.items()
+                    if other_name != name
+                    and other.key().toString() == normalized
+                ),
+                None,
+            )
+            if conflict:
+                raise ValueError(
+                    f"{normalized} is already assigned to {conflict.replace('_', ' ')}."
+                )
         shortcut, _default = self._shortcuts[name]
-        shortcut.setKey(QKeySequence(sequence))
+        shortcut.setKey(QKeySequence(normalized))
         if self.library:
-            self.library.set_setting(f"shortcut.{name}", sequence)
+            self.library.set_setting(f"shortcut.{name}", normalized)
 
     def bindings(self) -> dict[str, str]:
         return {

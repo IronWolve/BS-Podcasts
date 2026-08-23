@@ -153,6 +153,21 @@ def stylesheet() -> str:
         background: {c['border']}; border-radius: 4px; min-width: 34px;
     }}
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+    QScrollArea#settingsScroll, QScrollArea#settingsScroll QWidget#qt_scrollarea_viewport,
+    QWidget#settingsContent {{
+        background: {c['canvas']}; border: 0;
+    }}
+    QSpinBox::up-button, QDoubleSpinBox::up-button,
+    QSpinBox::down-button, QDoubleSpinBox::down-button {{
+        background: {c['surface_raised']}; border: 0;
+        border-left: 1px solid {c['border']}; width: 20px;
+    }}
+    QSpinBox::up-button, QDoubleSpinBox::up-button {{
+        border-top-right-radius: 8px;
+    }}
+    QSpinBox::down-button, QDoubleSpinBox::down-button {{
+        border-bottom-right-radius: 8px;
+    }}
 
     QFrame#contextPanel {{
         background: {c['surface']}; border-left: 1px solid {c['border']};

@@ -96,13 +96,17 @@ class LibraryRepository:
                     show_id,
                 ),
             )
+            initial_import = connection.execute(
+                "SELECT 1 FROM episodes WHERE show_id=? LIMIT 1", (show_id,)
+            ).fetchone() is None
+            new_flag = 0 if initial_import else 1
             for episode in feed.episodes:
                 connection.execute(
                     """INSERT INTO episodes(
                        show_id, external_id, title, description, media_url,
                        mime_type, published_at, duration_seconds,
-                       transcript_url, transcript_type, added_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       transcript_url, transcript_type, is_new, added_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(show_id, external_id) DO UPDATE SET
                        title=excluded.title,
                        description=excluded.description,
@@ -123,6 +127,7 @@ class LibraryRepository:
                         episode.duration_seconds,
                         episode.transcript_url,
                         episode.transcript_type,
+                        new_flag,
                         now,
                     ),
                 )

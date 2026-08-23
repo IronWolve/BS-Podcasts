@@ -436,6 +436,12 @@ class ContextPanel(QFrame):
         self._feed_url = podcast.feed_url if podcast.show_id == 0 else ""
         self._episode_id = 0
         self._show_id = podcast.show_id
+        self.tabs.setCurrentIndex(0)
+        for index in range(1, self.tabs.count()):
+            self.tabs.setTabVisible(index, False)
+        self.set_chapters(())
+        self.set_transcript(())
+        self.set_bookmarks(())
         self.primary.setText("Subscribe" if self._feed_url else "Play latest")
         self.primary.setEnabled(True)
         self.secondary.setEnabled(False)
@@ -465,6 +471,8 @@ class ContextPanel(QFrame):
         self._feed_url = ""
         self._episode_id = episode.episode_id
         self._show_id = episode.show_id
+        for index in range(1, self.tabs.count()):
+            self.tabs.setTabVisible(index, True)
         self.primary.setText("Play")
         self.primary.setEnabled(True)
         self.secondary.setEnabled(bool(self._episode_id))

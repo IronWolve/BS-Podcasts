@@ -1,5 +1,7 @@
 """M0 pages built from reusable, model-backed components."""
 
+from datetime import datetime
+
 from PySide6.QtCore import QEvent, QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -15,6 +17,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QSpinBox,
     QTabBar,
+    QScrollArea,
     QKeySequenceEdit,
     QVBoxLayout,
     QWidget,
@@ -384,7 +387,15 @@ class HomePage(BasePage):
     downloads_requested = Signal()
 
     def __init__(self, parent=None):
-        super().__init__("Good evening", "Pick up where you left off", parent=parent)
+        hour = datetime.now().hour
+        greeting = (
+            "Good morning"
+            if hour < 12
+            else "Good afternoon"
+            if hour < 18
+            else "Good evening"
+        )
+        super().__init__(greeting, "Pick up where you left off", parent=parent)
 
         stats = QHBoxLayout()
         self.summary_buttons = []
@@ -401,9 +412,9 @@ class HomePage(BasePage):
             stats.addWidget(card)
         self.root.addLayout(stats)
 
-        heading = QLabel("Continue listening")
-        heading.setObjectName("sectionTitle")
-        self.root.addWidget(heading)
+        self.section_title = QLabel("Continue listening")
+        self.section_title.setObjectName("sectionTitle")
+        self.root.addWidget(self.section_title)
         self.view = QListView()
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.view.setResizeMode(QListView.ResizeMode.Adjust)
@@ -428,8 +439,10 @@ class HomePage(BasePage):
         if item:
             self.play_requested.emit(item)
 
-    def set_items(self, items):
+    def set_items(self, items, heading: str | None = None):
         self.model.replace(list(items)[:4])
+        if heading:
+            self.section_title.setText(heading)
         if self.model.rowCount():
             self.view.setCurrentIndex(self.model.index(0, 0))
 
@@ -450,6 +463,10 @@ class EmptyPage(BasePage):
 class SettingsPage(BasePage):
     setting_changed = Signal(str, str)
     shortcut_changed = Signal(str, str)
+    open_data_requested = Signal()
+    refresh_storage_requested = Signal()
+    import_opml_requested = Signal()
+    export_opml_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(
@@ -458,6 +475,20 @@ class SettingsPage(BasePage):
             show_search=False,
             parent=parent,
         )
+        self.settings_scroll = QScrollArea()
+        self.settings_scroll.setObjectName("settingsScroll")
+        self.settings_scroll.setWidgetResizable(True)
+        self.settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.settings_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        settings_content = QWidget()
+        settings_content.setObjectName("settingsContent")
+        self.settings_content = QVBoxLayout(settings_content)
+        self.settings_content.setContentsMargins(0, 0, 8, 0)
+        self.settings_content.setSpacing(12)
+        self.settings_scroll.setWidget(settings_content)
+        self.root.addWidget(self.settings_scroll, 1)
         card = QFrame()
         card.setObjectName("settingCard")
         form = QFormLayout(card)
@@ -481,7 +512,7 @@ class SettingsPage(BasePage):
         note = QLabel("These defaults apply when a new podcast is added.")
         note.setObjectName("meta")
         form.addRow("", note)
-        self.root.addWidget(card)
+        self.settings_content.addWidget(card)
         shortcut_card = QFrame()
         shortcut_card.setObjectName("settingCard")
         shortcut_layout = QVBoxLayout(shortcut_card)
@@ -491,8 +522,88 @@ class SettingsPage(BasePage):
         self.shortcut_form = QFormLayout()
         shortcut_layout.addWidget(shortcut_title)
         shortcut_layout.addLayout(self.shortcut_form)
-        self.root.addWidget(shortcut_card)
-        self.root.addStretch(1)
+        self.settings_content.addWidget(shortcut_card)
+        storage_card = QFrame()
+        storage_card.setObjectName("settingCard")
+        storage_layout = QFormLayout(storage_card)
+        storage_layout.setContentsMargins(20, 18, 20, 18)
+        storage_layout.setSpacing(12)
+        storage_title = QLabel("Files & storage")
+        storage_title.setObjectName("sectionTitle")
+        self.data_root = QLabel("—")
+        self.settings_path = QLabel("—")
+        self.library_path = QLabel("—")
+        self.download_path = QLabel("—")
+        self.download_usage = QLabel("—")
+        self.artwork_path = QLabel("—")
+        self.artwork_usage = QLabel("—")
+        self.temp_path = QLabel("—")
+        path_labels = (
+            self.data_root,
+            self.settings_path,
+            self.library_path,
+            self.download_path,
+            self.artwork_path,
+            self.temp_path,
+        )
+        for label in path_labels:
+            label.setObjectName("meta")
+            label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            label.setWordWrap(True)
+        self.download_usage.setObjectName("meta")
+        self.artwork_usage.setObjectName("meta")
+        storage_layout.addRow(storage_title)
+        storage_layout.addRow("Application data", self.data_root)
+        storage_layout.addRow("Startup config", self.settings_path)
+        storage_layout.addRow("Library database", self.library_path)
+        storage_layout.addRow("Downloads folder", self.download_path)
+        storage_layout.addRow("Downloads usage", self.download_usage)
+        storage_layout.addRow("Artwork folder", self.artwork_path)
+        storage_layout.addRow("Artwork usage", self.artwork_usage)
+        storage_layout.addRow("Temporary files", self.temp_path)
+        storage_actions = QHBoxLayout()
+        open_folder = QPushButton("Open data folder")
+        open_folder.setObjectName("quietButton")
+        open_folder.clicked.connect(self.open_data_requested)
+        refresh_usage = QPushButton("Refresh usage")
+        refresh_usage.setObjectName("quietButton")
+        refresh_usage.clicked.connect(self.refresh_storage_requested)
+        storage_actions.addWidget(open_folder)
+        storage_actions.addWidget(refresh_usage)
+        storage_actions.addStretch(1)
+        storage_layout.addRow("", storage_actions)
+        self.settings_content.addWidget(storage_card)
+
+        transfer_card = QFrame()
+        transfer_card.setObjectName("settingCard")
+        transfer_layout = QVBoxLayout(transfer_card)
+        transfer_layout.setContentsMargins(20, 18, 20, 18)
+        transfer_layout.setSpacing(10)
+        transfer_title = QLabel("Subscriptions & transfer")
+        transfer_title.setObjectName("sectionTitle")
+        transfer_description = QLabel(
+            "Import subscriptions from an OPML file or export the current "
+            "subscription list for another podcast application."
+        )
+        transfer_description.setObjectName("meta")
+        transfer_description.setWordWrap(True)
+        transfer_actions = QHBoxLayout()
+        import_opml = QPushButton("Import OPML…")
+        import_opml.setObjectName("quietButton")
+        import_opml.clicked.connect(self.import_opml_requested)
+        export_opml = QPushButton("Export OPML…")
+        export_opml.setObjectName("quietButton")
+        export_opml.clicked.connect(self.export_opml_requested)
+        transfer_actions.addWidget(import_opml)
+        transfer_actions.addWidget(export_opml)
+        transfer_actions.addStretch(1)
+        transfer_layout.addWidget(transfer_title)
+        transfer_layout.addWidget(transfer_description)
+        transfer_layout.addLayout(transfer_actions)
+        self.settings_content.addWidget(transfer_card)
+        self.settings_content.addStretch(1)
         self.speed.valueChanged.connect(
             lambda value: self.setting_changed.emit("playback.default_speed", str(value))
         )
@@ -539,3 +650,32 @@ class SettingsPage(BasePage):
                 )
             )
             self.shortcut_form.addRow(label, editor)
+
+    def set_storage_info(
+        self,
+        data_root: str,
+        settings_path: str,
+        library_path: str,
+        download_path: str,
+        downloads: str,
+        artwork_path: str,
+        artwork: str,
+        temp_path: str,
+    ):
+        self.data_root.setText(data_root)
+        self.settings_path.setText(settings_path)
+        self.library_path.setText(library_path)
+        self.library_path.setToolTip(library_path)
+        self.download_path.setText(download_path)
+        self.download_usage.setText(downloads)
+        self.artwork_path.setText(artwork_path)
+        self.artwork_usage.setText(artwork)
+        self.temp_path.setText(temp_path)
+        for label in (
+            self.data_root,
+            self.settings_path,
+            self.download_path,
+            self.artwork_path,
+            self.temp_path,
+        ):
+            label.setToolTip(label.text())
