@@ -84,6 +84,10 @@ def stylesheet() -> str:
         font-weight: 750;
     }}
     QPushButton#iconButton:hover {{ border-color: {c['accent']}; }}
+    QPushButton:disabled {{
+        color: {c['subtle']}; background: {c['surface']};
+        border-color: {c['surface_soft']};
+    }}
 
     QPushButton#chip {{
         background: {c['surface']}; color: {c['muted']};

@@ -80,3 +80,24 @@ class AddPodcastDialog(StyledDialog):
             self.show_error("Enter a complete http:// or https:// URL.")
             return
         self.accept()
+
+
+class StartupErrorDialog(StyledDialog):
+    def __init__(self, title: str, message: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setFixedWidth(560)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+        heading = QLabel(title)
+        heading.setObjectName("pageTitle")
+        body = QLabel(message)
+        body.setObjectName("contextBody")
+        body.setWordWrap(True)
+        close = QPushButton("Close")
+        close.setObjectName("primaryButton")
+        close.clicked.connect(self.accept)
+        layout.addWidget(heading)
+        layout.addWidget(body)
+        layout.addWidget(close, alignment=Qt.AlignmentFlag.AlignRight)

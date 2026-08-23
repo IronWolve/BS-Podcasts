@@ -1,12 +1,13 @@
 """Application bootstrap."""
 
 import sys
+import sqlite3
 
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
 from .artwork import ArtworkCache
-from .config import APP_ID, APP_NAME
+from .config import APP_ID, APP_NAME, AppSettings
 from .config import data_dir as application_data_dir
 from .data import Database
 from .data.repositories import DownloadRepository, LibraryRepository, ListeningRepository
@@ -19,6 +20,7 @@ from .logging_setup import configure_logging
 from .playback import ExternalPlayerEngine, MpvEngine, PlaybackService
 from .services import LibraryService, ListeningService
 from .ui.shell import MainWindow
+from .ui.dialogs import StartupErrorDialog
 from .ui.theme import stylesheet
 
 
@@ -38,7 +40,19 @@ def create_application(argv=None) -> QApplication:
 def main() -> int:
     app = create_application()
     root = application_data_dir()
-    database = Database(root / "library.db")
+    settings = AppSettings.load(root / "config.json")
+    if settings.recovered_from_error:
+        configure_logging().warning("Invalid configuration; using safe defaults.")
+    try:
+        database = Database(root / "library.db")
+    except sqlite3.DatabaseError as exc:
+        dialog = StartupErrorDialog(
+            "Library could not be opened",
+            "BS Podcasts did not modify the database. Close the app and inspect "
+            f"the library at {root / 'library.db'}.\n\n{exc}",
+        )
+        dialog.exec()
+        return 1
     repository = LibraryRepository(database)
     library = LibraryService(repository)
     jobs = JobRunner(max_workers=4)
