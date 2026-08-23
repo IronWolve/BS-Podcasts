@@ -106,13 +106,23 @@ def main() -> int:
         require(window.navigation.width() == 224, "navigation collapsed too early")
         require(window.discover_page.model.rowCount() == 0, "Discover contains demo rows")
         require(
-            window.home_page.summary_buttons[0].text().startswith("2\n"),
+            window.home_page.summary_buttons[0].text().startswith("0\n"),
             "Home new count is not persisted data",
         )
         require(window.playlist_page.header.action is None, "Playlist has a dead action")
         require(window.history_page.header.action is None, "History has a dead action")
         require(window.bookmark_page.header.action is None, "Bookmarks has a dead action")
         require(not window.settings_page.header.search.isVisible(), "Settings has dead search")
+        require(
+            window.settings_page.library_path.text().endswith("library.db"),
+            "Settings storage path is missing",
+        )
+        try:
+            window.shortcuts.rebind("bookmark", "Ctrl+Space")
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError("Shortcut conflict was accepted")
         require(
             not window.download_page.header.action.isVisible(),
             "Cancel Active is visible without an active download",
