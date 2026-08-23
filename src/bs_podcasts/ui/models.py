@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from PySide6.QtCore import QAbstractListModel, QMimeData, QModelIndex, QSize, Signal, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle
 
 from .theme import COLORS
@@ -19,6 +19,7 @@ class Podcast:
     show_id: int = 0
     feed_url: str = ""
     artwork_url: str = ""
+    artwork_path: str = ""
     health: str = "unknown"
 
 
@@ -34,6 +35,7 @@ class Episode:
     episode_id: int = 0
     show_id: int = 0
     description: str = ""
+    artwork_path: str = ""
 
 
 PODCASTS = (
@@ -187,16 +189,19 @@ class PodcastDelegate(QStyledItemDelegate):
         painter.drawRoundedRect(card, 14, 14)
 
         art = card.adjusted(10, 10, -10, -68)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(item.accent))
-        painter.drawRoundedRect(art, 11, 11)
-
-        painter.setPen(QColor(COLORS["canvas"]))
         font = QFont(option.font)
-        font.setPointSize(23)
-        font.setWeight(QFont.Weight.Bold)
-        painter.setFont(font)
-        painter.drawText(art, Qt.AlignmentFlag.AlignCenter, _initials(item.title))
+        pixmap = QPixmap(item.artwork_path) if item.artwork_path else QPixmap()
+        if not pixmap.isNull():
+            painter.drawPixmap(art, pixmap)
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(item.accent))
+            painter.drawRoundedRect(art, 11, 11)
+            painter.setPen(QColor(COLORS["canvas"]))
+            font.setPointSize(23)
+            font.setWeight(QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.drawText(art, Qt.AlignmentFlag.AlignCenter, _initials(item.title))
 
         title_rect = card.adjusted(12, art.height() + 18, -12, -34)
         painter.setPen(QColor(COLORS["text"]))
@@ -262,15 +267,19 @@ class EpisodeDelegate(QStyledItemDelegate):
         painter.drawRoundedRect(row, 12, 12)
 
         art = row.adjusted(10, 10, -(row.width() - 64), -10)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(item.accent))
-        painter.drawRoundedRect(art, 9, 9)
-        painter.setPen(QColor(COLORS["canvas"]))
         font = QFont(option.font)
-        font.setPointSize(12)
-        font.setWeight(QFont.Weight.Bold)
-        painter.setFont(font)
-        painter.drawText(art, Qt.AlignmentFlag.AlignCenter, _initials(item.show))
+        pixmap = QPixmap(item.artwork_path) if item.artwork_path else QPixmap()
+        if not pixmap.isNull():
+            painter.drawPixmap(art, pixmap)
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(item.accent))
+            painter.drawRoundedRect(art, 9, 9)
+            painter.setPen(QColor(COLORS["canvas"]))
+            font.setPointSize(12)
+            font.setWeight(QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.drawText(art, Qt.AlignmentFlag.AlignCenter, _initials(item.show))
 
         text_left = art.right() + 13
         right_space = 116

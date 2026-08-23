@@ -18,7 +18,14 @@ class LibraryService:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("Enter a complete http:// or https:// feed URL.")
         fallback = title.strip() or parsed.netloc
-        return self.repository.add_show(feed_url, fallback)
+        show = self.repository.add_show(feed_url, fallback)
+        self.repository.update_show_playback(
+            show.id,
+            speed=float(self.setting("playback.default_speed", "1.0")),
+            skip_back=int(self.setting("playback.skip_back", "15")),
+            skip_forward=int(self.setting("playback.skip_forward", "30")),
+        )
+        return self.repository.get_show(show.id)
 
     def shows(self):
         return self.repository.list_shows()
@@ -73,3 +80,6 @@ class LibraryService:
 
     def import_local_audio(self, path):
         return LocalAudioImporter(self.repository).import_file(path)
+
+    def rearm(self, show_id: int):
+        self.repository.rearm_show(show_id)

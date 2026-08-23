@@ -151,10 +151,14 @@ def stylesheet() -> str:
     QLabel#emptyBody {{ color: {c['muted']}; }}
     QLabel#errorText {{ color: {c['danger']}; }}
 
-    QFrame#settingCard, QFrame#summaryCard {{
+    QFrame#settingCard, QFrame#summaryCard, QPushButton#summaryCard {{
         background: {c['surface']}; border: 1px solid {c['border']};
         border-radius: 14px;
     }}
+    QPushButton#summaryCard {{
+        text-align: left; padding: 12px 16px; font-size: 15px; font-weight: 700;
+    }}
+    QPushButton#summaryCard:hover {{ border-color: {c['accent']}; background: {c['surface_raised']}; }}
     QLabel#summaryNumber {{ color: {c['accent']}; font-size: 25px; font-weight: 800; }}
     QCheckBox {{ spacing: 9px; }}
     QCheckBox::indicator {{ width: 17px; height: 17px; }}

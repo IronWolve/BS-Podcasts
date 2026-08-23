@@ -4,9 +4,11 @@ from datetime import datetime
 
 from PySide6.QtCore import QObject, Signal, Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QHBoxLayout,
     QMainWindow,
+    QMenu,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
@@ -83,6 +85,7 @@ class MainWindow(QMainWindow):
         self.context.play_episode_requested.connect(self._play_episode)
         self.context.queue_episode_requested.connect(self._queue_episode)
         self.context.download_episode_requested.connect(self._download_episode)
+        self.context.play_latest_requested.connect(self._play_latest)
         self.context.seek_requested.connect(self._seek)
         self.context.transcript_search_requested.connect(self._search_transcript)
         self.splitter.addWidget(self.pages)
@@ -222,7 +225,33 @@ class MainWindow(QMainWindow):
         if self.episode_page.header.action:
             self.episode_page.header.action.clicked.connect(self._refresh_all)
         self.home_page.header.search.returnPressed.connect(self._global_search)
+        self.settings_page.setting_changed.connect(self._save_setting)
+        self.settings_page.load_values(
+            float(self.library.setting("playback.default_speed", "1.0")),
+            int(self.library.setting("playback.skip_back", "15")),
+            int(self.library.setting("playback.skip_forward", "30")),
+        )
+        self.home_page.new_requested.connect(self._show_new_episodes)
+        self.home_page.queue_requested.connect(lambda: self.navigation.select(3))
+        self.home_page.downloads_requested.connect(lambda: self.navigation.select(4))
+        self.podcast_page.open_requested.connect(self._open_podcast)
+        self.podcast_page.menu_requested.connect(self._podcast_menu)
+        self.discover_page.menu_requested.connect(self._podcast_menu)
+        for page in (
+            self.home_page,
+            self.episode_page,
+            self.playlist_page,
+            self.download_page,
+            self.history_page,
+            self.bookmark_page,
+        ):
+            if hasattr(page, "menu_requested"):
+                page.menu_requested.connect(self._episode_menu)
         if self.directory is not None and self.jobs is not None:
+            self.discover_page.set_items([])
+            self.discover_page.banner.show_state(
+                "empty", "Search or choose a category to discover podcasts."
+            )
             self.discover_page.header.search.returnPressed.connect(self._directory_search)
             self.discover_page.chips.selected.connect(self._browse_category)
             if self.discover_page.header.action:
@@ -230,6 +259,11 @@ class MainWindow(QMainWindow):
                     lambda: self._browse_category("")
                 )
         self._reload_library()
+
+    def _save_setting(self, key: str, value: str):
+        if self.library is not None:
+            self.library.set_setting(key, value)
+            self.settings_page.banner.show_state("loaded", "Setting saved.")
 
     def _wire_playback(self):
         if self.playback is None:
@@ -262,6 +296,18 @@ class MainWindow(QMainWindow):
         self.context.set_queue(queued)
         self.history_page.set_items(history)
         self._reload_downloads()
+        active_downloads = (
+            sum(record.state.value in {"queued", "downloading", "paused"} for record in self.downloads.records())
+            if self.downloads
+            else 0
+        )
+        self.home_page.set_counts(
+            sum(1 for episode in self.library.episodes() if episode.is_new),
+            len(queued),
+            active_downloads,
+        )
+        if not shows and not episodes:
+            self.context.show_empty()
 
         if shows:
             self.podcast_page.banner.clear()
@@ -286,6 +332,8 @@ class MainWindow(QMainWindow):
             self.podcast_page.banner.show_state("error", str(exc))
             return
         self._reload_library()
+        self.navigation.select(1)
+        self.podcast_page.banner.show_state("loading", "Podcast added; refreshing feed…")
         self._submit_refresh(show.id)
 
     def _subscribe_url(self, feed_url: str):
@@ -297,8 +345,70 @@ class MainWindow(QMainWindow):
             self.discover_page.banner.show_state("error", str(exc))
             return
         self._reload_library()
+        self.navigation.select(1)
+        self.podcast_page.banner.show_state("loading", "Podcast added; refreshing feed…")
         self._submit_refresh(show.id)
         self.discover_page.banner.show_state("loading", "Subscription added; refreshing feed…")
+
+    def _show_new_episodes(self):
+        self.episode_page.set_filter("New")
+        self.navigation.select(2)
+
+    def _open_podcast(self, podcast):
+        if not podcast.show_id or self.library is None:
+            return
+        episodes = [
+            self._ui_episode(episode)
+            for episode in self.library.episodes(show_id=podcast.show_id)
+        ]
+        self.episode_page.header.title_label.setText(podcast.title)
+        self.episode_page.header.subtitle_label.setText(
+            f"{len(episodes)} episode(s) from this podcast"
+        )
+        self.episode_page.set_filter("All")
+        self.episode_page.set_items(episodes)
+        self.navigation.select(2)
+
+    def _play_latest(self, show_id: int):
+        if self.library is None:
+            return
+        episodes = self.library.episodes(show_id=show_id, limit=1)
+        if episodes:
+            self._play_episode(episodes[0].id)
+        else:
+            self.podcast_page.banner.show_state("partial", "This podcast has no playable episodes.")
+
+    def _podcast_menu(self, podcast, global_position):
+        menu = QMenu(self)
+        if podcast.show_id:
+            menu.addAction("Open podcast", lambda: self._open_podcast(podcast))
+            menu.addAction("Play latest", lambda: self._play_latest(podcast.show_id))
+            menu.addAction("Refresh now", lambda: self._submit_refresh(podcast.show_id))
+            if podcast.health == "suspended":
+                menu.addAction("Rearm refresh", lambda: self._rearm_podcast(podcast.show_id))
+        elif podcast.feed_url:
+            menu.addAction("Subscribe", lambda: self._subscribe_url(podcast.feed_url))
+        if podcast.feed_url:
+            menu.addSeparator()
+            menu.addAction(
+                "Copy feed URL",
+                lambda: QApplication.clipboard().setText(podcast.feed_url),
+            )
+        menu.exec(global_position)
+
+    def _episode_menu(self, episode, global_position):
+        if not isinstance(episode, UiEpisode) or not episode.episode_id:
+            return
+        menu = QMenu(self)
+        menu.addAction("Play / Resume", lambda: self._play_episode(episode.episode_id))
+        menu.addAction("Add to Up Next", lambda: self._queue_episode(episode.episode_id))
+        menu.addAction("Download", lambda: self._download_episode(episode.episode_id))
+        menu.exec(global_position)
+
+    def _rearm_podcast(self, show_id: int):
+        self.library.rearm(show_id)
+        self._reload_library()
+        self._submit_refresh(show_id)
 
     def _play_episode(self, episode_id: int):
         if self.playback is None or not episode_id:
@@ -382,6 +492,7 @@ class MainWindow(QMainWindow):
                     episode_id=item.episode_id,
                     show_id=item.show_id,
                     description=record.error_message or item.description,
+                    artwork_path=item.artwork_path,
                 )
             )
         self.download_page.set_items(items)
@@ -473,6 +584,7 @@ class MainWindow(QMainWindow):
                     episode_id=item.episode_id,
                     show_id=item.show_id,
                     description=item.description,
+                    artwork_path=item.artwork_path,
                 )
             )
         if isinstance(self.bookmark_page, EpisodeListPage):
@@ -517,8 +629,7 @@ class MainWindow(QMainWindow):
         self._submit_directory("browse", normalized)
 
     def _submit_directory(self, operation: str, value: str):
-        callable_ = self.directory.search if operation == "search" else self.directory.browse
-        future = self.jobs.submit(callable_, value, 30)
+        future = self.jobs.submit(self._directory_request, operation, value)
         self._pending_jobs.add(future)
 
         def finished(completed):
@@ -530,6 +641,21 @@ class MainWindow(QMainWindow):
             self._bridge.completed.emit(("directory", operation, result))
 
         future.add_done_callback(finished)
+
+    def _directory_request(self, operation: str, value: str):
+        callable_ = self.directory.search if operation == "search" else self.directory.browse
+        candidates = callable_(value, 30)
+        results = []
+        artwork_cache = self.refresh.artwork if self.refresh is not None else None
+        for candidate in candidates:
+            artwork_path = ""
+            if artwork_cache is not None and candidate.artwork_url:
+                try:
+                    artwork_path = str(artwork_cache.fetch(candidate.artwork_url))
+                except Exception:
+                    artwork_path = ""
+            results.append((candidate, artwork_path))
+        return results
 
     def _refresh_all(self):
         if self.library is None:
@@ -595,7 +721,8 @@ class MainWindow(QMainWindow):
         candidates = result.value or []
         podcasts = []
         accents = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
-        for index, candidate in enumerate(candidates):
+        for index, candidate_data in enumerate(candidates):
+            candidate, artwork_path = candidate_data
             podcasts.append(
                 UiPodcast(
                     title=candidate.title,
@@ -605,6 +732,7 @@ class MainWindow(QMainWindow):
                     accent=accents[index % len(accents)],
                     feed_url=candidate.feed_url,
                     artwork_url=candidate.artwork_url,
+                    artwork_path=artwork_path,
                 )
             )
         self.discover_page.set_items(podcasts)
@@ -648,6 +776,7 @@ class MainWindow(QMainWindow):
             show_id=show.id,
             feed_url=show.feed_url,
             artwork_url=show.artwork_url,
+            artwork_path=show.artwork_path,
             health=show.health.value,
         )
 
@@ -670,6 +799,7 @@ class MainWindow(QMainWindow):
             episode_id=episode.id,
             show_id=episode.show_id,
             description=episode.description,
+            artwork_path=episode.artwork_path,
         )
 
     @staticmethod

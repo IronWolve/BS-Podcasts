@@ -59,6 +59,7 @@ class Episode:
     last_played: float | None = None
     transcript_url: str = ""
     transcript_type: str = ""
+    artwork_path: str = ""
 
 
 @dataclass(frozen=True)

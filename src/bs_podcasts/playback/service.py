@@ -38,6 +38,7 @@ class PlaybackSnapshot:
     ab_end: float | None = None
     trim_level: str = "off"
     silence_saved: float = 0.0
+    artwork_path: str = ""
 
 
 class PlaybackService:
@@ -87,6 +88,7 @@ class PlaybackService:
                 volume=self.snapshot.volume,
                 trim_level=show.trim_level if show else "off",
                 silence_saved=self.listening.silence_saved() if self.listening else 0.0,
+                artwork_path=episode.artwork_path,
             )
             self.repository.set_current_playback(episode.id, PlaybackState.LOADING.value)
             self._last_saved_position = episode.position_seconds
@@ -342,6 +344,7 @@ class PlaybackService:
             speed=show.playback_speed if show else 1.0,
             trim_level=show.trim_level if show else "off",
             silence_saved=self.listening.silence_saved() if self.listening else 0.0,
+            artwork_path=episode.artwork_path,
         )
 
     def _guard(self):

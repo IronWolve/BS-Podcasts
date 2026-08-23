@@ -1,6 +1,7 @@
 """Reusable shell components."""
 
 from PySide6.QtCore import Signal, Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -123,12 +124,12 @@ class PageHeader(QFrame):
 
         text = QVBoxLayout()
         text.setSpacing(2)
-        title_label = QLabel(title)
-        title_label.setObjectName("pageTitle")
-        subtitle_label = QLabel(subtitle)
-        subtitle_label.setObjectName("pageSubtitle")
-        text.addWidget(title_label)
-        text.addWidget(subtitle_label)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("pageTitle")
+        self.subtitle_label = QLabel(subtitle)
+        self.subtitle_label.setObjectName("pageSubtitle")
+        text.addWidget(self.title_label)
+        text.addWidget(self.subtitle_label)
         layout.addLayout(text, 1)
 
         self.search = QLineEdit()
@@ -225,6 +226,7 @@ class ContextPanel(QFrame):
     download_episode_requested = Signal(int)
     seek_requested = Signal(float)
     transcript_search_requested = Signal(int, str)
+    play_latest_requested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -233,6 +235,7 @@ class ContextPanel(QFrame):
         self.setMaximumWidth(420)
         self._feed_url = ""
         self._episode_id = 0
+        self._show_id = 0
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
@@ -381,11 +384,15 @@ class ContextPanel(QFrame):
     def show_podcast(self, podcast):
         words = podcast.title.replace("The ", "").split()
         self.letters.setText("".join(word[0] for word in words[:2]).upper())
+        self._set_artwork(podcast.artwork_path)
         self.title.setText(podcast.title)
         self.meta.setText(f"{podcast.author} · {podcast.episode_count} episodes")
         self._feed_url = podcast.feed_url if podcast.show_id == 0 else ""
         self._episode_id = 0
+        self._show_id = podcast.show_id
         self.primary.setText("Subscribe" if self._feed_url else "Play latest")
+        self.primary.setEnabled(True)
+        self.secondary.setEnabled(False)
         self.download.setEnabled(False)
         if self._feed_url:
             self.body.setText(
@@ -401,6 +408,7 @@ class ContextPanel(QFrame):
     def show_episode(self, episode):
         words = episode.show.replace("The ", "").split()
         self.letters.setText("".join(word[0] for word in words[:2]).upper())
+        self._set_artwork(episode.artwork_path)
         self.title.setText(episode.title)
         self.meta.setText(f"{episode.show} · {episode.published} · {episode.duration}")
         self.body.setText(
@@ -409,7 +417,10 @@ class ContextPanel(QFrame):
         )
         self._feed_url = ""
         self._episode_id = episode.episode_id
+        self._show_id = episode.show_id
         self.primary.setText("Play")
+        self.primary.setEnabled(True)
+        self.secondary.setEnabled(bool(self._episode_id))
         self.download.setEnabled(bool(self._episode_id))
 
     def _primary_clicked(self):
@@ -417,6 +428,8 @@ class ContextPanel(QFrame):
             self.subscribe_requested.emit(self._feed_url)
         elif self._episode_id:
             self.play_episode_requested.emit(self._episode_id)
+        elif self._show_id:
+            self.play_latest_requested.emit(self._show_id)
 
     def _secondary_clicked(self):
         if self._episode_id:
@@ -447,6 +460,35 @@ class ContextPanel(QFrame):
         total = max(0, int(seconds))
         minutes, secs = divmod(total, 60)
         return f"{minutes}:{secs:02d}"
+
+    def show_empty(self):
+        self.letters.setPixmap(QPixmap())
+        self.letters.setText("—")
+        self.title.setText("Nothing selected")
+        self.meta.setText("")
+        self.body.setText("Add a podcast or select an episode to see its details.")
+        self._feed_url = ""
+        self._episode_id = 0
+        self._show_id = 0
+        self.primary.setText("Play")
+        self.primary.setEnabled(False)
+        self.download.setEnabled(False)
+        self.secondary.setEnabled(False)
+
+    def _set_artwork(self, path: str):
+        pixmap = QPixmap(path) if path else QPixmap()
+        if pixmap.isNull():
+            self.letters.setPixmap(QPixmap())
+            return
+        self.letters.setText("")
+        self.letters.setPixmap(
+            pixmap.scaled(
+                300,
+                220,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
 
 
 class PlayerBar(QFrame):
@@ -610,6 +652,19 @@ class PlayerBar(QFrame):
         self.show.setText(snapshot.show_title or "")
         words = snapshot.show_title.replace("The ", "").split()
         self.initials.setText("".join(word[0] for word in words[:2]).upper() or "—")
+        pixmap = QPixmap(snapshot.artwork_path) if snapshot.artwork_path else QPixmap()
+        if not pixmap.isNull():
+            self.initials.setText("")
+            self.initials.setPixmap(
+                pixmap.scaled(
+                    58,
+                    58,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        else:
+            self.initials.setPixmap(QPixmap())
         self._duration = max(0.0, float(snapshot.duration))
         position = max(0.0, float(snapshot.position))
         self.slider.blockSignals(True)

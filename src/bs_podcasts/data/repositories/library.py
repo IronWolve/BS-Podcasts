@@ -43,7 +43,7 @@ class LibraryRepository:
 
     def list_episodes(self, show_id: int | None = None, limit: int = 500) -> list[Episode]:
         sql = (
-            "SELECT e.*, s.title AS show_title FROM episodes e "
+            "SELECT e.*, s.title AS show_title, s.artwork_path AS artwork_path FROM episodes e "
             "JOIN shows s ON s.id=e.show_id"
         )
         params: list[object] = []
@@ -59,7 +59,7 @@ class LibraryRepository:
     def get_episode(self, episode_id: int) -> Episode | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                """SELECT e.*, s.title AS show_title FROM episodes e
+                """SELECT e.*, s.title AS show_title, s.artwork_path AS artwork_path FROM episodes e
                    JOIN shows s ON s.id=e.show_id WHERE e.id=?""",
                 (episode_id,),
             ).fetchone()
@@ -68,7 +68,7 @@ class LibraryRepository:
     def list_history(self, limit: int = 200) -> list[Episode]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                """SELECT e.*, s.title AS show_title FROM episodes e
+                """SELECT e.*, s.title AS show_title, s.artwork_path AS artwork_path FROM episodes e
                    JOIN shows s ON s.id=e.show_id
                    WHERE e.last_played IS NOT NULL
                    ORDER BY e.last_played DESC LIMIT ?""",
@@ -209,7 +209,7 @@ class LibraryRepository:
     def list_queue(self) -> list[Episode]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                """SELECT e.*, s.title AS show_title FROM queue q
+                """SELECT e.*, s.title AS show_title, s.artwork_path AS artwork_path FROM queue q
                    JOIN episodes e ON e.id=q.episode_id
                    JOIN shows s ON s.id=e.show_id ORDER BY q.position"""
             ).fetchall()
@@ -304,7 +304,7 @@ class LibraryRepository:
                 (pattern, pattern, limit),
             ).fetchall()
             episode_rows = connection.execute(
-                """SELECT e.*, s.title AS show_title FROM episodes e
+                """SELECT e.*, s.title AS show_title, s.artwork_path AS artwork_path FROM episodes e
                    JOIN shows s ON s.id=e.show_id
                    WHERE e.title LIKE ? ESCAPE '\\'
                       OR e.description LIKE ? ESCAPE '\\'
@@ -373,4 +373,5 @@ class LibraryRepository:
             last_played=row["last_played"],
             transcript_url=row["transcript_url"],
             transcript_type=row["transcript_type"],
+            artwork_path=row["artwork_path"],
         )
