@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bs-podcasts"
+version = "0.1.0"
+description = "A wide, mobile-inspired desktop podcast application"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+  "PySide6>=6.8,<7",
+  "python-mpv>=1,<2",
+  "requests>=2.32,<3",
+  "mutagen>=1.47,<2",
+]
+
+[project.scripts]
+bs-podcasts = "bs_podcasts.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
