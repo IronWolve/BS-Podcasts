@@ -20,6 +20,7 @@ from bs_podcasts.feeds import parse_feed
 from bs_podcasts.jobs import JobRunner
 from bs_podcasts.services import LibraryService, ListeningService
 from bs_podcasts.ui.shell import MainWindow
+from PySide6.QtCore import QEvent, Qt
 
 
 class PagedDirectory:
@@ -45,10 +46,33 @@ class PagedDirectory:
     def topic(self, category, topic, limit=30):
         return self._items(limit)
 
+    def chart(self, chart_type, category=""):
+        return [
+            DirectoryCandidate(
+                item.title,
+                item.author,
+                item.feed_url,
+                rank=index + 1,
+                chart_type=chart_type,
+            )
+            for index, item in enumerate(self._items(24))
+        ]
+
 
 def require(condition: bool, message: str):
     if not condition:
         raise RuntimeError(message)
+
+
+class MouseNavigationEvent:
+    def __init__(self, button):
+        self._button = button
+
+    def type(self):
+        return QEvent.Type.MouseButtonPress
+
+    def button(self):
+        return self._button
 
 
 def main() -> int:
@@ -93,10 +117,21 @@ def main() -> int:
             not window.download_page.header.action.isVisible(),
             "Cancel Active is visible without an active download",
         )
+        window.navigation.select(1)
         podcast = window.podcast_page.model.index(0, 0).data(257)
         window._open_podcast(podcast)
         require(window.pages.currentIndex() == 2, "podcast did not open Episodes")
         require(window.episode_page.model.rowCount() == 2, "podcast episode flow differs")
+        handled = window.eventFilter(
+            window.episode_page.view.viewport(),
+            MouseNavigationEvent(Qt.MouseButton.BackButton),
+        )
+        require(handled and window.pages.currentIndex() == 1, "mouse Back did not navigate")
+        window.eventFilter(
+            window.podcast_page.view.viewport(),
+            MouseNavigationEvent(Qt.MouseButton.ForwardButton),
+        )
+        require(window.pages.currentIndex() == 2, "mouse Forward did not navigate")
 
         window.navigation.select(5)
         window._show_for_you()
@@ -120,6 +155,18 @@ def main() -> int:
         require(
             "Conservative News" in window.discover_page.result_summary.text(),
             "Discover topic summary is missing",
+        )
+        window.discover_page.chart.setCurrentIndex(1)
+        while window._discover_loading:
+            app.processEvents()
+        require(window.discover_page.model.rowCount() == 24, "Top Shows chart differs")
+        require(
+            "Apple Top Shows" in window.discover_page.result_summary.text(),
+            "Top Shows chart summary is missing",
+        )
+        require(
+            not window.discover_page.load_more.isVisible(),
+            "Chart incorrectly offers pagination",
         )
 
         window.close()

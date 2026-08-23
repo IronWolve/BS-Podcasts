@@ -22,6 +22,10 @@ class DirectoryProvider(Protocol):
         self, category: str, topic: str, limit: int = 30
     ) -> list[DirectoryCandidate]: ...
 
+    def chart(
+        self, chart_type: str, category: str = ""
+    ) -> list[DirectoryCandidate]: ...
+
 
 class DirectoryService:
     def __init__(self, providers: list[DirectoryProvider]):
@@ -63,6 +67,22 @@ class DirectoryService:
                 continue
             if results:
                 return results[:limit]
+        if errors:
+            raise DirectoryError("; ".join(errors))
+        return []
+
+    def chart(self, chart_type: str, category: str = ""):
+        errors = []
+        for provider in self.providers:
+            if not hasattr(provider, "chart"):
+                continue
+            try:
+                results = provider.chart(chart_type, category)
+            except Exception as exc:
+                errors.append(f"{provider.name}: {exc}")
+                continue
+            if results:
+                return results
         if errors:
             raise DirectoryError("; ".join(errors))
         return []

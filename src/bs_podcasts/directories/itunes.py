@@ -80,6 +80,9 @@ class ItunesDirectory:
     def __init__(self, session=None):
         self.session = session or requests.Session()
         self._browse_cache = {}
+        from .apple_charts import AppleCharts
+
+        self.charts = AppleCharts(self.session)
 
     def search(self, query: str, limit: int = 30) -> list[DirectoryCandidate]:
         query = query.strip()
@@ -149,6 +152,9 @@ class ItunesDirectory:
         if genre_id:
             params["genreId"] = genre_id
         return self._request(params)
+
+    def chart(self, chart_type: str, category: str = ""):
+        return self.charts.chart(chart_type, category)
 
     def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:
         excluded = {show.feed_url for show in shows}

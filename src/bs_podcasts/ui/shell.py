@@ -3,7 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal, Qt
+from PySide6.QtCore import QEvent, QObject, Signal, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -64,6 +64,9 @@ class MainWindow(QMainWindow):
         self._discover_loading = False
         self._discover_exhausted = False
         self._discover_result_count = 0
+        self._back_stack = []
+        self._forward_stack = []
+        self._history_navigation = False
         self._bridge = _JobBridge(self)
         self._bridge.completed.connect(self._refresh_finished)
         self._bridge.playback_event.connect(self._playback_changed)
@@ -126,6 +129,7 @@ class MainWindow(QMainWindow):
         self._wire_downloads()
         self._wire_listening()
         self.navigation.select(0)
+        QApplication.instance().installEventFilter(self)
         self.resize(1440, 900)
 
     @property
@@ -185,6 +189,7 @@ class MainWindow(QMainWindow):
         for page in pages:
             if hasattr(page, "context_changed"):
                 page.context_changed.connect(self._show_item)
+            page.header.back_requested.connect(self.navigate_back)
             self.pages.addWidget(page)
         for page in (self.home_page, self.episode_page, self.playlist_page, self.history_page):
             page.play_requested.connect(lambda item: self._play_episode(item.episode_id))
@@ -207,6 +212,8 @@ class MainWindow(QMainWindow):
             ("bookmark", "Ctrl+B", self._bookmark_current),
             ("silence_trim", "Ctrl+T", self._cycle_trim),
             ("ab_repeat", "Ctrl+Shift+A", self._cycle_ab),
+            ("navigate_back", "Alt+Left", self.navigate_back),
+            ("navigate_forward", "Alt+Right", self.navigate_forward),
             ("quit", "Ctrl+Q", self.close),
         ):
             self.shortcuts.add(name, sequence, handler)
@@ -275,12 +282,18 @@ class MainWindow(QMainWindow):
             )
             self.discover_page.header.search.returnPressed.connect(self._directory_search)
             self.discover_page.chips.selected.connect(self._show_for_you)
+            self.discover_page.chart.currentIndexChanged.connect(
+                self._discover_view_changed
+            )
             self.discover_page.category.currentTextChanged.connect(self._browse_category)
             self.discover_page.topic.currentTextChanged.connect(self._browse_topic)
             self.discover_page.near_end.connect(self._load_more_discover)
+            self.discover_page.load_more_requested.connect(
+                self._load_more_discover
+            )
             if self.discover_page.header.action:
                 self.discover_page.header.action.clicked.connect(
-                    self._show_for_you
+                    self._refresh_discover
                 )
         self._reload_library()
 
@@ -754,6 +767,10 @@ class MainWindow(QMainWindow):
         if not query:
             self.discover_page.banner.show_state("partial", "Enter a podcast search term.")
             return
+        self.discover_page.chart.blockSignals(True)
+        self.discover_page.chart.setCurrentIndex(0)
+        self.discover_page.chart.blockSignals(False)
+        self._set_explore_controls(True)
         self.discover_page.banner.show_state("loading", f"Searching for “{query}”…")
         self.discover_page.set_discover_summary(f"Searching Apple Podcasts for “{query}”…")
         self._start_directory_request("search", query)
@@ -765,6 +782,10 @@ class MainWindow(QMainWindow):
         self.discover_page.category.clearFocus()
         self.discover_page.view.setFocus()
         normalized = "" if category in {"For You", "All Categories"} else category
+        chart_type = self.discover_page.chart.currentData()
+        if chart_type != "explore":
+            self._load_chart(chart_type, normalized)
+            return
         self.discover_page.set_category_topics(normalized)
         label = normalized or "top podcasts"
         self.discover_page.banner.show_state("loading", f"Loading {label}…")
@@ -772,6 +793,8 @@ class MainWindow(QMainWindow):
         self._start_directory_request("browse", normalized)
 
     def _browse_topic(self, topic: str):
+        if self.discover_page.chart.currentData() != "explore":
+            return
         category = self.discover_page.category.currentText()
         if (
             not topic
@@ -791,6 +814,7 @@ class MainWindow(QMainWindow):
         self._discover_limit = 30
         self._discover_exhausted = False
         self._discover_result_count = 0
+        self.discover_page.set_load_more_state(False, loading=True)
         self._submit_directory(operation, value, self._discover_limit)
 
     def _load_more_discover(self):
@@ -798,6 +822,7 @@ class MainWindow(QMainWindow):
             self._discover_loading
             or self._discover_exhausted
             or not self._discover_operation
+            or self._discover_operation == "chart"
             or self._discover_limit >= (
                 200 if self._discover_operation in {"search", "topic"} else 500
             )
@@ -812,11 +837,16 @@ class MainWindow(QMainWindow):
         )
         self.discover_page.banner.show_state("loading", f"Loading more {label}…")
         self.discover_page.set_discover_summary(f"Loading more {label}…")
+        self.discover_page.set_load_more_state(False, loading=True)
         self._submit_directory(
             self._discover_operation, self._discover_value, self._discover_limit
         )
 
     def _show_for_you(self, _label: str = "For You"):
+        self.discover_page.chart.blockSignals(True)
+        self.discover_page.chart.setCurrentIndex(0)
+        self.discover_page.chart.blockSignals(False)
+        self._set_explore_controls(True)
         if self.discover_page.category.currentIndex() != 0:
             self.discover_page.category.blockSignals(True)
             self.discover_page.category.setCurrentIndex(0)
@@ -833,6 +863,59 @@ class MainWindow(QMainWindow):
             self._start_directory_request("recommend", "")
         else:
             self._browse_category("")
+
+    def _refresh_discover(self):
+        chart_type = self.discover_page.chart.currentData()
+        if chart_type == "explore":
+            self._show_for_you()
+        else:
+            category = (
+                ""
+                if not self.discover_page.category.isEnabled()
+                or self.discover_page.category.currentText() == "All Categories"
+                else self.discover_page.category.currentText()
+            )
+            self._load_chart(chart_type, category)
+
+    def _discover_view_changed(self, _index: int):
+        chart_type = self.discover_page.chart.currentData()
+        if chart_type == "explore":
+            self._set_explore_controls(True)
+            self.discover_page.header.action.setText("Refresh For You")
+            self._show_for_you()
+            return
+        category_enabled = chart_type in {"top_shows", "trending"}
+        self._set_explore_controls(False, category_enabled)
+        self.discover_page.header.action.setText("Refresh Chart")
+        category = (
+            self.discover_page.category.currentText()
+            if category_enabled
+            and self.discover_page.category.currentText() != "All Categories"
+            else ""
+        )
+        self._load_chart(chart_type, category)
+
+    def _set_explore_controls(
+        self, explore: bool, category_enabled: bool = True
+    ):
+        self.discover_page.chips.setEnabled(explore)
+        self.discover_page.category.setEnabled(category_enabled)
+        self.discover_page.topic.setEnabled(
+            explore and bool(self.discover_page.category.currentIndex())
+        )
+
+    def _load_chart(self, chart_type: str, category: str):
+        labels = {
+            "top_shows": "Apple Top Shows",
+            "trending": "Apple Trending Episodes",
+            "subscriber_shows": "Apple Top Subscriber Shows",
+            "top_series": "Apple Top Series",
+        }
+        label = labels.get(chart_type, "Apple Chart")
+        suffix = f" · {category}" if category else " · All Categories"
+        self.discover_page.banner.show_state("loading", f"Loading {label}…")
+        self.discover_page.set_discover_summary(f"Loading {label}{suffix}…")
+        self._start_directory_request("chart", (chart_type, category))
 
     def _submit_directory(self, operation: str, value: str, limit: int = 30):
         self._discover_loading = True
@@ -857,6 +940,9 @@ class MainWindow(QMainWindow):
         elif operation == "topic":
             category, topic = value
             candidates = self.directory.topic(category, topic, limit)
+        elif operation == "chart":
+            chart_type, category = value
+            candidates = self.directory.chart(chart_type, category)
         else:
             callable_ = self.directory.search if operation == "search" else self.directory.browse
             candidates = callable_(value, limit)
@@ -932,6 +1018,9 @@ class MainWindow(QMainWindow):
         self._discover_loading = False
         _operation, _value, requested_limit = request
         if result.status != JobStatus.OK:
+            self.discover_page.set_load_more_state(
+                _operation != "chart", loading=False
+            )
             self.discover_page.banner.show_state(
                 "error", result.message or "Directory search failed."
             )
@@ -949,10 +1038,19 @@ class MainWindow(QMainWindow):
                 continue
             seen_feeds.add(candidate.feed_url)
             saved = subscribed.get(candidate.feed_url)
+            is_chart = bool(candidate.chart_type)
+            meta_parts = []
+            if candidate.rank:
+                meta_parts.append(f"#{candidate.rank}")
+            meta_parts.extend(
+                value
+                for value in (candidate.author, candidate.genre)
+                if value
+            )
             podcasts.append(
                 UiPodcast(
-                    title=saved.title if saved else candidate.title,
-                    author=(saved.author if saved else candidate.author)
+                    title=candidate.title if is_chart else saved.title if saved else candidate.title,
+                    author=(candidate.author if is_chart else saved.author if saved else candidate.author)
                     or candidate.genre
                     or "Podcast directory",
                     episode_count=saved.episode_count if saved else 0,
@@ -963,25 +1061,22 @@ class MainWindow(QMainWindow):
                     artwork_url=candidate.artwork_url,
                     artwork_path=(saved.artwork_path if saved else "") or artwork_path,
                     health=saved.health.value if saved else "unknown",
-                    display_meta=" · ".join(
-                        value
-                        for value in (
-                            (saved.author if saved else candidate.author),
-                            candidate.genre,
-                        )
-                        if value
-                    ),
+                    display_meta=" · ".join(meta_parts),
                     directory_result=True,
                     subscribed=bool(saved),
                 )
             )
         result_count = len(podcasts)
         self._discover_exhausted = (
-            requested_limit
+            _operation == "chart"
+            or requested_limit
             >= (200 if self._discover_operation in {"search", "topic"} else 500)
             or result_count <= self._discover_result_count
         )
         self._discover_result_count = result_count
+        self.discover_page.set_load_more_state(
+            not self._discover_exhausted, loading=False
+        )
         self.discover_page.set_items(
             podcasts, preserve_scroll=requested_limit > 30
         )
@@ -991,6 +1086,17 @@ class MainWindow(QMainWindow):
                 description = "recommendations based on your library categories"
             elif _operation == "topic":
                 description = f"{_value[0]} › {_value[1]} podcasts"
+            elif _operation == "chart":
+                chart_labels = {
+                    "top_shows": "Apple Top Shows",
+                    "trending": "Apple Trending Episodes",
+                    "subscriber_shows": "Apple Top Subscriber Shows",
+                    "top_series": "Apple Top Series",
+                }
+                chart_type, category = _value
+                description = chart_labels.get(chart_type, "Apple Chart")
+                if category:
+                    description += f" · {category}"
             elif _operation == "browse":
                 description = f"{_value or 'general'} podcasts"
             else:
@@ -1004,7 +1110,16 @@ class MainWindow(QMainWindow):
             self.discover_page.set_discover_summary("No podcasts matched this selection.")
 
     def _select_page(self, index: int):
+        previous = self.pages.currentIndex()
+        if (
+            previous >= 0
+            and previous != index
+            and not self._history_navigation
+        ):
+            self._back_stack.append(previous)
+            self._forward_stack.clear()
         self.pages.setCurrentIndex(index)
+        self._update_navigation_controls()
         if index == 8:
             self.context.hide()
             return
@@ -1020,6 +1135,55 @@ class MainWindow(QMainWindow):
             self.context.show_empty()
         if self._last_mode == "wide":
             self.context.show()
+
+    def navigate_back(self):
+        if not self._back_stack:
+            return
+        current = self.pages.currentIndex()
+        target = self._back_stack.pop()
+        if current >= 0:
+            self._forward_stack.append(current)
+        self._history_navigation = True
+        try:
+            self.navigation.select(target)
+        finally:
+            self._history_navigation = False
+        self._update_navigation_controls()
+
+    def navigate_forward(self):
+        if not self._forward_stack:
+            return
+        current = self.pages.currentIndex()
+        target = self._forward_stack.pop()
+        if current >= 0:
+            self._back_stack.append(current)
+        self._history_navigation = True
+        try:
+            self.navigation.select(target)
+        finally:
+            self._history_navigation = False
+        self._update_navigation_controls()
+
+    def _update_navigation_controls(self):
+        for index in range(self.pages.count()):
+            page = self.pages.widget(index)
+            page.header.back.setVisible(
+                index == self.pages.currentIndex() and bool(self._back_stack)
+            )
+
+    def eventFilter(self, watched, event):
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and isinstance(watched, QWidget)
+            and (watched is self or self.isAncestorOf(watched))
+        ):
+            if event.button() == Qt.MouseButton.BackButton:
+                self.navigate_back()
+                return True
+            if event.button() == Qt.MouseButton.ForwardButton:
+                self.navigate_forward()
+                return True
+        return super().eventFilter(watched, event)
 
     def _show_item(self, item):
         if isinstance(item, UiPodcast):
@@ -1122,6 +1286,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
 
     def closeEvent(self, event):
+        QApplication.instance().removeEventFilter(self)
         for future in tuple(self._pending_jobs):
             future.cancel()
         self._pending_jobs.clear()

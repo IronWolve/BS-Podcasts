@@ -124,6 +124,9 @@ class DirectoryCandidate:
     feed_url: str
     artwork_url: str = ""
     genre: str = ""
+    rank: int = 0
+    chart_type: str = ""
+    apple_url: str = ""
 
 
 class DownloadState(StrEnum):
