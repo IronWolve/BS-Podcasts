@@ -521,6 +521,7 @@ class ContextPanel(QFrame):
         self._show_id = 0
         self.primary.setText("Play")
         self.primary.setEnabled(False)
+        self.download.setText("Download")
         self.download.setEnabled(False)
         self.secondary.setEnabled(False)
 

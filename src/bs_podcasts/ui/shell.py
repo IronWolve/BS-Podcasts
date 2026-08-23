@@ -281,8 +281,7 @@ class MainWindow(QMainWindow):
                 "empty", "Search or choose a category to discover podcasts."
             )
             self.discover_page.header.search.returnPressed.connect(self._directory_search)
-            self.discover_page.chips.selected.connect(self._show_for_you)
-            self.discover_page.chart.currentIndexChanged.connect(
+            self.discover_page.chart.currentChanged.connect(
                 self._discover_view_changed
             )
             self.discover_page.category.currentTextChanged.connect(self._browse_category)
@@ -907,7 +906,6 @@ class MainWindow(QMainWindow):
     def _set_explore_controls(
         self, explore: bool, category_enabled: bool = True
     ):
-        self.discover_page.chips.setEnabled(explore)
         self.discover_page.category.setEnabled(category_enabled)
         self.discover_page.topic.setEnabled(
             explore and bool(self.discover_page.category.currentIndex())

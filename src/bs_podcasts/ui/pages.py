@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QDoubleSpinBox,
     QSpinBox,
+    QTabBar,
     QKeySequenceEdit,
     QVBoxLayout,
     QWidget,
@@ -30,6 +31,11 @@ from .models import (
 )
 from .widgets import ChipRow, EmptyState, PageHeader, StateBanner
 from ..directories.itunes import CATEGORY_IDS, CATEGORY_TOPICS
+
+
+class DiscoverModeTabs(QTabBar):
+    def currentData(self):
+        return self.tabData(self.currentIndex())
 
 
 class BasePage(QWidget):
@@ -66,7 +72,7 @@ class PodcastGridPage(BasePage):
             "Add podcast" if not discover else "Refresh For You",
             parent=parent,
         )
-        chips = ("For You",) if discover else ("All", "New")
+        chips = () if discover else ("All", "New")
         self.chips = ChipRow(chips)
         if discover:
             filters = QWidget()
@@ -75,16 +81,19 @@ class PodcastGridPage(BasePage):
             filter_layout.setSpacing(8)
             primary_filters = QHBoxLayout()
             primary_filters.setSpacing(10)
-            primary_filters.addWidget(self.chips, 1)
-            self.chart = QComboBox()
+            self.chart = DiscoverModeTabs()
+            self.chart.setObjectName("discoverModes")
             self.chart.setAccessibleName("Discover view")
-            self.chart.addItem("Explore & For You", "explore")
-            self.chart.addItem("Apple Top Shows", "top_shows")
-            self.chart.addItem("Apple Trending Episodes", "trending")
-            self.chart.addItem("Apple Top Subscriber Shows", "subscriber_shows")
-            self.chart.addItem("Apple Top Series", "top_series")
-            self.chart.setMinimumWidth(260)
-            primary_filters.addWidget(self.chart)
+            for label, value in (
+                ("For You", "explore"),
+                ("Top Shows", "top_shows"),
+                ("Trending", "trending"),
+                ("Subscriber", "subscriber_shows"),
+                ("Series", "top_series"),
+            ):
+                index = self.chart.addTab(label)
+                self.chart.setTabData(index, value)
+            primary_filters.addWidget(self.chart, 1)
             filter_layout.addLayout(primary_filters)
             secondary_filters = QHBoxLayout()
             secondary_filters.setSpacing(10)
@@ -106,6 +115,12 @@ class PodcastGridPage(BasePage):
             self.result_summary = QLabel("Choose For You, search, or select a category.")
             self.result_summary.setObjectName("meta")
             self.root.addWidget(self.result_summary)
+            if self.header.action:
+                self.header.action.setText("↻")
+                self.header.action.setObjectName("iconButton")
+                self.header.action.setToolTip("Refresh current Discover view")
+                self.header.action.setAccessibleName("Refresh Discover")
+                self.header.action.setFixedSize(40, 38)
         else:
             self.chart = None
             self.category = None
