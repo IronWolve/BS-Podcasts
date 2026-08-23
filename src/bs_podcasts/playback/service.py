@@ -34,12 +34,17 @@ class PlaybackSnapshot:
     volume: float = 100.0
     sleep_deadline: float | None = None
     message: str = ""
+    ab_start: float | None = None
+    ab_end: float | None = None
+    trim_level: str = "off"
+    silence_saved: float = 0.0
 
 
 class PlaybackService:
-    def __init__(self, repository: LibraryRepository, engine):
+    def __init__(self, repository: LibraryRepository, engine, listening=None):
         self.repository = repository
         self.engine = engine
+        self.listening = listening
         self.engine.set_event_handler(self._engine_event)
         self.snapshot = PlaybackSnapshot()
         self._listeners = []
@@ -47,6 +52,10 @@ class PlaybackService:
         self._last_saved_position = -10.0
         self._sleep_timer: Timer | None = None
         self._dead = False
+        self._last_metric_time = None
+        self._last_metric_position = None
+        self._unsaved_silence = 0.0
+        self._ignore_metric_once = False
         self._restore_snapshot()
 
     def subscribe(self, listener):
@@ -76,10 +85,15 @@ class PlaybackService:
                 duration=float(episode.duration_seconds),
                 speed=speed,
                 volume=self.snapshot.volume,
+                trim_level=show.trim_level if show else "off",
+                silence_saved=self.listening.silence_saved() if self.listening else 0.0,
             )
             self.repository.set_current_playback(episode.id, PlaybackState.LOADING.value)
             self._last_saved_position = episode.position_seconds
-            self.engine.set_speed(speed)
+            if self.engine.capabilities.speed:
+                self.engine.set_speed(speed)
+            if self.engine.capabilities.silence_trim:
+                self.engine.set_silence_trim(self.snapshot.trim_level)
             self.engine.load(source, episode.position_seconds, autoplay)
             self._emit()
 
@@ -100,21 +114,56 @@ class PlaybackService:
 
     def seek(self, seconds: float):
         self._guard()
+        self._ignore_metric_once = True
         self.engine.seek_absolute(seconds)
 
     def skip_back(self):
         self._guard()
         show = self.repository.get_show(self.snapshot.show_id) if self.snapshot.show_id else None
-        self.engine.skip(-(show.skip_back if show else 15))
+        self.skip(-(show.skip_back if show else 15))
 
     def skip_forward(self):
         self._guard()
         show = self.repository.get_show(self.snapshot.show_id) if self.snapshot.show_id else None
-        self.engine.skip(show.skip_forward if show else 30)
+        self.skip(show.skip_forward if show else 30)
 
     def skip(self, seconds: float):
         self._guard()
+        self._ignore_metric_once = True
         self.engine.skip(float(seconds))
+
+    def set_ab_start(self):
+        self._guard()
+        self.snapshot = replace(
+            self.snapshot, ab_start=self.snapshot.position, ab_end=None
+        )
+        self._emit()
+
+    def set_ab_end(self):
+        self._guard()
+        if self.snapshot.ab_start is None or self.snapshot.position <= self.snapshot.ab_start:
+            raise PlaybackUnavailable("B must be after A.")
+        self.engine.set_ab_repeat(self.snapshot.ab_start, self.snapshot.position)
+        self.snapshot = replace(self.snapshot, ab_end=self.snapshot.position)
+        self._emit()
+
+    def clear_ab_repeat(self):
+        self._guard()
+        self.engine.clear_ab_repeat()
+        self.snapshot = replace(self.snapshot, ab_start=None, ab_end=None)
+        self._emit()
+
+    def set_trim_level(self, level: str):
+        self._guard()
+        if level not in {"off", "light", "medium", "strong"}:
+            raise ValueError("Unknown silence-trim level.")
+        self.engine.set_silence_trim(level)
+        if self.snapshot.show_id:
+            self.repository.update_show_playback(
+                self.snapshot.show_id, trim_level=level
+            )
+        self.snapshot = replace(self.snapshot, trim_level=level)
+        self._emit()
 
     def set_speed(self, speed: float):
         self._guard()
@@ -156,6 +205,9 @@ class PlaybackService:
             if self._dead:
                 return
             self._persist_position(force=True)
+            if self._unsaved_silence > 0 and self.listening:
+                self.listening.add_silence_saved(self._unsaved_silence)
+                self._unsaved_silence = 0.0
             self.cancel_sleep_timer()
             self._dead = True
             self.repository.set_current_playback(
@@ -169,7 +221,9 @@ class PlaybackService:
             if self._dead:
                 return
             if event.kind == "position":
-                self.snapshot = replace(self.snapshot, position=max(0.0, float(event.value)))
+                position = max(0.0, float(event.value))
+                self._measure_silence(position)
+                self.snapshot = replace(self.snapshot, position=position)
                 self._persist_position()
             elif event.kind == "duration":
                 self.snapshot = replace(self.snapshot, duration=max(0.0, float(event.value)))
@@ -178,6 +232,8 @@ class PlaybackService:
                 self.snapshot = replace(self.snapshot, state=state)
                 self.repository.set_current_playback(self.snapshot.episode_id, state.value)
             elif event.kind == "file_loaded":
+                self._last_metric_time = time.monotonic()
+                self._last_metric_position = self.snapshot.position
                 if self.snapshot.state == PlaybackState.LOADING:
                     self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED)
             elif event.kind == "eof":
@@ -217,6 +273,26 @@ class PlaybackService:
             self.repository.update_position(self.snapshot.episode_id, self.snapshot.position)
             self._last_saved_position = self.snapshot.position
 
+    def _measure_silence(self, position: float):
+        now = time.monotonic()
+        if self._last_metric_time is None or self._last_metric_position is None:
+            self._last_metric_time = now
+            self._last_metric_position = position
+            return
+        if self._ignore_metric_once:
+            self._ignore_metric_once = False
+        elif self.snapshot.trim_level != "off" and position >= self._last_metric_position:
+            media_delta = position - self._last_metric_position
+            expected = (now - self._last_metric_time) * self.snapshot.speed
+            self._unsaved_silence += max(0.0, media_delta - expected)
+            if self._unsaved_silence >= 1.0 and self.listening:
+                self.listening.add_silence_saved(self._unsaved_silence)
+                saved = self.listening.silence_saved()
+                self._unsaved_silence = 0.0
+                self.snapshot = replace(self.snapshot, silence_saved=saved)
+        self._last_metric_time = now
+        self._last_metric_position = position
+
     def _sleep_expired(self):
         with self._lock:
             self._sleep_timer = None
@@ -253,6 +329,8 @@ class PlaybackService:
             position=episode.position_seconds,
             duration=float(episode.duration_seconds),
             speed=show.playback_speed if show else 1.0,
+            trim_level=show.trim_level if show else "off",
+            silence_saved=self.listening.silence_saved() if self.listening else 0.0,
         )
 
     def _guard(self):

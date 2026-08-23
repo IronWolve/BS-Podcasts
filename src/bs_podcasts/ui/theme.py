@@ -113,6 +113,19 @@ def stylesheet() -> str:
     QLabel#contextTitle {{ font-size: 20px; font-weight: 760; }}
     QLabel#contextBody {{ color: {c['muted']}; line-height: 1.4; }}
     QFrame#contextDivider {{ background: {c['border']}; max-height: 1px; }}
+    QTabWidget#contextTabs::pane {{ border: 0; background: transparent; }}
+    QTabWidget#contextTabs QTabBar::tab {{
+        background: transparent; color: {c['muted']}; border: 0;
+        padding: 7px 6px; margin-right: 2px;
+    }}
+    QTabWidget#contextTabs QTabBar::tab:selected {{
+        color: {c['accent']}; border-bottom: 2px solid {c['accent']};
+    }}
+    QListWidget, QTextEdit {{
+        background: transparent; border: 0; color: {c['text']};
+    }}
+    QListWidget::item {{ padding: 6px; border-radius: 6px; }}
+    QListWidget::item:hover {{ background: {c['surface_raised']}; }}
 
     QFrame#playerBar {{
         background: {c['nav']}; border-top: 1px solid {c['border']};

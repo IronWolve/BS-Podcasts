@@ -1,0 +1,182 @@
+"""Advanced listening metadata and saved collections."""
+
+import time
+
+from ...domain import Bookmark, Chapter, TranscriptSegment
+from ..database import Database
+
+
+class ListeningRepository:
+    def __init__(self, database: Database):
+        self.database = database
+
+    def replace_chapters(self, episode_id: int, chapters):
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM chapters WHERE episode_id=?", (episode_id,))
+            for index, chapter in enumerate(chapters):
+                connection.execute(
+                    """INSERT INTO chapters(
+                       episode_id, chapter_index, start_seconds, end_seconds,
+                       title, artwork_url) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        episode_id,
+                        index,
+                        chapter[0],
+                        chapter[1],
+                        chapter[2],
+                        chapter[3] if len(chapter) > 3 else "",
+                    ),
+                )
+
+    def chapters(self, episode_id: int) -> list[Chapter]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM chapters WHERE episode_id=? ORDER BY chapter_index",
+                (episode_id,),
+            ).fetchall()
+        return [
+            Chapter(
+                row["id"],
+                row["episode_id"],
+                row["chapter_index"],
+                row["start_seconds"],
+                row["end_seconds"],
+                row["title"],
+                row["artwork_url"],
+            )
+            for row in rows
+        ]
+
+    def replace_transcript(self, episode_id: int, segments):
+        with self.database.connect() as connection:
+            connection.execute(
+                "DELETE FROM transcript_segments WHERE episode_id=?", (episode_id,)
+            )
+            for index, segment in enumerate(segments):
+                connection.execute(
+                    """INSERT INTO transcript_segments(
+                       episode_id, segment_index, start_seconds, end_seconds, text)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (episode_id, index, segment[0], segment[1], segment[2]),
+                )
+
+    def transcript(self, episode_id: int, query: str = "") -> list[TranscriptSegment]:
+        sql = "SELECT * FROM transcript_segments WHERE episode_id=?"
+        params: list[object] = [episode_id]
+        if query.strip():
+            sql += " AND text LIKE ?"
+            params.append(f"%{query.strip()}%")
+        sql += " ORDER BY segment_index"
+        with self.database.connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [
+            TranscriptSegment(
+                row["id"],
+                row["episode_id"],
+                row["segment_index"],
+                row["text"],
+                row["start_seconds"],
+                row["end_seconds"],
+            )
+            for row in rows
+        ]
+
+    def add_bookmark(self, episode_id: int, position: float, title: str = "") -> Bookmark:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                """INSERT INTO bookmarks(episode_id, position_seconds, title, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (episode_id, max(0.0, position), title, time.time()),
+            )
+            bookmark_id = cursor.lastrowid
+        return next(bookmark for bookmark in self.bookmarks() if bookmark.id == bookmark_id)
+
+    def bookmarks(self, episode_id: int | None = None) -> list[Bookmark]:
+        sql = (
+            "SELECT b.*, e.title AS episode_title, s.title AS show_title "
+            "FROM bookmarks b JOIN episodes e ON e.id=b.episode_id "
+            "JOIN shows s ON s.id=e.show_id"
+        )
+        params = ()
+        if episode_id is not None:
+            sql += " WHERE b.episode_id=?"
+            params = (episode_id,)
+        sql += " ORDER BY b.created_at DESC"
+        with self.database.connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [
+            Bookmark(
+                row["id"],
+                row["episode_id"],
+                row["position_seconds"],
+                row["title"],
+                row["created_at"],
+                row["episode_title"],
+                row["show_title"],
+            )
+            for row in rows
+        ]
+
+    def add_silence_saved(self, seconds: float):
+        if seconds <= 0:
+            return
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE playback_metrics SET silence_saved=silence_saved+? WHERE singleton_id=1",
+                (float(seconds),),
+            )
+
+    def silence_saved(self) -> float:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT silence_saved FROM playback_metrics WHERE singleton_id=1"
+            ).fetchone()
+        return float(row["silence_saved"] if row else 0)
+
+    def create_folder(self, name: str) -> int:
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO folders(name, created_at) VALUES (?, ?)",
+                (name.strip(), time.time()),
+            )
+            row = connection.execute("SELECT id FROM folders WHERE name=?", (name.strip(),)).fetchone()
+        return row["id"]
+
+    def assign_show(self, folder_id: int, show_id: int):
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO folder_shows(folder_id, show_id) VALUES (?, ?)",
+                (folder_id, show_id),
+            )
+
+    def create_playlist(self, name: str) -> int:
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO saved_playlists(name, created_at) VALUES (?, ?)",
+                (name.strip(), time.time()),
+            )
+            row = connection.execute(
+                "SELECT id FROM saved_playlists WHERE name=?", (name.strip(),)
+            ).fetchone()
+        return row["id"]
+
+    def set_playlist_items(self, playlist_id: int, episode_ids: list[int]):
+        with self.database.connect() as connection:
+            connection.execute(
+                "DELETE FROM saved_playlist_items WHERE playlist_id=?", (playlist_id,)
+            )
+            for position, episode_id in enumerate(episode_ids, start=1):
+                connection.execute(
+                    """INSERT INTO saved_playlist_items(playlist_id, episode_id, position)
+                       VALUES (?, ?, ?)""",
+                    (playlist_id, episode_id, position),
+                )
+
+    def playlist_items(self, playlist_id: int) -> list[int]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """SELECT episode_id FROM saved_playlist_items
+                   WHERE playlist_id=? ORDER BY position""",
+                (playlist_id,),
+            ).fetchall()
+        return [row["episode_id"] for row in rows]

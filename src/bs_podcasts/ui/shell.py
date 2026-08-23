@@ -38,6 +38,7 @@ class MainWindow(QMainWindow):
         directory=None,
         playback=None,
         downloads=None,
+        listening=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -47,6 +48,7 @@ class MainWindow(QMainWindow):
         self.directory = directory
         self.playback = playback
         self.downloads = downloads
+        self.listening = listening
         self.setObjectName("mainWindow")
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(900, 650)
@@ -81,6 +83,8 @@ class MainWindow(QMainWindow):
         self.context.play_episode_requested.connect(self._play_episode)
         self.context.queue_episode_requested.connect(self._queue_episode)
         self.context.download_episode_requested.connect(self._download_episode)
+        self.context.seek_requested.connect(self._seek)
+        self.context.transcript_search_requested.connect(self._search_transcript)
         self.splitter.addWidget(self.pages)
         self.splitter.addWidget(self.context)
         self.splitter.setStretchFactor(0, 1)
@@ -99,6 +103,9 @@ class MainWindow(QMainWindow):
         self.player.seek_requested.connect(self._seek)
         self.player.speed_requested.connect(self._set_speed)
         self.player.volume_requested.connect(self._set_volume)
+        self.player.bookmark_requested.connect(self._bookmark_current)
+        self.player.ab_requested.connect(self._cycle_ab)
+        self.player.trim_requested.connect(self._cycle_trim)
         outer.addWidget(self.player)
         self.setCentralWidget(root)
 
@@ -107,6 +114,7 @@ class MainWindow(QMainWindow):
         self._wire_library()
         self._wire_playback()
         self._wire_downloads()
+        self._wire_listening()
         self.navigation.select(0)
         self.resize(1440, 900)
 
@@ -132,12 +140,13 @@ class MainWindow(QMainWindow):
         self.discover_page = PodcastGridPage(
             "Discover", "Find something worth hearing", discover=True
         )
-        self.bookmark_page = EmptyPage(
+        self.bookmark_page = EpisodeListPage(
             "Bookmarks",
             "Moments you wanted to keep",
-            "No bookmarks yet",
-            "Create a bookmark from the expanded player.",
+            items=(),
         )
+        if self.bookmark_page.header.action:
+            self.bookmark_page.header.action.hide()
         self.history_page = EpisodeListPage(
             "History", "Recently played", items=tuple(reversed(EPISODES[:4]))
         )
@@ -171,6 +180,9 @@ class MainWindow(QMainWindow):
             ("Ctrl+Right", lambda: self._skip(30)),
             ("Ctrl+K", self._focus_search),
             ("Ctrl+Shift+Q", self._queue_selected),
+            ("Ctrl+B", self._bookmark_current),
+            ("Ctrl+T", self._cycle_trim),
+            ("Ctrl+Shift+A", self._cycle_ab),
             ("Ctrl+Q", self.close),
         ):
             shortcut = QShortcut(QKeySequence(sequence), self)
@@ -228,6 +240,10 @@ class MainWindow(QMainWindow):
             return
         self.downloads.subscribe(lambda event: self._bridge.download_event.emit(event))
         self._reload_downloads()
+
+    def _wire_listening(self):
+        if self.listening is not None:
+            self._reload_bookmarks()
 
     def _reload_library(self):
         if self.library is None:
@@ -391,6 +407,80 @@ class MainWindow(QMainWindow):
         if self.playback is not None:
             self.playback.set_volume(volume)
 
+    def _bookmark_current(self):
+        if self.listening is None or self.playback is None:
+            return
+        snapshot = self.playback.snapshot
+        if snapshot.episode_id is None:
+            return
+        self.listening.bookmark(
+            snapshot.episode_id,
+            snapshot.position,
+            f"Bookmark at {self.player._time(snapshot.position)}",
+        )
+        self._reload_bookmarks()
+        self._load_listening_details(snapshot.episode_id)
+        self.episode_page.banner.show_state("loaded", "Bookmark saved.")
+
+    def _cycle_ab(self):
+        if self.playback is None or self.playback.snapshot.episode_id is None:
+            return
+        snapshot = self.playback.snapshot
+        try:
+            if snapshot.ab_start is None:
+                self.playback.set_ab_start()
+            elif snapshot.ab_end is None:
+                self.playback.set_ab_end()
+            else:
+                self.playback.clear_ab_repeat()
+        except Exception as exc:
+            self.episode_page.banner.show_state("error", str(exc))
+
+    def _cycle_trim(self):
+        if self.playback is None or self.playback.snapshot.episode_id is None:
+            return
+        levels = ("off", "light", "medium", "strong")
+        current = self.playback.snapshot.trim_level
+        level = levels[(levels.index(current) + 1) % len(levels)]
+        try:
+            self.playback.set_trim_level(level)
+        except Exception as exc:
+            self.episode_page.banner.show_state("error", str(exc))
+
+    def _reload_bookmarks(self):
+        if self.listening is None or self.library is None:
+            return
+        items = []
+        for bookmark in self.listening.bookmarks():
+            episode = self.library.episode(bookmark.episode_id)
+            if episode is None:
+                continue
+            item = self._ui_episode(episode)
+            items.append(
+                UiEpisode(
+                    title=bookmark.title or item.title,
+                    show=item.show,
+                    published=f"At {self.player._time(bookmark.position_seconds)}",
+                    duration=item.duration,
+                    progress=(bookmark.position_seconds / episode.duration_seconds)
+                    if episode.duration_seconds
+                    else 0.0,
+                    state="Bookmark",
+                    accent=item.accent,
+                    episode_id=item.episode_id,
+                    show_id=item.show_id,
+                    description=item.description,
+                )
+            )
+        if isinstance(self.bookmark_page, EpisodeListPage):
+            self.bookmark_page.set_items(items)
+            if items:
+                self.bookmark_page.banner.clear()
+            else:
+                self.bookmark_page.banner.show_state(
+                    "empty", "Bookmarks created from the player will appear here."
+                )
+
     def _playback_changed(self, snapshot):
         self.player.set_snapshot(snapshot)
 
@@ -528,6 +618,20 @@ class MainWindow(QMainWindow):
             self.context.show_podcast(item)
         elif isinstance(item, UiEpisode):
             self.context.show_episode(item)
+            self._load_listening_details(item.episode_id)
+
+    def _load_listening_details(self, episode_id: int, query: str = ""):
+        if self.listening is None or not episode_id:
+            self.context.set_chapters(())
+            self.context.set_transcript(())
+            self.context.set_bookmarks(())
+            return
+        self.context.set_chapters(self.listening.chapters(episode_id))
+        self.context.set_transcript(self.listening.transcript(episode_id, query))
+        self.context.set_bookmarks(self.listening.bookmarks(episode_id))
+
+    def _search_transcript(self, episode_id: int, query: str):
+        self._load_listening_details(episode_id, query)
 
     @staticmethod
     def _ui_podcast(show) -> UiPodcast:

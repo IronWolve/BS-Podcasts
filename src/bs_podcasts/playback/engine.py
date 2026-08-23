@@ -16,6 +16,8 @@ class EngineCapabilities:
     seek: bool = True
     speed: bool = True
     volume: bool = True
+    ab_repeat: bool = True
+    silence_trim: bool = True
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,33 @@ class MpvEngine:
     def set_volume(self, volume: float):
         self._guard()
         self._player.volume = max(0.0, min(100.0, float(volume)))
+
+    def set_ab_repeat(self, start: float, end: float):
+        self._guard()
+        self._player.ab_loop_a = max(0.0, float(start))
+        self._player.ab_loop_b = max(float(start), float(end))
+
+    def clear_ab_repeat(self):
+        self._guard()
+        self._player.ab_loop_a = "no"
+        self._player.ab_loop_b = "no"
+
+    def set_silence_trim(self, level: str):
+        self._guard()
+        thresholds = {
+            "light": "-48dB",
+            "medium": "-42dB",
+            "strong": "-36dB",
+        }
+        threshold = thresholds.get(level)
+        if threshold is None:
+            self._player.af = ""
+            return
+        self._player.af = (
+            "lavfi=[silenceremove=start_periods=1:start_silence=0.1:"
+            f"start_threshold={threshold}:stop_periods=-1:stop_duration=0.35:"
+            f"stop_threshold={threshold}]"
+        )
 
     def shutdown(self):
         if self._dead:

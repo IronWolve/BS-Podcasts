@@ -100,15 +100,18 @@ class LibraryRepository:
                 connection.execute(
                     """INSERT INTO episodes(
                        show_id, external_id, title, description, media_url,
-                       mime_type, published_at, duration_seconds, added_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       mime_type, published_at, duration_seconds,
+                       transcript_url, transcript_type, added_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(show_id, external_id) DO UPDATE SET
                        title=excluded.title,
                        description=excluded.description,
                        media_url=excluded.media_url,
                        mime_type=excluded.mime_type,
                        published_at=excluded.published_at,
-                       duration_seconds=excluded.duration_seconds""",
+                       duration_seconds=excluded.duration_seconds,
+                       transcript_url=excluded.transcript_url,
+                       transcript_type=excluded.transcript_type""",
                     (
                         show_id,
                         episode.external_id,
@@ -118,6 +121,8 @@ class LibraryRepository:
                         episode.mime_type,
                         episode.published_at,
                         episode.duration_seconds,
+                        episode.transcript_url,
+                        episode.transcript_type,
                         now,
                     ),
                 )
@@ -269,6 +274,7 @@ class LibraryRepository:
         skip_back: int | None = None,
         skip_forward: int | None = None,
         auto_continue: bool | None = None,
+        trim_level: str | None = None,
     ):
         show = self.get_show(show_id)
         if show is None:
@@ -276,12 +282,13 @@ class LibraryRepository:
         with self.database.connect() as connection:
             connection.execute(
                 """UPDATE shows SET playback_speed=?, skip_back=?,
-                   skip_forward=?, auto_continue=? WHERE id=?""",
+                   skip_forward=?, auto_continue=?, trim_level=? WHERE id=?""",
                 (
                     speed if speed is not None else show.playback_speed,
                     skip_back if skip_back is not None else show.skip_back,
                     skip_forward if skip_forward is not None else show.skip_forward,
                     int(auto_continue if auto_continue is not None else show.auto_continue),
+                    trim_level if trim_level is not None else show.trim_level,
                     show_id,
                 ),
             )
@@ -343,6 +350,7 @@ class LibraryRepository:
             skip_back=row["skip_back"],
             skip_forward=row["skip_forward"],
             auto_continue=bool(row["auto_continue"]),
+            trim_level=row["trim_level"],
         )
 
     @staticmethod
@@ -363,4 +371,6 @@ class LibraryRepository:
             is_new=bool(row["is_new"]),
             downloaded_path=row["downloaded_path"],
             last_played=row["last_played"],
+            transcript_url=row["transcript_url"],
+            transcript_type=row["transcript_type"],
         )

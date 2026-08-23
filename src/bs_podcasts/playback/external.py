@@ -8,7 +8,14 @@ from .engine import EngineCapabilities, EngineEvent, PlaybackUnavailable
 
 
 class ExternalPlayerEngine:
-    capabilities = EngineCapabilities(internal=False, seek=False, speed=False, volume=False)
+    capabilities = EngineCapabilities(
+        internal=False,
+        seek=False,
+        speed=False,
+        volume=False,
+        ab_repeat=False,
+        silence_trim=False,
+    )
 
     def __init__(self, command: str = "xdg-open"):
         self.command = shutil.which(command)
@@ -55,6 +62,15 @@ class ExternalPlayerEngine:
 
     def set_volume(self, volume: float):
         raise PlaybackUnavailable("Volume is controlled by the external player.")
+
+    def set_ab_repeat(self, start: float, end: float):
+        raise PlaybackUnavailable("A-B repeat requires the internal player.")
+
+    def clear_ab_repeat(self):
+        raise PlaybackUnavailable("A-B repeat requires the internal player.")
+
+    def set_silence_trim(self, level: str):
+        raise PlaybackUnavailable("Silence trim requires the internal player.")
 
     def shutdown(self):
         self._dead = True

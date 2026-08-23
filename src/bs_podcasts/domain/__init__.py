@@ -2,6 +2,8 @@
 
 from .models import (
     DirectoryCandidate,
+    Bookmark,
+    Chapter,
     DownloadRecord,
     DownloadState,
     Episode,
@@ -9,10 +11,13 @@ from .models import (
     FeedEpisodeData,
     Health,
     Show,
+    TranscriptSegment,
 )
 
 __all__ = [
     "DirectoryCandidate",
+    "Bookmark",
+    "Chapter",
     "DownloadRecord",
     "DownloadState",
     "Episode",
@@ -20,4 +25,5 @@ __all__ = [
     "FeedEpisodeData",
     "Health",
     "Show",
+    "TranscriptSegment",
 ]

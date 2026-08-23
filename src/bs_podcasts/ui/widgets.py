@@ -7,9 +7,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QSizePolicy,
     QSlider,
+    QTabWidget,
+    QTextEdit,
     QSpacerItem,
     QVBoxLayout,
     QWidget,
@@ -217,6 +221,8 @@ class ContextPanel(QFrame):
     play_episode_requested = Signal(int)
     queue_episode_requested = Signal(int)
     download_episode_requested = Signal(int)
+    seek_requested = Signal(float)
+    transcript_search_requested = Signal(int, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -281,19 +287,36 @@ class ContextPanel(QFrame):
         actions.addWidget(self.secondary)
         layout.addLayout(actions)
 
-        divider = QFrame()
-        divider.setObjectName("contextDivider")
-        layout.addWidget(divider)
-        section = QLabel("UP NEXT")
-        section.setObjectName("brandSub")
-        layout.addWidget(section)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("contextTabs")
         self.queue_content = QWidget()
         self.queue_layout = QVBoxLayout(self.queue_content)
         self.queue_layout.setContentsMargins(0, 0, 0, 0)
         self.queue_layout.setSpacing(9)
-        layout.addWidget(self.queue_content)
+        self.tabs.addTab(self.queue_content, "Up Next")
+
+        self.chapter_list = QListWidget()
+        self.chapter_list.itemDoubleClicked.connect(self._chapter_activated)
+        self.tabs.addTab(self.chapter_list, "Chapters")
+
+        transcript_page = QWidget()
+        transcript_layout = QVBoxLayout(transcript_page)
+        transcript_layout.setContentsMargins(0, 8, 0, 0)
+        self.transcript_search = QLineEdit()
+        self.transcript_search.setObjectName("searchField")
+        self.transcript_search.setPlaceholderText("Search transcript")
+        self.transcript_search.returnPressed.connect(self._search_transcript)
+        self.transcript_text = QTextEdit()
+        self.transcript_text.setReadOnly(True)
+        transcript_layout.addWidget(self.transcript_search)
+        transcript_layout.addWidget(self.transcript_text, 1)
+        self.tabs.addTab(transcript_page, "Transcript")
+
+        self.bookmark_list = QListWidget()
+        self.bookmark_list.itemDoubleClicked.connect(self._bookmark_activated)
+        self.tabs.addTab(self.bookmark_list, "Bookmarks")
+        layout.addWidget(self.tabs, 1)
         self.set_queue(())
-        layout.addStretch(1)
 
     def set_queue(self, episodes):
         while self.queue_layout.count():
@@ -317,6 +340,37 @@ class ContextPanel(QFrame):
             empty = QLabel("Your queue is empty")
             empty.setObjectName("meta")
             self.queue_layout.addWidget(empty)
+
+    def set_chapters(self, chapters):
+        self.chapter_list.clear()
+        for chapter in chapters:
+            item = QListWidgetItem(
+                f"{self._time(chapter.start_seconds)}  {chapter.title or 'Untitled chapter'}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, chapter.start_seconds)
+            self.chapter_list.addItem(item)
+        if not chapters:
+            self.chapter_list.addItem("No chapters provided")
+
+    def set_transcript(self, segments):
+        self.transcript_text.setPlainText(
+            "\n\n".join(
+                f"{self._time(segment.start_seconds or 0)}  {segment.text}"
+                for segment in segments
+            )
+            or "No transcript provided"
+        )
+
+    def set_bookmarks(self, bookmarks):
+        self.bookmark_list.clear()
+        for bookmark in bookmarks:
+            item = QListWidgetItem(
+                f"{self._time(bookmark.position_seconds)}  {bookmark.title or 'Bookmark'}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, bookmark.position_seconds)
+            self.bookmark_list.addItem(item)
+        if not bookmarks:
+            self.bookmark_list.addItem("No bookmarks yet")
 
     def show_podcast(self, podcast):
         words = podcast.title.replace("The ", "").split()
@@ -366,6 +420,28 @@ class ContextPanel(QFrame):
         if self._episode_id:
             self.download_episode_requested.emit(self._episode_id)
 
+    def _chapter_activated(self, item):
+        position = item.data(Qt.ItemDataRole.UserRole)
+        if position is not None:
+            self.seek_requested.emit(float(position))
+
+    def _bookmark_activated(self, item):
+        position = item.data(Qt.ItemDataRole.UserRole)
+        if position is not None:
+            self.seek_requested.emit(float(position))
+
+    def _search_transcript(self):
+        if self._episode_id:
+            self.transcript_search_requested.emit(
+                self._episode_id, self.transcript_search.text().strip()
+            )
+
+    @staticmethod
+    def _time(seconds: float) -> str:
+        total = max(0, int(seconds))
+        minutes, secs = divmod(total, 60)
+        return f"{minutes}:{secs:02d}"
+
 
 class PlayerBar(QFrame):
     context_requested = Signal()
@@ -374,6 +450,9 @@ class PlayerBar(QFrame):
     seek_requested = Signal(float)
     speed_requested = Signal(float)
     volume_requested = Signal(float)
+    bookmark_requested = Signal()
+    ab_requested = Signal()
+    trim_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -461,7 +540,22 @@ class PlayerBar(QFrame):
         self.volume.setObjectName("iconButton")
         self.volume.setToolTip("Mute or restore volume")
         self.volume.clicked.connect(self._toggle_volume)
+        self.bookmark = QPushButton("BM")
+        self.bookmark.setObjectName("iconButton")
+        self.bookmark.setToolTip("Bookmark this position")
+        self.bookmark.clicked.connect(self.bookmark_requested)
+        self.ab = QPushButton("A–B")
+        self.ab.setObjectName("quietButton")
+        self.ab.setToolTip("Set A-B repeat")
+        self.ab.clicked.connect(self.ab_requested)
+        self.trim = QPushButton("Trim: off")
+        self.trim.setObjectName("quietButton")
+        self.trim.setToolTip("Silence trim")
+        self.trim.clicked.connect(self.trim_requested)
         layout.addWidget(self.speed)
+        layout.addWidget(self.bookmark)
+        layout.addWidget(self.ab)
+        layout.addWidget(self.trim)
         layout.addWidget(self.queue)
         layout.addWidget(self.volume)
 
@@ -469,6 +563,8 @@ class PlayerBar(QFrame):
 
     def set_compact(self, compact: bool):
         self.setFixedHeight(78 if compact else 86)
+        for widget in (self.bookmark, self.ab, self.trim):
+            widget.setVisible(not compact)
 
     def set_enabled(self, enabled: bool):
         self.play.setEnabled(enabled)
@@ -481,6 +577,13 @@ class PlayerBar(QFrame):
         )
         self.volume.setEnabled(
             enabled and (self._capabilities is None or self._capabilities.volume)
+        )
+        self.bookmark.setEnabled(enabled)
+        self.ab.setEnabled(
+            enabled and (self._capabilities is None or self._capabilities.ab_repeat)
+        )
+        self.trim.setEnabled(
+            enabled and (self._capabilities is None or self._capabilities.silence_trim)
         )
 
     def set_capabilities(self, capabilities):
@@ -502,6 +605,13 @@ class PlayerBar(QFrame):
         self.speed.setText(f"{self._speed:g}×")
         self._volume = float(snapshot.volume)
         self.volume.setText("MUTE" if self._volume == 0 else "VOL")
+        if snapshot.ab_start is None:
+            self.ab.setText("A–B")
+        elif snapshot.ab_end is None:
+            self.ab.setText("Set B")
+        else:
+            self.ab.setText("Clear A–B")
+        self.trim.setText(f"Trim: {snapshot.trim_level}")
         state = str(snapshot.state)
         self.play.setText("Ⅱ" if state == "playing" else "▶")
         self.set_enabled(snapshot.episode_id is not None and state != "shutdown")

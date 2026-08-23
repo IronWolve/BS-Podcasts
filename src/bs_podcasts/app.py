@@ -9,7 +9,7 @@ from .artwork import ArtworkCache
 from .config import APP_ID, APP_NAME
 from .config import data_dir as application_data_dir
 from .data import Database
-from .data.repositories import DownloadRepository, LibraryRepository
+from .data.repositories import DownloadRepository, LibraryRepository, ListeningRepository
 from .directories import DirectoryService, ItunesDirectory
 from .downloads import DownloadService
 from .feeds import FeedFetcher, RefreshService
@@ -17,7 +17,7 @@ from .jobs import JobRunner
 from .integrations import TrayController
 from .logging_setup import configure_logging
 from .playback import ExternalPlayerEngine, MpvEngine, PlaybackService
-from .services import LibraryService
+from .services import LibraryService, ListeningService
 from .ui.shell import MainWindow
 from .ui.theme import stylesheet
 
@@ -52,7 +52,9 @@ def main() -> int:
         engine = MpvEngine()
     except Exception:
         engine = ExternalPlayerEngine()
-    playback = PlaybackService(repository, engine)
+    listening_repository = ListeningRepository(database)
+    listening = ListeningService(listening_repository)
+    playback = PlaybackService(repository, engine, listening=listening_repository)
     downloads = DownloadService(
         repository,
         DownloadRepository(database),
@@ -65,6 +67,7 @@ def main() -> int:
         directory=directory,
         playback=playback,
         downloads=downloads,
+        listening=listening,
     )
     window.tray = TrayController(window, playback)
     app.aboutToQuit.connect(jobs.shutdown)

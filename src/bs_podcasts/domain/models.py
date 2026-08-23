@@ -37,6 +37,7 @@ class Show:
     skip_back: int = 15
     skip_forward: int = 30
     auto_continue: bool = True
+    trim_level: str = "off"
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,8 @@ class Episode:
     is_new: bool = True
     downloaded_path: str = ""
     last_played: float | None = None
+    transcript_url: str = ""
+    transcript_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,40 @@ class FeedEpisodeData:
     mime_type: str = "audio/*"
     published_at: str = ""
     duration_seconds: int = 0
+    transcript_url: str = ""
+    transcript_type: str = ""
+
+
+@dataclass(frozen=True)
+class Chapter:
+    id: int
+    episode_id: int
+    index: int
+    start_seconds: float
+    end_seconds: float | None
+    title: str
+    artwork_url: str = ""
+
+
+@dataclass(frozen=True)
+class TranscriptSegment:
+    id: int
+    episode_id: int
+    index: int
+    text: str
+    start_seconds: float | None = None
+    end_seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class Bookmark:
+    id: int
+    episode_id: int
+    position_seconds: float
+    title: str
+    created_at: float
+    episode_title: str = ""
+    show_title: str = ""
 
 
 @dataclass(frozen=True)
