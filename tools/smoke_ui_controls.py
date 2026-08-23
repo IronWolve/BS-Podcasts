@@ -15,18 +15,29 @@ from bs_podcasts.app import create_application
 from bs_podcasts.data import Database
 from bs_podcasts.data.repositories import DownloadRepository, LibraryRepository, ListeningRepository
 from bs_podcasts.downloads import DownloadService
+from bs_podcasts.domain import DirectoryCandidate
 from bs_podcasts.feeds import parse_feed
 from bs_podcasts.jobs import JobRunner
 from bs_podcasts.services import LibraryService, ListeningService
 from bs_podcasts.ui.shell import MainWindow
 
 
-class EmptyDirectory:
+class PagedDirectory:
+    def _items(self, limit):
+        return [
+            DirectoryCandidate(
+                f"Technology Podcast {index + 1}",
+                "Sample Directory",
+                f"https://samples.invalid/technology-{index + 1}.xml",
+            )
+            for index in range(min(limit, 75))
+        ]
+
     def search(self, query, limit=30):
-        return []
+        return self._items(limit)
 
     def browse(self, category="", limit=30):
-        return []
+        return self._items(limit)
 
 
 def require(condition: bool, message: str):
@@ -54,7 +65,7 @@ def main() -> int:
         window = MainWindow(
             library=library,
             jobs=jobs,
-            directory=EmptyDirectory(),
+            directory=PagedDirectory(),
             downloads=downloads,
             listening=listening,
         )
@@ -80,6 +91,18 @@ def main() -> int:
         window._open_podcast(podcast)
         require(window.pages.currentIndex() == 2, "podcast did not open Episodes")
         require(window.episode_page.model.rowCount() == 2, "podcast episode flow differs")
+
+        window.navigation.select(5)
+        window._start_directory_request("browse", "Technology")
+        while window._discover_loading:
+            app.processEvents()
+        require(window.discover_page.model.rowCount() == 30, "initial Discover page differs")
+        window.discover_page.view.verticalScrollBar().setValue(
+            window.discover_page.view.verticalScrollBar().maximum()
+        )
+        while window._discover_loading:
+            app.processEvents()
+        require(window.discover_page.model.rowCount() == 60, "Discover did not load more")
 
         window.close()
         jobs.shutdown(wait=True)

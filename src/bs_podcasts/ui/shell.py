@@ -58,6 +58,11 @@ class MainWindow(QMainWindow):
         self._context_forced = False
         self._last_mode = None
         self._pending_jobs = set()
+        self._discover_operation = ""
+        self._discover_value = ""
+        self._discover_limit = 30
+        self._discover_loading = False
+        self._discover_exhausted = False
         self._bridge = _JobBridge(self)
         self._bridge.completed.connect(self._refresh_finished)
         self._bridge.playback_event.connect(self._playback_changed)
@@ -270,6 +275,7 @@ class MainWindow(QMainWindow):
             self.discover_page.header.search.returnPressed.connect(self._directory_search)
             self.discover_page.chips.selected.connect(self._show_for_you)
             self.discover_page.category.currentTextChanged.connect(self._browse_category)
+            self.discover_page.near_end.connect(self._load_more_discover)
             if self.discover_page.header.action:
                 self.discover_page.header.action.clicked.connect(
                     self._show_for_you
@@ -747,7 +753,7 @@ class MainWindow(QMainWindow):
             self.discover_page.banner.show_state("partial", "Enter a podcast search term.")
             return
         self.discover_page.banner.show_state("loading", f"Searching for “{query}”…")
-        self._submit_directory("search", query)
+        self._start_directory_request("search", query)
 
     def _browse_category(self, category: str):
         if self.directory is None or self.jobs is None:
@@ -758,7 +764,29 @@ class MainWindow(QMainWindow):
         normalized = "" if category in {"For You", "All Categories"} else category
         label = normalized or "top podcasts"
         self.discover_page.banner.show_state("loading", f"Loading {label}…")
-        self._submit_directory("browse", normalized)
+        self._start_directory_request("browse", normalized)
+
+    def _start_directory_request(self, operation: str, value: str):
+        self._discover_operation = operation
+        self._discover_value = value
+        self._discover_limit = 30
+        self._discover_exhausted = False
+        self._submit_directory(operation, value, self._discover_limit)
+
+    def _load_more_discover(self):
+        if (
+            self._discover_loading
+            or self._discover_exhausted
+            or not self._discover_operation
+            or self._discover_limit >= 200
+        ):
+            return
+        self._discover_limit = min(200, self._discover_limit + 30)
+        label = self._discover_value or "For You"
+        self.discover_page.banner.show_state("loading", f"Loading more {label}…")
+        self._submit_directory(
+            self._discover_operation, self._discover_value, self._discover_limit
+        )
 
     def _show_for_you(self, _label: str = "For You"):
         if self.discover_page.category.currentIndex() != 0:
@@ -771,12 +799,13 @@ class MainWindow(QMainWindow):
             self.discover_page.banner.show_state(
                 "loading", f"Finding podcasts related to {shows[0].title}…"
             )
-            self._submit_directory("search", seed)
+            self._start_directory_request("search", seed)
         else:
             self._browse_category("")
 
-    def _submit_directory(self, operation: str, value: str):
-        future = self.jobs.submit(self._directory_request, operation, value)
+    def _submit_directory(self, operation: str, value: str, limit: int = 30):
+        self._discover_loading = True
+        future = self.jobs.submit(self._directory_request, operation, value, limit)
         self._pending_jobs.add(future)
 
         def finished(completed):
@@ -785,13 +814,15 @@ class MainWindow(QMainWindow):
                 result = completed.result()
             except Exception as exc:
                 result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._bridge.completed.emit(("directory", operation, result))
+            self._bridge.completed.emit(
+                ("directory", (operation, value, limit), result)
+            )
 
         future.add_done_callback(finished)
 
-    def _directory_request(self, operation: str, value: str):
+    def _directory_request(self, operation: str, value: str, limit: int):
         callable_ = self.directory.search if operation == "search" else self.directory.browse
-        candidates = callable_(value, 30)
+        candidates = callable_(value, limit)
         results = []
         artwork_cache = self.refresh.artwork if self.refresh is not None else None
         for candidate in candidates:
@@ -834,7 +865,7 @@ class MainWindow(QMainWindow):
     def _refresh_finished(self, payload):
         kind, identifier, result = payload
         if kind == "directory":
-            self._directory_finished(result)
+            self._directory_finished(identifier, result)
             return
         if kind == "download":
             self._reload_library()
@@ -860,20 +891,27 @@ class MainWindow(QMainWindow):
         else:
             self.podcast_page.banner.clear()
 
-    def _directory_finished(self, result):
+    def _directory_finished(self, request, result):
+        self._discover_loading = False
+        _operation, _value, requested_limit = request
         if result.status != JobStatus.OK:
             self.discover_page.banner.show_state(
                 "error", result.message or "Directory search failed."
             )
             return
         candidates = result.value or []
+        self._discover_exhausted = len(candidates) < requested_limit
         podcasts = []
+        seen_feeds = set()
         subscribed = {
             show.feed_url: show for show in self.library.shows()
         } if self.library is not None else {}
         accents = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
         for index, candidate_data in enumerate(candidates):
             candidate, artwork_path = candidate_data
+            if candidate.feed_url in seen_feeds:
+                continue
+            seen_feeds.add(candidate.feed_url)
             saved = subscribed.get(candidate.feed_url)
             podcasts.append(
                 UiPodcast(
@@ -891,7 +929,9 @@ class MainWindow(QMainWindow):
                     health=saved.health.value if saved else "unknown",
                 )
             )
-        self.discover_page.set_items(podcasts)
+        self.discover_page.set_items(
+            podcasts, preserve_scroll=requested_limit > 30
+        )
         if podcasts:
             self.discover_page.banner.clear()
         else:
