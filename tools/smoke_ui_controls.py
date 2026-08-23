@@ -42,6 +42,9 @@ class PagedDirectory:
     def recommend(self, shows, limit=30):
         return self._items(limit)
 
+    def topic(self, category, topic, limit=30):
+        return self._items(limit)
+
 
 def require(condition: bool, message: str):
     if not condition:
@@ -110,6 +113,14 @@ def main() -> int:
         while window._discover_loading:
             app.processEvents()
         require(window.discover_page.model.rowCount() == 60, "Discover did not load more")
+        window._start_directory_request("topic", ("News", "Conservative News"))
+        while window._discover_loading:
+            app.processEvents()
+        require(window.discover_page.model.rowCount() == 30, "Discover topic did not load")
+        require(
+            "Conservative News" in window.discover_page.result_summary.text(),
+            "Discover topic summary is missing",
+        )
 
         window.close()
         jobs.shutdown(wait=True)

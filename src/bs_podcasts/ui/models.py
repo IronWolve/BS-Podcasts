@@ -21,6 +21,9 @@ class Podcast:
     artwork_url: str = ""
     artwork_path: str = ""
     health: str = "unknown"
+    display_meta: str = ""
+    directory_result: bool = False
+    subscribed: bool = False
 
 
 @dataclass(frozen=True)
@@ -216,7 +219,7 @@ class PodcastDelegate(QStyledItemDelegate):
         font.setPointSize(8)
         font.setWeight(QFont.Weight.Normal)
         painter.setFont(font)
-        meta = f"{item.episode_count} episodes"
+        meta = item.display_meta or f"{item.episode_count} episodes"
         painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, meta)
 
         if item.new_count:
@@ -229,6 +232,16 @@ class PodcastDelegate(QStyledItemDelegate):
             font.setWeight(QFont.Weight.Bold)
             painter.setFont(font)
             painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, str(item.new_count))
+        elif item.directory_result and item.subscribed:
+            badge = card.adjusted(card.width() - 70, 16, -16, -(card.height() - 42))
+            painter.setBrush(QColor(COLORS["canvas"]))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(badge, 9, 9)
+            painter.setPen(QColor(COLORS["success"]))
+            font.setPointSize(7)
+            font.setWeight(QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, "SAVED")
 
         health_colors = {
             "ok": COLORS["success"],
