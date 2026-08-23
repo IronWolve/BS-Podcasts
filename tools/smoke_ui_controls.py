@@ -129,6 +129,12 @@ def main() -> int:
         )
         window.navigation.select(1)
         podcast = window.podcast_page.model.index(0, 0).data(257)
+        window._show_item(podcast)
+        require(
+            window.context.latest_episode.text()
+            == "Measure twice\nAug 22, 2026",
+            "podcast details omit latest episode freshness",
+        )
         window._open_podcast(podcast)
         require(window.pages.currentIndex() == 2, "podcast did not open Episodes")
         require(window.episode_page.model.rowCount() == 2, "podcast episode flow differs")
@@ -148,20 +154,41 @@ def main() -> int:
         while window._discover_loading:
             app.processEvents()
         require(window.discover_page.model.rowCount() == 30, "For You did not load")
+        app.processEvents()
+        stable_window_size = window.size()
+        stable_toolbar_geometry = window.discover_page.discover_toolbar.geometry()
+        stable_results_geometry = window.discover_page.view.geometry()
+
+        def require_stable_discover_geometry(stage: str):
+            app.processEvents()
+            require(window.size() == stable_window_size, f"{stage} resized the window")
+            require(
+                window.discover_page.discover_toolbar.geometry()
+                == stable_toolbar_geometry,
+                f"{stage} moved the Discover menu toolbar",
+            )
+            require(
+                window.discover_page.view.geometry() == stable_results_geometry,
+                f"{stage} made the Discover result area jump",
+            )
+
         window._start_directory_request("browse", "Technology")
         while window._discover_loading:
             app.processEvents()
         require(window.discover_page.model.rowCount() == 30, "initial Discover page differs")
+        require_stable_discover_geometry("category selection")
         window.discover_page.view.verticalScrollBar().setValue(
             window.discover_page.view.verticalScrollBar().maximum()
         )
         while window._discover_loading:
             app.processEvents()
         require(window.discover_page.model.rowCount() == 60, "Discover did not load more")
+        require_stable_discover_geometry("bottom-of-list loading")
         window._start_directory_request("topic", ("News", "Conservative News"))
         while window._discover_loading:
             app.processEvents()
         require(window.discover_page.model.rowCount() == 30, "Discover topic did not load")
+        require_stable_discover_geometry("topic selection")
         require(
             "Conservative News" in window.discover_page.result_summary.text(),
             "Discover topic summary is missing",
@@ -170,6 +197,7 @@ def main() -> int:
         while window._discover_loading:
             app.processEvents()
         require(window.discover_page.model.rowCount() == 30, "Top Shows chart differs")
+        require_stable_discover_geometry("chart mode selection")
         require(
             "Apple Top Shows" in window.discover_page.result_summary.text(),
             "Top Shows chart summary is missing",
@@ -179,6 +207,7 @@ def main() -> int:
         while window._discover_loading:
             app.processEvents()
         require(window.discover_page.model.rowCount() == 60, "Chart did not load more")
+        require_stable_discover_geometry("chart continuation")
 
         window.close()
         jobs.shutdown(wait=True)

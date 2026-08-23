@@ -986,6 +986,7 @@ class MainWindow(QMainWindow):
         self.discover_page.set_discover_filter_visibility(
             show_category=explore or category_enabled,
             show_topic=explore,
+            scope_text="All Categories · Apple chart",
         )
 
     def _load_chart(self, chart_type: str, category: str):
@@ -1145,6 +1146,11 @@ class MainWindow(QMainWindow):
                     directory_result=True,
                     subscribed=bool(saved),
                     rank=candidate.rank,
+                    description=saved.description if saved else "",
+                    latest_episode_title=saved.latest_episode_title if saved else "",
+                    latest_episode_date=self._display_full_date(
+                        saved.latest_episode_published_at if saved else ""
+                    ),
                 )
             )
         result_count = len(podcasts)
@@ -1327,6 +1333,11 @@ class MainWindow(QMainWindow):
             artwork_url=show.artwork_url,
             artwork_path=show.artwork_path,
             health=show.health.value,
+            description=show.description,
+            latest_episode_title=show.latest_episode_title,
+            latest_episode_date=MainWindow._display_full_date(
+                show.latest_episode_published_at
+            ),
         )
 
     @staticmethod
@@ -1357,6 +1368,16 @@ class MainWindow(QMainWindow):
             return "Unknown date"
         try:
             return datetime.fromisoformat(value.replace("Z", "+00:00")).strftime("%b %d")
+        except ValueError:
+            return value[:16]
+
+    @staticmethod
+    def _display_full_date(value: str) -> str:
+        if not value:
+            return "Unknown date"
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return f"{parsed:%b} {parsed.day}, {parsed:%Y}"
         except ValueError:
             return value[:16]
 

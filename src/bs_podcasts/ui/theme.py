@@ -200,6 +200,16 @@ def stylesheet() -> str:
     QTabBar#discoverModes::tab:selected {{
         background: {c['accent']}; color: {c['canvas']};
     }}
+    QLabel#scopePill {{
+        background: {c['surface']}; color: {c['muted']};
+        border: 1px solid {c['border']}; border-radius: 10px;
+        padding: 8px 14px; font-weight: 600;
+    }}
+    QLabel#contextLatest {{
+        color: {c['text']}; font-weight: 700;
+        background: {c['surface_raised']}; border: 1px solid {c['border']};
+        border-radius: 10px; padding: 10px 12px;
+    }}
     QListWidget, QTextEdit {{
         background: transparent; border: 0; color: {c['text']};
     }}

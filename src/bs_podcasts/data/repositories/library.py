@@ -326,7 +326,13 @@ class LibraryRepository:
     def _show_select() -> str:
         return (
             "SELECT s.*, COUNT(e.id) AS episode_count, "
-            "COALESCE(SUM(CASE WHEN e.is_new=1 THEN 1 ELSE 0 END), 0) AS new_count "
+            "COALESCE(SUM(CASE WHEN e.is_new=1 THEN 1 ELSE 0 END), 0) AS new_count, "
+            "COALESCE((SELECT e2.title FROM episodes e2 WHERE e2.show_id=s.id "
+            "ORDER BY e2.published_at DESC, e2.id DESC LIMIT 1), '') "
+            "AS latest_episode_title, "
+            "COALESCE((SELECT e3.published_at FROM episodes e3 WHERE e3.show_id=s.id "
+            "ORDER BY e3.published_at DESC, e3.id DESC LIMIT 1), '') "
+            "AS latest_episode_published_at "
             "FROM shows s LEFT JOIN episodes e ON e.show_id=s.id"
         )
 
@@ -351,6 +357,8 @@ class LibraryRepository:
             last_refresh=row["last_refresh"],
             episode_count=row["episode_count"],
             new_count=row["new_count"],
+            latest_episode_title=row["latest_episode_title"],
+            latest_episode_published_at=row["latest_episode_published_at"],
             playback_speed=row["playback_speed"],
             skip_back=row["skip_back"],
             skip_forward=row["skip_forward"],

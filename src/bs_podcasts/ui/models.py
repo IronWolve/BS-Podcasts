@@ -25,6 +25,9 @@ class Podcast:
     directory_result: bool = False
     subscribed: bool = False
     rank: int = 0
+    description: str = ""
+    latest_episode_title: str = ""
+    latest_episode_date: str = ""
 
 
 @dataclass(frozen=True)
