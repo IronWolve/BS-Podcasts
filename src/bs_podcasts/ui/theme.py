@@ -170,6 +170,21 @@ def stylesheet() -> str:
     QTabWidget#contextTabs QTabBar::tab:selected {{
         color: {c['accent']}; border-bottom: 2px solid {c['accent']};
     }}
+    QTabBar#discoverModes {{
+        background: {c['surface']}; border: 1px solid {c['border']};
+        border-radius: 12px; padding: 3px;
+    }}
+    QTabBar#discoverModes::tab {{
+        background: transparent; color: {c['muted']}; border: 0;
+        border-radius: 9px; padding: 8px 15px; margin: 1px;
+        font-weight: 650;
+    }}
+    QTabBar#discoverModes::tab:hover {{
+        background: {c['surface_raised']}; color: {c['text']};
+    }}
+    QTabBar#discoverModes::tab:selected {{
+        background: {c['accent']}; color: {c['canvas']};
+    }}
     QListWidget, QTextEdit {{
         background: transparent; border: 0; color: {c['text']};
     }}
