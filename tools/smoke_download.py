@@ -1,0 +1,141 @@
+"""One local M4 interrupted-download, resume, and cleanup-preview smoke flow."""
+
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import os
+import subprocess
+import wave
+
+import requests
+
+
+WORKSPACE = Path(__file__).resolve().parents[2]
+LOCAL_TMP = WORKSPACE / "tmp"
+
+os.environ.setdefault("TMPDIR", str(LOCAL_TMP))
+
+from bs_podcasts.data import Database
+from bs_podcasts.data.repositories import DownloadRepository, LibraryRepository
+from bs_podcasts.domain import DownloadState, FeedData, FeedEpisodeData
+from bs_podcasts.downloads import DownloadError, DownloadService
+
+
+def require(condition: bool, message: str):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def make_silent_media(path: Path):
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=stereo",
+            "-t",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            "-y",
+            str(path),
+        ],
+        check=True,
+    )
+
+
+class LocalResponse:
+    def __init__(self, content: bytes, status_code: int, interrupt: bool = False):
+        self.content = content
+        self.status_code = status_code
+        self.headers = {"Content-Length": str(len(content))}
+        self.interrupt = interrupt
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size):
+        midpoint = max(1, len(self.content) // 2)
+        yield self.content[:midpoint]
+        if self.interrupt:
+            raise requests.ConnectionError("intentional local interruption")
+        yield self.content[midpoint:]
+
+
+class ResumeSession:
+    def __init__(self, content: bytes):
+        self.content = content
+        self.calls = 0
+
+    def get(self, url, headers, **kwargs):
+        self.calls += 1
+        range_header = headers.get("Range", "")
+        if self.calls == 1:
+            return LocalResponse(self.content, 200, interrupt=True)
+        require(range_header.startswith("bytes="), "retry did not request a byte range")
+        start = int(range_header.removeprefix("bytes=").removesuffix("-"))
+        return LocalResponse(self.content[start:], 206)
+
+
+def main() -> int:
+    LOCAL_TMP.mkdir(parents=True, exist_ok=True)
+    source = LOCAL_TMP / "m4-source.wav"
+    make_silent_media(source)
+    media = source.read_bytes()
+
+    with TemporaryDirectory(prefix="m4-smoke-", dir=LOCAL_TMP) as temporary:
+        root = Path(temporary)
+        database = Database(root / "library.db")
+        library = LibraryRepository(database)
+        downloads = DownloadRepository(database)
+        show = library.add_show("https://samples.invalid/download.xml", "Download Sample")
+        library.import_feed(
+            show.id,
+            FeedData(
+                title="Download Sample",
+                episodes=(
+                    FeedEpisodeData(
+                        "download-001",
+                        "Resumable episode",
+                        media_url="https://media.invalid/resumable.wav",
+                        duration_seconds=1,
+                    ),
+                ),
+            ),
+        )
+        episode = library.list_episodes(show.id)[0]
+        session = ResumeSession(media)
+        service = DownloadService(library, downloads, root / "downloads", session=session)
+
+        try:
+            service.download(episode.id)
+        except DownloadError:
+            pass
+        else:
+            raise RuntimeError("intentional interrupted transfer reported success")
+        interrupted = downloads.get(episode.id)
+        partial = Path(interrupted.partial_path)
+        require(interrupted.state == DownloadState.ERROR, "interruption state was not saved")
+        require(partial.is_file() and partial.stat().st_size > 0, "partial file was not retained")
+
+        completed = service.download(episode.id)
+        target = Path(completed.target_path)
+        require(completed.state == DownloadState.COMPLETE, "retry did not complete")
+        require(target.read_bytes() == media, "resumed file differs from source")
+        require(not partial.exists(), "partial file remained after atomic completion")
+        with wave.open(str(target), "rb") as audio:
+            require(audio.getnframes() > 0, "completed WAV is unreadable")
+
+        preview = service.cleanup_preview(episode.id)
+        require(preview.path == str(target), "cleanup preview reported the wrong path")
+        require(preview.bytes_reclaimed == len(media), "cleanup preview reported the wrong size")
+        require(target.exists(), "cleanup preview deleted the file")
+
+    print("BS Podcasts M4 download smoke flow passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -86,3 +86,26 @@ class DirectoryCandidate:
     feed_url: str
     artwork_url: str = ""
     genre: str = ""
+
+
+class DownloadState(StrEnum):
+    QUEUED = "queued"
+    DOWNLOADING = "downloading"
+    PAUSED = "paused"
+    COMPLETE = "complete"
+    ERROR = "error"
+
+
+@dataclass(frozen=True)
+class DownloadRecord:
+    id: int
+    episode_id: int
+    source_url: str
+    target_path: str
+    partial_path: str
+    state: DownloadState
+    bytes_done: int = 0
+    bytes_total: int = 0
+    error_message: str = ""
+    episode_title: str = ""
+    show_title: str = ""

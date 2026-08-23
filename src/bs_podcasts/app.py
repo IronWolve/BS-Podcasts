@@ -9,10 +9,12 @@ from .artwork import ArtworkCache
 from .config import APP_ID, APP_NAME
 from .config import data_dir as application_data_dir
 from .data import Database
-from .data.repositories import LibraryRepository
+from .data.repositories import DownloadRepository, LibraryRepository
 from .directories import DirectoryService, ItunesDirectory
+from .downloads import DownloadService
 from .feeds import FeedFetcher, RefreshService
 from .jobs import JobRunner
+from .integrations import TrayController
 from .logging_setup import configure_logging
 from .playback import ExternalPlayerEngine, MpvEngine, PlaybackService
 from .services import LibraryService
@@ -51,13 +53,20 @@ def main() -> int:
     except Exception:
         engine = ExternalPlayerEngine()
     playback = PlaybackService(repository, engine)
+    downloads = DownloadService(
+        repository,
+        DownloadRepository(database),
+        root / "downloads",
+    )
     window = MainWindow(
         library=library,
         jobs=jobs,
         refresh=refresh,
         directory=directory,
         playback=playback,
+        downloads=downloads,
     )
+    window.tray = TrayController(window, playback)
     app.aboutToQuit.connect(jobs.shutdown)
     window.show()
     return app.exec()

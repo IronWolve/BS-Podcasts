@@ -2,6 +2,7 @@
 
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QFrame,
     QGridLayout,
@@ -48,6 +49,7 @@ class PodcastGridPage(BasePage):
         self.chips = ChipRow(chips)
         self.root.addWidget(self.chips)
         self.view = QListView()
+        self.view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.view.setViewMode(QListView.ViewMode.IconMode)
         self.view.setResizeMode(QListView.ResizeMode.Adjust)
         self.view.setMovement(QListView.Movement.Static)
@@ -74,12 +76,21 @@ class PodcastGridPage(BasePage):
 
 class EpisodeListPage(BasePage):
     play_requested = Signal(object)
+    order_changed = Signal(list)
 
-    def __init__(self, title="Episodes", subtitle="Recent episodes from your shows", items=EPISODES, parent=None):
+    def __init__(
+        self,
+        title="Episodes",
+        subtitle="Recent episodes from your shows",
+        items=EPISODES,
+        reorder=False,
+        parent=None,
+    ):
         super().__init__(title, subtitle, "Refresh", parent)
         self.chips = ChipRow(("All", "New", "In progress", "Downloaded", "Played"))
         self.root.addWidget(self.chips)
         self.view = QListView()
+        self.view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.view.setMouseTracking(True)
         self.view.setUniformItemSizes(True)
         self.model = EpisodeModel(items)
@@ -87,6 +98,10 @@ class EpisodeListPage(BasePage):
         self.view.setItemDelegate(EpisodeDelegate(self.view))
         self.view.selectionModel().currentChanged.connect(self._selected)
         self.view.doubleClicked.connect(self._play)
+        if reorder:
+            self.view.setDragDropMode(QListView.DragDropMode.InternalMove)
+            self.view.setDefaultDropAction(Qt.DropAction.MoveAction)
+            self.model.order_changed.connect(self.order_changed)
         self.root.addWidget(self.view, 1)
         self.view.setCurrentIndex(self.model.index(0, 0))
 

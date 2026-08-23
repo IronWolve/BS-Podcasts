@@ -26,6 +26,7 @@ from .widgets import ContextPanel, NavigationRail, PlayerBar
 class _JobBridge(QObject):
     completed = Signal(object)
     playback_event = Signal(object)
+    download_event = Signal(object)
 
 
 class MainWindow(QMainWindow):
@@ -36,6 +37,7 @@ class MainWindow(QMainWindow):
         refresh=None,
         directory=None,
         playback=None,
+        downloads=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -44,6 +46,7 @@ class MainWindow(QMainWindow):
         self.refresh = refresh
         self.directory = directory
         self.playback = playback
+        self.downloads = downloads
         self.setObjectName("mainWindow")
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(900, 650)
@@ -53,6 +56,7 @@ class MainWindow(QMainWindow):
         self._bridge = _JobBridge(self)
         self._bridge.completed.connect(self._refresh_finished)
         self._bridge.playback_event.connect(self._playback_changed)
+        self._bridge.download_event.connect(self._download_progress)
 
         root = QWidget()
         root.setObjectName("appRoot")
@@ -76,6 +80,7 @@ class MainWindow(QMainWindow):
         self.context.subscribe_requested.connect(self._subscribe_url)
         self.context.play_episode_requested.connect(self._play_episode)
         self.context.queue_episode_requested.connect(self._queue_episode)
+        self.context.download_episode_requested.connect(self._download_episode)
         self.splitter.addWidget(self.pages)
         self.splitter.addWidget(self.context)
         self.splitter.setStretchFactor(0, 1)
@@ -101,6 +106,7 @@ class MainWindow(QMainWindow):
         self._build_shortcuts()
         self._wire_library()
         self._wire_playback()
+        self._wire_downloads()
         self.navigation.select(0)
         self.resize(1440, 900)
 
@@ -113,15 +119,16 @@ class MainWindow(QMainWindow):
         self.podcast_page = PodcastGridPage()
         self.episode_page = EpisodeListPage()
         self.playlist_page = EpisodeListPage(
-            "Playlist", "Your deterministic listening order", items=()
+            "Playlist", "Your deterministic listening order", items=(), reorder=True
         )
-        self.download_page = EmptyPage(
+        self.download_page = EpisodeListPage(
             "Downloads",
             "Saved for offline listening",
-            "Nothing downloading",
-            "Episodes you download will appear here.",
-            "Browse episodes",
+            items=(),
         )
+        if self.download_page.header.action:
+            self.download_page.header.action.setText("Cancel active")
+            self.download_page.header.action.clicked.connect(self._cancel_downloads)
         self.discover_page = PodcastGridPage(
             "Discover", "Find something worth hearing", discover=True
         )
@@ -152,11 +159,45 @@ class MainWindow(QMainWindow):
             self.pages.addWidget(page)
         for page in (self.home_page, self.episode_page, self.playlist_page, self.history_page):
             page.play_requested.connect(lambda item: self._play_episode(item.episode_id))
+        self.playlist_page.order_changed.connect(self._queue_reordered)
 
     def _build_shortcuts(self):
         for index in range(self.page_count):
             shortcut = QShortcut(QKeySequence(f"Ctrl+{index + 1}"), self)
             shortcut.activated.connect(lambda i=index: self.navigation.select(i))
+        for sequence, handler in (
+            ("Ctrl+Space", self._play_pause),
+            ("Ctrl+Left", lambda: self._skip(-15)),
+            ("Ctrl+Right", lambda: self._skip(30)),
+            ("Ctrl+K", self._focus_search),
+            ("Ctrl+Shift+Q", self._queue_selected),
+            ("Ctrl+Q", self.close),
+        ):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.activated.connect(handler)
+
+    def _focus_search(self):
+        page = self.pages.currentWidget()
+        if hasattr(page, "header"):
+            page.header.search.setFocus()
+            page.header.search.selectAll()
+
+    def _queue_selected(self):
+        page = self.pages.currentWidget()
+        if self.library is None or not hasattr(page, "view"):
+            return
+        episode_ids = []
+        for index in page.view.selectionModel().selectedIndexes():
+            item = index.data(Qt.ItemDataRole.UserRole + 1)
+            if isinstance(item, UiEpisode) and item.episode_id:
+                episode_ids.append(item.episode_id)
+        for episode_id in episode_ids:
+            self.library.enqueue(episode_id)
+        if episode_ids:
+            self._reload_library()
+            self.episode_page.banner.show_state(
+                "loaded", f"Added {len(episode_ids)} episode(s) to Up Next."
+            )
 
     def _wire_library(self):
         if self.library is None:
@@ -182,17 +223,26 @@ class MainWindow(QMainWindow):
         self.player.set_capabilities(self.playback.engine.capabilities)
         self.player.set_snapshot(self.playback.snapshot)
 
+    def _wire_downloads(self):
+        if self.downloads is None:
+            return
+        self.downloads.subscribe(lambda event: self._bridge.download_event.emit(event))
+        self._reload_downloads()
+
     def _reload_library(self):
         if self.library is None:
             return
         shows = [self._ui_podcast(show) for show in self.library.shows()]
         episodes = [self._ui_episode(episode) for episode in self.library.episodes()]
         queued = [self._ui_episode(episode) for episode in self.library.queue()]
+        history = [self._ui_episode(episode) for episode in self.library.history()]
         self.podcast_page.set_items(shows)
         self.episode_page.set_items(episodes)
         self.home_page.set_items(episodes)
         self.playlist_page.set_items(queued)
         self.context.set_queue(queued)
+        self.history_page.set_items(history)
+        self._reload_downloads()
 
         if shows:
             self.podcast_page.banner.clear()
@@ -245,6 +295,81 @@ class MainWindow(QMainWindow):
         self.library.enqueue(episode_id)
         self._reload_library()
         self.episode_page.banner.show_state("loaded", "Episode added to Up Next.")
+
+    def _queue_reordered(self, episode_ids: list[int]):
+        if self.library is not None:
+            self.library.reorder_queue(episode_ids)
+            self.context.set_queue(
+                [self._ui_episode(episode) for episode in self.library.queue()]
+            )
+
+    def _download_episode(self, episode_id: int):
+        if self.downloads is None or self.jobs is None or not episode_id:
+            return
+        future = self.jobs.submit(self.downloads.download, episode_id)
+        self._pending_jobs.add(future)
+
+        def finished(completed):
+            self._pending_jobs.discard(completed)
+            try:
+                result = completed.result()
+            except Exception as exc:
+                result = JobResult(JobStatus.ERROR, message=str(exc))
+            self._bridge.completed.emit(("download", episode_id, result))
+
+        future.add_done_callback(finished)
+        self.navigation.select(4)
+        self.download_page.banner.show_state("loading", "Download queued…")
+
+    def _cancel_downloads(self):
+        if self.downloads is None:
+            return
+        cancelled = sum(
+            1 for record in self.downloads.records() if self.downloads.cancel(record.episode_id)
+        )
+        self.download_page.banner.show_state(
+            "partial", f"Cancellation requested for {cancelled} download(s)."
+        )
+
+    def _download_progress(self, _event):
+        self._reload_downloads()
+
+    def _reload_downloads(self):
+        if self.downloads is None or self.library is None:
+            return
+        items = []
+        for record in self.downloads.records():
+            episode = self.library.episode(record.episode_id)
+            if episode is None:
+                continue
+            item = self._ui_episode(episode)
+            if record.state.value == "complete":
+                state = "Downloaded"
+            elif record.state.value == "downloading" and record.bytes_total:
+                state = f"{int(100 * record.bytes_done / record.bytes_total)}%"
+            else:
+                state = record.state.value.title()
+            items.append(
+                UiEpisode(
+                    title=item.title,
+                    show=item.show,
+                    published=item.published,
+                    duration=item.duration,
+                    progress=(record.bytes_done / record.bytes_total)
+                    if record.bytes_total
+                    else 0.0,
+                    state=state,
+                    accent=item.accent,
+                    episode_id=item.episode_id,
+                    show_id=item.show_id,
+                    description=record.error_message or item.description,
+                )
+            )
+        self.download_page.set_items(items)
+        if not items:
+            self.download_page.banner.show_state(
+                "empty", "Downloaded and active episodes will appear here."
+            )
 
     def _play_pause(self):
         if self.playback is not None:
@@ -344,6 +469,15 @@ class MainWindow(QMainWindow):
         kind, _identifier, result = payload
         if kind == "directory":
             self._directory_finished(result)
+            return
+        if kind == "download":
+            self._reload_library()
+            if result.status == JobStatus.OK:
+                self.download_page.banner.clear()
+            else:
+                self.download_page.banner.show_state(
+                    "error", result.message or "Download failed."
+                )
             return
         self._reload_library()
         if result.status != JobStatus.OK:

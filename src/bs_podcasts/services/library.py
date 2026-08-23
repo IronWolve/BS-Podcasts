@@ -26,6 +26,9 @@ class LibraryService:
     def episodes(self, show_id: int | None = None, limit: int = 500):
         return self.repository.list_episodes(show_id, limit)
 
+    def history(self, limit: int = 200):
+        return self.repository.list_history(limit)
+
     def import_feed(self, show_id: int, feed: FeedData):
         return self.repository.import_feed(show_id, feed)
 
@@ -46,6 +49,9 @@ class LibraryService:
 
     def dequeue(self, episode_id: int):
         self.repository.dequeue(episode_id)
+
+    def reorder_queue(self, episode_ids: list[int]):
+        self.repository.reorder_queue(episode_ids)
 
     def search(self, query: str, limit: int = 100):
         query = query.strip()

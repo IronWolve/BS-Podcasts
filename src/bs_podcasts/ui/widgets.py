@@ -216,6 +216,7 @@ class ContextPanel(QFrame):
     subscribe_requested = Signal(str)
     play_episode_requested = Signal(int)
     queue_episode_requested = Signal(int)
+    download_episode_requested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -272,7 +273,11 @@ class ContextPanel(QFrame):
         self.secondary = QPushButton("Up Next")
         self.secondary.setObjectName("quietButton")
         self.secondary.clicked.connect(self._secondary_clicked)
+        self.download = QPushButton("Download")
+        self.download.setObjectName("quietButton")
+        self.download.clicked.connect(self._download_clicked)
         actions.addWidget(self.primary)
+        actions.addWidget(self.download)
         actions.addWidget(self.secondary)
         layout.addLayout(actions)
 
@@ -321,6 +326,7 @@ class ContextPanel(QFrame):
         self._feed_url = podcast.feed_url if podcast.show_id == 0 else ""
         self._episode_id = 0
         self.primary.setText("Subscribe" if self._feed_url else "Play latest")
+        self.download.setEnabled(False)
         if self._feed_url:
             self.body.setText(
                 "Directory result. Subscribe to add this podcast and refresh "
@@ -344,6 +350,7 @@ class ContextPanel(QFrame):
         self._feed_url = ""
         self._episode_id = episode.episode_id
         self.primary.setText("Play")
+        self.download.setEnabled(bool(self._episode_id))
 
     def _primary_clicked(self):
         if self._feed_url:
@@ -354,6 +361,10 @@ class ContextPanel(QFrame):
     def _secondary_clicked(self):
         if self._episode_id:
             self.queue_episode_requested.emit(self._episode_id)
+
+    def _download_clicked(self):
+        if self._episode_id:
+            self.download_episode_requested.emit(self._episode_id)
 
 
 class PlayerBar(QFrame):

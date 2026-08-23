@@ -65,6 +65,17 @@ class LibraryRepository:
             ).fetchone()
         return self._episode(row) if row else None
 
+    def list_history(self, limit: int = 200) -> list[Episode]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """SELECT e.*, s.title AS show_title FROM episodes e
+                   JOIN shows s ON s.id=e.show_id
+                   WHERE e.last_played IS NOT NULL
+                   ORDER BY e.last_played DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [self._episode(row) for row in rows]
+
     def import_feed(self, show_id: int, feed: FeedData) -> int:
         now = time.time()
         with self.database.connect() as connection:
@@ -206,6 +217,20 @@ class LibraryRepository:
             for position, row in enumerate(rows, start=1):
                 connection.execute(
                     "UPDATE queue SET position=? WHERE id=?", (position, row["id"])
+                )
+
+    def reorder_queue(self, episode_ids: list[int]):
+        with self.database.connect() as connection:
+            existing = {
+                row["episode_id"]
+                for row in connection.execute("SELECT episode_id FROM queue").fetchall()
+            }
+            requested = [episode_id for episode_id in episode_ids if episode_id in existing]
+            requested.extend(sorted(existing - set(requested)))
+            for position, episode_id in enumerate(requested, start=1):
+                connection.execute(
+                    "UPDATE queue SET position=? WHERE episode_id=?",
+                    (position, episode_id),
                 )
 
     def update_position(self, episode_id: int, seconds: float):

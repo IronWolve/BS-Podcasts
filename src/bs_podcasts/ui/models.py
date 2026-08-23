@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, QSize, Qt
+from PySide6.QtCore import QAbstractListModel, QMimeData, QModelIndex, QSize, Signal, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle
 
@@ -88,6 +88,8 @@ class PodcastModel(QAbstractListModel):
 
 
 class EpisodeModel(QAbstractListModel):
+    order_changed = Signal(list)
+
     def __init__(self, items=EPISODES, parent=None):
         super().__init__(parent)
         self._items = list(items)
@@ -109,6 +111,53 @@ class EpisodeModel(QAbstractListModel):
         if role == ItemRoles.ITEM:
             return item
         return None
+
+    def flags(self, index):
+        base = super().flags(index)
+        if index.isValid():
+            return base | Qt.ItemFlag.ItemIsDragEnabled | Qt.ItemFlag.ItemIsDropEnabled
+        return base | Qt.ItemFlag.ItemIsDropEnabled
+
+    def supportedDropActions(self):
+        return Qt.DropAction.MoveAction
+
+    def mimeTypes(self):
+        return ["application/x-bs-podcasts-episode-row"]
+
+    def mimeData(self, indexes):
+        data = QMimeData()
+        rows = sorted({index.row() for index in indexes if index.isValid()})
+        if rows:
+            data.setData("application/x-bs-podcasts-episode-row", str(rows[0]).encode("ascii"))
+        return data
+
+    def dropMimeData(self, data, action, row, column, parent):
+        if action != Qt.DropAction.MoveAction:
+            return False
+        try:
+            source = int(bytes(data.data("application/x-bs-podcasts-episode-row")))
+        except (TypeError, ValueError):
+            return False
+        destination = row if row >= 0 else parent.row()
+        if destination < 0:
+            destination = len(self._items)
+        return self.moveRows(QModelIndex(), source, 1, QModelIndex(), destination)
+
+    def moveRows(self, source_parent, source_row, count, destination_parent, destination_child):
+        if count != 1 or not 0 <= source_row < len(self._items):
+            return False
+        if destination_child == source_row or destination_child == source_row + 1:
+            return False
+        destination_child = max(0, min(destination_child, len(self._items)))
+        self.beginMoveRows(
+            source_parent, source_row, source_row, destination_parent, destination_child
+        )
+        item = self._items.pop(source_row)
+        insertion = destination_child - 1 if source_row < destination_child else destination_child
+        self._items.insert(insertion, item)
+        self.endMoveRows()
+        self.order_changed.emit([episode.episode_id for episode in self._items])
+        return True
 
 
 def _initials(text: str) -> str:
