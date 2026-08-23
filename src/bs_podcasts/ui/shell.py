@@ -63,6 +63,7 @@ class MainWindow(QMainWindow):
         self._discover_limit = 30
         self._discover_loading = False
         self._discover_exhausted = False
+        self._discover_result_count = 0
         self._bridge = _JobBridge(self)
         self._bridge.completed.connect(self._refresh_finished)
         self._bridge.playback_event.connect(self._playback_changed)
@@ -771,6 +772,7 @@ class MainWindow(QMainWindow):
         self._discover_value = value
         self._discover_limit = 30
         self._discover_exhausted = False
+        self._discover_result_count = 0
         self._submit_directory(operation, value, self._discover_limit)
 
     def _load_more_discover(self):
@@ -900,7 +902,6 @@ class MainWindow(QMainWindow):
             )
             return
         candidates = result.value or []
-        self._discover_exhausted = len(candidates) < requested_limit
         podcasts = []
         seen_feeds = set()
         subscribed = {
@@ -929,6 +930,11 @@ class MainWindow(QMainWindow):
                     health=saved.health.value if saved else "unknown",
                 )
             )
+        result_count = len(podcasts)
+        self._discover_exhausted = (
+            requested_limit >= 200 or result_count <= self._discover_result_count
+        )
+        self._discover_result_count = result_count
         self.discover_page.set_items(
             podcasts, preserve_scroll=requested_limit > 30
         )
