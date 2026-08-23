@@ -24,6 +24,7 @@ class Podcast:
     display_meta: str = ""
     directory_result: bool = False
     subscribed: bool = False
+    rank: int = 0
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,12 @@ class PodcastModel(QAbstractListModel):
         item = self._items[index.row()]
         if role == Qt.ItemDataRole.DisplayRole:
             return item.title
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return "\n".join(
+                value
+                for value in (item.title, item.author, item.display_meta)
+                if value
+            )
         if role == ItemRoles.ITEM:
             return item
         return None
@@ -113,6 +120,12 @@ class EpisodeModel(QAbstractListModel):
         item = self._items[index.row()]
         if role == Qt.ItemDataRole.DisplayRole:
             return item.title
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return "\n".join(
+                value
+                for value in (item.title, item.show, item.description)
+                if value
+            )
         if role == ItemRoles.ITEM:
             return item
         return None
@@ -220,7 +233,23 @@ class PodcastDelegate(QStyledItemDelegate):
         font.setWeight(QFont.Weight.Normal)
         painter.setFont(font)
         meta = item.display_meta or f"{item.episode_count} episodes"
+        meta = painter.fontMetrics().elidedText(
+            meta, Qt.TextElideMode.ElideRight, meta_rect.width()
+        )
         painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, meta)
+
+        if item.rank:
+            rank_badge = art.adjusted(8, 8, -(art.width() - 42), -(art.height() - 34))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(COLORS["accent"]))
+            painter.drawRoundedRect(rank_badge, 9, 9)
+            painter.setPen(QColor(COLORS["canvas"]))
+            font.setPointSize(8)
+            font.setWeight(QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.drawText(
+                rank_badge, Qt.AlignmentFlag.AlignCenter, f"#{item.rank}"
+            )
 
         if item.new_count:
             badge = card.adjusted(card.width() - 42, 16, -16, -(card.height() - 42))

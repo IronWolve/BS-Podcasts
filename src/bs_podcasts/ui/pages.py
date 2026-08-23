@@ -84,6 +84,9 @@ class PodcastGridPage(BasePage):
             self.chart = DiscoverModeTabs()
             self.chart.setObjectName("discoverModes")
             self.chart.setAccessibleName("Discover view")
+            self.chart.setExpanding(True)
+            self.chart.setUsesScrollButtons(True)
+            self.chart.setElideMode(Qt.TextElideMode.ElideRight)
             for label, value in (
                 ("For You", "explore"),
                 ("Top Shows", "top_shows"),
@@ -93,9 +96,21 @@ class PodcastGridPage(BasePage):
             ):
                 index = self.chart.addTab(label)
                 self.chart.setTabData(index, value)
+                self.chart.setTabToolTip(
+                    index,
+                    {
+                        "explore": "Recommendations based on your library",
+                        "top_shows": "Apple Top Shows",
+                        "trending": "Apple Trending Episodes",
+                        "subscriber_shows": "Apple Top Subscriber Shows",
+                        "top_series": "Apple Top Series",
+                    }[value],
+                )
             primary_filters.addWidget(self.chart, 1)
             filter_layout.addLayout(primary_filters)
-            secondary_filters = QHBoxLayout()
+            self.secondary_filters_widget = QWidget()
+            secondary_filters = QHBoxLayout(self.secondary_filters_widget)
+            secondary_filters.setContentsMargins(0, 0, 0, 0)
             secondary_filters.setSpacing(10)
             secondary_filters.addStretch(1)
             self.category = QComboBox()
@@ -110,11 +125,12 @@ class PodcastGridPage(BasePage):
             self.topic.setEnabled(False)
             self.topic.addItem("Choose a category first")
             secondary_filters.addWidget(self.topic)
-            filter_layout.addLayout(secondary_filters)
+            filter_layout.addWidget(self.secondary_filters_widget)
             self.root.addWidget(filters)
             self.result_summary = QLabel("Choose For You, search, or select a category.")
             self.result_summary.setObjectName("meta")
             self.root.addWidget(self.result_summary)
+            self.header.search.setPlaceholderText("Search podcasts or topics")
             if self.header.action:
                 self.header.action.setText("↻")
                 self.header.action.setObjectName("iconButton")
@@ -123,6 +139,7 @@ class PodcastGridPage(BasePage):
                 self.header.action.setFixedSize(40, 38)
         else:
             self.chart = None
+            self.secondary_filters_widget = None
             self.category = None
             self.topic = None
             self.result_summary = None
@@ -251,6 +268,15 @@ class PodcastGridPage(BasePage):
     def set_discover_summary(self, text: str):
         if self.result_summary is not None:
             self.result_summary.setText(text)
+
+    def set_discover_filter_visibility(
+        self, show_category: bool, show_topic: bool
+    ):
+        if self.secondary_filters_widget is None:
+            return
+        self.secondary_filters_widget.setVisible(show_category or show_topic)
+        self.category.setVisible(show_category)
+        self.topic.setVisible(show_topic)
 
 
 class EpisodeListPage(BasePage):

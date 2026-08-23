@@ -889,12 +889,14 @@ class MainWindow(QMainWindow):
         chart_type = self.discover_page.chart.currentData()
         if chart_type == "explore":
             self._set_explore_controls(True)
-            self.discover_page.header.action.setText("Refresh For You")
+            self.discover_page.header.action.setToolTip("Refresh For You")
+            self.discover_page.header.action.setAccessibleName("Refresh For You")
             self._show_for_you()
             return
         category_enabled = chart_type in {"top_shows", "trending"}
         self._set_explore_controls(False, category_enabled)
-        self.discover_page.header.action.setText("Refresh Chart")
+        self.discover_page.header.action.setToolTip("Refresh current Apple chart")
+        self.discover_page.header.action.setAccessibleName("Refresh current Apple chart")
         category = (
             self.discover_page.category.currentText()
             if category_enabled
@@ -909,6 +911,10 @@ class MainWindow(QMainWindow):
         self.discover_page.category.setEnabled(category_enabled)
         self.discover_page.topic.setEnabled(
             explore and bool(self.discover_page.category.currentIndex())
+        )
+        self.discover_page.set_discover_filter_visibility(
+            show_category=explore or category_enabled,
+            show_topic=explore,
         )
 
     def _load_chart(self, chart_type: str, category: str):
@@ -1045,8 +1051,6 @@ class MainWindow(QMainWindow):
             saved = subscribed.get(candidate.feed_url)
             is_chart = bool(candidate.chart_type)
             meta_parts = []
-            if candidate.rank:
-                meta_parts.append(f"#{candidate.rank}")
             meta_parts.extend(
                 value
                 for value in (candidate.author, candidate.genre)
@@ -1069,6 +1073,7 @@ class MainWindow(QMainWindow):
                     display_meta=" · ".join(meta_parts),
                     directory_result=True,
                     subscribed=bool(saved),
+                    rank=candidate.rank,
                 )
             )
         result_count = len(podcasts)
