@@ -112,6 +112,17 @@ class PlaybackService:
             elif self.snapshot.episode_id is not None:
                 self.engine.play()
 
+    def next(self):
+        self._guard()
+        if self.snapshot.episode_id is not None:
+            self.repository.dequeue(self.snapshot.episode_id)
+        queue = self.repository.list_queue()
+        if queue:
+            self.load_episode(queue[0].id, autoplay=True)
+
+    def previous(self):
+        self.seek(0.0)
+
     def seek(self, seconds: float):
         self._guard()
         self._ignore_metric_once = True

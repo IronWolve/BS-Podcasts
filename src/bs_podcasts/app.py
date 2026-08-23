@@ -14,7 +14,7 @@ from .directories import DirectoryService, ItunesDirectory
 from .downloads import DownloadService
 from .feeds import FeedFetcher, RefreshService
 from .jobs import JobRunner
-from .integrations import TrayController
+from .integrations import MprisController, TrayController
 from .logging_setup import configure_logging
 from .playback import ExternalPlayerEngine, MpvEngine, PlaybackService
 from .services import LibraryService, ListeningService
@@ -70,6 +70,8 @@ def main() -> int:
         listening=listening,
     )
     window.tray = TrayController(window, playback)
+    window.mpris = MprisController(window, playback)
+    app.aboutToQuit.connect(window.mpris.shutdown)
     app.aboutToQuit.connect(jobs.shutdown)
     window.show()
     return app.exec()

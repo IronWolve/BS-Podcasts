@@ -3,7 +3,6 @@
 from datetime import datetime
 
 from PySide6.QtCore import QObject, Signal, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -20,6 +19,7 @@ from ..jobs import JobResult, JobStatus
 from .dialogs import AddPodcastDialog
 from .models import EPISODES, Episode as UiEpisode, Podcast as UiPodcast
 from .pages import EmptyPage, EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
+from .shortcuts import ShortcutManager
 from .widgets import ContextPanel, NavigationRail, PlayerBar
 
 
@@ -171,22 +171,25 @@ class MainWindow(QMainWindow):
         self.playlist_page.order_changed.connect(self._queue_reordered)
 
     def _build_shortcuts(self):
+        self.shortcuts = ShortcutManager(self, self.library)
         for index in range(self.page_count):
-            shortcut = QShortcut(QKeySequence(f"Ctrl+{index + 1}"), self)
-            shortcut.activated.connect(lambda i=index: self.navigation.select(i))
-        for sequence, handler in (
-            ("Ctrl+Space", self._play_pause),
-            ("Ctrl+Left", lambda: self._skip(-15)),
-            ("Ctrl+Right", lambda: self._skip(30)),
-            ("Ctrl+K", self._focus_search),
-            ("Ctrl+Shift+Q", self._queue_selected),
-            ("Ctrl+B", self._bookmark_current),
-            ("Ctrl+T", self._cycle_trim),
-            ("Ctrl+Shift+A", self._cycle_ab),
-            ("Ctrl+Q", self.close),
+            self.shortcuts.add(
+                f"page_{index + 1}",
+                f"Ctrl+{index + 1}",
+                lambda i=index: self.navigation.select(i),
+            )
+        for name, sequence, handler in (
+            ("play_pause", "Ctrl+Space", self._play_pause),
+            ("skip_back", "Ctrl+Left", lambda: self._skip(-15)),
+            ("skip_forward", "Ctrl+Right", lambda: self._skip(30)),
+            ("search", "Ctrl+K", self._focus_search),
+            ("queue_selected", "Ctrl+Shift+Q", self._queue_selected),
+            ("bookmark", "Ctrl+B", self._bookmark_current),
+            ("silence_trim", "Ctrl+T", self._cycle_trim),
+            ("ab_repeat", "Ctrl+Shift+A", self._cycle_ab),
+            ("quit", "Ctrl+Q", self.close),
         ):
-            shortcut = QShortcut(QKeySequence(sequence), self)
-            shortcut.activated.connect(handler)
+            self.shortcuts.add(name, sequence, handler)
 
     def _focus_search(self):
         page = self.pages.currentWidget()
