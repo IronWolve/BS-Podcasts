@@ -4,8 +4,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
+from ..assets import icon_path
+
 
 def _tray_icon() -> QIcon:
+    packaged = QIcon(str(icon_path(64)))
+    if not packaged.isNull():
+        return packaged
     pixmap = QPixmap(32, 32)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
