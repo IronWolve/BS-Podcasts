@@ -536,9 +536,15 @@ class Toast(QFrame):
         self._callback = None
         self.hide()
 
+    MAX_QUEUE = 3
+
     def show_message(self, message: str, tone: str = "info", action: str = "", callback=None, duration_ms: int = 3200):
         if self.isVisible():
+            # Never let a burst stack up: drop duplicates, keep only the newest few.
+            if any(queued[0] == message for queued in self._queue) or self.text.text() == message:
+                return
             self._queue.append((message, tone, action, callback, duration_ms))
+            del self._queue[:-self.MAX_QUEUE]
             return
         glyph = {"success": "check", "error": "warning", "info": "info", "loading": "refresh"}.get(tone, "info")
         color = {"success": "success", "error": "danger", "loading": "blue"}.get(tone, "muted")

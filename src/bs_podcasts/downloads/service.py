@@ -121,6 +121,9 @@ class DownloadService:
                 stream=True,
             )
             response.raise_for_status()
+            content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            if content_type.startswith("text/html") or content_type in {"text/plain", "application/json"}:
+                raise DownloadError(f"Server returned {content_type or 'a non-media response'} instead of audio.")
             append = existing > 0 and response.status_code == 206
             if existing and not append:
                 existing = 0
