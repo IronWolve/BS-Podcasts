@@ -4,7 +4,10 @@ from requests import Session
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-USER_AGENT = "BS-Podcasts/0.1 (+desktop podcast client)"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_retries: bool = True) -> Session:

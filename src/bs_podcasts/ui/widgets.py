@@ -1399,6 +1399,8 @@ class ContextPanel(QFrame):
             return
         if episode is not None:
             e_title, e_date, e_description = episode
+            if e_title:
+                self.title.setText(e_title)
             self.meta.setText(f"Episode of {author}  ·  {e_date}  ·  {episode_count} episodes in feed")
             self.latest_card.setVisible(False)
             body = e_description or description or "No show notes provided for this episode."

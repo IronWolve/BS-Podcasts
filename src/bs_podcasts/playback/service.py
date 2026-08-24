@@ -447,6 +447,7 @@ class PlaybackService:
             position=episode.position_seconds,
             duration=float(episode.duration_seconds),
             speed=show.playback_speed if show else 1.0,
+            volume=self.snapshot.volume,
             trim_level=show.trim_level if show else "off",
             silence_saved=self.listening.silence_saved() if self.listening else 0.0,
             artwork_path=episode.artwork_path,

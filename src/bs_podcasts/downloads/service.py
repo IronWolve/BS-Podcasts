@@ -20,6 +20,10 @@ class DownloadError(RuntimeError):
     pass
 
 
+class _TruncatedDownload(DownloadError):
+    """The transfer ended before the expected Content-Length; safe to retry."""
+
+
 @dataclass(frozen=True)
 class DownloadProgress:
     episode_id: int
@@ -78,10 +82,10 @@ class DownloadService:
                 time.sleep(delay)
             try:
                 return self._download_once(episode_id)
-            except DownloadError as exc:
+            except _TruncatedDownload as exc:
                 last_error = exc
-                if "expected size" not in str(exc):
-                    raise
+            except DownloadError:
+                raise
             except (OSError, requests.RequestException) as exc:
                 last_error = exc
             record = self.downloads.get(episode_id)
@@ -110,7 +114,7 @@ class DownloadService:
         with self._lock:
             self._cancellations[episode_id] = cancellation
 
-        headers = {"User-Agent": "BS-Podcasts/0.1"}
+        headers = {}
         if existing:
             headers["Range"] = f"bytes={existing}-"
         try:
@@ -160,7 +164,7 @@ class DownloadService:
                         self._emit(episode_id, DownloadState.DOWNLOADING, done, total)
                         last_report = done
             if total and done < total:
-                raise DownloadError("Download ended before the expected size.")
+                raise _TruncatedDownload("Download ended before the expected size.")
             os.replace(partial, target)
             size = target.stat().st_size
             self.downloads.complete(episode_id, str(target), size)

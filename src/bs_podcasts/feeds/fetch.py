@@ -6,11 +6,10 @@ from urllib.parse import urljoin
 
 import requests
 
-from ..net import make_session
+from ..net import USER_AGENT, make_session
 
 
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024
-USER_AGENT = "BS-Podcasts/0.1 (+desktop podcast client)"
 
 
 class FeedFetchError(RuntimeError):
