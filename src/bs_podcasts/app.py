@@ -29,7 +29,7 @@ from .services import LibraryService, ListeningService
 from .ui.shell import MainWindow
 from .ui.dialogs import StartupErrorDialog
 from .ui.icons import resolve_stylesheet
-from .ui.theme import app_font, apply_theme, resolve_theme, stylesheet
+from .ui.theme import app_font, apply_theme, load_fonts, resolve_theme, stylesheet
 
 
 def _install_excepthook():
@@ -53,6 +53,7 @@ def create_application(argv=None) -> QApplication:
     app.setOrganizationDomain(APP_ID)
     app.setStyle("Fusion")
     app.setWindowIcon(QIcon(str(icon_path(256))))
+    load_fonts()
     app.setFont(app_font())
     app.setStyleSheet(resolve_stylesheet(stylesheet()))
     QCoreApplication.setApplicationVersion(app_version())

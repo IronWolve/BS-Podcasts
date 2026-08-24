@@ -13,3 +13,11 @@ def icon_path(size: int = 256) -> Path:
 
 def logo_path() -> Path:
     return BRANDING_DIR / "bs-podcasts-logo.png"
+
+
+FONTS_DIR = Path(__file__).with_name("assets") / "fonts"
+
+
+def font_paths() -> list[Path]:
+    """Bundled Inter variable fonts (SIL OFL, see assets/fonts/OFL.txt)."""
+    return sorted(FONTS_DIR.glob("*.ttf")) if FONTS_DIR.is_dir() else []
