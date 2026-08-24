@@ -1396,9 +1396,14 @@ class ContextPanel(QFrame):
             self.download.setIcon(icons.icon("downloaded", COLORS["success"], 16, disabled=COLORS["success"]))
             self.download.setEnabled(True)
             self.download.setToolTip("Downloaded — open location or delete")
+        elif episode.state == "Downloading":
+            self.download.setText("Downloading…")
+            self.download.setIcon(icons.icon("pause", COLORS["text"], 16, disabled=COLORS["border"]))
+            self.download.setToolTip("Click to pause")
+            self.download.setEnabled(True)
         else:
             self.download.setToolTip("")
-            self.download.setText("Retry download" if episode.state == "Error" else "Download")
+            self.download.setText("Retry download" if episode.state == "Error" else "Resume download" if episode.state == "Paused" else "Download")
             self.download.setIcon(icons.icon("download", COLORS["text"], 16, disabled=COLORS["border"]))
             self.download.setEnabled(bool(self._episode_id))
 
@@ -1454,7 +1459,7 @@ class ContextPanel(QFrame):
     def _download_clicked(self):
         if not self._episode_id:
             return
-        if self.download.text() == "Downloaded":
+        if self.download.text() in {"Downloaded", "Downloading…"}:
             self.download_menu_requested.emit(self._episode_id, self.download.mapToGlobal(self.download.rect().bottomLeft()))
         else:
             self.download_episode_requested.emit(self._episode_id)

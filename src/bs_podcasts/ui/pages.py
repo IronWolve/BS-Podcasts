@@ -830,6 +830,7 @@ class SettingsPage(BasePage):
     import_opml_requested = Signal()
     export_opml_requested = Signal()
     cleanup_played_requested = Signal()
+    change_download_folder_requested = Signal()
 
     FIELD_WIDTH = 180
 
@@ -958,6 +959,13 @@ class SettingsPage(BasePage):
         refresh_usage.setIcon(icons.icon("refresh", COLORS["text"], 16))
         refresh_usage.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_usage.clicked.connect(self.refresh_storage_requested)
+        change_folder = QPushButton("Change downloads folder…")
+        change_folder.setObjectName("quietButton")
+        change_folder.setIcon(icons.icon("folder", COLORS["text"], 16))
+        change_folder.setCursor(Qt.CursorShape.PointingHandCursor)
+        change_folder.setToolTip("Existing downloads stay where they are; new ones use the new folder")
+        change_folder.clicked.connect(self.change_download_folder_requested)
+        storage_actions.addWidget(change_folder)
         cleanup = QPushButton("Delete played downloads…")
         cleanup.setObjectName("dangerButton")
         cleanup.setCursor(Qt.CursorShape.PointingHandCursor)
