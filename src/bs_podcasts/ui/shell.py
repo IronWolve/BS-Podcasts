@@ -132,7 +132,7 @@ class MainWindow(QMainWindow):
         self.context = ContextPanel()
         self.context.closed.connect(self._hide_context)
         self.context.subscribe_requested.connect(self._subscribe_url)
-        self.context.play_episode_requested.connect(self._play_episode)
+        self.context.play_episode_requested.connect(self._play_or_toggle)
         self.context.queue_episode_requested.connect(self._queue_episode)
         self.context.dequeue_requested.connect(self._remove_from_queue)
         self.context.download_episode_requested.connect(self._download_episode)
@@ -237,7 +237,7 @@ class MainWindow(QMainWindow):
             page.header.back_requested.connect(self.navigate_back)
             self.pages.addWidget(page)
         for page in (self.home_page, self.playlist_page, self.history_page, self.download_page):
-            page.play_requested.connect(lambda item: self._play_episode(item.episode_id))
+            page.play_requested.connect(lambda item: self._play_or_toggle(item.episode_id))
         self.episode_page.play_requested.connect(self._play_episode_item)
         self.bookmark_page.play_requested.connect(self._play_bookmark)
         for page in (self.playlist_page, self.history_page):
@@ -978,7 +978,7 @@ class MainWindow(QMainWindow):
             return
         episodes = self.library.episodes(show_id=show_id, limit=1)
         if episodes:
-            self._play_episode(episodes[0].id)
+            self._play_or_toggle(episodes[0].id)
         else:
             self.podcast_page.banner.show_state("partial", "This podcast has no playable episodes yet.")
 
@@ -1337,9 +1337,18 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._notify(f"Couldn’t play this episode: {exc}", "error")
 
+    def _play_or_toggle(self, episode_id: int):
+        """Every play control routes here: the playing episode toggles, others load."""
+        if not episode_id:
+            return
+        if self.playback is not None and episode_id == self._playing_episode_id and self._playing_state in {"playing", "paused", "loading"}:
+            self._play_pause()
+            return
+        self._play_episode(episode_id)
+
     def _play_episode_item(self, item):
         if item.episode_id:
-            self._play_episode(item.episode_id)
+            self._play_or_toggle(item.episode_id)
         elif item.state == "Preview" and self._preview_episodes_url:
             url = self._preview_episodes_url
             self._notify("Subscribe to play this episode", "info", "Subscribe", lambda: self._subscribe_url(url))
@@ -1522,6 +1531,11 @@ class MainWindow(QMainWindow):
 
     def _apply_playing_marker(self):
         active = self._playing_state == "playing"
+        self.context.set_playing(self._playing_episode_id, active, self._playing_state == "loading")
+        if self.episode_page.hero.isVisible() and self._hero_show_id and self.library is not None:
+            latest = self.library.episodes(show_id=self._hero_show_id, limit=1)
+            playing_latest = bool(latest) and latest[0].id == self._playing_episode_id and self._playing_state in {"playing", "paused", "loading"}
+            self.episode_page.hero.set_playing(playing_latest, active)
         for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.history_page, self.bookmark_page):
             page.set_playing(self._playing_episode_id, active)
         delegate = self.context.queue_view.itemDelegate()
@@ -2194,6 +2208,7 @@ class MainWindow(QMainWindow):
                 self._preview_feed(item.feed_url)
         elif isinstance(item, UiEpisode):
             self.context.show_episode(item)
+            self.context.set_playing(self._playing_episode_id, self._playing_state == "playing", self._playing_state == "loading")
             self._load_listening_details(item.episode_id)
             if item.episode_id and self.library is not None:
                 stored = self.library.episode(item.episode_id)

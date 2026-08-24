@@ -783,6 +783,16 @@ class HeroCard(QFrame):
         )
         self.show()
 
+    def set_playing(self, playing_latest: bool, active: bool):
+        if self._subscribe_mode:
+            return
+        if playing_latest:
+            self.primary.setText("Pause latest" if active else "Resume latest")
+            self.primary.setIcon(icons.icon("pause" if active else "play", COLORS["on_accent"], 16))
+        else:
+            self.primary.setText("Play latest")
+            self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 16))
+
     def _primary(self):
         if self._subscribe_mode:
             self.subscribe_requested.emit()
@@ -1433,6 +1443,8 @@ class ContextPanel(QFrame):
         self._show_id = episode.show_id
         for index in range(1, self.tabs.count()):
             self.tabs.setTabVisible(index, True)
+        self._episode_progress = episode.progress
+        self._playing_state = ("", False)
         self.primary.setText("Resume" if 0 < episode.progress < 1 else "Play")
         self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 18))
         self.primary.setEnabled(True)
@@ -1489,6 +1501,27 @@ class ContextPanel(QFrame):
         # Keep the artwork proportional to the space that remains for text and tabs.
         reserved = 520 if self.latest_card.isVisible() else 440
         self.art.set_side(min(self.width() - 2 * SPACE["lg"] - 12, self.height() - reserved))
+
+    def set_playing(self, episode_id: int, active: bool, loading: bool = False):
+        """Make the primary button a Pause/Resume toggle when this episode is playing."""
+        if not self._episode_id or self._feed_url:
+            return
+        if episode_id == self._episode_id and (active or loading or getattr(self, "_was_playing", False)):
+            self._was_playing = True
+            if loading:
+                self.primary.setText("Opening…")
+                self.primary.setIcon(icons.icon("refresh", COLORS["on_accent"], 18))
+            elif active:
+                self.primary.setText("Pause")
+                self.primary.setIcon(icons.icon("pause", COLORS["on_accent"], 18))
+            else:
+                self.primary.setText("Resume")
+                self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 18))
+        else:
+            self._was_playing = False
+            progress = getattr(self, "_episode_progress", 0.0)
+            self.primary.setText("Resume" if 0 < progress < 1 else "Play")
+            self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 18))
 
     def _primary_clicked(self):
         if self._feed_url:
