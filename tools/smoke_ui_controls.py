@@ -103,7 +103,18 @@ def main() -> int:
         window.show()
         app.processEvents()
 
-        require(window.navigation.width() == 224, "navigation collapsed too early")
+        require(window.navigation.width() == 72, "medium layout should use the compact rail")
+        require(window.context.isVisible(), "medium layout should keep the details pane")
+        window.resize(1440, 900)
+        app.processEvents()
+        require(window.navigation.width() == 224, "wide layout should expand the rail")
+        window.resize(1000, 700)
+        app.processEvents()
+        require(window.player.back.text() == "15", "player skip label ignores settings")
+        window.settings_page.skip_back.setValue(20)
+        require(window.player.back.text() == "20", "player skip label did not follow the setting")
+        require(library.setting("playback.skip_back") == "20", "skip setting not persisted")
+        window.settings_page.skip_back.setValue(15)
         require(window.discover_page.model.rowCount() == 0, "Discover contains demo rows")
         require(
             window.home_page.summary_buttons[0].text().startswith("0\n"),
@@ -148,9 +159,16 @@ def main() -> int:
             MouseNavigationEvent(Qt.MouseButton.ForwardButton),
         )
         require(window.pages.currentIndex() == 2, "mouse Forward did not navigate")
+        window.episode_page.view.setCurrentIndex(window.episode_page.model.index(1, 0))
+        kept = window.episode_page.view.currentIndex().data(257).episode_id
+        window._reload_library()
+        require(
+            window.episode_page.view.currentIndex().data(257).episode_id == kept,
+            "reload lost the episode selection",
+        )
 
         window.navigation.select(5)
-        window._show_for_you()
+        require(window._discover_loading or window.discover_page.model.rowCount() == 30, "Discover did not auto-load For You")
         while window._discover_loading:
             app.processEvents()
         require(window.discover_page.model.rowCount() == 30, "For You did not load")

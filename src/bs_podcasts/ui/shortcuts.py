@@ -39,6 +39,15 @@ class ShortcutManager:
         if self.library:
             self.library.set_setting(f"shortcut.{name}", normalized)
 
+    def reset_all(self):
+        for name, (shortcut, default) in self._shortcuts.items():
+            shortcut.setKey(QKeySequence(default))
+            if self.library:
+                self.library.set_setting(f"shortcut.{name}", default)
+
+    def default(self, name: str) -> str:
+        return self._shortcuts[name][1]
+
     def bindings(self) -> dict[str, str]:
         return {
             name: shortcut.key().toString()

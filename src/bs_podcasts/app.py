@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from .artwork import ArtworkCache
 from .assets import icon_path
-from .config import APP_ID, APP_NAME, AppSettings
+from .config import APP_ID, APP_NAME, AppSettings, app_version
 from .config import data_dir as application_data_dir
 from .data import Database
 from .data.repositories import DownloadRepository, LibraryRepository, ListeningRepository
@@ -23,7 +23,8 @@ from .playback import ExternalPlayerEngine, MpvEngine, PlaybackService
 from .services import LibraryService, ListeningService
 from .ui.shell import MainWindow
 from .ui.dialogs import StartupErrorDialog
-from .ui.theme import stylesheet
+from .ui.icons import resolve_stylesheet
+from .ui.theme import app_font, apply_theme, resolve_theme, stylesheet
 
 
 def create_application(argv=None) -> QApplication:
@@ -35,8 +36,9 @@ def create_application(argv=None) -> QApplication:
     app.setOrganizationDomain(APP_ID)
     app.setStyle("Fusion")
     app.setWindowIcon(QIcon(str(icon_path(256))))
-    app.setStyleSheet(stylesheet())
-    QCoreApplication.setApplicationVersion("0.1.0")
+    app.setFont(app_font())
+    app.setStyleSheet(resolve_stylesheet(stylesheet()))
+    QCoreApplication.setApplicationVersion(app_version())
     return app
 
 
@@ -58,6 +60,8 @@ def main() -> int:
         return 1
     repository = LibraryRepository(database)
     library = LibraryService(repository)
+    apply_theme(resolve_theme(library.setting("ui.theme", "system")))
+    app.setStyleSheet(resolve_stylesheet(stylesheet()))
     jobs = JobRunner(max_workers=4)
     refresh = RefreshService(
         repository,
@@ -77,18 +81,40 @@ def main() -> int:
         DownloadRepository(database),
         root / "downloads",
     )
-    window = MainWindow(
-        library=library,
-        jobs=jobs,
-        refresh=refresh,
-        directory=directory,
-        playback=playback,
-        downloads=downloads,
-        listening=listening,
-    )
-    window.tray = TrayController(window, playback)
-    window.mpris = MprisController(window, playback)
-    app.aboutToQuit.connect(window.mpris.shutdown)
+    state = {"window": None}
+
+    def build_window():
+        window = MainWindow(
+            library=library,
+            jobs=jobs,
+            refresh=refresh,
+            directory=directory,
+            playback=playback,
+            downloads=downloads,
+            listening=listening,
+        )
+        window.tray = TrayController(window, playback)
+        window.mpris = MprisController(window, playback)
+        window.relaunch_requested.connect(lambda: rebuild_window())
+        state["window"] = window
+        window.show()
+        return window
+
+    def rebuild_window():
+        old = state["window"]
+        app.setStyleSheet(resolve_stylesheet(stylesheet()))
+        if old is not None:
+            if getattr(old, "tray", None) is not None and old.tray.tray is not None:
+                old.tray.tray.hide()
+            try:
+                old.mpris.shutdown()
+            except Exception:
+                pass
+            old.close()
+            old.deleteLater()
+        build_window()
+
+    build_window()
+    app.aboutToQuit.connect(lambda: state["window"].mpris.shutdown() if state["window"] is not None else None)
     app.aboutToQuit.connect(jobs.shutdown)
-    window.show()
     return app.exec()

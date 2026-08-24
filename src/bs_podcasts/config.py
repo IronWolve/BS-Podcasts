@@ -8,6 +8,17 @@ import os
 
 APP_NAME = "BS Podcasts"
 APP_ID = "bs-podcasts"
+APP_TAGLINE = "A wide, mobile-inspired desktop podcast app"
+GITHUB_URL = "https://github.com/example"
+
+
+def app_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("bs-podcasts")
+    except Exception:
+        return "0.1.0"
 
 
 def data_dir() -> Path:

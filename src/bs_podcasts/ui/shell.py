@@ -1,14 +1,22 @@
 """Wide responsive application shell."""
 
+from dataclasses import replace as replace_item
 from datetime import datetime
 from pathlib import Path
 import os
+import time
 
-from PySide6.QtCore import QEvent, QObject, QUrl, Signal, Qt
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QByteArray, QEvent, QObject, QUrl, Signal, Qt
+from PySide6.QtGui import QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
+    QComboBox,
     QDialog,
+    QFileDialog,
+    QKeySequenceEdit,
+    QLineEdit,
+    QTextEdit,
     QHBoxLayout,
     QMainWindow,
     QMenu,
@@ -20,12 +28,20 @@ from PySide6.QtWidgets import (
 
 from ..config import APP_NAME
 from ..domain import Health
+from ..feeds.parser import parse_feed
 from ..jobs import JobResult, JobStatus
-from .dialogs import AddPodcastDialog, PathActionDialog
-from .models import EPISODES, Episode as UiEpisode, Podcast as UiPodcast
-from .pages import EmptyPage, EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
+from . import icons
+from .dialogs import AboutDialog, AddPodcastDialog, PodcastSettingsDialog, RemovePodcastDialog
+from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast as UiPodcast, plain_snippet
+from .pixmaps import dominant_color
+from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
 from .shortcuts import ShortcutManager
-from .widgets import ContextPanel, NavigationRail, PlayerBar
+from .theme import COLORS, apply_theme, resolve_theme
+from .widgets import ContextPanel, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast
+
+
+PAGE_HOME, PAGE_PODCASTS, PAGE_EPISODES, PAGE_QUEUE, PAGE_DOWNLOADS, PAGE_DISCOVER, PAGE_BOOKMARKS, PAGE_HISTORY, PAGE_SETTINGS = range(9)
+ACCENTS = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
 
 
 class _JobBridge(QObject):
@@ -35,17 +51,9 @@ class _JobBridge(QObject):
 
 
 class MainWindow(QMainWindow):
-    def __init__(
-        self,
-        library=None,
-        jobs=None,
-        refresh=None,
-        directory=None,
-        playback=None,
-        downloads=None,
-        listening=None,
-        parent=None,
-    ):
+    relaunch_requested = Signal()
+
+    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, parent=None):
         super().__init__(parent)
         self.library = library
         self.jobs = jobs
@@ -56,20 +64,33 @@ class MainWindow(QMainWindow):
         self.listening = listening
         self.setObjectName("mainWindow")
         self.setWindowTitle(APP_NAME)
-        self.setMinimumSize(900, 650)
+        self.setMinimumSize(760, 600)
         self._context_forced = False
+        self._rail_user_compact = None
         self._last_mode = None
         self._pending_jobs = set()
+        self._refresh_batch = [0, 0, 0]  # total, done, new episodes
         self._discover_operation = ""
         self._discover_value = ""
         self._discover_limit = 30
         self._discover_loading = False
         self._discover_exhausted = False
         self._discover_result_count = 0
+        self._discover_visited = False
+        self._previews = {}
+        self._preview_pending = set()
+        self._preview_episodes_url = ""
+        self._pending_episodes_url = ""
         self._back_stack = []
         self._forward_stack = []
         self._history_navigation = False
         self._episode_navigation_prepared = False
+        self._playing_episode_id = 0
+        self._playing_state = ""
+        self._keep_services = False
+        self._chapters_cache = {}
+        self._hero_show_id = 0
+        self._hero_website = ""
         self._bridge = _JobBridge(self)
         self._bridge.completed.connect(self._refresh_finished)
         self._bridge.playback_event.connect(self._playback_changed)
@@ -80,50 +101,75 @@ class MainWindow(QMainWindow):
         outer = QVBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
 
         self.navigation = NavigationRail()
         self.navigation.page_requested.connect(self._select_page)
+        self.navigation.compact_toggled.connect(self._rail_toggled)
+        self.navigation.about_requested.connect(self._show_about)
+        self.navigation.episodes_dropped.connect(self._queue_ids)
         body.addWidget(self.navigation)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(8)
         self.pages = QStackedWidget()
         self.context = ContextPanel()
-        self.context.close_button.clicked.connect(self._hide_context)
+        self.context.closed.connect(self._hide_context)
         self.context.subscribe_requested.connect(self._subscribe_url)
         self.context.play_episode_requested.connect(self._play_episode)
         self.context.queue_episode_requested.connect(self._queue_episode)
+        self.context.dequeue_requested.connect(self._remove_from_queue)
         self.context.download_episode_requested.connect(self._download_episode)
         self.context.play_latest_requested.connect(self._play_latest)
+        self.context.open_show_requested.connect(self._open_show_id)
+        self.context.preview_episodes_requested.connect(self._show_preview_episodes)
+        self.context.open_url_requested.connect(self._open_url)
         self.context.seek_requested.connect(self._seek)
         self.context.transcript_search_requested.connect(self._search_transcript)
+        self.context.queue_reordered.connect(self._queue_reordered)
+        self.queue_model = EpisodeModel(())
+        self.context.attach_queue_model(self.queue_model, EpisodeDelegate(self.context.queue_view, compact=True, reorder=True))
+        self.context.queue_view.viewport().installEventFilter(self)
         self.splitter.addWidget(self.pages)
         self.splitter.addWidget(self.context)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
         self.splitter.setSizes([820, 360])
         body.addWidget(self.splitter, 1)
-
         body_wrap = QWidget()
         body_wrap.setLayout(body)
         outer.addWidget(body_wrap, 1)
 
         self.player = PlayerBar()
-        self.player.context_requested.connect(self._toggle_context)
+        self.player.context_requested.connect(self._toggle_queue)
+        self.player.now_playing_requested.connect(self._show_now_playing)
         self.player.play_pause_requested.connect(self._play_pause)
-        self.player.skip_requested.connect(self._skip)
+        self.player.skip_back_requested.connect(self._skip_back)
+        self.player.skip_forward_requested.connect(self._skip_forward)
+        self.player.next_requested.connect(self._play_next)
         self.player.seek_requested.connect(self._seek)
         self.player.speed_requested.connect(self._set_speed)
         self.player.volume_requested.connect(self._set_volume)
         self.player.bookmark_requested.connect(self._bookmark_current)
         self.player.ab_requested.connect(self._cycle_ab)
         self.player.trim_requested.connect(self._cycle_trim)
+        self.player.sleep_requested.connect(self._set_sleep)
         outer.addWidget(self.player)
         self.setCentralWidget(root)
+        self.toast = Toast(self)
+        self.now_playing = NowPlayingView(self.pages)
+        self.now_playing.close_requested.connect(self._hide_now_playing)
+        self.now_playing.seek_requested.connect(self._seek)
+        self.now_playing.show_requested.connect(self._open_show_id)
+        self.search_overlay = SearchOverlay(self.pages)
+        self.search_overlay.query_changed.connect(self._global_query)
+        self.search_overlay.podcast_chosen.connect(self._open_podcast)
+        self.search_overlay.episode_chosen.connect(self._open_search_episode)
+        self.search_overlay.directory_chosen.connect(self._directory_search_from_overlay)
+        self.pages.installEventFilter(self)
 
         self._build_pages()
         self._build_shortcuts()
@@ -131,86 +177,85 @@ class MainWindow(QMainWindow):
         self._wire_playback()
         self._wire_downloads()
         self._wire_listening()
-        self.navigation.select(0)
+        self._restore_layout()
         QApplication.instance().installEventFilter(self)
-        self.resize(1440, 900)
 
+    # ------------------------------------------------------------------ setup
     @property
     def page_count(self) -> int:
         return self.pages.count()
+
+    def toast_anchor(self) -> int:
+        return self.player.y()
 
     def _build_pages(self):
         self.home_page = HomePage()
         self.podcast_page = PodcastGridPage()
         self.episode_page = EpisodeListPage()
         self.playlist_page = EpisodeListPage(
-            "Playlist",
-            "Your deterministic listening order",
-            items=(),
-            reorder=True,
-            filters=(),
-            action="",
+            "Up Next", "", items=(), reorder=True, filters=(), action="", sortable=False,
+            empty=("Nothing queued", "Add episodes to Up Next and they play in this order. Drag rows to reorder.", "Browse episodes"),
+            glyph="queue",
         )
         self.download_page = EpisodeListPage(
-            "Downloads",
-            "Saved for offline listening",
-            items=(),
-            filters=("All", "Downloading", "Paused", "Downloaded", "Error"),
-            action="Cancel active",
+            "Downloads", "", items=(), filters=("All", "Downloading", "Paused", "Downloaded", "Error"), action="Cancel active",
+            empty=("No downloads", "Downloaded and in-progress episodes appear here for offline listening.", ""), glyph="downloads",
         )
         if self.download_page.header.action:
+            self.download_page.header.action.setObjectName("dangerButton")
             self.download_page.header.action.clicked.connect(self._cancel_downloads)
-        self.discover_page = PodcastGridPage(
-            "Discover", "Find something worth hearing", discover=True
-        )
+        self.discover_page = PodcastGridPage("Discover", "", discover=True)
         self.bookmark_page = EpisodeListPage(
-            "Bookmarks",
-            "Moments you wanted to keep",
-            items=(),
-            filters=(),
-            action="",
+            "Bookmarks", "", items=(), filters=(), action="", sortable=False,
+            empty=("No bookmarks yet", "Press the bookmark button in the player (Ctrl+B) to keep a moment.", ""), glyph="bookmark",
         )
         self.history_page = EpisodeListPage(
-            "History",
-            "Recently played",
-            items=tuple(reversed(EPISODES[:4])),
-            filters=(),
-            action="",
+            "History", "", items=(), filters=(), action="", sortable=False,
+            empty=("Nothing played yet", "Episodes you play show up here, most recent first.", ""), glyph="history",
         )
         self.settings_page = SettingsPage()
         pages = (
-            self.home_page,
-            self.podcast_page,
-            self.episode_page,
-            self.playlist_page,
-            self.download_page,
-            self.discover_page,
-            self.bookmark_page,
-            self.history_page,
-            self.settings_page,
+            self.home_page, self.podcast_page, self.episode_page, self.playlist_page, self.download_page,
+            self.discover_page, self.bookmark_page, self.history_page, self.settings_page,
         )
         for page in pages:
             if hasattr(page, "context_changed"):
                 page.context_changed.connect(self._show_item)
             page.header.back_requested.connect(self.navigate_back)
             self.pages.addWidget(page)
-        for page in (self.home_page, self.episode_page, self.playlist_page, self.history_page):
+        for page in (self.home_page, self.playlist_page, self.history_page, self.download_page):
             page.play_requested.connect(lambda item: self._play_episode(item.episode_id))
+        self.episode_page.play_requested.connect(self._play_episode_item)
+        self.bookmark_page.play_requested.connect(self._play_bookmark)
         self.playlist_page.order_changed.connect(self._queue_reordered)
+        self.playlist_page.remove_requested.connect(lambda items: [self._remove_from_queue(item.episode_id) for item in items])
+        self.playlist_page.empty_action_requested.connect(lambda: self.navigation.select(PAGE_EPISODES))
+        self.podcast_page.empty_action_requested.connect(self._add_podcast)
+        self.podcast_page.card_action_requested.connect(lambda item: self._play_latest(item.show_id))
+        self.discover_page.card_action_requested.connect(self._discover_card_action)
+        self.episode_page.hero.play_latest_requested.connect(lambda: self._play_latest(self._hero_show_id))
+        self.episode_page.hero.refresh_requested.connect(lambda: self._submit_refresh(self._hero_show_id) if self._hero_show_id else None)
+        self.episode_page.hero.subscribe_requested.connect(lambda: self._subscribe_url(self._preview_episodes_url))
+        self.episode_page.hero.website_requested.connect(lambda: self._open_url(self._hero_website))
+        self.home_page.resume_all_requested.connect(self._show_in_progress)
+        self.episode_page.hero.settings_requested.connect(self._podcast_settings)
+        self.episode_page.hero.unsubscribe_requested.connect(lambda: self._unsubscribe(self._hero_show_id))
+        for page in (self.episode_page, self.download_page, self.history_page, self.bookmark_page):
+            page.queue_selected_requested.connect(self._queue_many)
+            page.download_selected_requested.connect(self._download_many)
+            page.played_selected_requested.connect(lambda items: self._mark_played_many(items, True))
 
     def _build_shortcuts(self):
         self.shortcuts = ShortcutManager(self, self.library)
         for index in range(self.page_count):
-            self.shortcuts.add(
-                f"page_{index + 1}",
-                f"Ctrl+{index + 1}",
-                lambda i=index: self.navigation.select(i),
-            )
+            self.shortcuts.add(f"page_{index + 1}", f"Ctrl+{index + 1}", lambda i=index: self.navigation.select(i))
         for name, sequence, handler in (
             ("play_pause", "Ctrl+Space", self._play_pause),
-            ("skip_back", "Ctrl+Left", lambda: self._skip(-15)),
-            ("skip_forward", "Ctrl+Right", lambda: self._skip(30)),
-            ("search", "Ctrl+K", self._focus_search),
+            ("skip_back", "Ctrl+Left", self._skip_back),
+            ("skip_forward", "Ctrl+Right", self._skip_forward),
+            ("search", "Ctrl+K", self._open_search),
+            ("search_alt", "Ctrl+F", self._focus_search),
+            ("escape", "Esc", self._escape),
             ("queue_selected", "Ctrl+Shift+Q", self._queue_selected),
             ("bookmark", "Ctrl+B", self._bookmark_current),
             ("silence_trim", "Ctrl+T", self._cycle_trim),
@@ -221,44 +266,23 @@ class MainWindow(QMainWindow):
         ):
             self.shortcuts.add(name, sequence, handler)
 
-    def _focus_search(self):
-        page = self.pages.currentWidget()
-        if hasattr(page, "header"):
-            page.header.search.setFocus()
-            page.header.search.selectAll()
-
-    def _queue_selected(self):
-        page = self.pages.currentWidget()
-        if self.library is None or not hasattr(page, "view"):
-            return
-        episode_ids = []
-        for index in page.view.selectionModel().selectedIndexes():
-            item = index.data(Qt.ItemDataRole.UserRole + 1)
-            if isinstance(item, UiEpisode) and item.episode_id:
-                episode_ids.append(item.episode_id)
-        for episode_id in episode_ids:
-            self.library.enqueue(episode_id)
-        if episode_ids:
-            self._reload_library()
-            self.episode_page.banner.show_state(
-                "loaded", f"Added {len(episode_ids)} episode(s) to Up Next."
-            )
-
     def _wire_library(self):
         if self.library is None:
+            self.navigation.select(0)
             return
         if self.podcast_page.header.action:
-            self.podcast_page.header.action.setText("Add ▾")
+            self.podcast_page.header.action.setText("Add")
             self.podcast_page.header.action.clicked.connect(self._show_library_menu)
         if self.episode_page.header.action:
+            self.episode_page.header.action.setObjectName("quietButton")
+            self.episode_page.header.action.setIcon(icons.icon("refresh", COLORS["text"], 16))
             self.episode_page.header.action.clicked.connect(self._refresh_all)
-        self.home_page.header.search.returnPressed.connect(self._global_search)
+        self.home_page.header.search.returnPressed.connect(self._home_search)
         self.settings_page.setting_changed.connect(self._save_setting)
         self.settings_page.shortcut_changed.connect(self._rebind_shortcut)
+        self.settings_page.reset_shortcuts_requested.connect(self._reset_shortcuts)
         self.settings_page.open_data_requested.connect(self._open_data_folder)
-        self.settings_page.refresh_storage_requested.connect(
-            self._refresh_storage_settings
-        )
+        self.settings_page.refresh_storage_requested.connect(self._refresh_storage_settings)
         self.settings_page.import_opml_requested.connect(self._import_opml)
         self.settings_page.export_opml_requested.connect(self._export_opml)
         self.settings_page.load_values(
@@ -267,49 +291,273 @@ class MainWindow(QMainWindow):
             int(self.library.setting("playback.skip_forward", "30")),
             self.library.setting("playback.auto_continue", "1") == "1",
         )
+        self._apply_skip_settings()
+        self.settings_page.load_theme(self.library.setting("ui.theme", "system"))
         self.settings_page.set_shortcuts(self.shortcuts.bindings())
         self._refresh_storage_settings()
         self.home_page.new_requested.connect(self._show_new_episodes)
-        self.home_page.queue_requested.connect(lambda: self.navigation.select(3))
-        self.home_page.downloads_requested.connect(lambda: self.navigation.select(4))
+        self.home_page.queue_requested.connect(lambda: self.navigation.select(PAGE_QUEUE))
+        self.home_page.downloads_requested.connect(lambda: self.navigation.select(PAGE_DOWNLOADS))
         self.podcast_page.open_requested.connect(self._open_podcast)
         self.podcast_page.menu_requested.connect(self._podcast_menu)
         self.discover_page.menu_requested.connect(self._podcast_menu)
-        for page in (
-            self.home_page,
-            self.episode_page,
-            self.playlist_page,
-            self.download_page,
-            self.history_page,
-            self.bookmark_page,
-        ):
-            if hasattr(page, "menu_requested"):
-                page.menu_requested.connect(self._episode_menu)
+        self.discover_page.open_requested.connect(self._open_podcast)
+        for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.history_page, self.bookmark_page):
+            page.menu_requested.connect(self._episode_menu)
         if self.directory is not None and self.jobs is not None:
             self.discover_page.set_items([])
-            self.discover_page.banner.show_state(
-                "empty", "Search or choose a category to discover podcasts."
-            )
+            self.discover_page.banner.show_state("empty", "Search or choose a category to discover podcasts.")
             self.discover_page.header.search.returnPressed.connect(self._directory_search)
-            self.discover_page.chart.currentChanged.connect(
-                self._discover_view_changed
-            )
+            self.discover_page.chart.currentChanged.connect(self._discover_view_changed)
             self.discover_page.category.currentTextChanged.connect(self._browse_category)
             self.discover_page.topic.currentTextChanged.connect(self._browse_topic)
             self.discover_page.near_end.connect(self._load_more_discover)
-            self.discover_page.load_more_requested.connect(
-                self._load_more_discover
-            )
+            self.discover_page.load_more_requested.connect(self._load_more_discover)
+            self.discover_page.banner.retry_requested.connect(self._refresh_discover)
+            self.discover_page.discover_sort_changed.connect(self._discover_sort_changed)
             if self.discover_page.header.action:
-                self.discover_page.header.action.clicked.connect(
-                    self._refresh_discover
-                )
+                self.discover_page.header.action.clicked.connect(self._refresh_discover)
         self._reload_library()
 
+    def _wire_playback(self):
+        if self.playback is None:
+            return
+        self.playback.subscribe(lambda snapshot: self._bridge.playback_event.emit(snapshot))
+        self.player.set_capabilities(self.playback.engine.capabilities)
+        self._playback_changed(self.playback.snapshot)
+
+    def _wire_downloads(self):
+        if self.downloads is None:
+            return
+        self.downloads.subscribe(lambda event: self._bridge.download_event.emit(event))
+        self._reload_downloads()
+
+    def _wire_listening(self):
+        if self.listening is not None:
+            self._reload_bookmarks()
+
+    # ------------------------------------------------------------- persistence
+    def _restore_layout(self):
+        if self.library is None:
+            self.resize(1440, 900)
+            self.navigation.select(0)
+            return
+        geometry = self.library.setting("ui.geometry", "")
+        restored = bool(geometry) and self.restoreGeometry(QByteArray.fromHex(geometry.encode("ascii")))
+        if not restored:
+            self.resize(1440, 900)
+        rail = self.library.setting("ui.rail_compact", "")
+        if rail in {"0", "1"}:
+            self._rail_user_compact = rail == "1"
+        try:
+            page = int(self.library.setting("ui.page", "0"))
+        except ValueError:
+            page = 0
+        self.navigation.select(page if 0 <= page < self.page_count and page != PAGE_SETTINGS else 0)
+        self._back_stack.clear()
+        self._update_navigation_controls()
+
+    def _save_layout(self):
+        if self.library is None:
+            return
+        self.library.set_setting("ui.geometry", bytes(self.saveGeometry().toHex()).decode("ascii"))
+        self.library.set_setting("ui.page", str(self.pages.currentIndex()))
+        if self._rail_user_compact is not None:
+            self.library.set_setting("ui.rail_compact", "1" if self._rail_user_compact else "0")
+
+    def _rail_toggled(self, compact: bool):
+        self._rail_user_compact = compact
+
+    # ------------------------------------------------------------------ helpers
+    def _show_about(self):
+        info = {}
+        if self.library is not None:
+            shows = self.library.shows()
+            episodes = sum(show.episode_count for show in shows)
+            info["library"] = f"{len(shows)} podcast{'s' if len(shows) != 1 else ''}  ·  {episodes} episodes"
+            info["data_root"] = str(self.library.repository.database.path.parent)
+        if self.downloads is not None:
+            used, free, _total = self.downloads.storage()
+            info["storage"] = f"{self._format_bytes(used)} of downloads  ·  {self._format_bytes(free)} free"
+        if self.playback is not None:
+            info["engine"] = type(self.playback.engine).__name__.replace("Engine", "") or "—"
+        AboutDialog(info, self).exec()
+
+    def _notify(self, message: str, tone: str = "info", action: str = "", callback=None):
+        self.toast.show_message(message, tone, action, callback)
+
+    def _escape(self):
+        if self.search_overlay.isVisible():
+            self.search_overlay.hide()
+            return
+        if self.now_playing.isVisible():
+            self._hide_now_playing()
+            return
+        focus = QApplication.focusWidget()
+        if isinstance(focus, QLineEdit) and focus.text():
+            focus.clear()
+            return
+        if self.context.isVisible() and (self._context_forced or self._last_mode == "narrow"):
+            self._hide_context()
+            return
+        page = self.pages.currentWidget()
+        view = getattr(page, "view", None)
+        if view is not None and view.selectionModel().hasSelection():
+            view.clearSelection()
+
+    def _open_search(self):
+        if self.library is None:
+            return
+        self.search_overlay.setGeometry(self.pages.rect())
+        self.search_overlay.open()
+
+    def _global_query(self, query: str):
+        if self.library is None:
+            return
+        if not query:
+            self.search_overlay.set_results([], [], "")
+            return
+        shows, episodes = self.library.search(query, limit=40)
+        self.search_overlay.set_results([self._ui_podcast(show) for show in shows], [self._ui_episode(episode) for episode in episodes], query)
+
+    def _open_search_episode(self, episode):
+        if not episode.show_id:
+            return
+        self._open_show_id(episode.show_id)
+        row = self.episode_page.model.row_for_episode(episode.episode_id)
+        if row >= 0:
+            index = self.episode_page.model.index(row, 0)
+            self.episode_page.view.setCurrentIndex(index)
+            self.episode_page.view.scrollTo(index)
+
+    def _directory_search_from_overlay(self, query: str):
+        self.navigation.select(PAGE_DISCOVER)
+        self.discover_page.header.search.setText(query)
+        self._directory_search()
+
+    def _unsubscribe(self, show_id: int):
+        if self.library is None or not show_id:
+            return
+        preview = self.library.removal_preview(show_id)
+        if not preview:
+            return
+        dialog = RemovePodcastDialog(preview, self._format_bytes, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        show = preview["show"]
+        if self.playback is not None and self.playback.snapshot.show_id == show_id:
+            try:
+                self.playback.engine.pause()
+            except Exception:
+                pass
+        result = self.library.remove_subscription(show_id, dialog.delete_files.isChecked())
+        self._previews = {url: feed for url, feed in self._previews.items() if url != show.feed_url}
+        if self.pages.currentWidget() is self.episode_page and self._hero_show_id == show_id:
+            self._hero_show_id = 0
+            self.navigation.select(PAGE_PODCASTS)
+        self._reload_library()
+        self.context.show_empty()
+        reclaimed = sum(size for path, size in preview["files"] if path in result.get("removed_files", ()))
+        self._notify(f"Unsubscribed from {show.title}" + (f"  ·  {self._format_bytes(reclaimed)} reclaimed" if reclaimed else ""), "success")
+
+    def _focus_search(self):
+        page = self.pages.currentWidget()
+        if hasattr(page, "header") and page.header.search.isVisible():
+            page.header.search.setFocus()
+            page.header.search.selectAll()
+        else:
+            self.navigation.select(PAGE_HOME)
+            self.home_page.header.search.setFocus()
+
+    def _selected_episode_ids(self, page=None):
+        page = page or self.pages.currentWidget()
+        if not hasattr(page, "selected_items"):
+            return []
+        return [item.episode_id for item in page.selected_items() if isinstance(item, UiEpisode) and item.episode_id]
+
+    def _queue_selected(self):
+        self._queue_many([item for item in getattr(self.pages.currentWidget(), "selected_items", list)() if isinstance(item, UiEpisode)])
+
+    def _queue_many(self, items):
+        if self.library is None:
+            return
+        ids = [item.episode_id for item in items if item.episode_id]
+        for episode_id in ids:
+            self.library.enqueue(episode_id)
+        if ids:
+            self._reload_library()
+            self._notify(f"Added {len(ids)} episode{'s' if len(ids) != 1 else ''} to Up Next", "success", "Show", self._show_queue)
+
+    def _queue_ids(self, ids):
+        if self.library is None:
+            return
+        ids = [episode_id for episode_id in ids if episode_id]
+        for episode_id in ids:
+            self.library.enqueue(episode_id)
+        if ids:
+            self._reload_library()
+            self._notify(f"Added {len(ids)} episode{'s' if len(ids) != 1 else ''} to Up Next", "success", "Show", self._show_queue)
+
+    def _podcast_settings(self):
+        if self.library is None or not self._hero_show_id:
+            return
+        show = self.library.repository.get_show(self._hero_show_id)
+        if show is None:
+            return
+        dialog = PodcastSettingsDialog(show.title, show.playback_speed, show.skip_back, show.skip_forward, show.auto_continue, show.trim_level, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        self.library.repository.update_show_playback(show.id, **values)
+        if self.playback is not None and self.playback.snapshot.show_id == show.id:
+            try:
+                self.playback.set_speed(values["speed"])
+                self.playback.set_trim_level(values["trim_level"])
+            except Exception:
+                pass
+        self._notify(f"Saved settings for {show.title}", "success")
+
+    def _download_many(self, items):
+        ids = [item.episode_id for item in items if item.episode_id and item.state not in {"Downloaded", "Downloading"}]
+        for episode_id in ids:
+            self._download_episode(episode_id, quiet=True)
+        if ids:
+            self._notify(f"Queued {len(ids)} download{'s' if len(ids) != 1 else ''}", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
+
+    def _mark_played_many(self, items, played: bool):
+        if self.library is None:
+            return
+        ids = [item.episode_id for item in items if item.episode_id]
+        for episode_id in ids:
+            self.library.repository.mark_played(episode_id, played)
+        if ids:
+            self._reload_library()
+
+            def undo():
+                for episode_id in ids:
+                    self.library.repository.mark_played(episode_id, not played)
+                self._reload_library()
+
+            self._notify(f"Marked {len(ids)} episode{'s' if len(ids) != 1 else ''} as {'played' if played else 'unplayed'}", "success", "Undo", undo)
+
+    # ----------------------------------------------------------------- settings
     def _save_setting(self, key: str, value: str):
         if self.library is not None:
             self.library.set_setting(key, value)
-            self.settings_page.banner.show_state("loaded", "Setting saved.")
+            if key in {"playback.skip_back", "playback.skip_forward"}:
+                self._apply_skip_settings()
+            elif key == "ui.theme":
+                apply_theme(resolve_theme(value))
+                self._save_layout()
+                self._keep_services = True
+                self.relaunch_requested.emit()
+
+    def _apply_skip_settings(self):
+        if self.library is None:
+            return
+        back = int(self.library.setting("playback.skip_back", "15"))
+        forward = int(self.library.setting("playback.skip_forward", "30"))
+        self.player.set_skip_values(back, forward)
 
     def _refresh_storage_settings(self):
         if self.library is None:
@@ -322,34 +570,23 @@ class MainWindow(QMainWindow):
         if self.downloads is not None:
             download_path = str(self.downloads.directory)
             used, free, _total = self.downloads.storage()
-            download_text = f"{self._format_bytes(used)} used · {self._format_bytes(free)} free"
+            download_text = f"{self._format_bytes(used)} used  ·  {self._format_bytes(free)} free"
         artwork_bytes = 0
         artwork_path = "—"
         if self.refresh is not None and self.refresh.artwork is not None:
             directory = self.refresh.artwork.directory
             artwork_path = str(directory)
             if directory.exists():
-                artwork_bytes = sum(
-                    path.stat().st_size
-                    for path in directory.iterdir()
-                    if path.is_file()
-                )
+                artwork_bytes = sum(path.stat().st_size for path in directory.iterdir() if path.is_file())
         self.settings_page.set_storage_info(
-            data_root,
-            settings_path,
-            database_path,
-            download_path,
-            download_text,
-            artwork_path,
-            self._format_bytes(artwork_bytes),
-            os.environ.get("TMPDIR", "System temporary directory"),
+            data_root, settings_path, database_path, download_path, download_text, artwork_path,
+            self._format_bytes(artwork_bytes), os.environ.get("TMPDIR", "System temporary directory"),
         )
 
     def _open_data_folder(self):
         if self.library is None:
             return
-        folder = self.library.repository.database.path.parent
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.library.repository.database.path.parent)))
 
     @staticmethod
     def _format_bytes(value: int) -> str:
@@ -360,29 +597,20 @@ class MainWindow(QMainWindow):
             amount /= 1024
 
     def _rebind_shortcut(self, name: str, sequence: str):
+        previous = self.shortcuts.bindings().get(name, "")
         try:
             self.shortcuts.rebind(name, sequence)
-            self.settings_page.banner.show_state("loaded", "Shortcut saved.")
+            self.settings_page.shortcut_error.hide()
+            self.navigation.select(self.navigation.current_index)  # refresh tooltips
         except Exception as exc:
-            self.settings_page.banner.show_state("error", str(exc))
+            self.settings_page.show_shortcut_error(name, str(exc), previous)
 
-    def _wire_playback(self):
-        if self.playback is None:
-            return
-        self.playback.subscribe(lambda snapshot: self._bridge.playback_event.emit(snapshot))
-        self.player.set_capabilities(self.playback.engine.capabilities)
-        self.player.set_snapshot(self.playback.snapshot)
+    def _reset_shortcuts(self):
+        self.shortcuts.reset_all()
+        self.settings_page.set_shortcuts(self.shortcuts.bindings())
+        self._notify("Shortcuts reset to defaults", "success")
 
-    def _wire_downloads(self):
-        if self.downloads is None:
-            return
-        self.downloads.subscribe(lambda event: self._bridge.download_event.emit(event))
-        self._reload_downloads()
-
-    def _wire_listening(self):
-        if self.listening is not None:
-            self._reload_bookmarks()
-
+    # ------------------------------------------------------------------ library
     def _reload_library(self):
         if self.library is None:
             return
@@ -390,91 +618,75 @@ class MainWindow(QMainWindow):
         shows = [self._ui_podcast(show) for show in stored_shows]
         stored_episodes = self.library.episodes(limit=5000)
         episodes = [self._ui_episode(episode) for episode in stored_episodes]
-        in_progress = [
-            self._ui_episode(episode)
-            for episode in stored_episodes
-            if episode.position_seconds > 0 and not episode.played
-        ]
+        in_progress = [self._ui_episode(episode) for episode in stored_episodes if episode.position_seconds > 0 and not episode.played]
         queued = [self._ui_episode(episode) for episode in self.library.queue()]
         history = [self._ui_episode(episode) for episode in self.library.history()]
         self.podcast_page.set_items(shows)
-        self.episode_page.set_items(episodes)
-        self.home_page.set_items(
-            in_progress if in_progress else episodes,
-            "Continue listening" if in_progress else "Latest episodes",
+        if self.pages.currentIndex() != PAGE_EPISODES or not self._episode_navigation_prepared:
+            self.episode_page.set_items(episodes)
+        resume_ids = {episode.episode_id for episode in in_progress[:3]}
+        self.home_page.set_sections(
+            in_progress,
+            [episode for episode in episodes if episode.state not in {"Played", "In progress"} and episode.episode_id not in resume_ids],
         )
         self.playlist_page.set_items(queued)
         self.context.set_queue(queued)
+        self.player.set_next(queued[0].title if queued and queued[0].episode_id != self._playing_episode_id else (queued[1].title if len(queued) > 1 else ""))
         self.history_page.set_items(history)
         self._reload_downloads()
         active_downloads = (
             sum(record.state.value in {"queued", "downloading", "paused"} for record in self.downloads.records())
-            if self.downloads
-            else 0
+            if self.downloads else 0
         )
-        self.home_page.set_counts(
-            sum(show.new_count for show in stored_shows),
-            len(queued),
-            active_downloads,
+        new_total = sum(show.new_count for show in stored_shows)
+        self.home_page.set_counts(new_total, len(queued), active_downloads)
+        self.navigation.set_badge(PAGE_EPISODES, new_total)
+        self.navigation.set_badge(PAGE_QUEUE, len(queued))
+        self.navigation.set_badge(PAGE_DOWNLOADS, active_downloads)
+        show_count = len(stored_shows)
+        self.navigation.set_summary(
+            f"{show_count} podcast{'s' if show_count != 1 else ''}" + (f"  ·  {new_total} new" if new_total else "")
+            if show_count else "Library"
+        )
+        self.podcast_page.header.set_subtitle(
+            f"{show_count} podcast{'s' if show_count != 1 else ''}  ·  {len(episodes)} episode{'s' if len(episodes) != 1 else ''}" if show_count else ""
         )
         if not shows and not episodes:
             self.context.show_empty()
-
-        if shows:
-            self.podcast_page.banner.clear()
-        else:
-            self.podcast_page.banner.show_state(
-                "empty", "Your library is empty. Add a podcast by feed URL."
-            )
-        if episodes:
-            self.episode_page.banner.clear()
-        else:
-            self.episode_page.banner.show_state(
-                "empty", "Episodes will appear after a podcast refreshes."
-            )
-        if queued:
-            self.playlist_page.banner.clear()
-        else:
-            self.playlist_page.banner.show_state(
-                "empty", "Episodes added to Up Next will appear here in playback order."
-            )
+        self._apply_playing_marker()
 
     def _add_podcast(self):
+        if self.library is None:
+            return
         dialog = AddPodcastDialog(self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        while dialog.exec() == QDialog.DialogCode.Accepted:
+            try:
+                show = self.library.add_subscription(dialog.feed_url)
+            except ValueError as exc:
+                dialog.show_error(str(exc))
+                continue
+            self._reload_library()
+            self.navigation.select(PAGE_PODCASTS)
+            self.podcast_page.select_show(show.id)
+            self.podcast_page.banner.show_state("loading", f"Added {show.title or 'podcast'} — fetching episodes…")
+            self._submit_refresh(show.id)
             return
-        try:
-            show = self.library.add_subscription(dialog.feed_url)
-        except ValueError as exc:
-            self.podcast_page.banner.show_state("error", str(exc))
-            return
-        self._reload_library()
-        self.navigation.select(1)
-        self.podcast_page.select_show(show.id)
-        self.podcast_page.banner.show_state("loading", "Podcast added; refreshing feed…")
-        self._submit_refresh(show.id)
 
     def _show_library_menu(self):
         button = self.podcast_page.header.action
         menu = QMenu(self)
-        menu.addAction("Add feed URL…", self._add_podcast)
-        menu.addAction("Import OPML…", self._import_opml)
-        menu.addAction("Import local audio…", self._import_local_audio)
+        menu.addAction(icons.icon("rss", COLORS["text"], 16), "Add feed URL…", self._add_podcast)
+        menu.addAction(icons.icon("folder", COLORS["text"], 16), "Import OPML…", self._import_opml)
+        menu.addAction(icons.icon("podcasts", COLORS["text"], 16), "Import local audio…", self._import_local_audio)
         menu.addSeparator()
-        menu.addAction("Export OPML…", self._export_opml)
+        menu.addAction(icons.icon("discover", COLORS["text"], 16), "Browse Discover", lambda: self.navigation.select(PAGE_DISCOVER))
+        menu.addAction(icons.icon("external", COLORS["text"], 16), "Export OPML…", self._export_opml)
         menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
-    def _path_dialog(self, title, message, action, placeholder):
-        dialog = PathActionDialog(title, message, action, placeholder, self)
-        return dialog.path if dialog.exec() == QDialog.DialogCode.Accepted else ""
-
     def _import_opml(self):
-        path = self._path_dialog(
-            "Import OPML",
-            "Enter the path to an OPML subscription file.",
-            "Import",
-            "/path/to/subscriptions.opml",
-        )
+        if self.library is None:
+            return
+        path, _filter = QFileDialog.getOpenFileName(self, "Import OPML", str(Path.home()), "OPML files (*.opml *.xml);;All files (*)")
         if not path:
             return
         try:
@@ -485,17 +697,13 @@ class MainWindow(QMainWindow):
         self._reload_library()
         for show in added:
             self._submit_refresh(show.id)
-        self.podcast_page.banner.show_state(
-            "loaded", f"Imported {len(added)} podcast subscription(s)."
-        )
+        self.navigation.select(PAGE_PODCASTS)
+        self._notify(f"Imported {len(added)} subscription{'s' if len(added) != 1 else ''}", "success")
 
     def _export_opml(self):
-        path = self._path_dialog(
-            "Export OPML",
-            "Enter the destination path for your subscription export.",
-            "Export",
-            "/path/to/bs-podcasts.opml",
-        )
+        if self.library is None:
+            return
+        path, _filter = QFileDialog.getSaveFileName(self, "Export OPML", str(Path.home() / "bs-podcasts.opml"), "OPML files (*.opml)")
         if not path:
             return
         try:
@@ -503,15 +711,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.podcast_page.banner.show_state("error", str(exc))
             return
-        self.podcast_page.banner.show_state("loaded", f"Exported subscriptions to {path}.")
+        self._notify(f"Exported subscriptions to {Path(path).name}", "success")
 
     def _import_local_audio(self):
-        path = self._path_dialog(
-            "Import local audio",
-            "Enter the path to an audio file. It will be added as a local podcast.",
-            "Import",
-            "/path/to/episode.mp3",
-        )
+        if self.library is None:
+            return
+        path, _filter = QFileDialog.getOpenFileName(self, "Import local audio", str(Path.home()), "Audio files (*.mp3 *.m4a *.ogg *.opus *.wav *.flac);;All files (*)")
         if not path:
             return
         try:
@@ -520,9 +725,9 @@ class MainWindow(QMainWindow):
             self.podcast_page.banner.show_state("error", str(exc))
             return
         self._reload_library()
-        self.navigation.select(1)
+        self.navigation.select(PAGE_PODCASTS)
         self.podcast_page.select_show(show.id)
-        self.podcast_page.banner.show_state("loaded", "Local audio imported.")
+        self._notify("Local audio imported", "success")
 
     def _subscribe_url(self, feed_url: str):
         if self.library is None:
@@ -533,33 +738,78 @@ class MainWindow(QMainWindow):
             self.discover_page.banner.show_state("error", str(exc))
             return
         self._reload_library()
-        self.navigation.select(1)
-        self.podcast_page.select_show(show.id)
-        self.podcast_page.banner.show_state("loading", "Podcast added; refreshing feed…")
         self._submit_refresh(show.id)
-        self.discover_page.banner.show_state("loading", "Subscription added; refreshing feed…")
+        if self.pages.currentWidget() is self.episode_page and self._preview_episodes_url == feed_url:
+            self._preview_episodes_url = ""
+            self._open_podcast(self._ui_podcast(show))
+            self._notify(f"Subscribed to {show.title or 'podcast'} — fetching episodes…", "success")
+        elif self.pages.currentWidget() is self.discover_page:
+            # Stay in place; flip the card to Saved and offer a way over.
+            self.discover_page.set_items(
+                [self._merge_subscription(item, show) for item in self.discover_page._all_items], preserve_scroll=True
+            )
+            self._notify(f"Subscribed to {show.title or 'podcast'} — fetching episodes…", "success", "Open", lambda: self._open_show_id(show.id))
+        else:
+            self.navigation.select(PAGE_PODCASTS)
+            self.podcast_page.select_show(show.id)
+            self.podcast_page.banner.show_state("loading", "Podcast added — fetching episodes…")
+
+    @staticmethod
+    def _merge_subscription(item: UiPodcast, show) -> UiPodcast:
+        if item.feed_url != show.feed_url:
+            return item
+        return UiPodcast(
+            title=item.title, author=item.author, episode_count=show.episode_count, new_count=show.new_count, accent=item.accent,
+            show_id=show.id, feed_url=item.feed_url, artwork_url=item.artwork_url, artwork_path=item.artwork_path or show.artwork_path,
+            health=show.health.value, display_meta=item.display_meta, directory_result=True, subscribed=True, rank=item.rank,
+            description=item.description, latest_episode_title=item.latest_episode_title, latest_episode_date=item.latest_episode_date,
+        )
 
     def _show_new_episodes(self):
         self._show_all_episodes()
         self.episode_page.set_filter("New")
         self._episode_navigation_prepared = True
-        self.navigation.select(2)
+        self.navigation.select(PAGE_EPISODES)
+
+    def _show_in_progress(self):
+        self._show_all_episodes()
+        self.episode_page.set_filter("In progress")
+        self._episode_navigation_prepared = True
+        self.navigation.select(PAGE_EPISODES)
+
+    def _discover_card_action(self, item):
+        if item.show_id:
+            self._play_latest(item.show_id)
+        elif item.feed_url and not item.subscribed:
+            self._subscribe_url(item.feed_url)
+
+    def _open_show_id(self, show_id: int):
+        if not show_id or self.library is None:
+            return
+        show = self.library.repository.get_show(show_id)
+        if show is not None:
+            self._open_podcast(self._ui_podcast(show))
 
     def _open_podcast(self, podcast):
         if not podcast.show_id or self.library is None:
             return
-        episodes = [
-            self._ui_episode(episode)
-            for episode in self.library.episodes(show_id=podcast.show_id)
-        ]
+        episodes = [self._ui_episode(episode) for episode in self.library.episodes(show_id=podcast.show_id)]
         self.episode_page.header.title_label.setText(podcast.title)
-        self.episode_page.header.subtitle_label.setText(
-            f"{len(episodes)} episode(s) from this podcast"
+        self.episode_page.header.set_subtitle("")
+        show = self.library.repository.get_show(podcast.show_id)
+        self._hero_show_id = podcast.show_id
+        self._hero_website = getattr(show, "website_url", "") if show else ""
+        new_text = f"  ·  {podcast.new_count} new" if podcast.new_count else ""
+        latest = f"  ·  Latest {podcast.latest_episode_date}" if podcast.latest_episode_title else ""
+        self.episode_page.hero.show_podcast(
+            podcast.title, podcast.author, podcast.artwork_path, podcast.accent,
+            f"{podcast.author}  ·  {len(episodes)} episode{'s' if len(episodes) != 1 else ''}{new_text}{latest}",
+            plain_snippet(podcast.description, 220), True, bool(self._hero_website),
         )
         self.episode_page.set_filter("All")
-        self.episode_page.set_items(episodes)
+        self.episode_page.set_items(episodes, preserve_scroll=False)
         self._episode_navigation_prepared = True
-        self.navigation.select(2)
+        self.navigation.select(PAGE_EPISODES)
 
     def _play_latest(self, show_id: int):
         if self.library is None:
@@ -568,83 +818,296 @@ class MainWindow(QMainWindow):
         if episodes:
             self._play_episode(episodes[0].id)
         else:
-            self.podcast_page.banner.show_state("partial", "This podcast has no playable episodes.")
+            self.podcast_page.banner.show_state("partial", "This podcast has no playable episodes yet.")
 
     def _podcast_menu(self, podcast, global_position):
         menu = QMenu(self)
         if podcast.show_id:
-            status = menu.addAction(f"Status: {podcast.health.title()}")
-            status.setEnabled(False)
-            menu.addSeparator()
-            menu.addAction("Open podcast", lambda: self._open_podcast(podcast))
-            menu.addAction("Play latest", lambda: self._play_latest(podcast.show_id))
-            menu.addAction("Refresh now", lambda: self._submit_refresh(podcast.show_id))
+            menu.addAction(icons.icon("episodes", COLORS["text"], 16), "Open episodes", lambda: self._open_podcast(podcast))
+            menu.addAction(icons.icon("play", COLORS["text"], 16), "Play latest", lambda: self._play_latest(podcast.show_id))
+            menu.addAction(icons.icon("refresh", COLORS["text"], 16), "Refresh now", lambda: self._submit_refresh(podcast.show_id))
             if podcast.health == "suspended":
-                menu.addAction("Rearm refresh", lambda: self._rearm_podcast(podcast.show_id))
+                menu.addAction("Resume refreshing", lambda: self._rearm_podcast(podcast.show_id))
+            menu.addSeparator()
+            menu.addAction(icons.icon("trash", COLORS["text"], 16), "Unsubscribe…", lambda: self._unsubscribe(podcast.show_id))
         elif podcast.feed_url:
-            menu.addAction("Subscribe", lambda: self._subscribe_url(podcast.feed_url))
+            menu.addAction(icons.icon("add", COLORS["text"], 16), "Subscribe", lambda: self._subscribe_url(podcast.feed_url))
+            menu.addAction(icons.icon("episodes", COLORS["text"], 16), "Show episodes", lambda: self._show_preview_episodes(podcast.feed_url))
+            preview = self._previews.get(podcast.feed_url)
+            website = (preview.website_url if preview else "") or podcast.website_url
+            if website or podcast.apple_url:
+                menu.addSeparator()
+            if website:
+                menu.addAction(icons.icon("external", COLORS["text"], 16), "Open website", lambda: self._open_url(website))
+            if podcast.apple_url:
+                menu.addAction(icons.icon("external", COLORS["text"], 16), "Open in Apple Podcasts", lambda: self._open_url(podcast.apple_url))
         if podcast.feed_url:
             menu.addSeparator()
-            menu.addAction(
-                "Copy feed URL",
-                lambda: QApplication.clipboard().setText(podcast.feed_url),
-            )
+            menu.addAction("Copy feed URL", lambda: QApplication.clipboard().setText(podcast.feed_url))
         menu.exec(global_position)
 
     def _episode_menu(self, episode, global_position):
-        if not isinstance(episode, UiEpisode) or not episode.episode_id:
+        if not isinstance(episode, UiEpisode):
             return
+        if not episode.episode_id:
+            # Preview rows from an unsubscribed feed.
+            url = self._preview_episodes_url
+            if not url:
+                return
+            menu = QMenu(self)
+            menu.addAction(icons.icon("info", COLORS["text"], 16), "Show details", lambda: self._show_item(episode))
+            menu.addSeparator()
+            menu.addAction(icons.icon("add", COLORS["text"], 16), "Subscribe to play", lambda: self._subscribe_url(url))
+            menu.addAction("Copy feed URL", lambda: QApplication.clipboard().setText(url))
+            menu.exec(global_position)
+            return
+        page = self.pages.currentWidget()
+        selected = [item for item in getattr(page, "selected_items", list)() if isinstance(item, UiEpisode)]
+        targets = selected if len(selected) > 1 and episode in selected else [episode]
+        many = len(targets) > 1
         menu = QMenu(self)
-        menu.addAction("Show details", lambda: self._show_item(episode))
-        menu.addSeparator()
-        menu.addAction("Play / Resume", lambda: self._play_episode(episode.episode_id))
-        if self.pages.currentWidget() is self.playlist_page:
-            menu.addAction(
-                "Remove from Up Next", lambda: self._remove_from_queue(episode.episode_id)
-            )
+        if many:
+            header = menu.addAction(f"{len(targets)} episodes selected")
+            header.setEnabled(False)
+            menu.addSeparator()
         else:
-            menu.addAction("Add to Up Next", lambda: self._queue_episode(episode.episode_id))
-        if episode.state == "Downloading":
-            menu.addAction("Cancel download", lambda: self.downloads.cancel(episode.episode_id))
-        elif episode.state in {"Error", "Paused"}:
-            menu.addAction("Retry download", lambda: self._download_episode(episode.episode_id))
-        elif episode.state != "Downloaded":
-            menu.addAction("Download", lambda: self._download_episode(episode.episode_id))
+            menu.addAction(icons.icon("info", COLORS["text"], 16), "Show details", lambda: self._show_item(episode))
+            menu.addSeparator()
+            play = menu.addAction(icons.icon("play", COLORS["text"], 16), "Resume" if 0 < episode.progress < 1 else "Play", lambda: self._play_episode(episode.episode_id))
+            play.setShortcut(QKeySequence(Qt.Key.Key_Return))
+        if page is self.playlist_page:
+            remove = menu.addAction(icons.icon("close", COLORS["text"], 16), "Remove from Up Next", lambda: [self._remove_from_queue(item.episode_id) for item in targets])
+            remove.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+        else:
+            queue = menu.addAction(icons.icon("queue-add", COLORS["text"], 16), "Add to Up Next", lambda: self._queue_many(targets))
+            queue.setShortcut(QKeySequence(self.shortcuts.bindings().get("queue_selected", "")))
+        if not many:
+            if episode.state == "Downloading":
+                menu.addAction("Cancel download", lambda: self.downloads.cancel(episode.episode_id))
+            elif episode.state in {"Error", "Paused"}:
+                menu.addAction(icons.icon("download", COLORS["text"], 16), "Retry download", lambda: self._download_episode(episode.episode_id))
+            elif episode.state != "Downloaded":
+                menu.addAction(icons.icon("download", COLORS["text"], 16), "Download", lambda: self._download_episode(episode.episode_id))
+        else:
+            menu.addAction(icons.icon("download", COLORS["text"], 16), "Download", lambda: self._download_many(targets))
+        menu.addSeparator()
+        if many or episode.state != "Played":
+            menu.addAction(icons.icon("check", COLORS["text"], 16), "Mark as played", lambda: self._mark_played_many(targets, True))
+        if many or episode.state == "Played":
+            menu.addAction("Mark as unplayed", lambda: self._mark_played_many(targets, False))
+        if not many and episode.show_id:
+            menu.addSeparator()
+            menu.addAction(icons.icon("podcasts", COLORS["text"], 16), f"Go to {episode.show}", lambda: self._open_show_id(episode.show_id))
         menu.exec(global_position)
 
     def _remove_from_queue(self, episode_id: int):
         if self.library is not None:
             self.library.dequeue(episode_id)
             self._reload_library()
+            self._notify("Removed from Up Next", "info", "Undo", lambda: self._queue_episode(episode_id, quiet=True))
 
     def _rearm_podcast(self, show_id: int):
         self.library.rearm(show_id)
         self._reload_library()
         self._submit_refresh(show_id)
 
+    # ----------------------------------------------------------------- playback
     def _play_episode(self, episode_id: int):
         if self.playback is None or not episode_id:
+            if self.playback is None:
+                self._notify("Playback is not available", "error")
             return
         try:
             self.playback.load_episode(episode_id, autoplay=True)
         except Exception as exc:
-            self.episode_page.banner.show_state("error", str(exc))
+            self._notify(f"Couldn’t play this episode: {exc}", "error")
 
-    def _queue_episode(self, episode_id: int):
+    def _play_episode_item(self, item):
+        if item.episode_id:
+            self._play_episode(item.episode_id)
+        elif item.state == "Preview" and self._preview_episodes_url:
+            url = self._preview_episodes_url
+            self._notify("Subscribe to play this episode", "info", "Subscribe", lambda: self._subscribe_url(url))
+
+    def _play_bookmark(self, item):
+        if self.playback is None or not item.episode_id:
+            return
+        try:
+            self.playback.load_episode(item.episode_id, autoplay=True)
+            if item.duration_seconds and item.progress:
+                self.playback.seek(item.duration_seconds * item.progress)
+        except Exception as exc:
+            self._notify(f"Couldn’t play this bookmark: {exc}", "error")
+
+    def _play_next(self):
+        if self.playback is not None:
+            self.playback.next()
+
+    def _queue_episode(self, episode_id: int, quiet: bool = False):
         if self.library is None or not episode_id:
             return
         self.library.enqueue(episode_id)
         self._reload_library()
-        self.episode_page.banner.show_state("loaded", "Episode added to Up Next.")
+        if not quiet:
+            self._notify("Added to Up Next", "success", "Show", self._show_queue)
 
     def _queue_reordered(self, episode_ids: list[int]):
         if self.library is not None:
             self.library.reorder_queue(episode_ids)
-            self.context.set_queue(
-                [self._ui_episode(episode) for episode in self.library.queue()]
-            )
+            queued = [self._ui_episode(episode) for episode in self.library.queue()]
+            self.context.set_queue(queued)
+            self.playlist_page.set_items(queued)
 
-    def _download_episode(self, episode_id: int):
+    def _play_pause(self):
+        if self.playback is not None:
+            self.playback.play_pause()
+
+    def _skip_back(self):
+        if self.playback is not None:
+            self.playback.skip_back()
+
+    def _skip_forward(self):
+        if self.playback is not None:
+            self.playback.skip_forward()
+
+    def _seek(self, seconds: float):
+        if self.playback is not None:
+            self.playback.seek(seconds)
+
+    def _set_speed(self, speed: float):
+        if self.playback is not None:
+            self.playback.set_speed(speed)
+
+    def _set_volume(self, volume: float):
+        if self.playback is not None:
+            self.playback.set_volume(volume)
+
+    def _set_sleep(self, seconds: int):
+        if self.playback is None:
+            return
+        if seconds <= 0:
+            self.playback.cancel_sleep_timer()
+            self._notify("Sleep timer off")
+        else:
+            self.playback.set_sleep_timer(seconds)
+            self._notify(f"Sleep timer set for {seconds // 60} minutes")
+
+    def _bookmark_current(self):
+        if self.listening is None or self.playback is None:
+            return
+        snapshot = self.playback.snapshot
+        if snapshot.episode_id is None:
+            return
+        self.listening.bookmark(snapshot.episode_id, snapshot.position, f"Bookmark at {self.player._time(snapshot.position)}")
+        self._reload_bookmarks()
+        self._load_listening_details(snapshot.episode_id)
+        self._notify(f"Bookmarked {self.player._time(snapshot.position)}", "success", "Show", lambda: self.navigation.select(PAGE_BOOKMARKS))
+
+    def _cycle_ab(self):
+        if self.playback is None or self.playback.snapshot.episode_id is None:
+            return
+        snapshot = self.playback.snapshot
+        try:
+            if snapshot.ab_start is None:
+                self.playback.set_ab_start()
+                self._notify("Point A set — press again to set B")
+            elif snapshot.ab_end is None:
+                self.playback.set_ab_end()
+                self._notify("Repeating A–B")
+            else:
+                self.playback.clear_ab_repeat()
+                self._notify("A–B repeat cleared")
+        except Exception as exc:
+            self._notify(str(exc), "error")
+
+    def _cycle_trim(self):
+        if self.playback is None or self.playback.snapshot.episode_id is None:
+            return
+        levels = ("off", "light", "medium", "strong")
+        current = self.playback.snapshot.trim_level
+        level = levels[(levels.index(current) + 1) % len(levels)]
+        try:
+            self.playback.set_trim_level(level)
+            self._notify(f"Silence trim: {level}")
+        except Exception as exc:
+            self._notify(str(exc), "error")
+
+    def _playback_changed(self, snapshot):
+        self.player.set_snapshot(snapshot)
+        state = str(snapshot.state)
+        episode_id = snapshot.episode_id or 0
+        changed = episode_id != self._playing_episode_id
+        self._playing_episode_id = episode_id
+        self._playing_state = state
+        if episode_id:
+            self.setWindowTitle(f"{'▶ ' if state == 'playing' else ''}{snapshot.title} — {snapshot.show_title or APP_NAME}")
+        else:
+            self.setWindowTitle(APP_NAME)
+        self._apply_playing_marker()
+        if changed and episode_id and self.listening is not None:
+            chapters = self.listening.chapters(episode_id)
+            self._chapters_cache = {episode_id: chapters}
+            duration = float(snapshot.duration) or 0.0
+            self.player.set_chapter_markers([c.start_seconds / duration for c in chapters if duration and 0 < c.start_seconds < duration])
+            if self.library is not None:
+                queued = self.library.queue()
+                self.player.set_next(next((e.title for e in queued if e.id != episode_id), ""))
+            self.player.set_tint(dominant_color(snapshot.artwork_path, ""))
+        elif changed:
+            self.player.set_chapter_markers(())
+            self.player.set_tint("")
+        chapter = ""
+        for entry in self._chapters_cache.get(episode_id, ()):
+            if entry.start_seconds <= float(snapshot.position):
+                chapter = entry.title or ""
+        remaining = (snapshot.sleep_deadline - time.time()) if snapshot.sleep_deadline else None
+        self.player.set_status(chapter, remaining)
+        if self.now_playing.isVisible():
+            if changed:
+                if episode_id:
+                    self._populate_now_playing()
+                else:
+                    self._hide_now_playing()
+            else:
+                self.now_playing.set_position(float(snapshot.position), float(snapshot.duration))
+
+    def _apply_playing_marker(self):
+        active = self._playing_state == "playing"
+        for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.history_page, self.bookmark_page):
+            page.set_playing(self._playing_episode_id, active)
+        delegate = self.context.queue_view.itemDelegate()
+        if isinstance(delegate, EpisodeDelegate):
+            delegate.set_playing(self._playing_episode_id, active)
+            self.context.queue_view.viewport().update()
+
+    def _show_now_playing(self):
+        if not self._playing_episode_id or self.library is None:
+            return
+        if self.now_playing.isVisible():
+            self._hide_now_playing()
+            return
+        self._populate_now_playing()
+        self.now_playing.setGeometry(self.pages.rect())
+        self.now_playing.show()
+        self.now_playing.raise_()
+
+    def _hide_now_playing(self):
+        self.now_playing.hide()
+
+    def _populate_now_playing(self):
+        snapshot = self.playback.snapshot if self.playback is not None else None
+        if snapshot is None or snapshot.episode_id is None:
+            return
+        episode = self.library.episode(snapshot.episode_id) if self.library else None
+        chapters = self.listening.chapters(snapshot.episode_id) if self.listening else ()
+        segments = self.listening.transcript(snapshot.episode_id) if self.listening else ()
+        bookmarks = self.listening.bookmarks(snapshot.episode_id) if self.listening else ()
+        accent = dominant_color(snapshot.artwork_path, "")
+        self.now_playing.set_episode(snapshot, episode.description if episode else "", chapters, segments, bookmarks, accent)
+        self.now_playing.set_position(float(snapshot.position), float(snapshot.duration))
+
+    # ---------------------------------------------------------------- downloads
+    def _download_episode(self, episode_id: int, quiet: bool = False):
         if self.downloads is None or self.jobs is None or not episode_id:
             return
         future = self.jobs.submit(self.downloads.download, episode_id)
@@ -659,18 +1122,14 @@ class MainWindow(QMainWindow):
             self._bridge.completed.emit(("download", episode_id, result))
 
         future.add_done_callback(finished)
-        self.navigation.select(4)
-        self.download_page.banner.show_state("loading", "Download queued…")
+        if not quiet:
+            self._notify("Download started", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
 
     def _cancel_downloads(self):
         if self.downloads is None:
             return
-        cancelled = sum(
-            1 for record in self.downloads.records() if self.downloads.cancel(record.episode_id)
-        )
-        self.download_page.banner.show_state(
-            "partial", f"Cancellation requested for {cancelled} download(s)."
-        )
+        cancelled = sum(1 for record in self.downloads.records() if self.downloads.cancel(record.episode_id))
+        self._notify(f"Cancelling {cancelled} download{'s' if cancelled != 1 else ''}")
 
     def _download_progress(self, _event):
         self._reload_downloads()
@@ -691,95 +1150,27 @@ class MainWindow(QMainWindow):
                 state = "Downloading"
             else:
                 state = record.state.value.title()
+            detail = ""
+            if state == "Downloading" and record.bytes_total:
+                detail = f"{self._format_bytes(record.bytes_done)} of {self._format_bytes(record.bytes_total)}"
+            elif state == "Downloaded" and record.bytes_total:
+                detail = f"{self._format_bytes(record.bytes_total)} on disk"
+            elif record.error_message:
+                detail = record.error_message
             items.append(
                 UiEpisode(
-                    title=item.title,
-                    show=item.show,
-                    published=item.published,
-                    duration=item.duration,
-                    progress=(record.bytes_done / record.bytes_total)
-                    if record.bytes_total
-                    else 0.0,
-                    state=state,
-                    accent=item.accent,
-                    episode_id=item.episode_id,
-                    show_id=item.show_id,
-                    description=record.error_message or item.description,
-                    artwork_path=item.artwork_path,
+                    title=item.title, show=item.show, published=item.published, duration=item.duration,
+                    progress=(record.bytes_done / record.bytes_total) if record.bytes_total and state != "Downloaded" else 0.0,
+                    state=state, accent=item.accent, episode_id=item.episode_id, show_id=item.show_id,
+                    description=item.description, artwork_path=item.artwork_path, duration_seconds=item.duration_seconds, detail=detail,
                 )
             )
         self.download_page.set_items(items)
         if self.download_page.header.action:
-            self.download_page.header.action.setVisible(
-                any(record.state.value == "downloading" for record in records)
-            )
-        if not items:
-            self.download_page.banner.show_state(
-                "empty", "Downloaded and active episodes will appear here."
-            )
-        else:
-            self.download_page.banner.clear()
+            self.download_page.header.action.setVisible(any(record.state.value == "downloading" for record in records))
+        self.download_page.banner.clear()
 
-    def _play_pause(self):
-        if self.playback is not None:
-            self.playback.play_pause()
-
-    def _skip(self, seconds: float):
-        if self.playback is not None:
-            self.playback.skip(seconds)
-
-    def _seek(self, seconds: float):
-        if self.playback is not None:
-            self.playback.seek(seconds)
-
-    def _set_speed(self, speed: float):
-        if self.playback is not None:
-            self.playback.set_speed(speed)
-
-    def _set_volume(self, volume: float):
-        if self.playback is not None:
-            self.playback.set_volume(volume)
-
-    def _bookmark_current(self):
-        if self.listening is None or self.playback is None:
-            return
-        snapshot = self.playback.snapshot
-        if snapshot.episode_id is None:
-            return
-        self.listening.bookmark(
-            snapshot.episode_id,
-            snapshot.position,
-            f"Bookmark at {self.player._time(snapshot.position)}",
-        )
-        self._reload_bookmarks()
-        self._load_listening_details(snapshot.episode_id)
-        self.episode_page.banner.show_state("loaded", "Bookmark saved.")
-
-    def _cycle_ab(self):
-        if self.playback is None or self.playback.snapshot.episode_id is None:
-            return
-        snapshot = self.playback.snapshot
-        try:
-            if snapshot.ab_start is None:
-                self.playback.set_ab_start()
-            elif snapshot.ab_end is None:
-                self.playback.set_ab_end()
-            else:
-                self.playback.clear_ab_repeat()
-        except Exception as exc:
-            self.episode_page.banner.show_state("error", str(exc))
-
-    def _cycle_trim(self):
-        if self.playback is None or self.playback.snapshot.episode_id is None:
-            return
-        levels = ("off", "light", "medium", "strong")
-        current = self.playback.snapshot.trim_level
-        level = levels[(levels.index(current) + 1) % len(levels)]
-        try:
-            self.playback.set_trim_level(level)
-        except Exception as exc:
-            self.episode_page.banner.show_state("error", str(exc))
-
+    # --------------------------------------------------------------- bookmarks
     def _reload_bookmarks(self):
         if self.listening is None or self.library is None:
             return
@@ -791,47 +1182,40 @@ class MainWindow(QMainWindow):
             item = self._ui_episode(episode)
             items.append(
                 UiEpisode(
-                    title=bookmark.title or item.title,
-                    show=item.show,
-                    published=f"At {self.player._time(bookmark.position_seconds)}",
-                    duration=item.duration,
-                    progress=(bookmark.position_seconds / episode.duration_seconds)
-                    if episode.duration_seconds
-                    else 0.0,
-                    state="Bookmark",
-                    accent=item.accent,
-                    episode_id=item.episode_id,
-                    show_id=item.show_id,
-                    description=item.description,
-                    artwork_path=item.artwork_path,
+                    title=bookmark.title or item.title, show=item.show, published=f"At {self.player._time(bookmark.position_seconds)}",
+                    duration=item.duration, progress=(bookmark.position_seconds / episode.duration_seconds) if episode.duration_seconds else 0.0,
+                    state="Bookmark", accent=item.accent, episode_id=item.episode_id, show_id=item.show_id, description=item.description,
+                    artwork_path=item.artwork_path, duration_seconds=item.duration_seconds, detail=item.title,
                 )
             )
-        if isinstance(self.bookmark_page, EpisodeListPage):
-            self.bookmark_page.set_items(items)
-            if items:
-                self.bookmark_page.banner.clear()
-            else:
-                self.bookmark_page.banner.show_state(
-                    "empty", "Bookmarks created from the player will appear here."
-                )
+        self.bookmark_page.set_items(items)
 
-    def _playback_changed(self, snapshot):
-        self.player.set_snapshot(snapshot)
+    # ------------------------------------------------------------------ search
+    def _home_search(self):
+        query = self.home_page.header.search.text().strip()
+        self.search_overlay.field.setText(query)
+        self._open_search()
+        self._global_query(query)
 
     def _global_search(self):
         if self.library is None:
             return
         query = self.home_page.header.search.text().strip()
+        if not query:
+            return
         shows, episodes = self.library.search(query)
         self.podcast_page.set_items([self._ui_podcast(show) for show in shows])
-        self.episode_page.set_items([self._ui_episode(episode) for episode in episodes])
+        self.episode_page.hero.hide()
+        self.episode_page.header.title_label.setText(f"Results for “{query}”")
+        self.episode_page.header.set_subtitle(f"{len(shows)} podcast{'s' if len(shows) != 1 else ''}  ·  {len(episodes)} episode{'s' if len(episodes) != 1 else ''}")
+        self.episode_page.set_filter("All")
+        self.episode_page.set_items([self._ui_episode(episode) for episode in episodes], preserve_scroll=False)
         self._episode_navigation_prepared = bool(episodes)
-        self.navigation.select(2 if episodes else 1)
-        target = self.episode_page if episodes else self.podcast_page
-        target.banner.show_state(
-            "loaded", f"{len(shows)} podcast(s) and {len(episodes)} episode(s) matched."
-        )
+        self.navigation.select(PAGE_EPISODES if episodes else PAGE_PODCASTS)
+        if not episodes:
+            self.podcast_page.banner.show_state("partial", f"No episodes matched “{query}”.")
 
+    # ---------------------------------------------------------------- discover
     def _directory_search(self):
         query = self.discover_page.header.search.text().strip()
         if not query:
@@ -866,60 +1250,35 @@ class MainWindow(QMainWindow):
         if self.discover_page.chart.currentData() != "explore":
             return
         category = self.discover_page.category.currentText()
-        if (
-            not topic
-            or topic.startswith("All ")
-            or topic in {"Choose a category first", "No additional topics"}
-        ):
+        if not topic or topic.startswith("All ") or topic in {"Choose a category first", "No additional topics"}:
             return
         self.discover_page.banner.show_state("loading", f"Loading {topic}…")
-        self.discover_page.set_discover_summary(
-            f"Loading {category} › {topic}…"
-        )
+        self.discover_page.set_discover_summary(f"Loading {category} › {topic}…")
         self._start_directory_request("topic", (category, topic))
 
-    def _start_directory_request(self, operation: str, value: str):
+    def _start_directory_request(self, operation: str, value):
         self._discover_operation = operation
         self._discover_value = value
         self._discover_limit = 30
         self._discover_exhausted = False
         self._discover_result_count = 0
+        self.discover_page.set_items([])
+        self.discover_page.set_loading(True)
         self.discover_page.set_load_more_state(False, loading=True)
         self._submit_directory(operation, value, self._discover_limit)
 
+    def _discover_maximum(self) -> int:
+        return 100 if self._discover_operation == "chart" else 200 if self._discover_operation in {"search", "topic"} else 500
+
     def _load_more_discover(self):
-        if (
-            self._discover_loading
-            or self._discover_exhausted
-            or not self._discover_operation
-            or self._discover_limit >= (
-                100
-                if self._discover_operation == "chart"
-                else 200
-                if self._discover_operation in {"search", "topic"}
-                else 500
-            )
-        ):
+        if self._discover_loading or self._discover_exhausted or not self._discover_operation or self._discover_limit >= self._discover_maximum():
             return
-        maximum = (
-            100
-            if self._discover_operation == "chart"
-            else 200
-            if self._discover_operation in {"search", "topic"}
-            else 500
-        )
-        self._discover_limit = min(maximum, self._discover_limit + 30)
-        label = (
-            self._discover_value[1]
-            if isinstance(self._discover_value, tuple)
-            else self._discover_value or "For You"
-        )
+        self._discover_limit = min(self._discover_maximum(), self._discover_limit + 30)
+        label = self._discover_value[1] if isinstance(self._discover_value, tuple) else self._discover_value or "For You"
         self.discover_page.banner.show_state("loading", f"Loading more {label}…")
         self.discover_page.set_discover_summary(f"Loading more {label}…")
         self.discover_page.set_load_more_state(False, loading=True)
-        self._submit_directory(
-            self._discover_operation, self._discover_value, self._discover_limit
-        )
+        self._submit_directory(self._discover_operation, self._discover_value, self._discover_limit)
 
     def _show_for_you(self, _label: str = "For You"):
         self.discover_page.chart.blockSignals(True)
@@ -933,12 +1292,8 @@ class MainWindow(QMainWindow):
         self.discover_page.set_category_topics("")
         shows = self.library.shows() if self.library is not None else []
         if shows:
-            self.discover_page.banner.show_state(
-                "loading", "Finding podcasts from categories related to your library…"
-            )
-            self.discover_page.set_discover_summary(
-                "Building recommendations from your subscribed podcast categories…"
-            )
+            self.discover_page.banner.show_state("loading", "Finding podcasts from categories related to your library…")
+            self.discover_page.set_discover_summary("Building recommendations from your subscribed podcast categories…")
             self._start_directory_request("recommend", "")
         else:
             self._browse_category("")
@@ -949,9 +1304,7 @@ class MainWindow(QMainWindow):
             self._show_for_you()
         else:
             category = (
-                ""
-                if not self.discover_page.category.isEnabled()
-                or self.discover_page.category.currentText() == "All Categories"
+                "" if not self.discover_page.category.isEnabled() or self.discover_page.category.currentText() == "All Categories"
                 else self.discover_page.category.currentText()
             )
             self._load_chart(chart_type, category)
@@ -970,31 +1323,21 @@ class MainWindow(QMainWindow):
         self.discover_page.header.action.setAccessibleName("Refresh current Apple chart")
         category = (
             self.discover_page.category.currentText()
-            if category_enabled
-            and self.discover_page.category.currentText() != "All Categories"
-            else ""
+            if category_enabled and self.discover_page.category.currentText() != "All Categories" else ""
         )
         self._load_chart(chart_type, category)
 
-    def _set_explore_controls(
-        self, explore: bool, category_enabled: bool = True
-    ):
+    def _set_explore_controls(self, explore: bool, category_enabled: bool = True):
         self.discover_page.category.setEnabled(category_enabled)
-        self.discover_page.topic.setEnabled(
-            explore and bool(self.discover_page.category.currentIndex())
-        )
+        self.discover_page.topic.setEnabled(explore and bool(self.discover_page.category.currentIndex()))
         self.discover_page.set_discover_filter_visibility(
-            show_category=explore or category_enabled,
-            show_topic=explore,
-            scope_text="All Categories · Apple chart",
+            show_category=explore or category_enabled, show_topic=explore, scope_text="All Categories · Apple chart"
         )
 
     def _load_chart(self, chart_type: str, category: str):
         labels = {
-            "top_shows": "Apple Top Shows",
-            "trending": "Apple Trending Episodes",
-            "subscriber_shows": "Apple Top Subscriber Shows",
-            "top_series": "Apple Top Series",
+            "top_shows": "Apple Top Shows", "trending": "Apple Trending Episodes",
+            "subscriber_shows": "Apple Top Subscriber Shows", "top_series": "Apple Top Series",
         }
         label = labels.get(chart_type, "Apple Chart")
         suffix = f" · {category}" if category else " · All Categories"
@@ -1002,7 +1345,7 @@ class MainWindow(QMainWindow):
         self.discover_page.set_discover_summary(f"Loading {label}{suffix}…")
         self._start_directory_request("chart", (chart_type, category))
 
-    def _submit_directory(self, operation: str, value: str, limit: int = 30):
+    def _submit_directory(self, operation: str, value, limit: int = 30):
         self._discover_loading = True
         future = self.jobs.submit(self._directory_request, operation, value, limit)
         self._pending_jobs.add(future)
@@ -1013,13 +1356,11 @@ class MainWindow(QMainWindow):
                 result = completed.result()
             except Exception as exc:
                 result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._bridge.completed.emit(
-                ("directory", (operation, value, limit), result)
-            )
+            self._bridge.completed.emit(("directory", (operation, value, limit), result))
 
         future.add_done_callback(finished)
 
-    def _directory_request(self, operation: str, value: str, limit: int):
+    def _directory_request(self, operation: str, value, limit: int):
         if operation == "recommend":
             candidates = self.directory.recommend(self.library.shows(), limit)
         elif operation == "topic":
@@ -1043,6 +1384,7 @@ class MainWindow(QMainWindow):
             results.append((candidate, artwork_path))
         return results
 
+    # ------------------------------------------------------------------ refresh
     def _refresh_all(self):
         if self.library is None:
             return
@@ -1050,7 +1392,10 @@ class MainWindow(QMainWindow):
         if not shows:
             self.episode_page.banner.show_state("empty", "There are no podcasts to refresh.")
             return
-        self.episode_page.banner.show_state("loading", f"Refreshing {len(shows)} podcast(s)…")
+        self._refresh_batch = [len(shows), 0, 0]
+        self.episode_page.banner.show_state("loading", f"Refreshing 0 of {len(shows)} podcasts…")
+        if self.episode_page.header.action:
+            self.episode_page.header.action.setEnabled(False)
         for show in shows:
             self._submit_refresh(show.id)
 
@@ -1075,17 +1420,37 @@ class MainWindow(QMainWindow):
         if kind == "directory":
             self._directory_finished(identifier, result)
             return
+        if kind == "preview":
+            self._preview_pending.discard(identifier)
+            if result.status == JobStatus.OK:
+                self._previews[identifier] = result.value
+                self._apply_preview(identifier, result.value)
+            else:
+                self.context.show_preview_error(identifier, result.message or "unknown error")
+            return
         if kind == "download":
             self._reload_library()
             if result.status == JobStatus.OK:
-                self.download_page.banner.clear()
+                episode = self.library.episode(identifier) if self.library else None
+                self._notify(f"Downloaded {episode.title if episode else 'episode'}", "success", "Play", lambda: self._play_episode(identifier))
             else:
-                self.download_page.banner.show_state(
-                    "error", result.message or "Download failed."
-                )
+                self._notify(result.message or "Download failed", "error", "Retry", lambda: self._download_episode(identifier))
             return
         self._reload_library()
-        self.podcast_page.select_show(identifier)
+        total, done, new_episodes = self._refresh_batch
+        if total:
+            done += 1
+            report = result.value if result.status == JobStatus.OK else None
+            new_episodes += getattr(report, "new_episodes", 0) or 0
+            self._refresh_batch = [total, done, new_episodes]
+            if done < total:
+                self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
+            else:
+                self._refresh_batch = [0, 0, 0]
+                self.episode_page.banner.clear()
+                if self.episode_page.header.action:
+                    self.episode_page.header.action.setEnabled(True)
+                self._notify(f"Refreshed {total} podcast{'s' if total != 1 else ''}" + (f"  ·  {new_episodes} new episodes" if new_episodes else ""), "success")
         if result.status != JobStatus.OK:
             self.podcast_page.banner.show_state("error", result.message or "Refresh failed.")
             return
@@ -1093,28 +1458,25 @@ class MainWindow(QMainWindow):
         if report.health in {Health.ERROR, Health.SUSPENDED}:
             self.podcast_page.banner.show_state(report.health.value, report.message)
         elif report.health == Health.PARTIAL:
-            self.podcast_page.banner.show_state(
-                "partial", "The podcast refreshed but did not contain playable episodes."
-            )
-        else:
+            self.podcast_page.banner.show_state("partial", "The podcast refreshed but did not contain playable episodes.")
+        elif not total:
             self.podcast_page.banner.clear()
+            show = self.library.repository.get_show(identifier) if self.library else None
+            if show is not None and self.pages.currentWidget() is not self.discover_page:
+                self._notify(f"{show.title} is ready  ·  {show.episode_count} episodes", "success", "Play latest", lambda: self._play_latest(identifier))
 
     def _directory_finished(self, request, result):
         self._discover_loading = False
-        _operation, _value, requested_limit = request
+        self.discover_page.set_loading(False)
+        operation, value, requested_limit = request
         if result.status != JobStatus.OK:
-            self.discover_page.set_load_more_state(True, loading=False)
-            self.discover_page.banner.show_state(
-                "error", result.message or "Directory search failed."
-            )
+            self.discover_page.set_load_more_state(False, loading=False)
+            self.discover_page.banner.show_state("error", result.message or "Directory search failed.", retry=True)
             return
         candidates = result.value or []
         podcasts = []
         seen_feeds = set()
-        subscribed = {
-            show.feed_url: show for show in self.library.shows()
-        } if self.library is not None else {}
-        accents = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
+        subscribed = {show.feed_url: show for show in self.library.shows()} if self.library is not None else {}
         for index, candidate_data in enumerate(candidates):
             candidate, artwork_path = candidate_data
             if candidate.feed_url in seen_feeds:
@@ -1122,21 +1484,14 @@ class MainWindow(QMainWindow):
             seen_feeds.add(candidate.feed_url)
             saved = subscribed.get(candidate.feed_url)
             is_chart = bool(candidate.chart_type)
-            meta_parts = []
-            meta_parts.extend(
-                value
-                for value in (candidate.author, candidate.genre)
-                if value
-            )
+            meta_parts = [part for part in (candidate.author, candidate.genre) if part]
             podcasts.append(
                 UiPodcast(
                     title=candidate.title if is_chart else saved.title if saved else candidate.title,
-                    author=(candidate.author if is_chart else saved.author if saved else candidate.author)
-                    or candidate.genre
-                    or "Podcast directory",
+                    author=(candidate.author if is_chart else saved.author if saved else candidate.author) or candidate.genre or "Podcast directory",
                     episode_count=saved.episode_count if saved else 0,
                     new_count=saved.new_count if saved else 0,
-                    accent=accents[index % len(accents)],
+                    accent=dominant_color((saved.artwork_path if saved else "") or artwork_path, ACCENTS[index % len(ACCENTS)]),
                     show_id=saved.id if saved else 0,
                     feed_url=candidate.feed_url,
                     artwork_url=candidate.artwork_url,
@@ -1148,77 +1503,64 @@ class MainWindow(QMainWindow):
                     rank=candidate.rank,
                     description=saved.description if saved else "",
                     latest_episode_title=saved.latest_episode_title if saved else "",
-                    latest_episode_date=self._display_full_date(
-                        saved.latest_episode_published_at if saved else ""
-                    ),
+                    latest_episode_date=self._display_full_date(saved.latest_episode_published_at if saved else ""),
+                    apple_url=candidate.apple_url,
                 )
             )
+        podcasts = [self._with_preview(item, self._previews.get(item.feed_url)) for item in podcasts]
         result_count = len(podcasts)
-        self._discover_exhausted = (
-            requested_limit
-            >= (
-                100
-                if self._discover_operation == "chart"
-                else 200
-                if self._discover_operation in {"search", "topic"}
-                else 500
-            )
-            or result_count <= self._discover_result_count
-        )
+        self._discover_exhausted = requested_limit >= self._discover_maximum() or result_count <= self._discover_result_count
         self._discover_result_count = result_count
-        self.discover_page.set_load_more_state(
-            not self._discover_exhausted, loading=False
-        )
-        self.discover_page.set_items(
-            podcasts, preserve_scroll=requested_limit > 30
-        )
+        self.discover_page.set_load_more_state(not self._discover_exhausted, loading=False)
+        self.discover_page.set_items(podcasts, preserve_scroll=requested_limit > 30)
         if podcasts:
             self.discover_page.banner.clear()
-            if _operation == "recommend":
+            if operation == "recommend":
                 description = "recommendations based on your library categories"
-            elif _operation == "topic":
-                description = f"{_value[0]} › {_value[1]} podcasts"
-            elif _operation == "chart":
+            elif operation == "topic":
+                description = f"{value[0]} › {value[1]} podcasts"
+            elif operation == "chart":
                 chart_labels = {
-                    "top_shows": "Apple Top Shows",
-                    "trending": "Apple Trending Episodes",
-                    "subscriber_shows": "Apple Top Subscriber Shows",
-                    "top_series": "Apple Top Series",
+                    "top_shows": "Apple Top Shows", "trending": "Apple Trending Episodes",
+                    "subscriber_shows": "Apple Top Subscriber Shows", "top_series": "Apple Top Series",
                 }
-                chart_type, category = _value
+                chart_type, category = value
                 description = chart_labels.get(chart_type, "Apple Chart")
                 if category:
                     description += f" · {category}"
-            elif _operation == "browse":
-                description = f"{_value or 'general'} podcasts"
+            elif operation == "browse":
+                description = f"{value or 'general'} podcasts"
             else:
-                description = f"results for “{_value}”"
+                description = f"results for “{value}”"
             ending = "End of available results" if self._discover_exhausted else "Scroll for more"
-            self.discover_page.set_discover_summary(
-                f"{len(podcasts)} {description}  ·  {ending}"
-            )
+            self.discover_page.set_discover_summary(f"{len(podcasts)} {description}  ·  {ending}")
         else:
             self.discover_page.banner.show_state("partial", "No podcasts matched.")
             self.discover_page.set_discover_summary("No podcasts matched this selection.")
 
+    # --------------------------------------------------------------- navigation
     def _select_page(self, index: int):
         previous = self.pages.currentIndex()
-        if (
-            previous >= 0
-            and previous != index
-            and not self._history_navigation
-        ):
+        if previous >= 0 and previous != index and not self._history_navigation:
             self._back_stack.append(previous)
             self._forward_stack.clear()
         self.pages.setCurrentIndex(index)
-        if index == 2:
+        if index == PAGE_EPISODES:
             if self._episode_navigation_prepared:
                 self._episode_navigation_prepared = False
-            else:
+            elif not self._history_navigation:
+                # Back/Forward restore the page as it was; only a direct rail click resets it.
                 self._show_all_episodes()
+        if index == PAGE_DISCOVER and not self._discover_visited and self.directory is not None and self.jobs is not None:
+            self._discover_visited = True
+            self._show_for_you()
         self._update_navigation_controls()
-        if index == 8:
+        focus_target = getattr(self.pages.currentWidget(), "view", None)
+        if focus_target is not None and focus_target.isVisible():
+            focus_target.setFocus(Qt.FocusReason.OtherFocusReason)
+        if index == PAGE_SETTINGS:
             self.context.hide()
+            self.player.set_queue_open(False)
             return
         page = self.pages.currentWidget()
         selected = None
@@ -1228,23 +1570,22 @@ class MainWindow(QMainWindow):
                 selected = current.data(Qt.ItemDataRole.UserRole + 1)
         if selected is not None:
             self._show_item(selected)
-        else:
+        elif self.context.mode() == 0:
             self.context.show_empty()
-            self.context.hide()
-        if self._last_mode == "wide" and selected is not None:
+        if self._last_mode in {"wide", "medium"} or self._context_forced:
             self.context.show()
+        else:
+            self.context.hide()
+        self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)
 
     def _show_all_episodes(self):
         if self.library is None:
             return
-        episodes = [
-            self._ui_episode(episode)
-            for episode in self.library.episodes(limit=5000)
-        ]
+        episodes = [self._ui_episode(episode) for episode in self.library.episodes(limit=5000)]
         self.episode_page.header.title_label.setText("Episodes")
-        self.episode_page.header.subtitle_label.setText(
-            "Recent episodes from your shows"
-        )
+        self.episode_page.header.set_subtitle("")
+        self.episode_page.hero.hide()
+        self._hero_show_id = 0
         self.episode_page.set_filter("All")
         self.episode_page.set_items(episodes)
 
@@ -1279,32 +1620,176 @@ class MainWindow(QMainWindow):
     def _update_navigation_controls(self):
         for index in range(self.pages.count()):
             page = self.pages.widget(index)
-            page.header.back.setVisible(
-                index == self.pages.currentIndex() and bool(self._back_stack)
-            )
+            page.header.back.setVisible(index == self.pages.currentIndex() and bool(self._back_stack))
 
     def eventFilter(self, watched, event):
         if (
-            event.type() == QEvent.Type.MouseButtonPress
+            event.type() == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Space
+            and not event.modifiers()
             and isinstance(watched, QWidget)
             and (watched is self or self.isAncestorOf(watched))
+            and not isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QKeySequenceEdit, QAbstractSpinBox, QComboBox))
+            and self._playing_episode_id
         ):
+            self._play_pause()
+            return True
+        if event.type() == QEvent.Type.MouseButtonPress and isinstance(watched, QWidget) and (watched is self or self.isAncestorOf(watched)):
             if event.button() == Qt.MouseButton.BackButton:
                 self.navigate_back()
                 return True
             if event.button() == Qt.MouseButton.ForwardButton:
                 self.navigate_forward()
                 return True
+        if watched is self.pages and event.type() == QEvent.Type.Resize:
+            self.now_playing.setGeometry(self.pages.rect())
+            self.search_overlay.setGeometry(self.pages.rect())
+        if watched is self.context.queue_view.viewport() and event.type() == QEvent.Type.ContextMenu:
+            index = self.context.queue_view.indexAt(event.pos())
+            item = index.data(Qt.ItemDataRole.UserRole + 1) if index.isValid() else None
+            if isinstance(item, UiEpisode):
+                menu = QMenu(self)
+                menu.addAction(icons.icon("play", COLORS["text"], 16), "Play now", lambda: self._play_episode(item.episode_id))
+                menu.addAction(icons.icon("info", COLORS["text"], 16), "Show details", lambda: self._show_item(item))
+                menu.addSeparator()
+                menu.addAction(icons.icon("close", COLORS["text"], 16), "Remove from Up Next", lambda: self._remove_from_queue(item.episode_id))
+                menu.exec(self.context.queue_view.viewport().mapToGlobal(event.pos()))
+                return True
         return super().eventFilter(watched, event)
 
     def _show_item(self, item):
         if isinstance(item, UiPodcast):
             self.context.show_podcast(item)
+            if item.feed_url and not item.show_id:
+                self._preview_feed(item.feed_url)
         elif isinstance(item, UiEpisode):
             self.context.show_episode(item)
             self._load_listening_details(item.episode_id)
-        if self._last_mode == "wide":
+        else:
+            return
+        if self._last_mode in {"wide", "medium"} and self.pages.currentIndex() != PAGE_SETTINGS:
             self.context.show()
+        self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)
+
+    # ------------------------------------------------------------ feed preview
+    @staticmethod
+    def _open_url(url: str):
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _discover_sort_changed(self, key: str):
+        if key == "newest":
+            missing = [item.feed_url for item in self.discover_page._all_items if item.feed_url and not item.show_id and item.feed_url not in self._previews]
+            for feed_url in missing:
+                self._preview_feed(feed_url, silent=True)
+            if missing:
+                self._notify(f"Checking {len(missing)} feeds for their newest episode…", "loading")
+
+    def _show_preview_episodes(self, feed_url: str):
+        if not feed_url:
+            return
+        feed = self._previews.get(feed_url)
+        if feed is None:
+            self._preview_feed(feed_url)
+            self._notify("Fetching episodes…", "loading")
+            self._pending_episodes_url = feed_url
+            return
+        self._pending_episodes_url = ""
+        self._preview_episodes_url = feed_url
+        episodes = sorted(feed.episodes, key=lambda episode: episode.published_at or "", reverse=True)
+        items = [
+            UiEpisode(
+                title=episode.title, show=feed.title, published=self._display_date(episode.published_at),
+                duration=self._display_duration(episode.duration_seconds), progress=0.0, state="Preview", accent=ACCENTS[3],
+                description=episode.description, duration_seconds=episode.duration_seconds,
+            )
+            for episode in episodes
+        ]
+        self.episode_page.header.title_label.setText(feed.title)
+        self.episode_page.header.set_subtitle("")
+        card = next((item for item in self.discover_page._all_items if item.feed_url == feed_url), None)
+        self._hero_show_id = 0
+        self._hero_website = feed.website_url
+        latest = f"  ·  Latest {self._display_full_date(episodes[0].published_at)}" if episodes else ""
+        self.episode_page.hero.show_podcast(
+            feed.title, feed.author, card.artwork_path if card else "", card.accent if card else "",
+            f"{feed.author}  ·  {len(items)} episode{'s' if len(items) != 1 else ''}{latest}",
+            plain_snippet(feed.description, 220), False, bool(feed.website_url),
+        )
+        self.episode_page.set_filter("All")
+        self.episode_page.set_items(items, preserve_scroll=False)
+        self.episode_page.banner.show_state("empty", "Preview only — subscribe to play, queue or download these episodes.")
+        self._episode_navigation_prepared = True
+        self.navigation.select(PAGE_EPISODES)
+
+    def _preview_feed(self, feed_url: str, silent: bool = False):
+        """Fetch a directory result's feed in the background to fill the details pane."""
+        cached = self._previews.get(feed_url)
+        if cached is not None:
+            self._apply_preview(feed_url, cached)
+            return
+        if self.jobs is None or self.refresh is None or feed_url in self._preview_pending:
+            if self.refresh is None and not silent:
+                self.context.show_preview_error(feed_url, "feed fetching is unavailable in this session")
+            return
+        self._preview_pending.add(feed_url)
+        fetcher = self.refresh.fetcher
+
+        def work():
+            response = fetcher.fetch(feed_url)
+            return parse_feed(response.content)
+
+        future = self.jobs.submit(work)
+        self._pending_jobs.add(future)
+
+        def finished(completed):
+            self._pending_jobs.discard(completed)
+            try:
+                result = completed.result()
+            except Exception as exc:
+                result = JobResult(JobStatus.ERROR, message=str(exc))
+            self._bridge.completed.emit(("preview", feed_url, result))
+
+        future.add_done_callback(finished)
+
+    def _apply_preview(self, feed_url: str, feed):
+        # Merge freshness into Discover cards first (this re-selects the current card),
+        # then fill the pane. Only unmerged cards are touched, so cached replays are no-ops.
+        stale = [item for item in self.discover_page._all_items if item.feed_url == feed_url and not item.show_id and not item.latest_sort_key and feed.episodes]
+        if stale:
+            self.discover_page.set_items(
+                [self._with_preview(item, feed) if item.feed_url == feed_url else item for item in self.discover_page._all_items],
+                preserve_scroll=True,
+            )
+        episodes = sorted(feed.episodes, key=lambda episode: episode.published_at or "", reverse=True)
+        latest = episodes[0] if episodes else None
+        recent = [(episode.title, self._display_full_date(episode.published_at)) for episode in episodes[:5]]
+        self.context.show_preview(
+            feed_url,
+            feed.author,
+            len(feed.episodes),
+            latest.title if latest else "",
+            self._display_full_date(latest.published_at) if latest else "",
+            feed.description,
+            recent,
+            feed.website_url,
+        )
+        if self._pending_episodes_url == feed_url:
+            self._show_preview_episodes(feed_url)
+
+    def _with_preview(self, item: UiPodcast, feed) -> UiPodcast:
+        """Merge fetched feed freshness into an unsubscribed directory card."""
+        if feed is None or item.show_id:
+            return item
+        latest = max(feed.episodes, key=lambda episode: episode.published_at or "") if feed.episodes else None
+        return replace_item(
+            item,
+            latest_episode_title=latest.title if latest else "",
+            latest_episode_date=self._display_full_date(latest.published_at) if latest else "",
+            latest_sort_key=(latest.published_at or "") if latest else "",
+            website_url=feed.website_url or item.website_url,
+            episode_count=len(feed.episodes),
+        )
 
     def _load_listening_details(self, episode_id: int, query: str = ""):
         if self.listening is None or not episode_id:
@@ -1319,15 +1804,15 @@ class MainWindow(QMainWindow):
     def _search_transcript(self, episode_id: int, query: str):
         self._load_listening_details(episode_id, query)
 
+    # -------------------------------------------------------------- converters
     @staticmethod
     def _ui_podcast(show) -> UiPodcast:
-        accents = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
         return UiPodcast(
             title=show.title or show.feed_url,
             author=show.author or "Podcast feed",
             episode_count=show.episode_count,
             new_count=show.new_count,
-            accent=accents[show.id % len(accents)],
+            accent=dominant_color(show.artwork_path, ACCENTS[show.id % len(ACCENTS)]),
             show_id=show.id,
             feed_url=show.feed_url,
             artwork_url=show.artwork_url,
@@ -1335,14 +1820,11 @@ class MainWindow(QMainWindow):
             health=show.health.value,
             description=show.description,
             latest_episode_title=show.latest_episode_title,
-            latest_episode_date=MainWindow._display_full_date(
-                show.latest_episode_published_at
-            ),
+            latest_episode_date=MainWindow._display_full_date(show.latest_episode_published_at),
         )
 
     @staticmethod
     def _ui_episode(episode) -> UiEpisode:
-        accents = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
         state = "Played" if episode.played else "In progress" if episode.position_seconds else "New"
         if episode.downloaded_path:
             state = "Downloaded"
@@ -1351,15 +1833,14 @@ class MainWindow(QMainWindow):
             show=episode.show_title,
             published=MainWindow._display_date(episode.published_at),
             duration=MainWindow._display_duration(episode.duration_seconds),
-            progress=(episode.position_seconds / episode.duration_seconds)
-            if episode.duration_seconds
-            else 0.0,
+            progress=(episode.position_seconds / episode.duration_seconds) if episode.duration_seconds else 0.0,
             state=state,
-            accent=accents[episode.show_id % len(accents)],
+            accent=dominant_color(episode.artwork_path, ACCENTS[episode.show_id % len(ACCENTS)]),
             episode_id=episode.id,
             show_id=episode.show_id,
             description=episode.description,
             artwork_path=episode.artwork_path,
+            duration_seconds=episode.duration_seconds,
         )
 
     @staticmethod
@@ -1367,9 +1848,18 @@ class MainWindow(QMainWindow):
         if not value:
             return "Unknown date"
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).strftime("%b %d")
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return value[:16]
+        now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+        days = (now.date() - parsed.date()).days
+        if days == 0:
+            return "Today"
+        if days == 1:
+            return "Yesterday"
+        if 1 < days < 7:
+            return f"{days} days ago"
+        return parsed.strftime("%b %d") if parsed.year == now.year else parsed.strftime("%b %d, %Y")
 
     @staticmethod
     def _display_full_date(value: str) -> str:
@@ -1389,33 +1879,49 @@ class MainWindow(QMainWindow):
         minutes = remainder // 60
         return f"{hours} hr {minutes} min" if hours else f"{minutes} min"
 
-    def _toggle_context(self):
-        self._context_forced = not self.context.isVisible()
-        self.context.setVisible(not self.context.isVisible())
-        if self.context.isVisible():
-            self.splitter.setSizes([max(540, self.width() - 600), 360])
+    # ------------------------------------------------------------- context pane
+    def _toggle_queue(self):
+        if self.context.isVisible() and self.context.mode() == 1:
+            self._hide_context()
+            return
+        self._show_queue()
+
+    def _show_queue(self):
+        self.context.set_mode(1)
+        self._context_forced = True
+        self.context.show()
+        self.splitter.setSizes([max(480, self.width() - self.navigation.width() - 360), 360])
+        self.player.set_queue_open(True)
 
     def _hide_context(self):
         self._context_forced = False
         self.context.hide()
+        self.player.set_queue_open(False)
 
     def resizeEvent(self, event):
         width = event.size().width()
-        mode = "wide" if width >= 1200 else "medium" if width >= 900 else "narrow"
+        mode = "wide" if width >= 1200 else "medium" if width >= 960 else "narrow"
         if mode != self._last_mode:
-            compact = mode == "narrow"
+            compact = mode != "wide" if self._rail_user_compact is None else (self._rail_user_compact or mode == "narrow")
             self.navigation.set_compact(compact)
-            self.player.set_compact(compact)
-            if mode == "wide" and self.pages.currentIndex() != 8:
+            self.player.set_compact(mode == "narrow")
+            if mode in {"wide", "medium"} and self.pages.currentIndex() != PAGE_SETTINGS:
                 self.context.show()
-                self.splitter.setSizes([max(620, width - 610), 360])
+                self.splitter.setSizes([max(520, width - self.navigation.width() - 360), 360])
             elif not self._context_forced:
                 self.context.hide()
             self._last_mode = mode
+            self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)
+        self.toast.reposition()
         super().resizeEvent(event)
 
     def closeEvent(self, event):
+        self._save_layout()
         QApplication.instance().removeEventFilter(self)
+        if self._keep_services:
+            # Window is being rebuilt (theme change); services stay alive.
+            super().closeEvent(event)
+            return
         for future in tuple(self._pending_jobs):
             future.cancel()
         self._pending_jobs.clear()
