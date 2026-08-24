@@ -912,9 +912,12 @@ class SettingsPage(BasePage):
         self.auto_download_limit.setSuffix(" per refresh")
         self.auto_download_limit.setFixedWidth(self.FIELD_WIDTH)
         self.delete_played = QCheckBox("Delete downloads once an episode is played")
+        self.download_first = QCheckBox("Download before playing (no streaming)")
         downloads_form.addRow("After a refresh", self.auto_download)
         downloads_form.addRow("At most", self.auto_download_limit)
+        downloads_form.addRow("Playback", self.download_first)
         downloads_form.addRow("Housekeeping", self.delete_played)
+        self.download_first.toggled.connect(lambda value: self.setting_changed.emit("playback.download_first", "1" if value else "0"))
         self.delete_played.toggled.connect(lambda value: self.setting_changed.emit("downloads.delete_played", "1" if value else "0"))
         self.settings_content.addWidget(downloads_card)
         self.auto_download.toggled.connect(lambda value: self.setting_changed.emit("downloads.auto", "1" if value else "0"))
@@ -1085,13 +1088,14 @@ class SettingsPage(BasePage):
         outer.addLayout(form)
         return card, form
 
-    def load_downloads(self, auto: bool, limit: int, delete_played: bool = False):
-        for control in (self.auto_download, self.auto_download_limit, self.delete_played):
+    def load_downloads(self, auto: bool, limit: int, delete_played: bool = False, download_first: bool = False):
+        for control in (self.auto_download, self.auto_download_limit, self.delete_played, self.download_first):
             control.blockSignals(True)
         self.auto_download.setChecked(auto)
         self.auto_download_limit.setValue(limit)
         self.delete_played.setChecked(delete_played)
-        for control in (self.auto_download, self.auto_download_limit, self.delete_played):
+        self.download_first.setChecked(download_first)
+        for control in (self.auto_download, self.auto_download_limit, self.delete_played, self.download_first):
             control.blockSignals(False)
 
     def load_refresh_interval(self, minutes: int):

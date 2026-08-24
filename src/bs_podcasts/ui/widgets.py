@@ -2019,16 +2019,31 @@ class PlayerBar(QFrame):
         self._sleep_remaining = sleep_remaining
         self._refresh_status()
 
+    def set_transport_state(self, loading: bool, buffering, streaming: bool):
+        self._loading = loading
+        self._buffering = buffering
+        self._streaming = streaming
+        self._refresh_status()
+
     def _refresh_status(self):
         sleep = getattr(self, "_sleep_remaining", None)
         chapter = getattr(self, "_chapter", "")
         next_title = getattr(self, "_next_title", "")
-        if sleep is not None and sleep > 0:
+        loading = getattr(self, "_loading", False)
+        buffering = getattr(self, "_buffering", None)
+        streaming = getattr(self, "_streaming", False)
+        if loading:
+            text = "Opening stream…" if streaming else "Opening…"
+        elif buffering is not None:
+            text = f"Buffering {int(buffering)}%" if buffering else "Buffering…"
+        elif sleep is not None and sleep > 0:
             text = f"Sleep in {self._time(sleep)}"
         elif chapter:
             text = f"Chapter · {chapter}"
         elif next_title:
             text = f"Next: {next_title}"
+        elif streaming:
+            text = "Streaming"
         else:
             text = ""
         self.next_label.setText(text)
@@ -2103,9 +2118,14 @@ class PlayerBar(QFrame):
         self.sleep.setChecked(sleeping)
         self.sleep.setToolTip("Sleep timer running — click to change" if sleeping else "Sleep timer")
         playing = str(snapshot.state) == "playing"
-        self.play.setIcon(icons.icon("pause" if playing else "play", COLORS["on_accent"], 22, disabled=COLORS["subtle"]))
-        self.play.setToolTip(("Pause" if playing else "Play") + "  ·  Ctrl+Space")
+        loading = str(snapshot.state) == "loading"
+        glyph = "refresh" if loading else "pause" if playing else "play"
+        self.play.setIcon(icons.icon(glyph, COLORS["on_accent"], 22, disabled=COLORS["subtle"]))
+        self.play.setToolTip("Opening…" if loading else ("Pause" if playing else "Play") + "  ·  Ctrl+Space")
+        self.set_transport_state(loading, getattr(snapshot, "buffering", None), getattr(self, "_streaming", False))
         self.set_enabled(self._has_episode and str(snapshot.state) != "shutdown")
+        if loading:
+            self.play.setEnabled(False)
 
     def set_queue_open(self, open_: bool):
         self.queue.setChecked(open_)

@@ -36,9 +36,12 @@ class MpvEngine:
             "terminal": False,
             "input_default_bindings": False,
             "audio_display": "no",
+            "network_timeout": 15,
+            "cache": "yes",
         }
         defaults.update(options)
-        self._player = mpv.MPV(**defaults)
+        self._last_error = ""
+        self._player = mpv.MPV(log_handler=self._log, loglevel="error", **defaults)
         self._handler: Callable[[EngineEvent], None] = lambda event: None
         self._dead = False
         self._pending_position = 0.0
@@ -47,6 +50,8 @@ class MpvEngine:
         self._player.observe_property("time-pos", self._position_changed)
         self._player.observe_property("duration", self._duration_changed)
         self._player.observe_property("pause", self._pause_changed)
+        self._player.observe_property("paused-for-cache", self._cache_paused)
+        self._player.observe_property("cache-buffering-state", self._cache_state)
         self._event_callback = self._player.event_callback(
             "file-loaded", "end-file", "shutdown"
         )(self._mpv_event)
@@ -62,6 +67,8 @@ class MpvEngine:
         self._guard()
         self._pending_position = max(0.0, float(start_position))
         self._pending_autoplay = bool(autoplay)
+        self._last_error = ""
+        self._emit("loading", source)
         self._player.loadfile(source, "replace")
 
     def play(self):
@@ -143,6 +150,19 @@ class MpvEngine:
         if value is not None:
             self._emit("paused", bool(value))
 
+    def _cache_paused(self, _name, value):
+        if value is not None:
+            self._emit("buffering", 0 if value else None)
+
+    def _cache_state(self, _name, value):
+        if value is not None:
+            percent = int(value)
+            self._emit("buffering", percent if percent < 100 else None)
+
+    def _log(self, level, prefix, text):
+        if level in {"error", "fatal"} and text.strip():
+            self._last_error = f"{prefix}: {text.strip()}" if prefix else text.strip()
+
     def _mpv_event(self, event):
         event_id = event.event_id.value
         if event_id == mpv.MpvEventID.FILE_LOADED:
@@ -153,6 +173,17 @@ class MpvEngine:
             self._emit("paused", not self._pending_autoplay)
         elif event_id == mpv.MpvEventID.END_FILE:
             reason = getattr(event.data, "reason", None)
-            self._emit("eof" if reason == event.data.EOF else "stopped", reason)
+            error_reason = getattr(event.data, "ERROR", 4)
+            if reason == error_reason:
+                code = getattr(event.data, "error", 0)
+                message = self._last_error
+                if not message:
+                    try:
+                        message = mpv._mpv_error_string(code).decode("utf-8", "replace") if code else "Unknown playback error"
+                    except Exception:
+                        message = f"mpv error {code}"
+                self._emit("error", message)
+            else:
+                self._emit("eof" if reason == event.data.EOF else "stopped", reason)
         elif event_id == mpv.MpvEventID.SHUTDOWN:
             self._emit("shutdown")
