@@ -33,6 +33,10 @@ def main() -> int:
     database = Database(DATA / "library.db")
     repository = LibraryRepository(database)
     library = LibraryService(repository)
+    from bs_podcasts.ui.icons import resolve_stylesheet
+    from bs_podcasts.ui.theme import apply_theme, resolve_theme, stylesheet
+    apply_theme(resolve_theme(library.setting("ui.theme", "system")))
+    app.setStyleSheet(resolve_stylesheet(stylesheet()))
     listening = ListeningService(ListeningRepository(database))
     downloads = DownloadService(
         repository,
