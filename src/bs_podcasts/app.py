@@ -1,9 +1,13 @@
 """Application bootstrap."""
 
+import logging
 import sys
 import sqlite3
+import traceback
 
 from PySide6.QtCore import QCoreApplication
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
+import getpass
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
@@ -12,6 +16,7 @@ from .assets import icon_path
 from .config import APP_ID, APP_NAME, AppSettings, app_version
 from .config import data_dir as application_data_dir
 from .data import Database
+from .data.database import DatabaseIntegrityError
 from .data.repositories import DownloadRepository, LibraryRepository, ListeningRepository
 from .directories import DirectoryService, ItunesDirectory
 from .downloads import DownloadService
@@ -27,8 +32,20 @@ from .ui.icons import resolve_stylesheet
 from .ui.theme import app_font, apply_theme, resolve_theme, stylesheet
 
 
+def _install_excepthook():
+    logger = logging.getLogger("bs_podcasts")
+
+    def hook(exc_type, exc_value, exc_traceback):
+        text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        logger.error("Unhandled exception:\n%s", text)
+        sys.__stderr__.write(text)
+
+    sys.excepthook = hook
+
+
 def create_application(argv=None) -> QApplication:
     configure_logging()
+    _install_excepthook()
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
@@ -42,15 +59,35 @@ def create_application(argv=None) -> QApplication:
     return app
 
 
+def _claim_single_instance(app):
+    """Raise the running window instead of opening a second one."""
+    name = f"{APP_ID}-{getpass.getuser()}"
+    probe = QLocalSocket()
+    probe.connectToServer(name)
+    if probe.waitForConnected(300):
+        probe.write(b"raise")
+        probe.waitForBytesWritten(300)
+        probe.disconnectFromServer()
+        return None
+    QLocalServer.removeServer(name)
+    server = QLocalServer(app)
+    server.listen(name)
+    return server
+
+
 def main() -> int:
     app = create_application()
+    server = _claim_single_instance(app)
+    if server is None:
+        return 0
     root = application_data_dir()
     settings = AppSettings.load(root / "config.json")
     if settings.recovered_from_error:
         configure_logging().warning("Invalid configuration; using safe defaults.")
     try:
         database = Database(root / "library.db")
-    except sqlite3.DatabaseError as exc:
+        database.check_integrity()
+    except (sqlite3.DatabaseError, DatabaseIntegrityError, OSError) as exc:
         dialog = StartupErrorDialog(
             "Library could not be opened",
             "BS Podcasts did not modify the database. Close the app and inspect "
@@ -63,6 +100,7 @@ def main() -> int:
     apply_theme(resolve_theme(library.setting("ui.theme", "system")))
     app.setStyleSheet(resolve_stylesheet(stylesheet()))
     jobs = JobRunner(max_workers=4)
+    download_jobs = JobRunner(max_workers=2)
     refresh = RefreshService(
         repository,
         fetcher=FeedFetcher(),
@@ -92,6 +130,7 @@ def main() -> int:
             playback=playback,
             downloads=downloads,
             listening=listening,
+            download_jobs=download_jobs,
         )
         window.tray = TrayController(window, playback)
         window.mpris = MprisController(window, playback)
@@ -115,6 +154,20 @@ def main() -> int:
         build_window()
 
     build_window()
+
+    def raise_existing():
+        socket = server.nextPendingConnection()
+        if socket is not None:
+            socket.deleteLater()
+        window = state["window"]
+        if window is not None:
+            window.showNormal()
+            window.raise_()
+            window.activateWindow()
+
+    server.newConnection.connect(raise_existing)
     app.aboutToQuit.connect(lambda: state["window"].mpris.shutdown() if state["window"] is not None else None)
+    app.aboutToQuit.connect(lambda: downloads.pause_all())
     app.aboutToQuit.connect(jobs.shutdown)
+    app.aboutToQuit.connect(download_jobs.shutdown)
     return app.exec()

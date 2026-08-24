@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=BS Podcasts
+GenericName=Podcast Player
+Comment=A wide, mobile-inspired desktop podcast app
+Exec=bs-podcasts
+Icon=bs-podcasts
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=podcast;audio;player;rss;
+StartupNotify=true
+StartupWMClass=bs-podcasts
+MimeType=x-scheme-handler/podcast;
