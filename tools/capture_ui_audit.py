@@ -26,6 +26,30 @@ class EmptyDirectory:
     def browse(self, category="", limit=30):
         return []
 
+    def recommend(self, shows, limit=30):
+        return []
+
+    def topic(self, category, topic, limit=30):
+        return []
+
+    def chart(self, chart_type, category="", limit=30):
+        return []
+
+
+def settle(app, window, seconds=5.0):
+    import time
+    deadline = time.monotonic() + seconds
+    quiet = 0
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if window.reads_pending():
+            quiet = 0
+        else:
+            quiet += 1
+            if quiet >= 4:
+                return
+        time.sleep(0.01)
+
 
 def main() -> int:
     OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -52,6 +76,7 @@ def main() -> int:
         listening=listening,
     )
     window.show()
+    settle(app, window)
     page_names = (
         "home",
         "podcasts",
@@ -67,7 +92,7 @@ def main() -> int:
         window.resize(width, height)
         for index, name in enumerate(page_names):
             window.navigation.select(index)
-            app.processEvents()
+            settle(app, window)
             output = OUTPUT / f"{name}-{width}x{height}.png"
             window.grab().save(str(output), "PNG")
             print(output)

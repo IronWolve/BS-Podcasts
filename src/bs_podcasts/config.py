@@ -1,16 +1,16 @@
 """Application identity and paths without filesystem side effects."""
 
 from pathlib import Path
-from dataclasses import dataclass, field
-import json
 import os
 import sys
 
 
 APP_NAME = "BS Podcasts"
 APP_ID = "bs-podcasts"
-APP_TAGLINE = "A wide, mobile-inspired desktop podcast app"
+APP_TAGLINE = "A wide, mobile-inspired desktop podcast player"
 GITHUB_URL = "https://github.com/example"
+RELEASES_URL = "https://github.com/example/bs-podcasts/releases"
+RELEASES_API_URL = "https://api.github.com/repos/example/bs-podcasts/releases/latest"
 
 
 def app_version() -> str:
@@ -23,7 +23,7 @@ def app_version() -> str:
 
 
 # Per-platform locations, none created here.
-#   library, config, logs  -> data_dir()
+#   library/settings, logs -> data_dir()
 #   artwork, icons, temp   -> cache_dir()
 #   episode media          -> default_downloads_dir() (user-visible, changeable)
 # BS_PODCASTS_DATA_DIR keeps everything under one folder (development / portable).
@@ -86,33 +86,3 @@ def default_downloads_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Music" / "Podcasts" / APP_NAME
     return _xdg_user_dir("MUSIC", "Music") / "Podcasts" / APP_NAME
-
-
-@dataclass
-class AppSettings:
-    values: dict = field(default_factory=lambda: {"theme": "dark", "density": "comfortable"})
-    recovered_from_error: bool = False
-
-    @classmethod
-    def load(cls, path: str | Path):
-        source = Path(path)
-        if not source.exists():
-            return cls()
-        try:
-            payload = json.loads(source.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("configuration root is not an object")
-            settings = cls()
-            settings.values.update(payload)
-            return settings
-        except (OSError, ValueError, json.JSONDecodeError):
-            return cls(recovered_from_error=True)
-
-    def save(self, path: str | Path):
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix(target.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps(self.values, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        os.replace(temporary, target)

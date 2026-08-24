@@ -32,12 +32,16 @@ class LocalResponse:
         self.headers = {"Content-Type": content_type}
         self.status_code = 200
         self.encoding = "utf-8"
+        self.closed = False
 
     def raise_for_status(self):
         return None
 
     def iter_content(self, chunk_size):
         yield self.content
+
+    def close(self):
+        self.closed = True
 
 
 class LocalSession:
@@ -46,11 +50,15 @@ class LocalSession:
     def __init__(self, html: bytes, atom: bytes):
         self.html = html
         self.atom = atom
+        self.responses = []
 
     def get(self, url, **kwargs):
         if url.endswith("bench.atom"):
-            return LocalResponse(url, self.atom, "application/atom+xml")
-        return LocalResponse(url, self.html, "text/html; charset=utf-8")
+            response = LocalResponse(url, self.atom, "application/atom+xml")
+        else:
+            response = LocalResponse(url, self.html, "text/html; charset=utf-8")
+        self.responses.append(response)
+        return response
 
 
 class BrokenProvider:
@@ -81,6 +89,15 @@ def main() -> int:
     malformed = (SAMPLES / "m1-malformed.xml").read_bytes()
 
     require(len(parse_feed(rss_content).episodes) == 2, "RSS sample failed")
+    categorized = parse_feed(
+        b'''<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" version="2.0"><channel>
+        <title>Categorized</title><link>https://example.test/show</link>
+        <itunes:category text="Society &amp; Culture"><itunes:category text="Philosophy"/></itunes:category>
+        <itunes:category text="News"><itunes:category text="Daily News"/></itunes:category>
+        <item><title>One</title><guid>one</guid><enclosure url="https://example.test/one.mp3" type="audio/mpeg"/></item>
+        </channel></rss>'''
+    )
+    require(categorized.categories == ("Philosophy", "Daily News"), categorized.categories)
     atom = parse_feed(atom_content)
     require(len(atom.episodes) == 2, "Atom sample failed")
     try:
@@ -90,10 +107,12 @@ def main() -> int:
     else:
         raise RuntimeError("malformed feed was accepted")
 
-    fetcher = FeedFetcher(session=LocalSession(html_content, atom_content))
+    session = LocalSession(html_content, atom_content)
+    fetcher = FeedFetcher(session=session)
     discovered = fetcher.fetch("https://samples.invalid/landing")
     require(discovered.final_url.endswith("bench.atom"), "HTML autodiscovery failed")
     require(len(parse_feed(discovered.content).episodes) == 2, "discovered feed failed")
+    require(all(response.closed for response in session.responses), "feed responses were not closed")
 
     directory = DirectoryService([BrokenProvider(), LocalProvider()])
     candidates = directory.search("bench")
@@ -104,6 +123,8 @@ def main() -> int:
         library = LibraryService(repository)
         show = library.add_subscription("https://samples.invalid/workshop.xml", "Workshop Radio")
         repository.import_feed(show.id, parse_feed(rss_content))
+        repository.import_feed(show.id, categorized)
+        require(repository.get_show(show.id).categories == "Philosophy, Daily News", "feed categories were not stored")
         before = len(library.shows())
         shows, episodes = library.search("foundation")
         require(not shows and len(episodes) == 1, "persisted search failed")

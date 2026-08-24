@@ -1,18 +1,25 @@
 """Original styled dialogs for BS Podcasts: level-3 surfaces with scrim and shadow."""
 
 import platform
+from datetime import datetime
+from pathlib import Path
+import re
 
-from PySide6.QtCore import QPoint, QUrl, Qt, qVersion
+from PySide6.QtCore import QPoint, QTimer, QUrl, Qt, qVersion
 from PySide6.QtGui import QColor, QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
+    QApplication,
     QFrame,
+    QFormLayout,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -20,10 +27,181 @@ import PySide6
 
 from ..assets import logo_path
 from ..config import APP_NAME, APP_TAGLINE, GITHUB_URL, app_version
+from . import icons
+from .pixmaps import cover, initials
 from .theme import COLORS, SPACE
+from .widgets import safe_feed_html
 
 
 SHADOW_MARGIN = 24
+_LONG_VALUE = re.compile(r"\S{36,}")
+
+
+def _wrap_long_value(value: str) -> str:
+    """Add display-only break opportunities without changing copied data."""
+    return _LONG_VALUE.sub(
+        lambda match: "\u200b".join(
+            match.group(0)[offset:offset + 36]
+            for offset in range(0, len(match.group(0)), 36)
+        ),
+        str(value),
+    )
+
+
+def _episode_date(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone()
+        hour = parsed.strftime("%I").lstrip("0") or "0"
+        zone = parsed.strftime(" %Z") if parsed.tzinfo is not None else ""
+        return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year} at {hour}:{parsed.strftime('%M %p')}{zone}"
+    except ValueError:
+        return value
+
+
+def _episode_duration(seconds: int) -> str:
+    seconds = max(0, int(seconds or 0))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+
+
+def episode_information_rows(episode, show=None, format_bytes=None) -> list[tuple[str, str]]:
+    """Human-readable episode/feed facts shared by the dialog and Copy all."""
+    byte_text = format_bytes or (lambda value: f"{value} bytes")
+    rows = [("Podcast", getattr(show, "title", "") or getattr(episode, "show", ""))]
+    author = getattr(episode, "author", "")
+    if author:
+        rows.append(("Episode author", author))
+    published = _episode_date(getattr(episode, "published_at", "")) or getattr(episode, "published", "")
+    if published:
+        rows.append(("Published", published))
+    season = getattr(episode, "season_number", None)
+    number = getattr(episode, "episode_number", None)
+    if season is not None:
+        rows.append(("Season", str(season)))
+    if number is not None:
+        rows.append(("Episode number", str(number)))
+    episode_type = getattr(episode, "episode_type", "")
+    if episode_type:
+        rows.append(("Episode type", episode_type.title()))
+    explicit = getattr(episode, "explicit", None)
+    if explicit is not None:
+        rows.append(("Explicit", "Yes" if explicit else "No"))
+    duration_seconds = getattr(episode, "duration_seconds", 0)
+    if duration_seconds:
+        rows.append(("Duration", _episode_duration(duration_seconds)))
+    state = getattr(episode, "state", "")
+    if state:
+        rows.append(("Library status", state))
+    position = getattr(episode, "position_seconds", 0.0)
+    progress = getattr(episode, "progress", 0.0)
+    if position:
+        rows.append(("Listening position", _episode_duration(int(position))))
+    elif progress and duration_seconds:
+        rows.append(("Listening position", _episode_duration(int(progress * duration_seconds))))
+    mime_type = getattr(episode, "mime_type", "")
+    if mime_type:
+        rows.append(("Media type", mime_type))
+    enclosure_bytes = getattr(episode, "enclosure_bytes", 0)
+    if enclosure_bytes:
+        rows.append(("Feed-reported size", byte_text(enclosure_bytes)))
+    external_id = getattr(episode, "external_id", "")
+    if external_id:
+        rows.append(("Feed ID", external_id))
+    transcript_url = getattr(episode, "transcript_url", "")
+    if transcript_url:
+        transcript_type = getattr(episode, "transcript_type", "")
+        rows.append(("Transcript", transcript_type or "Available"))
+        rows.append(("Transcript source", transcript_url))
+    chapters_url = getattr(episode, "chapters_url", "")
+    if chapters_url:
+        rows.append(("Chapters source", chapters_url))
+    downloaded_path = getattr(episode, "downloaded_path", "")
+    if downloaded_path:
+        rows.append(("Downloaded file", downloaded_path))
+        try:
+            rows.append(("Downloaded size", byte_text(Path(downloaded_path).stat().st_size)))
+        except OSError:
+            pass
+    for label, value in (
+        ("Episode page", getattr(episode, "website_url", "")),
+        ("Podcast website", getattr(show, "website_url", "") if show else ""),
+        ("Feed URL", getattr(show, "feed_url", "") if show else ""),
+        ("Audio URL", getattr(episode, "media_url", "")),
+        ("Artwork URL", getattr(episode, "artwork_url", "")),
+    ):
+        if value:
+            rows.append((label, value))
+    return [(label, value) for label, value in rows if value]
+
+
+def episode_information_text(episode, show=None, format_bytes=None) -> str:
+    rows = episode_information_rows(episode, show, format_bytes)
+    text = [getattr(episode, "title", "Episode"), ""]
+    text.extend(f"{label}: {value}" for label, value in rows)
+    notes = getattr(episode, "description", "")
+    if notes:
+        text.extend(("", "Show notes:", notes))
+    return "\n".join(text).strip()
+
+
+def podcast_information_rows(podcast, feed=None) -> list[tuple[str, str]]:
+    def value(name, default=""):
+        return getattr(feed, name, default) or getattr(podcast, name, default)
+
+    rows = []
+    author = value("author")
+    if author:
+        rows.append(("Author", author))
+    categories = value("categories", ())
+    if isinstance(categories, (tuple, list)):
+        categories = ", ".join(str(item) for item in categories if item)
+    if categories:
+        rows.append(("Categories", str(categories)))
+    episode_count = getattr(podcast, "episode_count", 0)
+    if episode_count:
+        rows.append(("Episodes", str(episode_count)))
+    new_count = getattr(podcast, "new_count", 0)
+    if new_count:
+        rows.append(("New episodes", str(new_count)))
+    health = getattr(podcast, "health", "")
+    if health and health not in {"unknown", "ok"}:
+        rows.append(("Feed status", health.title()))
+    refreshed = getattr(podcast, "last_refresh_text", "")
+    if refreshed:
+        rows.append(("Last refreshed", refreshed))
+    latest_title = getattr(podcast, "latest_episode_title", "")
+    if latest_title:
+        rows.append(("Latest episode", latest_title))
+        latest_date = getattr(podcast, "latest_episode_date", "")
+        if latest_date:
+            rows.append(("Latest date", latest_date))
+    source = getattr(podcast, "source", "")
+    if source:
+        rows.append(("Source type", source.upper()))
+    for label, field in (
+        ("Podcast website", "website_url"),
+        ("Feed URL", "feed_url"),
+        ("Artwork URL", "artwork_url"),
+        ("Artwork file", "artwork_path"),
+    ):
+        item = value(field)
+        if item:
+            rows.append((label, item))
+    description = value("description")
+    if description:
+        rows.append(("Description", description))
+    return rows
+
+
+def podcast_information_text(podcast, feed=None) -> str:
+    text = [getattr(feed, "title", "") or getattr(podcast, "title", "Podcast"), ""]
+    text.extend(f"{label}: {value}" for label, value in podcast_information_rows(podcast, feed))
+    return "\n".join(text).strip()
 
 
 class StyledDialog(QDialog):
@@ -70,7 +248,10 @@ class StyledDialog(QDialog):
             self._scrim.raise_()
             self.adjustSize()
             centre = window.mapToGlobal(window.rect().center())
-            self.move(centre.x() - self.width() // 2, centre.y() - self.height() // 2)
+            screen = window.screen().availableGeometry()
+            x = max(screen.left(), min(centre.x() - self.width() // 2, screen.right() - self.width() + 1))
+            y = max(screen.top(), min(centre.y() - self.height() // 2, screen.bottom() - self.height() + 1))
+            self.move(x, y)
         try:
             return super().exec()
         finally:
@@ -104,6 +285,7 @@ class StyledDialog(QDialog):
     def add_heading(self, title: str, body: str = ""):
         heading = QLabel(title)
         heading.setObjectName("cardTitle")
+        heading.setWordWrap(True)
         self.card_layout.addWidget(heading)
         if body:
             text = QLabel(body)
@@ -184,11 +366,16 @@ class PodcastSettingsDialog(StyledDialog):
 
     TRIM_LEVELS = ("off", "light", "medium", "strong")
 
-    def __init__(self, title: str, speed: float, skip_back: int, skip_forward: int, auto_continue: bool, trim_level: str, parent=None):
+    def __init__(
+        self, title: str, speed: float, skip_back: int, skip_forward: int,
+        auto_continue: bool, trim_level: str, parent=None,
+        auto_download_override=None, auto_download_limit=None,
+        retention_keep=None, retention_days=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle(f"{title} settings")
-        self.set_card_width(540)
-        self.add_heading(title, "Playback settings for this podcast only.")
+        self.set_card_width(680)
+        self.add_heading(title, "Simple playback, download and retention settings for this podcast.")
         from PySide6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QSpinBox
 
         form = QFormLayout()
@@ -219,6 +406,36 @@ class PodcastSettingsDialog(StyledDialog):
         form.addRow("Skip forward", self.skip_forward)
         form.addRow("Silence trim", self.trim)
         form.addRow("After an episode", self.auto_continue)
+        self.auto_download = QComboBox()
+        self.auto_download.addItem("Use global setting", None)
+        self.auto_download.addItem("On", True)
+        self.auto_download.addItem("Off", False)
+        selected = self.auto_download.findData(auto_download_override)
+        self.auto_download.setCurrentIndex(max(0, selected))
+        self.auto_download_limit = QSpinBox()
+        self.auto_download_limit.setRange(1, 20)
+        self.auto_download_limit.setSuffix(" new episodes")
+        self.auto_download_limit.setValue(auto_download_limit or 3)
+        self.retention_keep = QSpinBox()
+        self.retention_keep.setRange(0, 1000)
+        self.retention_keep.setSpecialValueText("No limit")
+        self.retention_keep.setSuffix(" latest")
+        self.retention_keep.setValue(retention_keep or 0)
+        self.retention_days = QSpinBox()
+        self.retention_days.setRange(0, 3650)
+        self.retention_days.setSpecialValueText("No age limit")
+        self.retention_days.setSuffix(" days")
+        self.retention_days.setValue(retention_days or 0)
+        for field in (self.auto_download, self.auto_download_limit, self.retention_keep, self.retention_days):
+            field.setFixedWidth(180)
+        form.addRow("Automatic downloads", self.auto_download)
+        form.addRow("Download at most", self.auto_download_limit)
+        form.addRow("Keep downloads", self.retention_keep)
+        form.addRow("Delete downloads older than", self.retention_days)
+        protection = QLabel("Favorites are always kept. You will see a preview before the first cleanup.")
+        protection.setObjectName("settingHint")
+        protection.setWordWrap(True)
+        self.card_layout.addWidget(protection)
         self.card_layout.addLayout(form)
         save = QPushButton("Save")
         save.setObjectName("primaryButton")
@@ -232,6 +449,10 @@ class PodcastSettingsDialog(StyledDialog):
             "skip_forward": self.skip_forward.value(),
             "auto_continue": self.auto_continue.isChecked(),
             "trim_level": self.TRIM_LEVELS[self.trim.currentIndex()],
+            "auto_download_override": self.auto_download.currentData(),
+            "auto_download_limit": self.auto_download_limit.value(),
+            "retention_keep": self.retention_keep.value() or None,
+            "retention_days": self.retention_days.value() or None,
         }
 
 
@@ -324,6 +545,265 @@ class TextInputDialog(StyledDialog):
     @property
     def value(self) -> str:
         return self.field.text().strip()
+
+
+class EpisodeInfoDialog(StyledDialog):
+    """Full feed and local-library information for one episode."""
+
+    def __init__(self, episode, show=None, format_bytes=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Episode information")
+        screen = parent.screen() if parent is not None else QApplication.primaryScreen()
+        available = screen.availableGeometry()
+        target_width = min(1120, max(700, int(available.width() * 0.92)))
+        target_height = min(820, max(600, int(available.height() * 0.88)))
+        self.setFixedSize(min(target_width, available.width()), min(target_height, available.height()))
+        self.add_heading(
+            _wrap_long_value(getattr(episode, "title", "Episode information")),
+            "Feed metadata and local library state. Full show notes remain available through Show details.",
+        )
+        self.information_text = episode_information_text(episode, show, format_bytes)
+        rows = episode_information_rows(episode, show, format_bytes)
+        source_names = {
+            "Feed ID", "Transcript source", "Chapters source", "Downloaded file",
+            "Episode page", "Podcast website", "Feed URL", "Audio URL", "Artwork URL",
+        }
+        groups = (
+            [(name, value) for name, value in rows if name not in source_names],
+            [(name, value) for name, value in rows if name in source_names],
+        )
+        columns = QHBoxLayout()
+        columns.setSpacing(SPACE["xl"])
+        self.value_labels = []
+        for group in groups:
+            form = QFormLayout()
+            form.setHorizontalSpacing(SPACE["lg"])
+            form.setVerticalSpacing(SPACE["sm"])
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            for name, value in group:
+                field = QLabel(_wrap_long_value(value))
+                field.setTextFormat(Qt.TextFormat.PlainText)
+                field.setWordWrap(True)
+                field.setToolTip(value)
+                field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                label = QLabel(name)
+                label.setObjectName("muted")
+                label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+                form.addRow(label, field)
+                self.value_labels.append(field)
+            holder = QWidget()
+            holder.setLayout(form)
+            columns.addWidget(holder, 1, Qt.AlignmentFlag.AlignTop)
+        self.card_layout.addLayout(columns, 1)
+
+        buttons = QHBoxLayout()
+        copy = QPushButton("Copy information")
+        copy.setObjectName("quietButton")
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(self.information_text))
+        close = QPushButton("Close")
+        close.setObjectName("primaryButton")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(copy)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        self.card_layout.addLayout(buttons)
+
+
+class PodcastInfoDialog(StyledDialog):
+    """Readable podcast summary with useful links before technical details."""
+
+    def __init__(self, podcast, feed=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Podcast information")
+        screen = parent.screen() if parent is not None else QApplication.primaryScreen()
+        available = screen.availableGeometry()
+        target_width = min(860, max(700, int(available.width() * 0.72)))
+        target_height = min(760, max(600, int(available.height() * 0.82)))
+        self.setFixedSize(min(target_width, available.width()), min(target_height, available.height()))
+        title = getattr(feed, "title", "") or getattr(podcast, "title", "Podcast information")
+        self.information_text = podcast_information_text(podcast, feed)
+        website_url = getattr(feed, "website_url", "") or getattr(podcast, "website_url", "")
+        feed_url = getattr(feed, "feed_url", "") or getattr(podcast, "feed_url", "")
+        artwork_url = getattr(feed, "artwork_url", "") or getattr(podcast, "artwork_url", "")
+        artwork_path = getattr(feed, "artwork_path", "") or getattr(podcast, "artwork_path", "")
+        description = getattr(feed, "description", "") or getattr(podcast, "description", "")
+        author = getattr(feed, "author", "") or getattr(podcast, "author", "")
+        categories = getattr(feed, "categories", ()) or getattr(podcast, "categories", "")
+        if isinstance(categories, (tuple, list)):
+            categories = ", ".join(str(value) for value in categories if value)
+
+        scroll = QScrollArea()
+        self.scroll = scroll
+        scroll.setObjectName("dialogScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, SPACE["sm"], 0)
+        content_layout.setSpacing(SPACE["md"])
+        scroll.setWidget(content)
+
+        hero = QHBoxLayout()
+        hero.setSpacing(SPACE["lg"])
+        artwork = QLabel()
+        artwork.setFixedSize(148, 148)
+        artwork.setPixmap(
+            cover(
+                artwork_path, 148, 148, 14, initials(title),
+                getattr(podcast, "accent", ""), self.devicePixelRatioF(),
+            )
+        )
+        artwork.setAccessibleName(f"Artwork for {title}")
+        hero.addWidget(artwork, 0, Qt.AlignmentFlag.AlignTop)
+        summary = QVBoxLayout()
+        summary.setSpacing(SPACE["xs"])
+        heading = QLabel(_wrap_long_value(title))
+        heading.setObjectName("contextTitle")
+        heading.setWordWrap(True)
+        summary.addWidget(heading)
+        if author:
+            author_label = QLabel(author)
+            author_label.setObjectName("meta")
+            author_label.setWordWrap(True)
+            summary.addWidget(author_label)
+        if categories:
+            category_label = QLabel(str(categories))
+            category_label.setObjectName("scopePill")
+            category_label.setWordWrap(True)
+            summary.addWidget(category_label, 0, Qt.AlignmentFlag.AlignLeft)
+        episode_count = getattr(podcast, "episode_count", 0)
+        refreshed = getattr(podcast, "last_refresh_text", "")
+        summary_text = "  ·  ".join(
+            part for part in (
+                f"{episode_count} episodes" if episode_count else "",
+                f"Refreshed {refreshed}" if refreshed else "",
+            ) if part
+        )
+        if summary_text:
+            summary_meta = QLabel(summary_text)
+            summary_meta.setObjectName("meta")
+            summary.addWidget(summary_meta)
+        summary.addStretch(1)
+        hero.addLayout(summary, 1)
+        content_layout.addLayout(hero)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(SPACE["sm"])
+        open_website = QPushButton("Open website")
+        open_website.setObjectName("primaryButton")
+        open_website.setIcon(icons.icon("external", COLORS["on_accent"], 16))
+        open_website.setEnabled(bool(website_url))
+        open_website.setToolTip(website_url or "This feed does not provide a website")
+        open_website.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(website_url)))
+        copy_feed = QPushButton("Copy RSS feed")
+        copy_feed.setObjectName("quietButton")
+        copy_feed.setIcon(icons.icon("rss", COLORS["text"], 16))
+        copy_feed.setEnabled(bool(feed_url))
+        copy_feed.setToolTip(feed_url or "Feed URL unavailable")
+        copy_feed.clicked.connect(lambda: QApplication.clipboard().setText(feed_url))
+        actions.addWidget(open_website)
+        actions.addWidget(copy_feed)
+        actions.addStretch(1)
+        content_layout.addLayout(actions)
+        link_help = QLabel(
+            "Website opens the public podcast page. RSS feed is the subscription address used by podcast readers."
+        )
+        link_help.setObjectName("settingHint")
+        link_help.setWordWrap(True)
+        content_layout.addWidget(link_help)
+
+        about_heading = QLabel("ABOUT")
+        about_heading.setObjectName("eyebrow")
+        content_layout.addWidget(about_heading)
+        about = QTextBrowser()
+        about.setObjectName("contextBody")
+        about.setFrameShape(QFrame.Shape.NoFrame)
+        about.setOpenExternalLinks(False)
+        about.anchorClicked.connect(QDesktopServices.openUrl)
+        about.setHtml(safe_feed_html(description or "No description provided by this feed."))
+        about.setMinimumHeight(130)
+        about.setMaximumHeight(220)
+        content_layout.addWidget(about)
+
+        facts = QFormLayout()
+        facts.setHorizontalSpacing(SPACE["xl"])
+        facts.setVerticalSpacing(SPACE["xs"])
+        facts.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        facts.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.value_labels = []
+        friendly_names = {"Author", "Categories", "Episodes", "New episodes", "Feed status", "Last refreshed", "Latest episode", "Latest date"}
+        for name, value in podcast_information_rows(podcast, feed):
+            if name not in friendly_names:
+                continue
+            field = QLabel(_wrap_long_value(value))
+            field.setTextFormat(Qt.TextFormat.PlainText)
+            field.setWordWrap(True)
+            field.setToolTip(value)
+            field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            label = QLabel(name)
+            label.setObjectName("muted")
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            facts.addRow(label, field)
+            self.value_labels.append(field)
+        content_layout.addLayout(facts)
+
+        technical_toggle = QPushButton("Show technical details")
+        technical_toggle.setObjectName("textButton")
+        technical_toggle.setCheckable(True)
+        technical_toggle.setIcon(icons.icon("chevron-down", COLORS["muted"], 14))
+        technical_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        technical = QWidget()
+        technical_form = QFormLayout(technical)
+        technical_form.setContentsMargins(0, 0, 0, 0)
+        technical_form.setHorizontalSpacing(SPACE["lg"])
+        technical_form.setVerticalSpacing(SPACE["xs"])
+        technical_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        technical_names = {"Podcast website", "Feed URL", "Artwork URL", "Artwork file", "Source type"}
+        for name, value in podcast_information_rows(podcast, feed):
+            if name not in technical_names:
+                continue
+            field = QLabel(_wrap_long_value(value))
+            field.setTextFormat(Qt.TextFormat.PlainText)
+            field.setWordWrap(True)
+            field.setToolTip(value)
+            field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            label = QLabel("RSS feed" if name == "Feed URL" else "Website" if name == "Podcast website" else name)
+            label.setObjectName("muted")
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            technical_form.addRow(label, field)
+            self.value_labels.append(field)
+        technical.hide()
+        content_layout.addWidget(technical)
+
+        def toggle_technical(checked: bool):
+            technical.setVisible(checked)
+            technical_toggle.setText("Hide technical details" if checked else "Show technical details")
+            technical_toggle.setIcon(
+                icons.icon("chevron-up" if checked else "chevron-down", COLORS["muted"], 14)
+            )
+            if checked:
+                QTimer.singleShot(0, lambda: scroll.ensureWidgetVisible(technical))
+
+        technical_toggle.toggled.connect(toggle_technical)
+        content_layout.addStretch(1)
+        self.card_layout.addWidget(scroll, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(technical_toggle)
+        copy = QPushButton("Copy information")
+        self.copy_button = copy
+        copy.setObjectName("quietButton")
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(self.information_text))
+        close = QPushButton("Close")
+        self.close_button = close
+        close.setObjectName("primaryButton")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(copy)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        self.card_layout.addLayout(buttons)
 
 
 class ShortcutsDialog(StyledDialog):

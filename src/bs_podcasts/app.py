@@ -15,12 +15,11 @@ from PySide6.QtWidgets import QApplication
 
 from .artwork import ArtworkCache
 from .assets import icon_path
-from .config import APP_ID, APP_NAME, AppSettings, app_version
+from .config import APP_ID, APP_NAME, app_version
 from .config import cache_dir, data_dir as application_data_dir, default_downloads_dir
 from .data import Database
-from .data.database import DatabaseIntegrityError
 from .data.repositories import DownloadRepository, LibraryRepository, ListeningRepository
-from .directories import DirectoryService, ItunesDirectory
+from .directories import DirectoryService, PublicDirectory
 from .downloads import DownloadService
 from .feeds import FeedFetcher, RefreshService
 from .jobs import JobRunner
@@ -125,16 +124,12 @@ def main() -> int:
     if server is None:
         return 0
     root = application_data_dir()
-    settings = AppSettings.load(root / "config.json")
-    if settings.recovered_from_error:
-        configure_logging().warning("Invalid configuration; using safe defaults.")
     try:
         database = Database(root / "library.db")
-        database.check_integrity()
-    except (sqlite3.DatabaseError, DatabaseIntegrityError, OSError) as exc:
+    except (sqlite3.DatabaseError, OSError) as exc:
         dialog = StartupErrorDialog(
             "Library could not be opened",
-            "BS Podcasts did not modify the database. Close the app and inspect "
+            "Close the app and inspect "
             f"the library at {root / 'library.db'}.\n\n{exc}",
         )
         dialog.exec()
@@ -150,10 +145,12 @@ def main() -> int:
         fetcher=FeedFetcher(),
         artwork=ArtworkCache(cache_dir() / "artwork"),
     )
-    directory = DirectoryService([ItunesDirectory()])
+    directory = DirectoryService([PublicDirectory()])
+    logger = logging.getLogger("bs_podcasts")
     try:
         engine = MpvEngine()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Internal playback unavailable; using external player: %s", exc)
         engine = ExternalPlayerEngine()
     listening_repository = ListeningRepository(database)
     listening = ListeningService(listening_repository)
@@ -213,6 +210,7 @@ def main() -> int:
             window.activateWindow()
 
     server.newConnection.connect(raise_existing)
+    app.aboutToQuit.connect(lambda: state["window"]._save_layout() if state["window"] is not None else None)
     app.aboutToQuit.connect(lambda: state["window"].mpris.shutdown() if state["window"] is not None else None)
     app.aboutToQuit.connect(lambda: downloads.pause_all())
     code = app.exec()

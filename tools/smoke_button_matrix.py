@@ -66,7 +66,8 @@ class RecordingPlayback:
     def load_episode(self, episode_id, autoplay=True):
         self.calls.append(("load", episode_id))
         self._set(state=PlaybackState.PLAYING if autoplay else PlaybackState.PAUSED, episode_id=episode_id,
-                  show_id=1, title=f"Episode {episode_id}", show_title="Workshop Radio", position=0.0, duration=2520.0)
+                  show_id=1, title=f"Episode {episode_id}", show_title="Workshop Radio",
+                  source=f"https://media.invalid/{episode_id}.mp3", position=0.0, duration=2520.0)
 
     def play_pause(self):
         self.calls.append(("play_pause",))
@@ -230,6 +231,20 @@ def main() -> int:
         QTest.mouseClick(window.navigation.mark, Qt.MouseButton.LeftButton)
         process(app)
         check("AboutDialog" in opened_dialogs, "brand mark did not open About")
+        nav_expectations = {
+            0: "Search library…",
+            1: "Add podcast…",
+            2: "Clear all new badges",
+            3: "Clear Up Next…",
+            4: "Delete played downloads…",
+            5: "Refresh Discover",
+            6: "Open Bookmarks",
+            7: "Clear history…",
+            8: "Open data folder",
+        }
+        for index, expected_action in nav_expectations.items():
+            labels = [action.text() for action in window._create_navigation_menu(index).actions()]
+            check(expected_action in labels, f"navigation context menu {index} lacks {expected_action}")
 
         # ------------------------------------------------------------- filters
         print("filters, sort, selection bar")
@@ -242,7 +257,7 @@ def main() -> int:
         window.episode_page.header.search.clear()
         process(app)
         check(window.episode_page.model.rowCount() == total, "clearing filter did not restore")
-        window.episode_page.chips._buttons[3].click()  # Downloaded
+        next(button for button in window.episode_page.chips._buttons if button.text() == "Downloaded").click()
         process(app)
         check(window.episode_page.model.rowCount() == 0 and window.episode_page.stack.currentWidget() is window.episode_page.empty, "Downloaded chip / empty state")
         window.episode_page.chips._buttons[0].click()
@@ -277,6 +292,15 @@ def main() -> int:
         window.episode_page.view.setCurrentIndex(window.episode_page.model.index(window.episode_page.model.row_for_episode(first.id), 0))
         process(app)
         check(window.context.title.text() == first.title, f"selecting a row did not update the pane (pane={window.context.title.text()!r}, row={window.episode_page.view.currentIndex().row()}, rows={window.episode_page.model.rowCount()})")
+        opened_before = len(opened_dialogs)
+        window.context.info_button.click()
+        process(app)
+        check("EpisodeInfoDialog" in opened_dialogs[opened_before:], "pane Info button did not open episode information")
+        info_menu = window.context._create_information_menu()
+        check(info_menu.actions()[0].text() == "Episode information…", "episode pane context menu label")
+        info_menu.actions()[0].trigger()
+        process(app)
+        check(opened_dialogs.count("EpisodeInfoDialog") >= 2, "pane right-click Info did not open episode information")
         window.context.primary.click()
         process(app)
         check(playback.last("load") == ("load", first.id), f"pane Play did not load the episode (calls={playback.calls[-3:]}, primary={window.context.primary.text()!r}, ep={window.context._episode_id})")
@@ -312,12 +336,26 @@ def main() -> int:
         check(not window.context.isVisible(), "player Up Next button did not close the pane")
         window.context.show()
 
+        podcast_item = window._ui_podcast(library.shows()[0])
+        window._show_item(podcast_item)
+        opened_before = len(opened_dialogs)
+        window.context.info_button.click()
+        process(app)
+        check("PodcastInfoDialog" in opened_dialogs[opened_before:], "pane Info button did not open podcast information")
+        podcast_menu = window.context._create_information_menu()
+        check(podcast_menu.actions()[0].text() == "Podcast information…", "podcast pane context menu label")
+
         # -------------------------------------------------------------- hero
         print("hero")
         window._open_podcast(window._ui_podcast(library.shows()[0]))
         settle(app, window)
         hero = window.episode_page.hero
         check(hero.isVisible(), "hero not shown for a podcast")
+        opened_before = len(opened_dialogs)
+        hero.info.click()
+        process(app)
+        check("PodcastInfoDialog" in opened_dialogs[opened_before:], "hero Info did not open podcast information")
+        check(hero._create_context_menu().actions()[0].text() == "Podcast information…", "hero context menu lacks information")
         latest_id = library.episodes(show_id=show.id, limit=1)[0].id
         hero.primary.click()
         process(app)
@@ -384,6 +422,12 @@ def main() -> int:
         p.title.click()
         process(app)
         check(window.now_playing.isVisible(), "player title did not open Now Playing")
+        check([action.text() for action in p._create_context_menu().actions()] == ["Show Now Playing", "Episode information…"], "player context menu")
+        opened_before = len(opened_dialogs)
+        window.now_playing.info_button.click()
+        process(app)
+        check("EpisodeInfoDialog" in opened_dialogs[opened_before:], "Now Playing Info did not open episode information")
+        check(window.now_playing._create_context_menu().actions()[0].text() == "Episode information…", "Now Playing context menu lacks information")
         window.now_playing.close_button.click()
         process(app)
         check(not window.now_playing.isVisible(), "Now Playing close button")
@@ -439,7 +483,7 @@ def main() -> int:
         window.discover_page.chart.setCurrentIndex(1)
         while window._discover_loading:
             app.processEvents()
-        check("Apple Top Shows" in window.discover_page.result_summary.text(), "Discover chart tab")
+        check("Top Shows" in window.discover_page.result_summary.text(), "Discover chart tab")
         window.discover_page.set_discover_sort("title", "Title A–Z")
         check(window.discover_page.discover_sort.text() == "Title A–Z", "Discover sort handler")
         window.discover_page.set_discover_sort("rank", "Chart order")
@@ -496,6 +540,9 @@ def main() -> int:
         window.search_overlay.field.setText("foundation")
         window._global_query("foundation")
         settle(app, window)
+        search_payload = window.search_overlay.results.currentItem().data(Qt.ItemDataRole.UserRole)
+        search_menu = window._create_search_result_menu(search_payload)
+        check(search_menu.actions()[0].text() == "Episode information…", "search result context menu lacks episode information")
         window.search_overlay._activate_current()
         settle(app, window)
         check(window.pages.currentIndex() == 2 and window.episode_page.view.currentIndex().data(257).episode_id == second.id, "search result did not open and select the episode")

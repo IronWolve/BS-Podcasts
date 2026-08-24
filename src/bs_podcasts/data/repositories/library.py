@@ -77,6 +77,42 @@ class LibraryRepository:
             ).fetchall()
         return [self._episode(row) for row in rows]
 
+    def list_favorites(self) -> list[Episode]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """SELECT e.*, s.title AS show_title,
+                   COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path
+                   FROM episodes e JOIN shows s ON s.id=e.show_id
+                   WHERE e.favorite=1 ORDER BY e.published_at DESC, e.id DESC"""
+            ).fetchall()
+        return [self._episode(row) for row in rows]
+
+    def retention_candidates(
+        self, show_id: int, keep_latest: int | None, older_than_days: int | None
+    ) -> list[Episode]:
+        """Downloaded episodes a feed rule may remove; favorites never qualify."""
+        episodes = [
+            episode for episode in self.list_episodes(show_id, limit=100_000)
+            if episode.downloaded_path and not episode.favorite
+        ]
+        keep_latest = max(0, int(keep_latest or 0))
+        cutoff = time.time() - max(0, int(older_than_days or 0)) * 86400
+        candidates = []
+        for index, episode in enumerate(episodes):
+            outside_count = bool(keep_latest and index >= keep_latest)
+            older = False
+            if older_than_days:
+                try:
+                    from datetime import datetime
+                    older = datetime.fromisoformat(
+                        episode.published_at.replace("Z", "+00:00")
+                    ).timestamp() < cutoff
+                except (TypeError, ValueError):
+                    older = False
+            if outside_count or older:
+                candidates.append(episode)
+        return candidates
+
     def import_feed(self, show_id: int, feed: FeedData) -> int:
         now = time.time()
         with self.database.connect() as connection:
@@ -86,7 +122,8 @@ class LibraryRepository:
                    author=COALESCE(NULLIF(?, ''), author),
                    description=COALESCE(NULLIF(?, ''), description),
                    website_url=COALESCE(NULLIF(?, ''), website_url),
-                   artwork_url=COALESCE(NULLIF(?, ''), artwork_url)
+                   artwork_url=COALESCE(NULLIF(?, ''), artwork_url),
+                   categories=COALESCE(NULLIF(?, ''), categories)
                    WHERE id=?""",
                 (
                     feed.title,
@@ -94,12 +131,20 @@ class LibraryRepository:
                     feed.description,
                     feed.website_url,
                     feed.artwork_url,
+                    ", ".join(feed.categories),
                     show_id,
                 ),
             )
             initial_import = connection.execute(
                 "SELECT 1 FROM episodes WHERE show_id=? LIMIT 1", (show_id,)
             ).fetchone() is None
+            existing_ids = {
+                row["external_id"]
+                for row in connection.execute(
+                    "SELECT external_id FROM episodes WHERE show_id=?", (show_id,)
+                ).fetchall()
+            }
+            imported = sum(episode.external_id not in existing_ids for episode in feed.episodes)
             new_flag = 0 if initial_import else 1
             for episode in feed.episodes:
                 connection.execute(
@@ -107,8 +152,10 @@ class LibraryRepository:
                        show_id, external_id, title, description, media_url,
                        mime_type, published_at, duration_seconds,
                        transcript_url, transcript_type, is_new, added_at,
-                       chapters_url, artwork_url)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       chapters_url, artwork_url, website_url, author,
+                       season_number, episode_number, episode_type, explicit,
+                       enclosure_bytes)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(show_id, external_id) DO UPDATE SET
                        title=excluded.title,
                        description=excluded.description,
@@ -119,7 +166,14 @@ class LibraryRepository:
                        transcript_url=excluded.transcript_url,
                        transcript_type=excluded.transcript_type,
                        chapters_url=excluded.chapters_url,
-                       artwork_url=excluded.artwork_url""",
+                       artwork_url=excluded.artwork_url,
+                       website_url=excluded.website_url,
+                       author=excluded.author,
+                       season_number=excluded.season_number,
+                       episode_number=excluded.episode_number,
+                       episode_type=excluded.episode_type,
+                       explicit=excluded.explicit,
+                       enclosure_bytes=excluded.enclosure_bytes""",
                     (
                         show_id,
                         episode.external_id,
@@ -135,9 +189,32 @@ class LibraryRepository:
                         now,
                         episode.chapters_url,
                         episode.artwork_url,
+                        episode.website_url,
+                        episode.author,
+                        episode.season_number,
+                        episode.episode_number,
+                        episode.episode_type,
+                        None if episode.explicit is None else int(episode.explicit),
+                        episode.enclosure_bytes,
                     ),
                 )
-        return len(feed.episodes)
+        return imported
+
+    def episodes_by_ids(self, episode_ids) -> dict[int, Episode]:
+        """Fetch a set of episodes in one query for download/bookmark views."""
+        ids = list(dict.fromkeys(int(value) for value in episode_ids if value))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"""SELECT e.*, s.title AS show_title,
+                    COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path
+                    FROM episodes e JOIN shows s ON s.id=e.show_id
+                    WHERE e.id IN ({placeholders})""",
+                ids,
+            ).fetchall()
+        return {row["id"]: self._episode(row) for row in rows}
 
     def artwork_paths(self) -> set[str]:
         with self.database.connect() as connection:
@@ -323,10 +400,26 @@ class LibraryRepository:
         with self.database.connect() as connection:
             connection.execute("UPDATE episodes SET episode_artwork_path=? WHERE id=?", (path, episode_id))
 
+    def set_favorite(self, episode_id: int, favorite: bool = True) -> bool:
+        with self.database.connect() as connection:
+            changed = connection.execute(
+                "UPDATE episodes SET favorite=? WHERE id=?",
+                (int(favorite), episode_id),
+            ).rowcount
+        return bool(changed)
+
     def mark_show_seen(self, show_id: int) -> int:
         """Opening a show clears its new-episode badge."""
         with self.database.connect() as connection:
             return connection.execute("UPDATE episodes SET is_new=0 WHERE show_id=? AND is_new=1", (show_id,)).rowcount
+
+    def clear_all_new(self, played: bool = False) -> int:
+        with self.database.connect() as connection:
+            if played:
+                return connection.execute(
+                    "UPDATE episodes SET is_new=0, played=1 WHERE is_new=1"
+                ).rowcount
+            return connection.execute("UPDATE episodes SET is_new=0 WHERE is_new=1").rowcount
 
     def mark_show_played(self, show_id: int, played: bool = True) -> int:
         with self.database.connect() as connection:
@@ -356,10 +449,16 @@ class LibraryRepository:
 
     def mark_played(self, episode_id: int, played: bool = True):
         with self.database.connect() as connection:
-            connection.execute(
-                "UPDATE episodes SET played=?, is_new=0, last_played=? WHERE id=?",
-                (int(played), time.time(), episode_id),
-            )
+            if played:
+                connection.execute(
+                    "UPDATE episodes SET played=1, is_new=0, last_played=? WHERE id=?",
+                    (time.time(), episode_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE episodes SET played=0, is_new=0 WHERE id=?",
+                    (episode_id,),
+                )
 
     def set_current_playback(self, episode_id: int | None, state: str):
         with self.database.connect() as connection:
@@ -384,6 +483,10 @@ class LibraryRepository:
         skip_forward: int | None = None,
         auto_continue: bool | None = None,
         trim_level: str | None = None,
+        auto_download_override: bool | None | object = ...,
+        auto_download_limit: int | None | object = ...,
+        retention_keep: int | None | object = ...,
+        retention_days: int | None | object = ...,
     ):
         show = self.get_show(show_id)
         if show is None:
@@ -391,13 +494,19 @@ class LibraryRepository:
         with self.database.connect() as connection:
             connection.execute(
                 """UPDATE shows SET playback_speed=?, skip_back=?,
-                   skip_forward=?, auto_continue=?, trim_level=? WHERE id=?""",
+                   skip_forward=?, auto_continue=?, trim_level=?,
+                   auto_download_override=?, auto_download_limit=?,
+                   retention_keep=?, retention_days=? WHERE id=?""",
                 (
                     speed if speed is not None else show.playback_speed,
                     skip_back if skip_back is not None else show.skip_back,
                     skip_forward if skip_forward is not None else show.skip_forward,
                     int(auto_continue if auto_continue is not None else show.auto_continue),
                     trim_level if trim_level is not None else show.trim_level,
+                    show.auto_download_override if auto_download_override is ... else (None if auto_download_override is None else int(auto_download_override)),
+                    show.auto_download_limit if auto_download_limit is ... else auto_download_limit,
+                    show.retention_keep if retention_keep is ... else retention_keep,
+                    show.retention_days if retention_days is ... else retention_days,
                     show_id,
                 ),
             )
@@ -468,6 +577,11 @@ class LibraryRepository:
             skip_forward=row["skip_forward"],
             auto_continue=bool(row["auto_continue"]),
             trim_level=row["trim_level"],
+            auto_download_override=(bool(row["auto_download_override"]) if row["auto_download_override"] is not None else None),
+            auto_download_limit=row["auto_download_limit"],
+            retention_keep=row["retention_keep"],
+            retention_days=row["retention_days"],
+            categories=row["categories"],
         )
 
     @staticmethod
@@ -493,4 +607,12 @@ class LibraryRepository:
             transcript_url=row["transcript_url"],
             transcript_type=row["transcript_type"],
             artwork_path=row["artwork_path"],
+            website_url=row["website_url"] if "website_url" in row.keys() else "",
+            author=row["author"] if "author" in row.keys() else "",
+            season_number=row["season_number"] if "season_number" in row.keys() else None,
+            episode_number=row["episode_number"] if "episode_number" in row.keys() else None,
+            episode_type=row["episode_type"] if "episode_type" in row.keys() else "",
+            explicit=(bool(row["explicit"]) if "explicit" in row.keys() and row["explicit"] is not None else None),
+            enclosure_bytes=row["enclosure_bytes"] if "enclosure_bytes" in row.keys() else 0,
+            favorite=bool(row["favorite"]) if "favorite" in row.keys() else False,
         )

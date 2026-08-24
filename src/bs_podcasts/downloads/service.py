@@ -5,7 +5,6 @@ from pathlib import Path
 from threading import Event, Lock
 from urllib.parse import urlparse
 import os
-import time
 import shutil
 
 import requests
@@ -67,31 +66,47 @@ class DownloadService:
 
     def download(self, episode_id: int):
         """Download with bounded automatic retry on transient network errors."""
-        if self.is_active(episode_id):
-            # A second click while a transfer runs must not open a second writer.
-            return self.downloads.get(episode_id)
+        episode = self.library.get_episode(episode_id)
+        if episode is None or not episode.media_url:
+            raise DownloadError("Episode has no downloadable media URL.")
+        target = self._target(episode_id, episode.media_url)
+        partial = target.with_suffix(target.suffix + ".part")
+        self.downloads.prepare(episode_id, episode.media_url, target, partial)
+        with self._lock:
+            if episode_id in self._cancellations:
+                return self.downloads.get(episode_id)
+            cancellation = Event()
+            self._cancellations[episode_id] = cancellation
         self.directory.mkdir(parents=True, exist_ok=True)
         if shutil.disk_usage(self.directory).free < self.MIN_FREE_BYTES:
             message = "Not enough free space in the downloads folder."
             self.downloads.progress(episode_id, DownloadState.ERROR, 0, 0, message)
             self._emit(episode_id, DownloadState.ERROR, 0, 0, message)
+            with self._lock:
+                self._cancellations.pop(episode_id, None)
             raise DownloadError(message)
-        last_error = None
-        for attempt, delay in enumerate((0.0,) + self.RETRY_DELAYS):
-            if delay:
-                time.sleep(delay)
-            try:
-                return self._download_once(episode_id)
-            except _TruncatedDownload as exc:
-                last_error = exc
-            except DownloadError:
-                raise
-            except (OSError, requests.RequestException) as exc:
-                last_error = exc
-            record = self.downloads.get(episode_id)
-            if record is not None and record.state == DownloadState.PAUSED:
-                return record
-        raise DownloadError(str(last_error) if last_error else "Download failed.")
+        try:
+            last_error = None
+            for delay in (0.0,) + self.RETRY_DELAYS:
+                if delay and cancellation.wait(delay):
+                    record = self.downloads.get(episode_id)
+                    done = record.bytes_done if record else 0
+                    total = record.bytes_total if record else 0
+                    self.downloads.progress(episode_id, DownloadState.PAUSED, done, total)
+                    self._emit(episode_id, DownloadState.PAUSED, done, total)
+                    return self.downloads.get(episode_id)
+                try:
+                    return self._download_once(episode_id, cancellation)
+                except (_TruncatedDownload, requests.RequestException) as exc:
+                    last_error = exc
+                record = self.downloads.get(episode_id)
+                if cancellation.is_set() or (record is not None and record.state == DownloadState.PAUSED):
+                    return record
+            raise DownloadError(str(last_error) if last_error else "Download failed.")
+        finally:
+            with self._lock:
+                if self._cancellations.get(episode_id) is cancellation:
+                    self._cancellations.pop(episode_id, None)
 
     def pause_all(self) -> int:
         """Stop in-flight transfers (partials are kept) — used at shutdown."""
@@ -101,22 +116,19 @@ class DownloadService:
             cancellation.set()
         return len(active)
 
-    def _download_once(self, episode_id: int):
+    def _download_once(self, episode_id: int, cancellation: Event):
         episode = self.library.get_episode(episode_id)
         if episode is None or not episode.media_url:
             raise DownloadError("Episode has no downloadable media URL.")
         target = self._target(episode_id, episode.media_url)
         partial = target.with_suffix(target.suffix + ".part")
-        record = self.downloads.prepare(episode_id, episode.media_url, target, partial)
         self.directory.mkdir(parents=True, exist_ok=True)
         existing = partial.stat().st_size if partial.is_file() else 0
-        cancellation = Event()
-        with self._lock:
-            self._cancellations[episode_id] = cancellation
 
         headers = {}
         if existing:
             headers["Range"] = f"bytes={existing}-"
+        response = None
         try:
             response = self.session.get(
                 episode.media_url,
@@ -176,16 +188,21 @@ class DownloadService:
             )
             self._emit(episode_id, DownloadState.ERROR, 0, 0, str(exc))
             raise
-        except (OSError, requests.RequestException) as exc:
+        except requests.RequestException as exc:
             done = partial.stat().st_size if partial.exists() else 0
             self.downloads.progress(
                 episode_id, DownloadState.ERROR, done, 0, str(exc)
             )
             self._emit(episode_id, DownloadState.ERROR, done, 0, str(exc))
+            raise
+        except OSError as exc:
+            done = partial.stat().st_size if partial.exists() else 0
+            self.downloads.progress(episode_id, DownloadState.ERROR, done, 0, str(exc))
+            self._emit(episode_id, DownloadState.ERROR, done, 0, str(exc))
             raise DownloadError(str(exc)) from exc
         finally:
-            with self._lock:
-                self._cancellations.pop(episode_id, None)
+            if response is not None:
+                response.close()
 
     def cancel(self, episode_id: int) -> bool:
         with self._lock:
@@ -198,13 +215,14 @@ class DownloadService:
     def records(self):
         return self.downloads.list()
 
-    def storage(self) -> tuple[int, int, int]:
+    def storage(self, records=None) -> tuple[int, int, int]:
         self.directory.mkdir(parents=True, exist_ok=True)
         usage = shutil.disk_usage(self.directory)
+        records = list(records) if records is not None else self.records()
         used_by_app = sum(
-            Path(record.target_path).stat().st_size
-            for record in self.records()
-            if Path(record.target_path).is_file()
+            record.bytes_done
+            for record in records
+            if record.state == DownloadState.COMPLETE
         )
         return used_by_app, usage.free, usage.total
 

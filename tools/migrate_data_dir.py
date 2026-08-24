@@ -34,7 +34,6 @@ def migrate(source: Path, dry_run: bool = False) -> dict:
     source = source.expanduser().resolve()
     targets = {
         "library": data_dir() / "library.db",
-        "config": data_dir() / "config.json",
         "artwork": cache_dir() / "artwork",
         "downloads": default_downloads_dir(),
     }
@@ -53,8 +52,6 @@ def migrate(source: Path, dry_run: bool = False) -> dict:
     for sidecar in ("library.db-wal", "library.db-shm"):
         if (source / sidecar).exists():
             shutil.copy2(source / sidecar, targets["library"].parent / sidecar)
-    if (source / "config.json").is_file():
-        shutil.copy2(source / "config.json", targets["config"])
     copied = {"artwork": 0, "downloads": 0}
     for key in ("artwork", "downloads"):
         folder = source / key

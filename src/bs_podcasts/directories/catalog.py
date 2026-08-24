@@ -1,4 +1,4 @@
-"""Public Apple podcast-directory adapter; no authentication required."""
+"""Public podcast-directory adapter; no authentication required."""
 
 import requests
 
@@ -75,16 +75,16 @@ CATEGORY_EXPANSION_TERMS = {
 }
 
 
-class ItunesDirectory:
-    name = "Apple Podcasts"
+class PublicDirectory:
+    name = "Podcast directory"
     endpoint = "https://itunes.apple.com/search"
 
     def __init__(self, session=None):
         self.session = session or make_session()
         self._browse_cache = {}
-        from .apple_charts import AppleCharts
+        from .charts import DirectoryCharts
 
-        self.charts = AppleCharts(self.session)
+        self.charts = DirectoryCharts(self.session)
 
     def search(self, query: str, limit: int = 30) -> list[DirectoryCandidate]:
         query = query.strip()

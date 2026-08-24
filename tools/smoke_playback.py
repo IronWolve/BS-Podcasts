@@ -175,6 +175,26 @@ def main() -> int:
         require(not reopened.list_queue(), "finished queue retained entries")
         queued_playback.shutdown()
 
+        # A manually removed download must fall back to the enclosure URL.
+        with reopened.database.connect() as connection:
+            connection.execute(
+                "UPDATE episodes SET downloaded_path=? WHERE id=?",
+                (str(Path(temporary) / "missing.mp3"), first.id),
+            )
+        fallback_engine = FakeEngine()
+        fallback_playback = PlaybackService(reopened, fallback_engine)
+        fallback_playback.load_episode(first.id, autoplay=True)
+        require(fallback_engine.loaded[-1] == media.as_uri(), "missing download did not fall back to stream")
+
+        # A late mpv pause callback after stop must not restore a detached
+        # episode or violate playback_state's foreign key during deletion.
+        fallback_playback.stop()
+        fallback_engine.handler(EngineEvent("paused", True))
+        saved_episode, saved_state = reopened.current_playback()
+        require(fallback_playback.snapshot.state == PlaybackState.IDLE, "late pause revived stopped playback")
+        require(saved_episode is None and saved_state == "idle", "late pause revived durable playback state")
+        fallback_playback.shutdown()
+
     print("BS Podcasts M3 silent playback smoke flow passed.")
     return 0
 

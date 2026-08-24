@@ -57,6 +57,9 @@ class LibraryService:
     def history(self, limit: int = 200):
         return self.repository.list_history(limit)
 
+    def favorites(self):
+        return self.repository.list_favorites()
+
     def import_feed(self, show_id: int, feed: FeedData):
         return self.repository.import_feed(show_id, feed)
 
@@ -74,6 +77,9 @@ class LibraryService:
 
     def episode(self, episode_id: int):
         return self.repository.get_episode(episode_id)
+
+    def set_favorite(self, episode_id: int, favorite: bool = True) -> bool:
+        return self.repository.set_favorite(episode_id, favorite)
 
     def dequeue(self, episode_id: int):
         self.repository.dequeue(episode_id)
@@ -109,6 +115,9 @@ class LibraryService:
 
     def mark_show_played(self, show_id: int, played: bool = True) -> int:
         return self.repository.mark_show_played(show_id, played)
+
+    def clear_all_new(self, played: bool = False) -> int:
+        return self.repository.clear_all_new(played)
 
     def clear_history(self, episode_id: int | None = None) -> int:
         return self.repository.clear_history(episode_id)

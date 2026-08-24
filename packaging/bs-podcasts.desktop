@@ -2,7 +2,7 @@
 Type=Application
 Name=BS Podcasts
 GenericName=Podcast Player
-Comment=A wide, mobile-inspired desktop podcast app
+Comment=A wide, mobile-inspired desktop podcast player
 Exec=bs-podcasts
 Icon=bs-podcasts
 Terminal=false

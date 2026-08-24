@@ -1,8 +1,10 @@
 """Explicit external-player fallback for systems without usable libmpv."""
 
 from pathlib import Path
+import os
 import shutil
 import subprocess
+import sys
 
 from .engine import EngineCapabilities, EngineEvent, PlaybackUnavailable
 
@@ -17,8 +19,9 @@ class ExternalPlayerEngine:
         silence_trim=False,
     )
 
-    def __init__(self, command: str = "xdg-open"):
-        self.command = shutil.which(command)
+    def __init__(self, command: str | None = None):
+        default = "open" if sys.platform == "darwin" else "xdg-open"
+        self.command = shutil.which(command or default) if os.name != "nt" else None
         self._handler = lambda event: None
         self._dead = False
 
@@ -31,11 +34,15 @@ class ExternalPlayerEngine:
 
     def load(self, source: str, start_position: float = 0.0, autoplay: bool = True):
         self._guard()
-        if not self.command:
-            raise PlaybackUnavailable("No internal or external audio player is available.")
         target = source
         if not source.startswith(("http://", "https://", "file://")):
             target = Path(source).expanduser().resolve().as_uri()
+        if os.name == "nt":
+            os.startfile(target)  # type: ignore[attr-defined]
+            self._handler(EngineEvent("external", target))
+            return
+        if not self.command:
+            raise PlaybackUnavailable("No internal or external audio player is available.")
         subprocess.Popen(
             [self.command, target],
             stdin=subprocess.DEVNULL,
