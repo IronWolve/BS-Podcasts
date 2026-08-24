@@ -179,6 +179,9 @@ class LibraryRepository:
         preview = self.removal_preview(show_id)
         if not preview:
             return {}
+        # Database first: if this fails nothing on disk has been touched.
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM shows WHERE id=?", (show_id,))
         removed_files = []
         if delete_files:
             for path, _size in preview["files"]:
@@ -187,8 +190,6 @@ class LibraryRepository:
                     removed_files.append(path)
                 except OSError:
                     pass
-        with self.database.connect() as connection:
-            connection.execute("DELETE FROM shows WHERE id=?", (show_id,))
         preview["removed_files"] = removed_files
         return preview
 

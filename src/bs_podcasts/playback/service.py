@@ -55,6 +55,7 @@ class PlaybackService:
         self._last_saved_position = -10.0
         self._sleep_timer: Timer | None = None
         self._load_watchdog: Timer | None = None
+        self._deferred_episode_id = None
         self._dead = False
         self._last_metric_time = None
         self._last_metric_position = None
@@ -104,6 +105,7 @@ class PlaybackService:
     def load_episode(self, episode_id: int, autoplay: bool = True):
         with self._lock:
             self._guard()
+            self._deferred_episode_id = None
             episode = self.repository.get_episode(episode_id)
             if episode is None:
                 raise PlaybackUnavailable("Episode was not found.")
@@ -146,15 +148,43 @@ class PlaybackService:
             self._emit()
 
     def resume_saved(self, autoplay: bool = False) -> bool:
+        """Restore the last episode's metadata without touching the network.
+
+        The source is opened on the first play/seek/skip, so an offline launch
+        never produces a stream error and startup does no media I/O.
+        """
         episode_id, _state = self.repository.current_playback()
         if episode_id is None:
             return False
-        self.load_episode(episode_id, autoplay=autoplay)
+        if autoplay:
+            self.load_episode(episode_id, autoplay=True)
+            return True
+        self._restore_snapshot()
+        self._deferred_episode_id = episode_id if self.snapshot.episode_id == episode_id else None
+        self._emit()
+        return self.snapshot.episode_id is not None
+
+    def _materialize(self) -> bool:
+        """Open the deferred episode in the engine if it is not loaded yet."""
+        deferred = getattr(self, "_deferred_episode_id", None)
+        if deferred is None:
+            return False
+        self._deferred_episode_id = None
+        position = self.snapshot.position
+        self.load_episode(deferred, autoplay=False)
+        if position:
+            try:
+                self.engine.seek_absolute(position)
+            except Exception:
+                pass
         return True
 
     def play_pause(self):
         with self._lock:
             self._guard()
+            if self._materialize():
+                self.engine.play()
+                return
             if self.snapshot.state == PlaybackState.PLAYING:
                 self.engine.pause()
             elif self.snapshot.episode_id is not None:
@@ -189,6 +219,7 @@ class PlaybackService:
 
     def seek(self, seconds: float):
         self._guard()
+        self._materialize()
         self._ignore_metric_once = True
         self.engine.seek_absolute(seconds)
 
@@ -204,6 +235,7 @@ class PlaybackService:
 
     def skip(self, seconds: float):
         self._guard()
+        self._materialize()
         self._ignore_metric_once = True
         self.engine.skip(float(seconds))
 

@@ -3,6 +3,7 @@
 import logging
 import os
 import sys
+import threading
 import sqlite3
 import traceback
 
@@ -42,6 +43,14 @@ def _install_excepthook():
         sys.__stderr__.write(text)
 
     sys.excepthook = hook
+
+    def thread_hook(args):
+        if args.exc_type is SystemExit:
+            return
+        text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+        logger.error("Unhandled exception in thread %s:\n%s", getattr(args.thread, "name", "?"), text)
+
+    threading.excepthook = thread_hook
 
 
 def create_application(argv=None) -> QApplication:

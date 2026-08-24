@@ -105,6 +105,11 @@ class MainWindow(QMainWindow):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._scheduled_refresh)
         self._closed = False
+        self._ui_episode_cache = {}
+        self._reload_timer = QTimer(self)
+        self._reload_timer.setSingleShot(True)
+        self._reload_timer.setInterval(200)
+        self._reload_timer.timeout.connect(self._reload_library)
         self._download_reload_timer = QTimer(self)
         self._download_reload_timer.setSingleShot(True)
         self._download_reload_timer.setInterval(250)
@@ -440,8 +445,14 @@ class MainWindow(QMainWindow):
         cache = self.refresh.artwork
         if not hasattr(cache, "prune"):
             return
-        keep = self._referenced_artwork()
-        future = self.jobs.submit(cache.prune, keep, 400 * 1024 * 1024)
+        repository = self.library.repository
+
+        def work():
+            keep = {show.artwork_path for show in repository.list_shows() if show.artwork_path}
+            keep.update(episode.artwork_path for episode in repository.list_episodes(limit=100000) if episode.artwork_path)
+            return cache.prune(keep, 400 * 1024 * 1024)
+
+        future = self.jobs.submit(work)
         self._pending_jobs.add(future)
         future.add_done_callback(lambda completed: self._pending_jobs.discard(completed))
 
@@ -815,6 +826,11 @@ class MainWindow(QMainWindow):
             self.context.show_empty()
         self._apply_playing_marker()
 
+    def _request_reload(self):
+        """Coalesce bursts (batch refresh, imports) into one reload per 200 ms."""
+        if not self._reload_timer.isActive():
+            self._reload_timer.start()
+
     def _reload_queue(self):
         """Cheap refresh for queue-only changes: queue views, badges, counts."""
         if self.library is None:
@@ -867,9 +883,10 @@ class MainWindow(QMainWindow):
             self.podcast_page.banner.show_state("error", str(exc))
             return
         self._reload_library()
-        for show in added:
-            self._submit_refresh(show.id)
         self.navigation.select(PAGE_PODCASTS)
+        if added:
+            self._refresh_shows(added, quiet=True)
+            self.podcast_page.banner.show_state("loading", f"Imported {len(added)} podcast{'s' if len(added) != 1 else ''} — fetching episodes in the background…")
         self._notify(f"Imported {len(added)} subscription{'s' if len(added) != 1 else ''}", "success")
 
     def _export_opml(self):
@@ -1994,7 +2011,7 @@ class MainWindow(QMainWindow):
             else:
                 self._notify(result.message or "Download failed", "error", "Retry", lambda: self._download_episode(identifier))
             return
-        self._reload_library()
+        self._request_reload()
         if result.status == JobStatus.OK and getattr(result.value, "imported", 0):
             self._auto_download(identifier)
         total, done, new_episodes = self._refresh_batch
@@ -2007,10 +2024,15 @@ class MainWindow(QMainWindow):
             if done < total:
                 if not quiet:
                     self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
+                elif self.podcast_page.banner.state == "loading":
+                    self.podcast_page.banner.show_state("loading", f"Fetching episodes… {done} of {total} podcasts done")
             elif quiet:
                 self._refresh_batch = [0, 0, 0]
+                if self.podcast_page.banner.state == "loading":
+                    self.podcast_page.banner.clear()
+                self._reload_library()
                 if new_episodes:
-                    self._notify(f"{new_episodes} new episode{'s' if new_episodes != 1 else ''} arrived", "success", "Show", self._show_new_episodes)
+                    self._notify(f"{new_episodes} new episode{'s' if new_episodes != 1 else ''} arrived across {total} podcast{'s' if total != 1 else ''}", "success", "Show", self._show_new_episodes)
             else:
                 self._refresh_batch = [0, 0, 0]
                 self.episode_page.banner.clear()
@@ -2252,8 +2274,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ feed preview
     @staticmethod
     def _open_url(url: str):
-        if url:
-            QDesktopServices.openUrl(QUrl(url))
+        """Only web URLs leave the app; feeds are untrusted input."""
+        if not url:
+            return
+        parsed = QUrl(url)
+        if parsed.scheme().lower() not in {"http", "https"}:
+            logging.getLogger("bs_podcasts").warning("Refusing to open non-web URL from feed data: %s", url[:120])
+            return
+        QDesktopServices.openUrl(parsed)
 
     def _discover_sort_changed(self, key: str):
         if key == "newest":
@@ -2364,12 +2392,22 @@ class MainWindow(QMainWindow):
             self._show_preview_episodes(feed_url)
 
     def _ui_episodes(self, stored) -> list:
-        """Convert stored episodes and overlay any in-flight download state."""
+        """Convert stored episodes (cached per unchanged row) and overlay download state."""
         active_records = {
             record.episode_id: record for record in (self.downloads.records() if self.downloads else ())
             if record.state.value != "complete"
         }
-        return [self._with_download_state(self._ui_episode(episode), active_records.get(episode.id)) for episode in stored]
+        cache = self._ui_episode_cache
+        fresh = {}
+        result = []
+        for episode in stored:
+            key = (episode.title, episode.played, episode.position_seconds, episode.downloaded_path, episode.is_new, episode.artwork_path, episode.duration_seconds)
+            hit = cache.get(episode.id)
+            item = hit[1] if hit and hit[0] == key else self._ui_episode(episode)
+            fresh[episode.id] = (key, item)
+            result.append(self._with_download_state(item, active_records.get(episode.id)))
+        self._ui_episode_cache = fresh
+        return result
 
     def _with_download_state(self, item: UiEpisode, record) -> UiEpisode:
         """Reflect an in-flight download on an episode row anywhere in the app."""
