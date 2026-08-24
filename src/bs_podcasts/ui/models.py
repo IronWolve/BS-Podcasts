@@ -437,7 +437,7 @@ class EpisodeDelegate(QStyledItemDelegate):
         painter.setFont(app_font(12))
         painter.setPen(QColor(COLORS["subtle"]))
         remaining = ""
-        if 0 < item.progress < 1 and item.duration_seconds:
+        if item.state == "In progress" and 0 < item.progress < 1 and item.duration_seconds:
             left_seconds = int(item.duration_seconds * (1 - item.progress))
             hours, minutes = divmod(max(1, left_seconds // 60), 60)
             remaining = f"{hours} hr {minutes} min left" if hours else f"{minutes} min left"
