@@ -35,6 +35,7 @@ class Podcast:
     latest_sort_key: str = ""
     apple_url: str = ""
     website_url: str = ""
+    last_refresh_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -290,10 +291,12 @@ class PodcastDelegate(QStyledItemDelegate):
 
         if item.rank:
             _badge(painter, art.x() + 8 + painter.fontMetrics().horizontalAdvance(f"#{item.rank}") + 16, art.y() + 8, f"#{item.rank}", COLORS["accent"], filled=True)
+        badge_right = art.right() - 7
         if item.new_count:
-            _badge(painter, art.right() - 7, art.y() + 8, f"{item.new_count} new", COLORS["accent"], filled=True)
-        elif item.directory_result and item.subscribed:
-            _badge(painter, art.right() - 7, art.y() + 8, "Saved", COLORS["success"], filled=True)
+            rect = _badge(painter, badge_right, art.y() + 8, f"{item.new_count} new", COLORS["accent"], filled=True)
+            badge_right = rect.x() - 6
+        if item.directory_result and item.subscribed:
+            _badge(painter, badge_right, art.y() + 8, "Saved", COLORS["success"], filled=True)
 
         if hovered or selected:
             action = self.action_rect(option.rect)

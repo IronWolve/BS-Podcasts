@@ -47,6 +47,7 @@ class PlaybackService:
         self.engine = engine
         self.listening = listening
         self.engine.set_event_handler(self._engine_event)
+        self._volume_applied = False
         self.snapshot = PlaybackSnapshot()
         self._listeners = []
         self._lock = RLock()
@@ -55,6 +56,11 @@ class PlaybackService:
         self._dead = False
         self._last_metric_time = None
         self._last_metric_position = None
+        try:
+            saved_volume = float(self.repository.get_setting("playback.volume", "100"))
+        except (TypeError, ValueError):
+            saved_volume = 100.0
+        self.snapshot = replace(self.snapshot, volume=max(0.0, min(100.0, saved_volume)))
         self._unsaved_silence = 0.0
         self._ignore_metric_once = False
         self._restore_snapshot()
@@ -75,6 +81,12 @@ class PlaybackService:
             if episode.downloaded_path:
                 source = str(Path(episode.downloaded_path).expanduser())
             speed = show.playback_speed if show else 1.0
+            if not self._volume_applied:
+                try:
+                    self.engine.set_volume(self.snapshot.volume)
+                except Exception:
+                    pass
+                self._volume_applied = True
             self.snapshot = PlaybackSnapshot(
                 state=PlaybackState.LOADING,
                 episode_id=episode.id,
@@ -208,6 +220,7 @@ class PlaybackService:
         volume = max(0.0, min(100.0, float(volume)))
         self.engine.set_volume(volume)
         self.snapshot = replace(self.snapshot, volume=volume)
+        self.repository.set_setting("playback.volume", f"{volume:g}")
         self._emit()
 
     def set_sleep_timer(self, seconds: int):

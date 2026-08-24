@@ -5,6 +5,10 @@ from pathlib import Path
 import sqlite3
 
 
+class DatabaseIntegrityError(RuntimeError):
+    pass
+
+
 class Database:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -18,6 +22,14 @@ class Database:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA busy_timeout=10000")
         return connection
+
+    def check_integrity(self) -> str:
+        """Run SQLite's quick_check; raise with the report when the file is damaged."""
+        with self.connect() as connection:
+            result = connection.execute("PRAGMA quick_check").fetchone()[0]
+        if result != "ok":
+            raise DatabaseIntegrityError(result)
+        return result
 
     @contextmanager
     def connect(self):

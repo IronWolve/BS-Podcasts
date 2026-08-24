@@ -11,7 +11,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionSlider,
     QTabWidget,
+    QTextBrowser,
     QTextEdit,
     QToolTip,
     QVBoxLayout,
@@ -42,7 +43,7 @@ from PySide6.QtWidgets import (
 from ..assets import icon_path
 from . import icons
 from .pixmaps import cover, initials
-from .theme import COLORS, HEALTH_LABELS, SPACE
+from .theme import COLORS, HEALTH_LABELS, SPACE, app_font
 
 
 NAV_ITEMS = (
@@ -840,9 +841,14 @@ class SeekSlider(QSlider):
         self._markers = ()
         self._formatter = None
         self._duration = 0.0
+        self._ab = (None, None)
 
     def set_markers(self, fractions):
         self._markers = tuple(fractions)
+        self.update()
+
+    def set_ab(self, start_fraction, end_fraction):
+        self._ab = (start_fraction, end_fraction)
         self.update()
 
     def set_duration(self, seconds: float, formatter):
@@ -884,17 +890,35 @@ class SeekSlider(QSlider):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if not self._markers or not self.isEnabled():
+        if not self.isEnabled() or (not self._markers and self._ab == (None, None)):
             return
         option = QStyleOptionSlider()
         self.initStyleOption(option)
         groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderGroove, self)
         painter = QPainter(self)
-        painter.setPen(QPen(QColor(COLORS["nav"]), 2))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         centre = groove.center().y()
+        painter.setPen(QPen(QColor(COLORS["nav"]), 2))
         for fraction in self._markers:
             x = groove.x() + int(groove.width() * fraction)
             painter.drawLine(x, centre - 3, x, centre + 3)
+        start, end = self._ab
+        if start is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(COLORS["teal"]))
+            x1 = groove.x() + int(groove.width() * start)
+            x2 = groove.x() + int(groove.width() * end) if end is not None else x1
+            if end is not None:
+                fill = QColor(COLORS["teal"])
+                fill.setAlpha(70)
+                painter.fillRect(QRect(x1, centre - 4, max(2, x2 - x1), 8), fill)
+            for x, label in ((x1, "A"), (x2, "B")) if end is not None else ((x1, "A"),):
+                painter.setBrush(QColor(COLORS["teal"]))
+                painter.drawRoundedRect(QRect(x - 6, centre - 12, 12, 10), 3, 3)
+                painter.setPen(QColor(COLORS["canvas"]))
+                painter.setFont(app_font(8, QFont.Weight.Bold))
+                painter.drawText(QRect(x - 6, centre - 12, 12, 10), Qt.AlignmentFlag.AlignCenter, label)
+                painter.setPen(Qt.PenStyle.NoPen)
 
 
 class Popover(QFrame):
@@ -1157,9 +1181,10 @@ class ContextPanel(QFrame):
         self.tabs.tabBar().setUsesScrollButtons(False)
         self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
         self.tabs.setMinimumHeight(150)
-        self.body = QTextEdit()
+        self.body = QTextBrowser()
         self.body.setObjectName("contextBody")
         self.body.setReadOnly(True)
+        self.body.setOpenExternalLinks(True)
         self.body.setFrameShape(QFrame.Shape.NoFrame)
         self.tabs.addTab(self.body, "Details")
         self.chapter_list = QListWidget()
@@ -1297,7 +1322,9 @@ class ContextPanel(QFrame):
         else:
             new_text = f"  ·  {podcast.new_count} new" if podcast.new_count else ""
             health_label = HEALTH_LABELS.get(podcast.health, "") if podcast.health not in {"unknown", "ok"} else ""
-            self.meta.setText(f"{podcast.author}  ·  {podcast.episode_count} episodes{new_text}" + (f"\n{health_label}" if health_label else ""))
+            refreshed = f"Refreshed {podcast.last_refresh_text}" if podcast.last_refresh_text else ""
+            extra = "  ·  ".join(part for part in (health_label, refreshed) if part)
+            self.meta.setText(f"{podcast.author}  ·  {podcast.episode_count} episodes{new_text}" + (f"\n{extra}" if extra else ""))
         self._feed_url = podcast.feed_url if podcast.show_id == 0 else ""
         self._episode_id = 0
         self._show_id = podcast.show_id
@@ -1553,8 +1580,9 @@ class NowPlayingView(QFrame):
         self.tabs.setObjectName("contextTabs")
         self.tabs.setDocumentMode(True)
         self.tabs.tabBar().setExpanding(False)
-        self.notes = QTextEdit()
+        self.notes = QTextBrowser()
         self.notes.setReadOnly(True)
+        self.notes.setOpenExternalLinks(True)
         self.notes.setFrameShape(QFrame.Shape.NoFrame)
         self.tabs.addTab(self.notes, "Show notes")
         self.chapter_list = QListWidget()
@@ -2000,6 +2028,9 @@ class PlayerBar(QFrame):
 
     def set_chapter_markers(self, fractions):
         self.slider.set_markers(fractions)
+
+    def set_ab_markers(self, start_fraction, end_fraction):
+        self.slider.set_ab(start_fraction, end_fraction)
 
     def set_enabled(self, enabled: bool):
         caps = self._capabilities

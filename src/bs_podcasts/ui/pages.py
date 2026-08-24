@@ -800,9 +800,10 @@ SHORTCUT_GROUPS = (
         ("silence_trim", "Cycle silence trim"),
     )),
     ("Library", (
-        ("search", "Focus search"),
-        ("search_alt", "Focus search (alternate)"),
+        ("search", "Global search"),
+        ("search_alt", "Filter the current page"),
         ("queue_selected", "Add selection to Up Next"),
+        ("help", "Keyboard shortcuts"),
     )),
     ("Navigation", (
         ("navigate_back", "Back"),
@@ -831,6 +832,7 @@ class SettingsPage(BasePage):
     export_opml_requested = Signal()
     cleanup_played_requested = Signal()
     change_download_folder_requested = Signal()
+    open_log_requested = Signal()
 
     FIELD_WIDTH = 180
 
@@ -870,6 +872,18 @@ class SettingsPage(BasePage):
         form.addRow("After an episode", self.auto_continue)
         self.settings_content.addWidget(card)
 
+        # Library ---------------------------------------------------------------
+        library_card, library_form = self._card("Library", "Podcasts refresh in the background on this schedule and once at launch when stale.")
+        self.refresh_interval = QSpinBox()
+        self.refresh_interval.setRange(0, 24 * 60)
+        self.refresh_interval.setSingleStep(15)
+        self.refresh_interval.setSuffix(" minutes")
+        self.refresh_interval.setSpecialValueText("Manual only")
+        self.refresh_interval.setFixedWidth(self.FIELD_WIDTH)
+        library_form.addRow("Refresh every", self.refresh_interval)
+        self.settings_content.addWidget(library_card)
+        self.refresh_interval.valueChanged.connect(lambda value: self.setting_changed.emit("refresh.interval_minutes", str(value)))
+
         # Downloads --------------------------------------------------------------
         downloads_card, downloads_form = self._card("Downloads", "New episodes found during a refresh can be downloaded automatically.")
         self.auto_download = QCheckBox("Auto-download new episodes")
@@ -877,8 +891,11 @@ class SettingsPage(BasePage):
         self.auto_download_limit.setRange(1, 10)
         self.auto_download_limit.setSuffix(" per refresh")
         self.auto_download_limit.setFixedWidth(self.FIELD_WIDTH)
+        self.delete_played = QCheckBox("Delete downloads once an episode is played")
         downloads_form.addRow("After a refresh", self.auto_download)
         downloads_form.addRow("At most", self.auto_download_limit)
+        downloads_form.addRow("Housekeeping", self.delete_played)
+        self.delete_played.toggled.connect(lambda value: self.setting_changed.emit("downloads.delete_played", "1" if value else "0"))
         self.settings_content.addWidget(downloads_card)
         self.auto_download.toggled.connect(lambda value: self.setting_changed.emit("downloads.auto", "1" if value else "0"))
         self.auto_download_limit.valueChanged.connect(lambda value: self.setting_changed.emit("downloads.auto_limit", str(value)))
@@ -933,7 +950,8 @@ class SettingsPage(BasePage):
         self.artwork_path = QLabel("—")
         self.artwork_usage = QLabel("—")
         self.temp_path = QLabel("—")
-        for label in (self.data_root, self.settings_path, self.library_path, self.download_path, self.artwork_path, self.temp_path):
+        self.log_path = QLabel("—")
+        for label in (self.data_root, self.settings_path, self.library_path, self.download_path, self.artwork_path, self.temp_path, self.log_path):
             label.setObjectName("meta")
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             label.setWordWrap(True)
@@ -947,8 +965,15 @@ class SettingsPage(BasePage):
         storage_layout.addRow("Artwork folder", self.artwork_path)
         storage_layout.addRow("Artwork usage", self.artwork_usage)
         storage_layout.addRow("Temporary files", self.temp_path)
+        storage_layout.addRow("Log file", self.log_path)
         storage_actions = QHBoxLayout()
         storage_actions.setSpacing(SPACE["sm"])
+        open_log = QPushButton("Open log")
+        open_log.setObjectName("quietButton")
+        open_log.setIcon(icons.icon("info", COLORS["text"], 16))
+        open_log.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_log.clicked.connect(self.open_log_requested)
+        storage_actions.addWidget(open_log)
         open_folder = QPushButton("Open data folder")
         open_folder.setObjectName("quietButton")
         open_folder.setIcon(icons.icon("folder", COLORS["text"], 16))
@@ -1028,13 +1053,19 @@ class SettingsPage(BasePage):
         outer.addLayout(form)
         return card, form
 
-    def load_downloads(self, auto: bool, limit: int):
-        for control in (self.auto_download, self.auto_download_limit):
+    def load_downloads(self, auto: bool, limit: int, delete_played: bool = False):
+        for control in (self.auto_download, self.auto_download_limit, self.delete_played):
             control.blockSignals(True)
         self.auto_download.setChecked(auto)
         self.auto_download_limit.setValue(limit)
-        for control in (self.auto_download, self.auto_download_limit):
+        self.delete_played.setChecked(delete_played)
+        for control in (self.auto_download, self.auto_download_limit, self.delete_played):
             control.blockSignals(False)
+
+    def load_refresh_interval(self, minutes: int):
+        self.refresh_interval.blockSignals(True)
+        self.refresh_interval.setValue(minutes)
+        self.refresh_interval.blockSignals(False)
 
     def load_theme(self, value: str):
         self.theme.blockSignals(True)
@@ -1093,7 +1124,8 @@ class SettingsPage(BasePage):
         self.shortcut_error.setText(message)
         self.shortcut_error.show()
 
-    def set_storage_info(self, data_root, settings_path, library_path, download_path, downloads, artwork_path, artwork, temp_path):
+    def set_storage_info(self, data_root, settings_path, library_path, download_path, downloads, artwork_path, artwork, temp_path, log_path=""):
+        self.log_path.setText(log_path or "—")
         self.data_root.setText(data_root)
         self.settings_path.setText(settings_path)
         self.library_path.setText(library_path)

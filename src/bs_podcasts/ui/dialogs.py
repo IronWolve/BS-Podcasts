@@ -326,6 +326,57 @@ class TextInputDialog(StyledDialog):
         return self.field.text().strip()
 
 
+class ShortcutsDialog(StyledDialog):
+    """Cheat sheet of every binding, grouped, plus the fixed keys."""
+
+    FIXED = (
+        ("Space", "Play / pause (outside text fields)"),
+        ("Enter", "Play / open the selected row"),
+        ("Delete", "Remove from Up Next · delete download · delete bookmark"),
+        ("Esc", "Close overlay · clear filter · clear selection"),
+        ("↑ ↓", "Move through lists and search results"),
+        ("Drag", "Drop episodes on Up Next in the rail"),
+    )
+
+    def __init__(self, groups, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Keyboard shortcuts")
+        self.set_card_width(620)
+        self.add_heading("Keyboard shortcuts", "Change the bindable ones in Settings › Keyboard shortcuts.")
+        columns = QHBoxLayout()
+        columns.setSpacing(SPACE["xl"])
+        left, right = QVBoxLayout(), QVBoxLayout()
+        for index, (title, entries) in enumerate(list(groups) + [("Fixed keys", self.FIXED)]):
+            target = left if index % 2 == 0 else right
+            heading = QLabel(title.upper())
+            heading.setObjectName("eyebrow")
+            target.addWidget(heading)
+            for key, label in entries:
+                row = QHBoxLayout()
+                key_label = QLabel(key)
+                key_label.setObjectName("cardTitle")
+                key_label.setFixedWidth(110)
+                text = QLabel(label)
+                text.setObjectName("muted")
+                text.setWordWrap(True)
+                row.addWidget(key_label, 0, Qt.AlignmentFlag.AlignTop)
+                row.addWidget(text, 1)
+                target.addLayout(row)
+            target.addSpacing(SPACE["sm"])
+        left.addStretch(1)
+        right.addStretch(1)
+        columns.addLayout(left, 1)
+        columns.addLayout(right, 1)
+        self.card_layout.addLayout(columns)
+        close = QPushButton("Close")
+        close.setObjectName("primaryButton")
+        close.clicked.connect(self.accept)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(close)
+        self.card_layout.addLayout(row)
+
+
 class ConfirmDialog(StyledDialog):
     """Generic confirmation with an optional destructive primary action."""
 

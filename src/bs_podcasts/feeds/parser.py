@@ -113,6 +113,13 @@ def _transcript(element) -> tuple[str, str]:
     return "", ""
 
 
+def _chapters(element) -> str:
+    for child in element:
+        if _local(child.tag) == "chapters":
+            return child.attrib.get("url", "").strip()
+    return ""
+
+
 def _atom_link(element, relation: str) -> tuple[str, str]:
     for link in _children(element, "link"):
         if link.attrib.get("rel", "alternate") != relation:
@@ -152,6 +159,8 @@ def _parse_rss(root) -> FeedData:
             continue
         seen.add(external)
         transcript_url, transcript_type = _transcript(item)
+        chapters_url = _chapters(item)
+        item_artwork = _artwork(item)
         episodes.append(
             FeedEpisodeData(
                 external_id=external,
@@ -190,6 +199,8 @@ def _parse_atom(root) -> FeedData:
             continue
         seen.add(external)
         transcript_url, transcript_type = _transcript(entry)
+        chapters_url = _chapters(entry)
+        item_artwork = _artwork(entry)
         episodes.append(
             FeedEpisodeData(
                 external_id=external,
@@ -201,6 +212,8 @@ def _parse_atom(root) -> FeedData:
                 duration_seconds=_duration(_text(entry, "duration")),
                 transcript_url=transcript_url,
                 transcript_type=transcript_type,
+                chapters_url=chapters_url,
+                artwork_url=item_artwork,
             )
         )
 

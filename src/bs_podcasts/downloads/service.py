@@ -5,6 +5,7 @@ from pathlib import Path
 from threading import Event, Lock
 from urllib.parse import urlparse
 import os
+import time
 import shutil
 
 import requests
@@ -45,7 +46,43 @@ class DownloadService:
     def subscribe(self, listener):
         self._listeners.append(listener)
 
+    RETRY_DELAYS = (2.0, 5.0, 10.0)
+    MIN_FREE_BYTES = 500 * 1024 * 1024
+
     def download(self, episode_id: int):
+        """Download with bounded automatic retry on transient network errors."""
+        self.directory.mkdir(parents=True, exist_ok=True)
+        if shutil.disk_usage(self.directory).free < self.MIN_FREE_BYTES:
+            message = "Not enough free space in the downloads folder."
+            self.downloads.progress(episode_id, DownloadState.ERROR, 0, 0, message)
+            self._emit(episode_id, DownloadState.ERROR, 0, 0, message)
+            raise DownloadError(message)
+        last_error = None
+        for attempt, delay in enumerate((0.0,) + self.RETRY_DELAYS):
+            if delay:
+                time.sleep(delay)
+            try:
+                return self._download_once(episode_id)
+            except DownloadError as exc:
+                last_error = exc
+                if "expected size" not in str(exc):
+                    raise
+            except (OSError, requests.RequestException) as exc:
+                last_error = exc
+            record = self.downloads.get(episode_id)
+            if record is not None and record.state == DownloadState.PAUSED:
+                return record
+        raise DownloadError(str(last_error) if last_error else "Download failed.")
+
+    def pause_all(self) -> int:
+        """Stop in-flight transfers (partials are kept) — used at shutdown."""
+        with self._lock:
+            active = list(self._cancellations.values())
+        for cancellation in active:
+            cancellation.set()
+        return len(active)
+
+    def _download_once(self, episode_id: int):
         episode = self.library.get_episode(episode_id)
         if episode is None or not episode.media_url:
             raise DownloadError("Episode has no downloadable media URL.")

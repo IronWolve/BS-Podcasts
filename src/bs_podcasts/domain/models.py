@@ -62,6 +62,8 @@ class Episode:
     transcript_url: str = ""
     transcript_type: str = ""
     artwork_path: str = ""
+    chapters_url: str = ""
+    artwork_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,8 @@ class FeedEpisodeData:
     duration_seconds: int = 0
     transcript_url: str = ""
     transcript_type: str = ""
+    chapters_url: str = ""
+    artwork_url: str = ""
 
 
 @dataclass(frozen=True)

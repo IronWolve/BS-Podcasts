@@ -106,8 +106,9 @@ class LibraryRepository:
                     """INSERT INTO episodes(
                        show_id, external_id, title, description, media_url,
                        mime_type, published_at, duration_seconds,
-                       transcript_url, transcript_type, is_new, added_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       transcript_url, transcript_type, is_new, added_at,
+                       chapters_url, artwork_url)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(show_id, external_id) DO UPDATE SET
                        title=excluded.title,
                        description=excluded.description,
@@ -116,7 +117,9 @@ class LibraryRepository:
                        published_at=excluded.published_at,
                        duration_seconds=excluded.duration_seconds,
                        transcript_url=excluded.transcript_url,
-                       transcript_type=excluded.transcript_type""",
+                       transcript_type=excluded.transcript_type,
+                       chapters_url=excluded.chapters_url,
+                       artwork_url=excluded.artwork_url""",
                     (
                         show_id,
                         episode.external_id,
@@ -130,6 +133,8 @@ class LibraryRepository:
                         episode.transcript_type,
                         new_flag,
                         now,
+                        episode.chapters_url,
+                        episode.artwork_url,
                     ),
                 )
         return len(feed.episodes)
@@ -298,11 +303,21 @@ class LibraryRepository:
                 )
 
     def update_position(self, episode_id: int, seconds: float):
+        # Starting an episode is what makes it "not new" everywhere in the UI.
         with self.database.connect() as connection:
             connection.execute(
-                "UPDATE episodes SET position_seconds=?, last_played=? WHERE id=?",
+                "UPDATE episodes SET position_seconds=?, last_played=?, is_new=0 WHERE id=?",
                 (max(0.0, float(seconds)), time.time(), episode_id),
             )
+
+    def set_episode_artwork_path(self, episode_id: int, path: str):
+        with self.database.connect() as connection:
+            connection.execute("UPDATE episodes SET artwork_path=? WHERE id=?", (path, episode_id))
+
+    def mark_show_seen(self, show_id: int) -> int:
+        """Opening a show clears its new-episode badge."""
+        with self.database.connect() as connection:
+            return connection.execute("UPDATE episodes SET is_new=0 WHERE show_id=? AND is_new=1", (show_id,)).rowcount
 
     def mark_show_played(self, show_id: int, played: bool = True) -> int:
         with self.database.connect() as connection:
@@ -464,6 +479,8 @@ class LibraryRepository:
             is_new=bool(row["is_new"]),
             downloaded_path=row["downloaded_path"],
             last_played=row["last_played"],
+            chapters_url=row["chapters_url"] if "chapters_url" in row.keys() else "",
+            artwork_url=row["artwork_url"] if "artwork_url" in row.keys() else "",
             transcript_url=row["transcript_url"],
             transcript_type=row["transcript_type"],
             artwork_path=row["artwork_path"],
