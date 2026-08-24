@@ -158,12 +158,17 @@ def main() -> int:
         class FakePlayback:
             def __init__(self, snapshot):
                 self.snapshot = snapshot
+                self.toggles = 0
+                self.loads = 0
 
             def seek(self, seconds):
                 self.snapshot = PlaybackSnapshot(**{**self.snapshot.__dict__, "position": seconds})
 
             def play_pause(self):
-                pass
+                self.toggles += 1
+
+            def load_episode(self, episode_id, autoplay=True):
+                self.loads += 1
 
         first = episodes[0]
         snapshot = PlaybackSnapshot(state=PlaybackState.PLAYING, episode_id=first.id, show_id=show.id, title=first.title, show_title="Workshop Radio", position=600.0, duration=float(first.duration_seconds or 2520))
@@ -181,6 +186,16 @@ def main() -> int:
         window.playback = FakePlayback(snapshot)
         window._playback_changed(snapshot)
         window.navigation.select(2)
+        # Every play control toggles the playing episode instead of reloading it.
+        row_item = next(window.episode_page.model.index(r, 0).data(257) for r in range(window.episode_page.model.rowCount()) if window.episode_page.model.index(r, 0).data(257).episode_id == first.id)
+        window.episode_page.play_requested.emit(row_item)
+        window._play_or_toggle(first.id)
+        window._play_latest(show.id)
+        assert window.playback.toggles == 3 and window.playback.loads == 0, (window.playback.toggles, window.playback.loads)
+        window._show_item(row_item)
+        assert window.context.primary.text() == "Pause", window.context.primary.text()
+        window._play_or_toggle(episodes[1].id)
+        assert window.playback.loads == 1, "a different episode must load"
         window._show_now_playing()
         QApplication.processEvents()
         assert window.now_playing.isVisible(), "now playing overlay did not open"
