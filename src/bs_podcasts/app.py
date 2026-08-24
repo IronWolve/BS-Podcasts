@@ -53,6 +53,34 @@ def _install_excepthook():
     threading.excepthook = thread_hook
 
 
+def _install_stall_monitor(app, threshold_ms: int = 150):
+    """BS_PODCASTS_TRACE=1: log main-thread stalls with the stack that caused them."""
+    import time
+    from PySide6.QtCore import QTimer
+
+    logger = logging.getLogger("bs_podcasts.trace")
+    main_thread_id = threading.get_ident()
+    beat = {"at": time.monotonic()}
+    heartbeat = QTimer(app)
+    heartbeat.setInterval(50)
+    heartbeat.timeout.connect(lambda: beat.__setitem__("at", time.monotonic()))
+    heartbeat.start()
+
+    def watch():
+        reported = 0.0
+        while True:
+            time.sleep(0.05)
+            late = time.monotonic() - beat["at"]
+            if late * 1000 >= threshold_ms and beat["at"] != reported:
+                frame = sys._current_frames().get(main_thread_id)
+                stack = "".join(traceback.format_stack(frame)[-6:]) if frame else "(no frame)"
+                logger.warning("main thread stalled %.0f ms; main-thread stack:\n%s", late * 1000, stack)
+                reported = beat["at"]
+                time.sleep(0.5)
+
+    threading.Thread(target=watch, name="bs-stall-monitor", daemon=True).start()
+
+
 def create_application(argv=None) -> QApplication:
     configure_logging()
     _install_excepthook()
@@ -67,6 +95,8 @@ def create_application(argv=None) -> QApplication:
     app.setFont(app_font())
     app.setStyleSheet(resolve_stylesheet(stylesheet()))
     QCoreApplication.setApplicationVersion(app_version())
+    if os.environ.get("BS_PODCASTS_TRACE"):
+        _install_stall_monitor(app)
     return app
 
 

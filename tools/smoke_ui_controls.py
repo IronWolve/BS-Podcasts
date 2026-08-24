@@ -59,6 +59,22 @@ class PagedDirectory:
         ]
 
 
+def settle(app, window, seconds: float = 5.0):
+    """Pump the event loop until background reads have landed and stayed idle."""
+    import time as _time
+    end = _time.time() + seconds
+    quiet = 0
+    while _time.time() < end:
+        app.processEvents()
+        if window.reads_pending():
+            quiet = 0
+        else:
+            quiet += 1
+            if quiet >= 4:  # idle across several pumps: queued completions have been delivered
+                return
+        _time.sleep(0.01)
+
+
 def require(condition: bool, message: str):
     if not condition:
         raise RuntimeError(message)
@@ -147,6 +163,7 @@ def main() -> int:
             "podcast details omit latest episode freshness",
         )
         window._open_podcast(podcast)
+        settle(app, window)
         require(window.pages.currentIndex() == 2, "podcast did not open Episodes")
         require(window.episode_page.model.rowCount() == 2, "podcast episode flow differs")
         handled = window.eventFilter(
