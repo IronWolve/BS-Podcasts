@@ -104,6 +104,11 @@ class MainWindow(QMainWindow):
         self._refresh_quiet = False
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._scheduled_refresh)
+        self._closed = False
+        self._download_reload_timer = QTimer(self)
+        self._download_reload_timer.setSingleShot(True)
+        self._download_reload_timer.setInterval(250)
+        self._download_reload_timer.timeout.connect(self._reload_downloads)
         self._bridge = _JobBridge(self)
         self._bridge.completed.connect(self._refresh_finished)
         self._bridge.playback_event.connect(self._playback_changed)
@@ -361,7 +366,8 @@ class MainWindow(QMainWindow):
     def _wire_playback(self):
         if self.playback is None:
             return
-        self.playback.subscribe(lambda snapshot: self._bridge.playback_event.emit(snapshot))
+        self._playback_listener = lambda snapshot: (None if self._closed else self._bridge.playback_event.emit(snapshot))
+        self.playback.subscribe(self._playback_listener)
         self.player.set_capabilities(self.playback.engine.capabilities)
         try:
             self.playback.resume_saved(autoplay=False)
@@ -372,7 +378,8 @@ class MainWindow(QMainWindow):
     def _wire_downloads(self):
         if self.downloads is None:
             return
-        self.downloads.subscribe(lambda event: self._bridge.download_event.emit(event))
+        self._download_listener = lambda event: (None if self._closed else self._bridge.download_event.emit(event))
+        self.downloads.subscribe(self._download_listener)
         self._reload_downloads()
 
     def _wire_listening(self):
@@ -459,6 +466,11 @@ class MainWindow(QMainWindow):
         removed, freed = cache.prune(keep, None)
         self._refresh_storage_settings()
         self._notify(f"Removed {removed} image{'s' if removed != 1 else ''}  ·  {self._format_bytes(freed)} reclaimed", "success")
+
+    def _emit_completed(self, payload):
+        """Called from worker threads; never touch a window that is closing."""
+        if not self._closed:
+            self._bridge.completed.emit(payload)
 
     def _show_shortcuts(self):
         from .pages import SHORTCUT_GROUPS
@@ -1127,7 +1139,7 @@ class MainWindow(QMainWindow):
                 result = completed.result()
             except Exception as exc:
                 result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._bridge.completed.emit(("details", episode.id, result))
+            self._emit_completed(("details", episode.id, result))
 
         future.add_done_callback(finished)
 
@@ -1154,7 +1166,7 @@ class MainWindow(QMainWindow):
                 result = completed.result()
             except Exception as exc:
                 result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._bridge.completed.emit(("artwork", episode.id, result))
+            self._emit_completed(("artwork", episode.id, result))
 
         future.add_done_callback(finished)
 
@@ -1583,7 +1595,7 @@ class MainWindow(QMainWindow):
                 result = completed.result()
             except Exception as exc:
                 result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._bridge.completed.emit(("download", episode_id, result))
+            self._emit_completed(("download", episode_id, result))
 
         future.add_done_callback(finished)
         if not quiet:
@@ -1620,6 +1632,12 @@ class MainWindow(QMainWindow):
         self._notify(f"Cancelling {cancelled} download{'s' if cancelled != 1 else ''}")
 
     def _download_progress(self, event):
+        # Progress arrives every 256 KB; coalesce the list rebuild to ~4/s.
+        self._note_download_rate(event)
+        if not self._download_reload_timer.isActive():
+            self._download_reload_timer.start()
+
+    def _note_download_rate(self, event):
         episode_id = getattr(event, "episode_id", None)
         done = getattr(event, "bytes_done", None)
         if episode_id is not None and done is not None:
@@ -1630,7 +1648,6 @@ class MainWindow(QMainWindow):
                 rate = (done - previous[1]) / (now - previous[0])
             if previous is None or rate is not None:
                 self._download_samples[episode_id] = (now, done, rate if rate is not None else (previous[2] if previous else None))
-        self._reload_downloads()
 
     def _reload_downloads(self):
         if self.downloads is None or self.library is None:
@@ -1865,7 +1882,7 @@ class MainWindow(QMainWindow):
                 result = completed.result()
             except Exception as exc:
                 result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._bridge.completed.emit(("directory", (operation, value, limit), result))
+            self._emit_completed(("directory", (operation, value, limit), result))
 
         future.add_done_callback(finished)
 
@@ -1881,17 +1898,25 @@ class MainWindow(QMainWindow):
         else:
             callable_ = self.directory.search if operation == "search" else self.directory.browse
             candidates = callable_(value, limit)
-        results = []
         artwork_cache = self.refresh.artwork if self.refresh is not None else None
-        for candidate in candidates:
-            artwork_path = ""
-            if artwork_cache is not None and candidate.artwork_url:
-                try:
-                    artwork_path = str(artwork_cache.fetch(candidate.artwork_url))
-                except Exception:
-                    artwork_path = ""
-            results.append((candidate, artwork_path))
-        return results
+        candidates = list(candidates)
+        if artwork_cache is None:
+            return [(candidate, "") for candidate in candidates]
+
+        def fetch(candidate):
+            if not candidate.artwork_url:
+                return ""
+            try:
+                return str(artwork_cache.fetch(candidate.artwork_url))
+            except Exception:
+                return ""
+
+        # Thirty sequential image fetches made Discover feel broken on slow CDNs.
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="bs-art") as pool:
+            paths = list(pool.map(fetch, candidates))
+        return list(zip(candidates, paths))
 
     # ------------------------------------------------------------------ refresh
     def _refresh_all(self):
@@ -1915,7 +1940,7 @@ class MainWindow(QMainWindow):
                 result = completed.result()
             except Exception as exc:
                 result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._bridge.completed.emit(("refresh", show_id, result))
+            self._emit_completed(("refresh", show_id, result))
 
         future.add_done_callback(finished)
 
@@ -2299,7 +2324,7 @@ class MainWindow(QMainWindow):
                 result = completed.result()
             except Exception as exc:
                 result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._bridge.completed.emit(("preview", feed_url, result))
+            self._emit_completed(("preview", feed_url, result))
 
         future.add_done_callback(finished)
 
@@ -2516,7 +2541,14 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
 
     def closeEvent(self, event):
+        self._closed = True
         self._save_layout()
+        self._refresh_timer.stop()
+        self._download_reload_timer.stop()
+        if self.playback is not None and hasattr(self.playback, "unsubscribe") and getattr(self, "_playback_listener", None):
+            self.playback.unsubscribe(self._playback_listener)
+        if self.downloads is not None and hasattr(self.downloads, "unsubscribe") and getattr(self, "_download_listener", None):
+            self.downloads.unsubscribe(self._download_listener)
         QApplication.instance().removeEventFilter(self)
         if self._keep_services:
             # Window is being rebuilt (theme change); services stay alive.

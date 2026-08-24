@@ -2,9 +2,12 @@
 
 from hashlib import sha256
 from pathlib import Path
+from threading import Lock
 import os
 
 import requests
+
+from ..net import make_session
 
 
 MAX_ARTWORK_BYTES = 8 * 1024 * 1024
@@ -17,7 +20,9 @@ class ArtworkError(RuntimeError):
 class ArtworkCache:
     def __init__(self, directory: str | Path, session=None):
         self.directory = Path(directory)
-        self.session = session or requests.Session()
+        self.session = session or make_session()
+        self._url_locks: dict[str, Lock] = {}
+        self._locks_guard = Lock()
 
     def files(self):
         if not self.directory.is_dir():
@@ -57,18 +62,33 @@ class ArtworkCache:
         digest = sha256(url.encode("utf-8")).hexdigest()
         return self.directory / f"{digest}.img"
 
+    def _lock_for(self, url: str) -> Lock:
+        with self._locks_guard:
+            lock = self._url_locks.get(url)
+            if lock is None:
+                lock = self._url_locks[url] = Lock()
+            return lock
+
     def fetch(self, url: str) -> Path:
         if not url:
             raise ArtworkError("Artwork URL is empty.")
         target = self.path_for(url)
         if target.is_file() and target.stat().st_size > 0:
             return target
+        # Two workers asking for the same image must not race on the .part file.
+        with self._lock_for(url):
+            if target.is_file() and target.stat().st_size > 0:
+                return target
+            return self._fetch_locked(url, target)
+
+    def _fetch_locked(self, url: str, target: Path) -> Path:
 
         self.directory.mkdir(parents=True, exist_ok=True)
         partial = target.with_suffix(".part")
         try:
             response = self.session.get(url, timeout=(8, 20), stream=True)
             response.raise_for_status()
+            response_close = response.close
             content_type = response.headers.get("Content-Type", "").lower()
             if content_type and not content_type.startswith("image/"):
                 raise ArtworkError("Artwork response is not an image.")
@@ -82,6 +102,7 @@ class ArtworkCache:
             if size == 0:
                 raise ArtworkError("Artwork response was empty.")
             os.replace(partial, target)
+            response_close()
             return target
         except ArtworkError:
             partial.unlink(missing_ok=True)

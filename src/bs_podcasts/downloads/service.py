@@ -10,6 +10,8 @@ import shutil
 
 import requests
 
+from ..net import make_session
+
 from ..data.repositories import DownloadRepository, LibraryRepository
 from ..domain import DownloadState
 
@@ -38,7 +40,7 @@ class DownloadService:
         self.library = library
         self.downloads = downloads
         self.directory = Path(directory)
-        self.session = session or requests.Session()
+        self.session = session or make_session(read_retries=False)
         self._cancellations: dict[int, Event] = {}
         self._listeners = []
         self._lock = Lock()
@@ -46,11 +48,24 @@ class DownloadService:
     def subscribe(self, listener):
         self._listeners.append(listener)
 
+    def unsubscribe(self, listener):
+        try:
+            self._listeners.remove(listener)
+        except ValueError:
+            pass
+
+    def is_active(self, episode_id: int) -> bool:
+        with self._lock:
+            return episode_id in self._cancellations
+
     RETRY_DELAYS = (2.0, 5.0, 10.0)
     MIN_FREE_BYTES = 500 * 1024 * 1024
 
     def download(self, episode_id: int):
         """Download with bounded automatic retry on transient network errors."""
+        if self.is_active(episode_id):
+            # A second click while a transfer runs must not open a second writer.
+            return self.downloads.get(episode_id)
         self.directory.mkdir(parents=True, exist_ok=True)
         if shutil.disk_usage(self.directory).free < self.MIN_FREE_BYTES:
             message = "Not enough free space in the downloads folder."

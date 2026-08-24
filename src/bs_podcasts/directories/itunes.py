@@ -2,6 +2,8 @@
 
 import requests
 
+from ..net import make_session
+
 from ..domain import DirectoryCandidate
 from .base import DirectoryError
 
@@ -78,7 +80,7 @@ class ItunesDirectory:
     endpoint = "https://itunes.apple.com/search"
 
     def __init__(self, session=None):
-        self.session = session or requests.Session()
+        self.session = session or make_session()
         self._browse_cache = {}
         from .apple_charts import AppleCharts
 

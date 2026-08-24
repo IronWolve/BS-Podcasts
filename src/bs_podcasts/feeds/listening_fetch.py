@@ -6,6 +6,8 @@ import re
 
 import requests
 
+from ..net import USER_AGENT, make_session
+
 
 MAX_BYTES = 4 * 1024 * 1024
 TIMEOUT = 15
@@ -31,15 +33,15 @@ class SegmentData:
 
 
 def _get(url: str, session=None) -> tuple[bytes, str]:
-    client = session or requests
-    response = client.get(url, timeout=TIMEOUT, stream=True, headers={"User-Agent": "BS Podcasts/0.1"})
-    response.raise_for_status()
-    content = b""
-    for chunk in response.iter_content(64 * 1024):
-        content += chunk
-        if len(content) > MAX_BYTES:
-            raise ListeningFetchError("File exceeds the size limit.")
-    return content, response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    client = session or make_session()
+    with client.get(url, timeout=TIMEOUT, stream=True, headers={"User-Agent": USER_AGENT}) as response:
+        response.raise_for_status()
+        content = bytearray()
+        for chunk in response.iter_content(64 * 1024):
+            content.extend(chunk)
+            if len(content) > MAX_BYTES:
+                raise ListeningFetchError("File exceeds the size limit.")
+        return bytes(content), response.headers.get("Content-Type", "").split(";")[0].strip().lower()
 
 
 def fetch_chapters(url: str, session=None) -> list[ChapterData]:
