@@ -146,6 +146,22 @@ def check(condition, message):
         print("  FAIL:", message)
 
 
+def settle(app, window, seconds: float = 5.0):
+    """Pump the event loop until background reads have landed and stayed idle."""
+    import time as _time
+    end = _time.time() + seconds
+    quiet = 0
+    while _time.time() < end:
+        app.processEvents()
+        if window.reads_pending():
+            quiet = 0
+        else:
+            quiet += 1
+            if quiet >= 4:  # idle across several pumps: queued completions have been delivered
+                return
+        _time.sleep(0.01)
+
+
 def process(app, times=3):
     for _ in range(times):
         app.processEvents()
@@ -218,7 +234,7 @@ def main() -> int:
         # ------------------------------------------------------------- filters
         print("filters, sort, selection bar")
         window.navigation.select(2)
-        process(app)
+        settle(app, window)
         total = window.episode_page.model.rowCount()
         window.episode_page.header.search.setText("Measure")
         process(app)
@@ -257,12 +273,13 @@ def main() -> int:
         # ---------------------------------------------------------- context pane
         print("details pane")
         row = next(window.episode_page.model.index(r, 0).data(257) for r in range(window.episode_page.model.rowCount()) if window.episode_page.model.index(r, 0).data(257).episode_id == first.id)
+        settle(app, window)
         window.episode_page.view.setCurrentIndex(window.episode_page.model.index(window.episode_page.model.row_for_episode(first.id), 0))
         process(app)
-        check(window.context.title.text() == first.title, "selecting a row did not update the pane")
+        check(window.context.title.text() == first.title, f"selecting a row did not update the pane (pane={window.context.title.text()!r}, row={window.episode_page.view.currentIndex().row()}, rows={window.episode_page.model.rowCount()})")
         window.context.primary.click()
         process(app)
-        check(playback.last("load") == ("load", first.id), "pane Play did not load the episode")
+        check(playback.last("load") == ("load", first.id), f"pane Play did not load the episode (calls={playback.calls[-3:]}, primary={window.context.primary.text()!r}, ep={window.context._episode_id})")
         check(window.context.primary.text() == "Pause", f"pane button after play: {window.context.primary.text()}")
         window.context.primary.click()
         process(app)
@@ -276,7 +293,7 @@ def main() -> int:
         process(app)
         check([e.id for e in library.queue()] == [first.id], "pane Up Next did not enqueue")
         window.context.show_link.click()
-        process(app)
+        settle(app, window)
         check(window.pages.currentIndex() == 2 and window.episode_page.hero.isVisible(), "pane show link did not open the show")
         window.context.queue_mode.click()
         process(app)
@@ -298,7 +315,7 @@ def main() -> int:
         # -------------------------------------------------------------- hero
         print("hero")
         window._open_podcast(window._ui_podcast(library.shows()[0]))
-        process(app)
+        settle(app, window)
         hero = window.episode_page.hero
         check(hero.isVisible(), "hero not shown for a podcast")
         latest_id = library.episodes(show_id=show.id, limit=1)[0].id
@@ -391,7 +408,7 @@ def main() -> int:
         check(window.pages.currentIndex() == 4, "home downloads card")
         window.navigation.select(0)
         window.home_page.summary_buttons[0].click()
-        process(app)
+        settle(app, window)
         check(window.pages.currentIndex() == 2 and window.episode_page.chips.current() == "New", "home new-episodes card should open Episodes filtered to New")
 
         # ---------------------------------------------------------- downloads
@@ -478,9 +495,9 @@ def main() -> int:
         window._open_search()
         window.search_overlay.field.setText("foundation")
         window._global_query("foundation")
-        process(app)
+        settle(app, window)
         window.search_overlay._activate_current()
-        process(app)
+        settle(app, window)
         check(window.pages.currentIndex() == 2 and window.episode_page.view.currentIndex().data(257).episode_id == second.id, "search result did not open and select the episode")
 
         # ------------------------------------------------------------- toast

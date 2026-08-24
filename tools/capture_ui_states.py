@@ -23,6 +23,22 @@ from bs_podcasts.services import LibraryService, ListeningService
 from bs_podcasts.ui.shell import MainWindow
 
 
+def settle(app, window, seconds: float = 5.0):
+    """Pump the event loop until background reads have landed and stayed idle."""
+    import time as _time
+    end = _time.time() + seconds
+    quiet = 0
+    while _time.time() < end:
+        app.processEvents()
+        if window.reads_pending():
+            quiet = 0
+        else:
+            quiet += 1
+            if quiet >= 4:  # idle across several pumps: queued completions have been delivered
+                return
+        _time.sleep(0.01)
+
+
 def grab(window, name):
     QApplication.processEvents()
     path = OUTPUT / f"state-{name}.png"
@@ -47,12 +63,14 @@ def main() -> int:
         listening = ListeningService(ListeningRepository(database))
         jobs = JobRunner(max_workers=1)
         app = create_application(["bs-podcasts-ui-states"])
+        window_app_ref = [app]
         window = MainWindow(library=library, jobs=jobs, downloads=downloads, listening=listening)
         window.resize(1440, 900)
         window.show()
         QApplication.processEvents()
 
         window.navigation.select(2)
+        settle(window_app_ref[0], window)
         window.episode_page.view.selectAll()
         grab(window, "selection")
         window.episode_page.view.clearSelection()
@@ -73,7 +91,7 @@ def main() -> int:
         window.navigation.select(1)
         podcast = window.podcast_page.model.index(0, 0).data(257)
         window._open_podcast(podcast)
-        QApplication.processEvents()
+        settle(window_app_ref[0], window)
         assert window.episode_page.hero.isVisible(), "podcast hero not shown"
         assert window.episode_page.hero.title.text() == "Workshop Radio"
         grab(window, "podcast-hero")
@@ -135,7 +153,7 @@ def main() -> int:
         assert card.episode_count == 2, card.episode_count
         # Show episodes from the details pane opens a preview list.
         window.context.episodes_link.click()
-        QApplication.processEvents()
+        settle(window_app_ref[0], window)
         assert window.pages.currentIndex() == 2, "preview episodes did not open"
         assert window.episode_page.model.rowCount() == 2 and window.episode_page.model.index(0, 0).data(257).state == "Preview"
         grab(window, "discover-episodes-preview")
@@ -143,7 +161,7 @@ def main() -> int:
         QApplication.processEvents()
         assert window.pages.currentIndex() == 5, f"Back from preview episodes landed on page {window.pages.currentIndex()}"
         window.navigate_forward()
-        QApplication.processEvents()
+        settle(window_app_ref[0], window)
         assert window.pages.currentIndex() == 2, "Forward did not return to the preview"
         assert window.episode_page.header.title_label.text() == "Workshop Radio", window.episode_page.header.title_label.text()
         assert window.episode_page.model.rowCount() == 2, "Forward lost the preview episode list"
@@ -186,6 +204,7 @@ def main() -> int:
         window.playback = FakePlayback(snapshot)
         window._playback_changed(snapshot)
         window.navigation.select(2)
+        settle(window_app_ref[0], window)
         # Every play control toggles the playing episode instead of reloading it.
         row_item = next(window.episode_page.model.index(r, 0).data(257) for r in range(window.episode_page.model.rowCount()) if window.episode_page.model.index(r, 0).data(257).episode_id == first.id)
         window.episode_page.play_requested.emit(row_item)
@@ -214,6 +233,7 @@ def main() -> int:
         downloads.downloads.progress(episodes[1].id, DownloadState.DOWNLOADING, 512, 2048, "")
         window._reload_library()
         window.navigation.select(2)
+        settle(window_app_ref[0], window)
         rows = [window.episode_page.model.index(r, 0).data(257) for r in range(window.episode_page.model.rowCount())]
         live = next(r for r in rows if r.episode_id == episodes[1].id)
         assert live.state == "Downloading" and abs(live.progress - 0.25) < 0.01, (live.state, live.progress)
@@ -307,6 +327,7 @@ def main() -> int:
 
         # Diff-aware replace keeps the current index across a same-shape reload.
         window.navigation.select(2)
+        settle(window_app_ref[0], window)
         window.episode_page.view.setCurrentIndex(window.episode_page.model.index(1, 0))
         before = window.episode_page.view.currentIndex().row()
         window._reload_library()
@@ -329,11 +350,12 @@ def main() -> int:
         window._open_search()
         window.search_overlay.field.setText("measure")
         window._global_query("measure")
-        QApplication.processEvents()
+        settle(window_app_ref[0], window)
         assert window.search_overlay.isVisible() and window.search_overlay.results.count() >= 3, window.search_overlay.results.count()
         grab(window, "search")
+        settle(window_app_ref[0], window)
         window.search_overlay._activate_current()
-        QApplication.processEvents()
+        settle(window_app_ref[0], window)
         assert window.pages.currentIndex() == 2 and window.episode_page.model.rowCount() == 2, "search result did not open the podcast"
 
         # Unsubscribe with preview, without deleting anything until confirmed.

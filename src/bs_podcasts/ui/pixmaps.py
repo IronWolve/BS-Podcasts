@@ -20,11 +20,13 @@ def dominant_color(path: str, fallback: str = "") -> str:
     cached = _dominant.get(path)
     if cached is not None:
         return cached or fallback
-    source = _source(path)
-    if source is None:
+    from PySide6.QtGui import QImage
+
+    image = QImage(path)  # QImage, not QPixmap: safe on worker threads
+    if image.isNull():
         _dominant[path] = ""
         return fallback
-    image = source.scaled(24, 24, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation).toImage()
+    image = image.scaled(24, 24, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
     total = [0, 0, 0]
     count = 0
     for y in range(image.height()):

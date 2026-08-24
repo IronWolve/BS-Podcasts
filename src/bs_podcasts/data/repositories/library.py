@@ -139,6 +139,14 @@ class LibraryRepository:
                 )
         return len(feed.episodes)
 
+    def artwork_paths(self) -> set[str]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT artwork_path FROM shows WHERE artwork_path != '' "
+                "UNION SELECT episode_artwork_path FROM episodes WHERE episode_artwork_path != ''"
+            ).fetchall()
+        return {row[0] for row in rows}
+
     def removal_preview(self, show_id: int) -> dict:
         """Exact targets that removing a show would delete; nothing is touched."""
         show = self.get_show(show_id)
