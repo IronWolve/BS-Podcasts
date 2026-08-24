@@ -2241,7 +2241,7 @@ class PlayerBar(QFrame):
         transport = QVBoxLayout()
         transport.setSpacing(2)
         controls = QHBoxLayout()
-        controls.setSpacing(SPACE["xs"])
+        controls.setSpacing(SPACE["sm"])
         controls.addStretch(1)
         self.back = QPushButton("15")
         self.back.setObjectName("textButton")
