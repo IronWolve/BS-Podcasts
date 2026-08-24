@@ -12,11 +12,31 @@ class LibraryService:
     def __init__(self, repository: LibraryRepository):
         self.repository = repository
 
+    @staticmethod
+    def normalize_feed_url(url: str) -> str:
+        """Key used to spot the same feed behind http/https, www, trailing slashes."""
+        parsed = urlparse(url.strip())
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        path = parsed.path.rstrip("/") or "/"
+        return f"{host}{path}" + (f"?{parsed.query}" if parsed.query else "")
+
+    def find_subscription(self, feed_url: str):
+        key = self.normalize_feed_url(feed_url)
+        for show in self.repository.list_shows():
+            if key in {self.normalize_feed_url(show.feed_url), self.normalize_feed_url(show.canonical_url or "")}:
+                return show
+        return None
+
     def add_subscription(self, feed_url: str, title: str = ""):
         feed_url = feed_url.strip()
         parsed = urlparse(feed_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("Enter a complete http:// or https:// feed URL.")
+        existing = self.find_subscription(feed_url)
+        if existing is not None:
+            raise ValueError(f"Already subscribed as “{existing.title}”.")
         fallback = title.strip() or parsed.netloc
         show = self.repository.add_show(feed_url, fallback)
         self.repository.update_show_playback(
@@ -69,7 +89,12 @@ class LibraryService:
 
     def import_opml(self, content: bytes):
         added = []
+        seen = set()
         for entry in import_opml(content):
+            key = self.normalize_feed_url(entry.feed_url)
+            if key in seen:
+                continue
+            seen.add(key)
             try:
                 added.append(self.add_subscription(entry.feed_url, entry.title))
             except ValueError:
