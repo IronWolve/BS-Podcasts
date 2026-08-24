@@ -58,6 +58,7 @@ class Episode:
     downloaded_path: str = ""
     bookmark_id: int = 0
     bookmark_position: float = 0.0
+    is_new: bool = False
 
 
 class ItemRoles:
@@ -431,11 +432,9 @@ class EpisodeDelegate(QStyledItemDelegate):
         play_zone = self.PLAY_ZONE + 8
         badge_reserve = 0
         state_color = STATE_COLORS.get(item.state, item.accent)
-        show_badge = item.state not in {"New", "Played"} and not self.compact
-        if show_badge and not self.compact:
-            badge_font = app_font(11, QFont.Weight.DemiBold)
-            badge_reserve = painter.fontMetrics().horizontalAdvance(item.state.upper()) + 40
-            painter.setFont(badge_font)
+        show_badge = item.state not in {"New", "Played"}
+        if show_badge:
+            painter.setFont(app_font(11, QFont.Weight.DemiBold))
             badge_reserve = painter.fontMetrics().horizontalAdvance(item.state.upper()) + 36
         text_right = row.right() - play_zone - badge_reserve
         text_width = max(40, text_right - text_left)
@@ -451,7 +450,7 @@ class EpisodeDelegate(QStyledItemDelegate):
             title_rect = QRect(text_left, row.y() + 11, text_width, 20)
             snippet_rect = QRect(text_left, row.y() + 32, text_width, 17)
             meta_rect = QRect(text_left, row.y() + 52, text_width, 16)
-        if item.state == "New" and not self.compact:
+        if item.state == "New":
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["accent"]))
             painter.drawEllipse(QRect(title_rect.x(), title_rect.center().y() - 3, 7, 7))
@@ -473,7 +472,8 @@ class EpisodeDelegate(QStyledItemDelegate):
             left_seconds = int(item.duration_seconds * (1 - item.progress))
             hours, minutes = divmod(max(1, left_seconds // 60), 60)
             remaining = f"{hours} hr {minutes} min left" if hours else f"{minutes} min left"
-        meta = "  ·  ".join(part for part in (item.show if not self.compact else "", item.published, remaining or item.duration) if part)
+        compact_detail = item.detail if self.compact and item.detail else ""
+        meta = compact_detail or "  ·  ".join(part for part in (item.show if not self.compact else "", item.published, remaining or item.duration) if part)
         painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, text_width))
 
         if show_badge:

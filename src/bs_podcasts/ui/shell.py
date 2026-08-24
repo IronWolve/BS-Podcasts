@@ -783,10 +783,12 @@ class MainWindow(QMainWindow):
         if self.pages.currentIndex() != PAGE_EPISODES or not self._episode_navigation_prepared:
             self.episode_page.set_items(episodes)
         resume_ids = {episode.episode_id for episode in in_progress[:3]}
-        self.home_page.set_sections(
-            in_progress,
-            [episode for episode in episodes if episode.state not in {"Played", "In progress"} and episode.episode_id not in resume_ids],
-        )
+        unplayed = [episode for episode in episodes if episode.state not in {"Played", "In progress"} and episode.episode_id not in resume_ids]
+        fresh = [episode for episode in unplayed if episode.is_new]
+        # The Home card counts is_new; the section shows the same set, or falls
+        # back to the newest unplayed episodes when nothing is flagged new.
+        self.home_page.latest_title.title.setText("New episodes" if fresh else "Latest episodes")
+        self.home_page.set_sections(in_progress, fresh or unplayed)
         self.playlist_page.set_items(queued)
         self.context.set_queue(queued)
         self.player.set_next(queued[0].title if queued and queued[0].episode_id != self._playing_episode_id else (queued[1].title if len(queued) > 1 else ""))
@@ -2452,6 +2454,7 @@ class MainWindow(QMainWindow):
             duration_seconds=episode.duration_seconds,
             media_url=episode.media_url,
             downloaded_path=episode.downloaded_path,
+            is_new=bool(episode.is_new),
         )
 
     @staticmethod
