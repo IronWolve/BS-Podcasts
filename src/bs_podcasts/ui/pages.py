@@ -1,11 +1,13 @@
 """Pages built from reusable, model-backed components."""
 
 from datetime import datetime
+import time
 
 from PySide6.QtCore import QEvent, QSize, QTimer, Signal, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QFrame,
@@ -20,6 +22,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStackedWidget,
     QTabBar,
+    QToolTip,
     QScrollArea,
     QSizePolicy,
     QKeySequenceEdit,
@@ -31,7 +34,7 @@ from . import icons
 from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner
 from .theme import COLORS, SPACE
-from ..directories.itunes import CATEGORY_IDS, CATEGORY_TOPICS
+from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 
 
 class DiscoverModeTabs(QTabBar):
@@ -73,16 +76,38 @@ class _ListPageMixin:
         self.view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.view.setMouseTracking(True)
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.view.verticalScrollBar().setSingleStep(40)
         self.view.setResizeMode(QListView.ResizeMode.Adjust)
         self.view.setUniformItemSizes(True)
         self.view.setModel(self.model)
         self.view.selectionModel().currentChanged.connect(self._selected)
-        self.view.activated.connect(self._activated)
-        self.view.doubleClicked.connect(self._activated)
+        self._last_activation = (None, 0.0)
+        self.view.activated.connect(self._activated_once)
+        self.view.doubleClicked.connect(self._activated_once)
         self.view.viewport().installEventFilter(self)
+        self._tooltip_target = None
         delete = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.view)
         delete.setContext(Qt.ShortcutContext.WidgetShortcut)
         delete.activated.connect(self._remove_selected)
+
+    def _track_item_tooltip(self, view: QListView, event):
+        """Dismiss a native item tooltip as soon as its hover target is gone."""
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseMove:
+            index = view.indexAt(event.position().toPoint())
+            target = (id(view), index.row() if index.isValid() else -1)
+            if target != getattr(self, "_tooltip_target", None):
+                QToolTip.hideText()
+                self._tooltip_target = target
+        elif event_type in {
+            QEvent.Type.Leave,
+            QEvent.Type.Wheel,
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.Hide,
+        }:
+            QToolTip.hideText()
+            self._tooltip_target = None
 
     def _selected(self, current, previous):
         item = current.data(ItemRoles.ITEM) if current.isValid() else None
@@ -93,6 +118,14 @@ class _ListPageMixin:
         item = index.data(ItemRoles.ITEM)
         if item is not None:
             self.activate_requested.emit(item)
+
+    def _activated_once(self, index):
+        key = self._key(index.data(ItemRoles.ITEM)) if index.isValid() else None
+        now = time.monotonic()
+        if key is not None and self._last_activation[0] == key and now - self._last_activation[1] < 0.25:
+            return
+        self._last_activation = (key, now)
+        self._activated(index)
 
     def _remove_selected(self):
         items = self.selected_items()
@@ -200,10 +233,10 @@ class PodcastGridPage(BasePage, _ListPageMixin):
                     index,
                     {
                         "explore": "Recommendations based on your library",
-                        "top_shows": "Apple Top Shows",
-                        "trending": "Apple Trending Episodes",
-                        "subscriber_shows": "Apple Top Subscriber Shows",
-                        "top_series": "Apple Top Series",
+                        "top_shows": "Top Shows",
+                        "trending": "Trending Episodes",
+                        "subscriber_shows": "Subscriber Shows",
+                        "top_series": "Top Series",
                     }[value],
                 )
             primary_filters.addWidget(self.chart, 1)
@@ -227,7 +260,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self._discover_sort = "rank"
             secondary_filters.addWidget(self.discover_sort)
             secondary_filters.addStretch(1)
-            self.scope_label = QLabel("All Categories · Apple chart")
+            self.scope_label = QLabel("All Categories · Directory chart")
             self.scope_label.setObjectName("scopePill")
             self.scope_label.setVisible(False)
             secondary_filters.addWidget(self.scope_label)
@@ -251,7 +284,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.result_summary.setObjectName("meta")
             self.result_summary.setFixedHeight(22)
             self.root.addWidget(self.result_summary)
-            self.header.search.setPlaceholderText("Search Apple Podcasts")
+            self.header.search.setPlaceholderText("Search")
             self.header.search.setAccessibleName("Search the podcast directory")
             if self.header.action:
                 self.header.action.setText("")
@@ -296,6 +329,10 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         self.header.search.textChanged.connect(self._apply_filters)
         self.chips.selected.connect(self._apply_filters)
         self.activate_requested.connect(self._open)
+        # A normal click opens the show's stored or preview episodes on both
+        # Podcasts and Discover. Modifier clicks remain available for the
+        # collection views' multi-select actions.
+        view.clicked.connect(self._clicked)
         self.root.addWidget(self.stack, 1)
         self.load_more = QPushButton("Load more podcasts")
         self.load_more.setObjectName("quietButton")
@@ -369,18 +406,40 @@ class PodcastGridPage(BasePage, _ListPageMixin):
     discover_sort_changed = Signal(str)
 
     def _show_discover_sort_menu(self):
-        menu = QMenu(self)
-        for key, label in self.DISCOVER_SORTS:
-            action = menu.addAction(label, lambda k=key, l=label: self.set_discover_sort(k, l))
-            action.setCheckable(True)
-            action.setChecked(key == self._discover_sort)
+        menu = self._create_discover_sort_menu()
         menu.exec(self.discover_sort.mapToGlobal(self.discover_sort.rect().bottomLeft()))
 
+    def _create_discover_sort_menu(self):
+        """Build the menu separately so its QAction wiring can be regression-tested."""
+        menu = QMenu(self)
+        for key, label in self.DISCOVER_SORTS:
+            action = menu.addAction(label)
+            # QAction.triggered supplies ``checked``. Consume it explicitly so
+            # it never replaces the captured string sort key.
+            action.triggered.connect(
+                lambda _checked=False, k=key, l=label: self.set_discover_sort(k, l)
+            )
+            action.setCheckable(True)
+            action.setChecked(key == self._discover_sort)
+        return menu
+
     def set_discover_sort(self, key: str, label: str = ""):
+        labels = dict(self.DISCOVER_SORTS)
+        if key not in labels:
+            return
         self._discover_sort = key
         if self.discover_sort is not None:
-            self.discover_sort.setText(label or dict(self.DISCOVER_SORTS)[key])
-        self._apply_filters(preserve_scroll=False)
+            self.discover_sort.setText(label or labels[key])
+        needs_scan = key == "newest" and any(
+            item.feed_url and not item.show_id and not item.latest_sort_key
+            for item in self._all_items
+        )
+        # Keep the current card order stable while newest dates are fetched;
+        # MainWindow applies all freshness in one batch when the scan finishes.
+        if not needs_scan:
+            self._apply_filters(preserve_scroll=False)
+        if key == "title":
+            QTimer.singleShot(0, self.view.scrollToTop)
         self.discover_sort_changed.emit(key)
 
     def discover_sort_key(self) -> str:
@@ -389,6 +448,12 @@ class PodcastGridPage(BasePage, _ListPageMixin):
     def _open(self, item):
         self.open_requested.emit(item)
 
+    def _clicked(self, index):
+        modifiers = QApplication.keyboardModifiers()
+        selecting = modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+        if not selecting:
+            self._activated(index)
+
     def set_loading(self, loading: bool):
         if loading and self.model.rowCount() == 0:
             self.stack.setCurrentWidget(self.skeleton)
@@ -396,6 +461,8 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self._update_empty()
 
     def eventFilter(self, watched, event):
+        if watched is self.view.viewport():
+            self._track_item_tooltip(self.view, event)
         if watched is self.view.viewport() and event.type() == QEvent.Type.ContextMenu:
             self._menu(event.pos())
             return True
@@ -458,7 +525,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         if self.result_summary is not None:
             self.result_summary.setText(text)
 
-    def set_discover_filter_visibility(self, show_category: bool, show_topic: bool, scope_text: str = "All Categories · Apple chart"):
+    def set_discover_filter_visibility(self, show_category: bool, show_topic: bool, scope_text: str = "All Categories · Directory chart"):
         if self.secondary_filters_widget is None:
             return
         self.secondary_filters_widget.setVisible(True)
@@ -494,7 +561,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         subtitle="",
         items=(),
         reorder=False,
-        filters=("All", "New", "In progress", "Downloaded", "Played"),
+        filters=("All", "Favorites", "New", "Unplayed", "In progress", "Downloaded", "Played"),
         action="Refresh",
         show_search=True,
         sortable=True,
@@ -568,14 +635,24 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self._apply_filters()
 
     def _show_sort_menu(self):
-        menu = QMenu(self)
-        for key, label in SORT_OPTIONS:
-            action = menu.addAction(label, lambda k=key, l=label: self._set_sort(k, l))
-            action.setCheckable(True)
-            action.setChecked(key == self._sort)
+        menu = self._create_sort_menu()
         menu.exec(self.sort_button.mapToGlobal(self.sort_button.rect().bottomLeft()))
 
+    def _create_sort_menu(self):
+        """Build the menu separately so its QAction wiring can be regression-tested."""
+        menu = QMenu(self)
+        for key, label in SORT_OPTIONS:
+            action = menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, k=key, l=label: self._set_sort(k, l)
+            )
+            action.setCheckable(True)
+            action.setChecked(key == self._sort)
+        return menu
+
     def _set_sort(self, key: str, label: str):
+        if key not in dict(SORT_OPTIONS):
+            return
         self._sort = key
         self.sort_button.setText(label)
         self._apply_filters()
@@ -587,7 +664,13 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         query = self.header.search.text().strip().lower()
         if query:
             items = [item for item in items if query in item.title.lower() or query in item.show.lower()]
-        if self._filter != "All":
+        if self._filter == "New":
+            items = [item for item in items if item.is_new]
+        elif self._filter == "Favorites":
+            items = [item for item in items if item.favorite]
+        elif self._filter == "Unplayed":
+            items = [item for item in items if not item.played]
+        elif self._filter != "All":
             items = [item for item in items if item.state.lower() == self._filter.lower()]
         if self.sort_button is not None and self._sort != "newest":
             if self._sort == "oldest":
@@ -603,8 +686,8 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self._update_empty(query)
         self._selection_changed()
 
-    def set_playing(self, episode_id: int, active: bool):
-        self.delegate.set_playing(episode_id, active)
+    def set_playing(self, episode_id: int, active: bool, source: str = ""):
+        self.delegate.set_playing(episode_id, active, source)
         self.view.viewport().update()
 
     def set_density(self, compact: bool):
@@ -612,7 +695,19 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self.view.doItemsLayout()
         self.view.viewport().update()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        narrow = event.size().width() < 720
+        self.chips.set_compact(narrow)
+        if self.sort_button is not None:
+            self.sort_button.setText("" if narrow else dict(SORT_OPTIONS).get(self._sort, "Newest first"))
+            self.sort_button.setFixedWidth(38 if narrow else 0)
+            self.sort_button.setMinimumWidth(38 if narrow else 0)
+            self.sort_button.setMaximumWidth(38 if narrow else 16777215)
+
     def eventFilter(self, watched, event):
+        if watched is self.view.viewport():
+            self._track_item_tooltip(self.view, event)
         if watched is self.view.viewport() and event.type() == QEvent.Type.ContextMenu:
             self._menu(event.pos())
             return True
@@ -718,8 +813,8 @@ class HomePage(BasePage, _ListPageMixin):
         self.resume_delegate = EpisodeDelegate(self.resume_view)
         self.resume_view.setItemDelegate(self.resume_delegate)
         self.resume_view.selectionModel().currentChanged.connect(self._selected)
-        self.resume_view.activated.connect(self._activated)
-        self.resume_view.doubleClicked.connect(self._activated)
+        self.resume_view.activated.connect(self._activated_once)
+        self.resume_view.doubleClicked.connect(self._activated_once)
         self.resume_view.viewport().installEventFilter(self)
         self.root.addWidget(self.resume_view)
         self.latest_title = SectionHeader("New episodes")
@@ -769,9 +864,9 @@ class HomePage(BasePage, _ListPageMixin):
     def set_items(self, items, heading: str | None = None):  # compatibility
         self.set_sections([], items)
 
-    def set_playing(self, episode_id: int, active: bool):
-        self.delegate.set_playing(episode_id, active)
-        self.resume_delegate.set_playing(episode_id, active)
+    def set_playing(self, episode_id: int, active: bool, source: str = ""):
+        self.delegate.set_playing(episode_id, active, source)
+        self.resume_delegate.set_playing(episode_id, active, source)
         self.view.viewport().update()
         self.resume_view.viewport().update()
 
@@ -809,6 +904,8 @@ class HomePage(BasePage, _ListPageMixin):
 
     def eventFilter(self, watched, event):
         view, delegate = self._view_for(watched)
+        if view is not None:
+            self._track_item_tooltip(view, event)
         if view is not None and event.type() == QEvent.Type.ContextMenu:
             index = view.indexAt(event.pos())
             if index.isValid():
@@ -871,6 +968,12 @@ class SettingsPage(BasePage):
     open_log_requested = Signal()
     clear_artwork_requested = Signal()
     reset_library_requested = Signal()
+    statistics_requested = Signal()
+    update_check_requested = Signal()
+    database_health_requested = Signal()
+    database_reindex_requested = Signal()
+    database_optimize_requested = Signal()
+    database_repair_requested = Signal()
 
     FIELD_WIDTH = 180
 
@@ -919,8 +1022,15 @@ class SettingsPage(BasePage):
         self.refresh_interval.setSpecialValueText("Manual only")
         self.refresh_interval.setFixedWidth(self.FIELD_WIDTH)
         library_form.addRow("Refresh every", self.refresh_interval)
+        self.background_paused = QCheckBox("Pause background work")
+        self.background_status = QLabel("Background refresh, artwork, transcripts and automatic downloads are running.")
+        self.background_status.setObjectName("settingHint")
+        self.background_status.setWordWrap(True)
+        library_form.addRow("Background", self.background_paused)
+        library_form.addRow("", self.background_status)
         self.settings_content.addWidget(library_card)
         self.refresh_interval.valueChanged.connect(lambda value: self.setting_changed.emit("refresh.interval_minutes", str(value)))
+        self.background_paused.toggled.connect(lambda value: self.setting_changed.emit("background.paused", "1" if value else "0"))
 
         # Downloads --------------------------------------------------------------
         downloads_card, downloads_form = self._card("Downloads", "New episodes found during a refresh can be downloaded automatically.")
@@ -958,6 +1068,68 @@ class SettingsPage(BasePage):
         self.theme.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.theme", self.theme.itemData(index)))
         self.density.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.density", self.density.itemData(index)))
 
+        # Desktop --------------------------------------------------------------
+        desktop_card, desktop_form = self._card("Desktop", "Small, optional desktop conveniences.")
+        self.notifications = QCheckBox("Show native notifications")
+        self.close_to_tray = QCheckBox("Keep running in the tray when the window closes")
+        desktop_form.addRow("Notifications", self.notifications)
+        desktop_form.addRow("Window close", self.close_to_tray)
+        self.settings_content.addWidget(desktop_card)
+        self.notifications.toggled.connect(lambda value: self.setting_changed.emit("notifications.enabled", "1" if value else "0"))
+        self.close_to_tray.toggled.connect(lambda value: self.setting_changed.emit("ui.close_to_tray", "1" if value else "0"))
+
+        # Listening statistics -------------------------------------------------
+        stats_card, stats_form = self._card("Listening statistics", "Stored only in your local library.")
+        self.statistics = QLabel("Choose Refresh to calculate your totals.")
+        self.statistics.setObjectName("meta")
+        self.statistics.setWordWrap(True)
+        stats_refresh = QPushButton("Refresh statistics")
+        stats_refresh.setObjectName("quietButton")
+        stats_refresh.clicked.connect(self.statistics_requested)
+        stats_form.addRow("Summary", self.statistics)
+        stats_form.addRow("", stats_refresh)
+        self.settings_content.addWidget(stats_card)
+
+        # Updates --------------------------------------------------------------
+        update_card, update_form = self._card("App updates", "Checks the project releases page; updates are never installed automatically.")
+        self.update_checks = QCheckBox("Check for updates in the background")
+        self.update_status = QLabel("Not checked")
+        self.update_status.setObjectName("meta")
+        self.update_status.setWordWrap(True)
+        check_now = QPushButton("Check now")
+        check_now.setObjectName("quietButton")
+        check_now.clicked.connect(self.update_check_requested)
+        update_form.addRow("Automatic checks", self.update_checks)
+        update_form.addRow("Status", self.update_status)
+        update_form.addRow("", check_now)
+        self.settings_content.addWidget(update_card)
+        self.update_checks.toggled.connect(lambda value: self.setting_changed.emit("updates.enabled", "1" if value else "0"))
+
+        # Database -------------------------------------------------------------
+        database_card, database_form = self._card("Library database", "Maintenance creates a backup first. Repair is offered only if a health check finds a problem.")
+        self.database_status = QLabel("Not checked")
+        self.database_status.setObjectName("meta")
+        self.database_status.setWordWrap(True)
+        database_actions = QHBoxLayout()
+        for label, signal in (
+            ("Health check", self.database_health_requested),
+            ("Reindex", self.database_reindex_requested),
+            ("Optimize", self.database_optimize_requested),
+        ):
+            button = QPushButton(label)
+            button.setObjectName("quietButton")
+            button.clicked.connect(signal)
+            database_actions.addWidget(button)
+        self.database_repair = QPushButton("Attempt repair…")
+        self.database_repair.setObjectName("dangerButton")
+        self.database_repair.clicked.connect(self.database_repair_requested)
+        self.database_repair.hide()
+        database_actions.addWidget(self.database_repair)
+        database_actions.addStretch(1)
+        database_form.addRow("Status", self.database_status)
+        database_form.addRow("", database_actions)
+        self.settings_content.addWidget(database_card)
+
         # Shortcuts ----------------------------------------------------------
         shortcut_card = QFrame()
         shortcut_card.setObjectName("settingCard")
@@ -991,7 +1163,6 @@ class SettingsPage(BasePage):
         storage_card, storage_layout = self._card("Files & storage", "")
         storage_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.data_root = QLabel("—")
-        self.settings_path = QLabel("—")
         self.library_path = QLabel("—")
         self.download_path = QLabel("—")
         self.download_usage = QLabel("—")
@@ -999,7 +1170,7 @@ class SettingsPage(BasePage):
         self.artwork_usage = QLabel("—")
         self.temp_path = QLabel("—")
         self.log_path = QLabel("—")
-        for label in (self.data_root, self.settings_path, self.library_path, self.download_path, self.artwork_path, self.temp_path, self.log_path):
+        for label in (self.data_root, self.library_path, self.download_path, self.artwork_path, self.temp_path, self.log_path):
             label.setObjectName("meta")
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             label.setWordWrap(True)
@@ -1008,7 +1179,6 @@ class SettingsPage(BasePage):
         self.download_usage.setObjectName("meta")
         self.artwork_usage.setObjectName("meta")
         storage_layout.addRow("Application data", self.data_root)
-        storage_layout.addRow("Startup config", self.settings_path)
         storage_layout.addRow("Library database", self.library_path)
         download_row = QWidget()
         download_row_layout = QHBoxLayout(download_row)
@@ -1078,7 +1248,7 @@ class SettingsPage(BasePage):
         # Transfer ------------------------------------------------------------
         transfer_card, transfer_layout = self._card(
             "Subscriptions & transfer",
-            "Import subscriptions from an OPML file or export the current list for another podcast app.",
+            "Import subscriptions from an OPML file or export the current list for another podcast reader.",
         )
         transfer_actions = QHBoxLayout()
         transfer_actions.setSpacing(SPACE["sm"])
@@ -1139,6 +1309,35 @@ class SettingsPage(BasePage):
         self.refresh_interval.blockSignals(True)
         self.refresh_interval.setValue(minutes)
         self.refresh_interval.blockSignals(False)
+
+    def load_desktop_options(self, background_paused: bool, notifications: bool, close_to_tray: bool, update_checks: bool):
+        for control, value in (
+            (self.background_paused, background_paused),
+            (self.notifications, notifications),
+            (self.close_to_tray, close_to_tray),
+            (self.update_checks, update_checks),
+        ):
+            control.blockSignals(True)
+            control.setChecked(value)
+            control.blockSignals(False)
+        self.set_background_paused(background_paused)
+
+    def set_background_paused(self, paused: bool):
+        self.background_status.setText(
+            "Paused: feed refreshes, artwork, transcripts and automatic downloads will wait."
+            if paused else
+            "Background refresh, artwork, transcripts and automatic downloads are running."
+        )
+
+    def set_statistics(self, text: str):
+        self.statistics.setText(text)
+
+    def set_update_status(self, text: str):
+        self.update_status.setText(text)
+
+    def set_database_status(self, text: str, repair_available: bool = False):
+        self.database_status.setText(text)
+        self.database_repair.setVisible(repair_available)
 
     def load_density(self, value: str):
         self.density.blockSignals(True)
@@ -1202,15 +1401,14 @@ class SettingsPage(BasePage):
         self.shortcut_error.setText(message)
         self.shortcut_error.show()
 
-    def set_storage_info(self, data_root, settings_path, library_path, download_path, downloads, artwork_path, artwork, temp_path, log_path=""):
+    def set_storage_info(self, data_root, library_path, download_path, downloads, artwork_path, artwork, temp_path, log_path=""):
         self.log_path.setText(log_path or "—")
         self.data_root.setText(data_root)
-        self.settings_path.setText(settings_path)
         self.library_path.setText(library_path)
         self.download_path.setText(download_path)
         self.download_usage.setText(downloads)
         self.artwork_path.setText(artwork_path)
         self.artwork_usage.setText(artwork)
         self.temp_path.setText(temp_path)
-        for label in (self.data_root, self.settings_path, self.library_path, self.download_path, self.artwork_path, self.temp_path):
+        for label in (self.data_root, self.library_path, self.download_path, self.artwork_path, self.temp_path):
             label.setToolTip(label.text())

@@ -1,7 +1,13 @@
 """Cached, cover-cropped, rounded artwork pixmaps shared by widgets and delegates."""
 
-from PySide6.QtCore import QRect, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap, QPixmapCache
+from pathlib import Path
+import json
+import math
+import os
+import threading
+
+from PySide6.QtCore import QRect, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QFont, QImageReader, QPainter, QPainterPath, QPixmap, QPixmapCache
 
 from . import icons
 from .theme import COLORS, app_font
@@ -11,22 +17,82 @@ QPixmapCache.setCacheLimit(96 * 1024)  # 96 MB of decoded artwork
 
 
 _dominant: dict[str, str] = {}
+_dominant_mtime: dict[str, float] = {}
+_disk_loaded = False
+_disk_lock = threading.Lock()
+_SAMPLE_SIZE = 24
 
 
-def dominant_color(path: str, fallback: str = "") -> str:
-    """Average of the saturated mid-tone pixels in the artwork, cached per path."""
-    if not path:
-        return fallback
-    cached = _dominant.get(path)
-    if cached is not None:
-        return cached or fallback
-    from PySide6.QtGui import QImage
+def _cache_file() -> Path:
+    from ..config import cache_dir
 
-    image = QImage(path)  # QImage, not QPixmap: safe on worker threads
+    return cache_dir() / "accents.json"
+
+
+def _load_disk() -> None:
+    """Load persisted accents once so a cold launch does not re-decode artwork."""
+    global _disk_loaded
+    if _disk_loaded:
+        return
+    with _disk_lock:
+        if _disk_loaded:
+            return
+        _disk_loaded = True
+        try:
+            payload = json.loads(_cache_file().read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, dict):
+            return
+        for path, record in items.items():
+            if not isinstance(record, dict):
+                continue
+            color = record.get("color")
+            mtime = record.get("mtime")
+            if not isinstance(color, str) or not isinstance(mtime, (int, float)):
+                continue
+            _dominant[path] = color
+            _dominant_mtime[path] = float(mtime)
+
+
+def _save_disk() -> None:
+    target = _cache_file()
+    payload = {
+        "version": 1,
+        "items": {
+            path: {"mtime": _dominant_mtime.get(path, 0.0), "color": color}
+            for path, color in _dominant.items()
+        },
+    }
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(temporary, target)
+    except OSError:
+        pass
+
+
+def _fresh(path: str) -> bool:
+    cached_mtime = _dominant_mtime.get(path)
+    if cached_mtime is None:
+        return path in _dominant
+    try:
+        return abs(os.path.getmtime(path) - cached_mtime) < 1.0
+    except OSError:
+        return True
+
+
+def _sample(path: str) -> str:
+    """Decode a thumbnail, not the full file. `.img` caches have no real suffix."""
+    reader = QImageReader(path)
+    reader.setDecideFormatFromContent(True)
+    reader.setAutoTransform(True)
+    reader.setScaledSize(QSize(_SAMPLE_SIZE, _SAMPLE_SIZE))
+    image = reader.read()
     if image.isNull():
-        _dominant[path] = ""
-        return fallback
-    image = image.scaled(24, 24, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        return ""
     total = [0, 0, 0]
     count = 0
     for y in range(image.height()):
@@ -39,14 +105,61 @@ def dominant_color(path: str, fallback: str = "") -> str:
             total[2] += color.blue()
             count += 1
     if count < 8:
-        _dominant[path] = ""
-        return fallback
+        return ""
     color = QColor(total[0] // count, total[1] // count, total[2] // count)
-    # Normalise to a readable tint on the dark canvas.
-    color = QColor.fromHslF(color.hslHueF() if color.hslHueF() >= 0 else 0.0, min(0.85, max(0.45, color.hslSaturationF())), 0.66)
-    result = color.name()
+    color = QColor.fromHslF(
+        color.hslHueF() if color.hslHueF() >= 0 else 0.0,
+        min(0.85, max(0.45, color.hslSaturationF())),
+        0.66,
+    )
+    return color.name()
+
+
+def dominant_color(path: str, fallback: str = "", compute: bool = True) -> str:
+    """Average of the saturated mid-tone pixels in the artwork, cached per path.
+
+    `compute=False` returns a cached or fallback tint without decoding the
+    image — first paint must not wait on a full-library JPEG scan.
+    """
+    if not path:
+        return fallback
+    _load_disk()
+    if path in _dominant and _fresh(path):
+        return _dominant[path] or fallback
+    if not compute:
+        return fallback
+    result = _sample(path)
     _dominant[path] = result
-    return result
+    try:
+        _dominant_mtime[path] = os.path.getmtime(path)
+    except OSError:
+        _dominant_mtime[path] = 0.0
+    return result or fallback
+
+
+def missing_accents(paths) -> list[str]:
+    """Unique artwork paths that still need a sample, in stable order."""
+    _load_disk()
+    pending = []
+    seen = set()
+    for path in paths:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if path not in _dominant or not _fresh(path):
+            pending.append(path)
+    return pending
+
+
+def sample_accents(paths) -> int:
+    """Decode missing artwork tints. Safe on a worker thread (QImageReader)."""
+    pending = missing_accents(paths)
+    if not pending:
+        return 0
+    for path in pending:
+        dominant_color(path, compute=True)
+    _save_disk()
+    return len(pending)
 
 
 def initials(text: str) -> str:
@@ -54,18 +167,34 @@ def initials(text: str) -> str:
     return "".join(word[0] for word in words[:2]).upper() or "—"
 
 
-def _source(path: str) -> QPixmap | None:
-    key = f"src:{path}"
+def _source(path: str, width: int, height: int) -> QPixmap | None:
+    """Decode artwork near its painted size instead of loading full covers.
+
+    Scrolling can reveal many unique episode images in quick succession. A
+    target-sized reader keeps those first paints small; the finished rounded
+    covers remain in QPixmapCache for subsequent paints.
+    """
+    key = f"src:{path}:{width}x{height}"
     cached = QPixmapCache.find(key)
     if cached is not None and not cached.isNull():
         return cached
-    pixmap = QPixmap(path)
-    if pixmap.isNull():
-        return None
-    if pixmap.width() > 1024 or pixmap.height() > 1024:
-        pixmap = pixmap.scaled(
-            1024, 1024, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+
+    reader = QImageReader(path)
+    reader.setDecideFormatFromContent(True)
+    reader.setAutoTransform(True)
+    source_size = reader.size()
+    if source_size.isValid() and source_size.width() > 0 and source_size.height() > 0:
+        factor = max(width / source_size.width(), height / source_size.height())
+        reader.setScaledSize(
+            QSize(
+                max(width, math.ceil(source_size.width() * factor)),
+                max(height, math.ceil(source_size.height() * factor)),
+            )
         )
+    image = reader.read()
+    if image.isNull():
+        return None
+    pixmap = QPixmap.fromImage(image)
     QPixmapCache.insert(key, pixmap)
     return pixmap
 
@@ -98,7 +227,7 @@ def cover(
     clip = QPainterPath()
     clip.addRoundedRect(QRectF(0, 0, physical_w, physical_h), radius * scale, radius * scale)
     painter.setClipPath(clip)
-    source = _source(path) if path else None
+    source = _source(path, physical_w, physical_h) if path else None
     if source is not None:
         scaled = source.scaled(
             physical_w,

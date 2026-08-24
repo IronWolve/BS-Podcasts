@@ -1,7 +1,7 @@
 """Optional Linux MPRIS service implemented with bundled QtDBus."""
 
 from PySide6.QtCore import ClassInfo, Property, QObject, Slot
-from PySide6.QtDBus import QDBusAbstractAdaptor, QDBusConnection, QDBusObjectPath
+from PySide6.QtDBus import QDBusAbstractAdaptor, QDBusConnection, QDBusMessage, QDBusObjectPath
 
 
 @ClassInfo({"D-Bus Interface": "org.mpris.MediaPlayer2"})
@@ -117,7 +117,7 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
 
     @Slot()
     def Pause(self):
-        self.host.playback.engine.pause()
+        self.host.playback.pause()
 
     @Slot()
     def PlayPause(self):
@@ -125,11 +125,11 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
 
     @Slot()
     def Stop(self):
-        self.host.playback.engine.pause()
+        self.host.playback.stop()
 
     @Slot()
     def Play(self):
-        self.host.playback.engine.play()
+        self.host.playback.play()
 
     @Slot("qlonglong")
     def Seek(self, offset):
@@ -159,8 +159,36 @@ class MprisController(QObject):
             self,
             QDBusConnection.RegisterOption.ExportAdaptors,
         )
+        self._bridge = getattr(window, "_bridge", None)
+        if self.available and self._bridge is not None:
+            self._bridge.playback_event.connect(self._playback_changed)
+
+    def _playback_changed(self, _snapshot):
+        if not self.available:
+            return
+        message = QDBusMessage.createSignal(
+            "/org/mpris/MediaPlayer2",
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+        )
+        message.setArguments([
+            "org.mpris.MediaPlayer2.Player",
+            {
+                "PlaybackStatus": self.player_adaptor.PlaybackStatus,
+                "Metadata": self.player_adaptor.Metadata,
+                "Volume": self.player_adaptor.Volume,
+                "Position": self.player_adaptor.Position,
+            },
+            [],
+        ])
+        QDBusConnection.sessionBus().send(message)
 
     def shutdown(self):
+        if getattr(self, "_bridge", None) is not None:
+            try:
+                self._bridge.playback_event.disconnect(self._playback_changed)
+            except (RuntimeError, TypeError):
+                pass
         if self.available:
             bus = QDBusConnection.sessionBus()
             bus.unregisterObject("/org/mpris/MediaPlayer2")

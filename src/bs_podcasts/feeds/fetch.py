@@ -71,6 +71,7 @@ class FeedFetcher:
             headers["If-None-Match"] = etag
         if last_modified:
             headers["If-Modified-Since"] = last_modified
+        response = None
         try:
             response = self.session.get(
                 url,
@@ -93,6 +94,7 @@ class FeedFetcher:
                 if len(body) > MAX_RESPONSE_BYTES:
                     raise FeedFetchError("Feed response exceeds the size limit.")
             content_type = response.headers.get("Content-Type", "").lower()
+            discovered = ""
             if allow_discovery and (
                 "text/html" in content_type or bytes(body[:256]).lstrip().lower().startswith(b"<!doctype html")
             ):
@@ -101,14 +103,21 @@ class FeedFetcher:
                 if not parser.href:
                     raise FeedFetchError("HTML page does not advertise a podcast feed.")
                 discovered = urljoin(response.url, parser.href)
-                return self._fetch(discovered, allow_discovery=False)
-            return FeedResponse(
+            result = FeedResponse(
                 content=bytes(body),
                 final_url=response.url,
                 etag=response.headers.get("ETag", ""),
                 last_modified=response.headers.get("Last-Modified", ""),
             )
+            if discovered:
+                response.close()
+                response = None
+                return self._fetch(discovered, allow_discovery=False)
+            return result
         except FeedFetchError:
             raise
         except requests.RequestException as exc:
             raise FeedFetchError(str(exc)) from exc
+        finally:
+            if response is not None:
+                response.close()

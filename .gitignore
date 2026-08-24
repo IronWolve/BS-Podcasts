@@ -1,9 +1,57 @@
-.venv/
+# Python bytecode and tooling
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
+.coverage.*
+htmlcov/
+
+# Local environments and secrets
+.venv/
+.venv-*/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Generated packages and binaries
 build/
 dist/
+*.exe
+*.msi
+*.msix
+*.app
+*.AppImage
+*.deb
+*.rpm
+*.dll
+*.7z
+
+# Runtime data (never source)
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.bak
+*.part
 *.log
+/cache/
+/data/
+/downloads/
+/logs/
+/tmp/
+
+# Local editors and operating-system files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -3,7 +3,8 @@
 from dataclasses import dataclass
 from typing import Any, Callable
 
-import mpv
+
+mpv = None
 
 
 class PlaybackUnavailable(RuntimeError):
@@ -30,6 +31,11 @@ class MpvEngine:
     capabilities = EngineCapabilities()
 
     def __init__(self, **options):
+        global mpv
+        if mpv is None:
+            import mpv as mpv_module
+
+            mpv = mpv_module
         defaults = {
             "video": False,
             "ytdl": False,

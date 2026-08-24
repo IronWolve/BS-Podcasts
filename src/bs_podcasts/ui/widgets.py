@@ -1,5 +1,9 @@
 """Reusable shell components."""
 
+from html import escape as html_escape
+from html.parser import HTMLParser
+from urllib.parse import urlsplit
+
 from PySide6.QtCore import (
     QCoreApplication,
     QEvent,
@@ -24,11 +28,13 @@ from PySide6.QtWidgets import (
     QListView,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QStackedWidget,
     QStyle,
     QStyleOptionSlider,
@@ -60,6 +66,73 @@ NAV_ITEMS = (
 
 RAIL_WIDTH = 224
 RAIL_COMPACT_WIDTH = 72
+
+
+class _SafeFeedHtml(HTMLParser):
+    """Small allow-list sanitizer for untrusted feed descriptions."""
+
+    ALLOWED = {
+        "p", "br", "b", "strong", "i", "em", "u", "s", "ul", "ol", "li",
+        "blockquote", "code", "pre", "h1", "h2", "h3", "h4", "h5", "h6", "a",
+    }
+    VOID = {"br"}
+    BLOCKED = {"script", "style", "iframe", "object", "embed", "svg"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self._blocked = 0
+        self._anchors = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag == "img":
+            return
+        if tag in self.BLOCKED:
+            self._blocked += 1
+            return
+        if self._blocked or tag not in self.ALLOWED:
+            return
+        if tag == "a":
+            href = next((value for name, value in attrs if name.lower() == "href"), "") or ""
+            if urlsplit(href).scheme.lower() not in {"http", "https"}:
+                self._anchors.append(False)
+                self.parts.append("<span>")
+                return
+            self._anchors.append(True)
+            self.parts.append(f'<a href="{html_escape(href, quote=True)}">')
+            return
+        self.parts.append(f"<{tag}>")
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in self.BLOCKED:
+            self._blocked = max(0, self._blocked - 1)
+            return
+        if self._blocked or tag not in self.ALLOWED or tag in self.VOID:
+            return
+        if tag == "a":
+            self.parts.append("</a>" if self._anchors and self._anchors.pop() else "</span>")
+        else:
+            self.parts.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if not self._blocked:
+            self.parts.append(html_escape(data))
+
+
+def safe_feed_html(text: str) -> str:
+    if not text:
+        return ""
+    if "<" not in text or ">" not in text:
+        return html_escape(text).replace("\n", "<br>")
+    parser = _SafeFeedHtml()
+    parser.feed(text)
+    parser.close()
+    return "".join(parser.parts)
 
 
 def icon_button(name: str, tooltip: str, object_name: str = "iconButton", size: int = 20, checkable=False):
@@ -99,9 +172,10 @@ class Artwork(QWidget):
             self.setFixedSize(side, side)
 
     def set_artwork(self, path: str, text: str = "", color: str = ""):
-        self._path = path or ""
-        self._text = text or "—"
-        self._color = color or ""
+        state = (path or "", text or "—", color or "")
+        if state == (self._path, self._text, self._color):
+            return
+        self._path, self._text, self._color = state
         self.update()
 
     def resizeEvent(self, event):
@@ -132,6 +206,8 @@ class NavigationRail(QFrame):
     compact_toggled = Signal(bool)
     about_requested = Signal()
     episodes_dropped = Signal(list)
+    page_menu_requested = Signal(int, object)
+    EPISODES_INDEX = 2
     QUEUE_INDEX = 3
     IDS_MIME = "application/x-bs-podcasts-episode-ids"
 
@@ -145,6 +221,8 @@ class NavigationRail(QFrame):
         self._compact = False
         self._buttons = []
         self._badges = []
+        self._badge_counts = []
+        self._background_paused = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACE["md"], SPACE["lg"], SPACE["md"], SPACE["md"])
@@ -196,6 +274,12 @@ class NavigationRail(QFrame):
             button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
             button.setIconSize(QSize(20, 20))
             button.clicked.connect(lambda checked=False, i=index: self.select(i))
+            button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            button.customContextMenuRequested.connect(
+                lambda position, i=index, target=button: self.page_menu_requested.emit(
+                    i, target.mapToGlobal(position)
+                )
+            )
             self.group.addButton(button, index)
             badge = QLabel()
             badge.setObjectName("navBadge")
@@ -206,10 +290,17 @@ class NavigationRail(QFrame):
             row_layout.addSpacing(SPACE["sm"])
             self._buttons.append((button, glyph, label))
             self._badges.append(badge)
+            self._badge_counts.append(0)
             layout.addWidget(row)
         self._paint_icons()
 
         layout.addStretch(1)
+        self.background_status = QLabel("Background paused")
+        self.background_status.setObjectName("scopePill")
+        self.background_status.setToolTip("Feed refreshes, artwork, transcripts and automatic downloads are paused")
+        self.background_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.background_status.hide()
+        layout.addWidget(self.background_status)
         footer = QHBoxLayout()
         self.version = QLabel(self._version_text())
         self.version.setObjectName("eyebrow")
@@ -218,6 +309,10 @@ class NavigationRail(QFrame):
         footer.addWidget(self.version, 1)
         footer.addWidget(self.toggle)
         layout.addLayout(footer)
+
+    def set_background_paused(self, paused: bool):
+        self._background_paused = bool(paused)
+        self.background_status.setVisible(self._background_paused and not self._compact)
 
     def eventFilter(self, watched, event):
         if watched is self.mark and event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
@@ -301,6 +396,7 @@ class NavigationRail(QFrame):
     def set_badge(self, index: int, count: int):
         if not 0 <= index < len(self._badges):
             return
+        self._badge_counts[index] = max(0, int(count))
         badge = self._badges[index]
         if count > 0 and not self._compact:
             badge.setText(str(count) if count < 100 else "99+")
@@ -321,6 +417,7 @@ class NavigationRail(QFrame):
         self.setFixedWidth(RAIL_COMPACT_WIDTH if compact else RAIL_WIDTH)
         self.brand_text.setVisible(not compact)
         self.version.setVisible(not compact)
+        self.background_status.setVisible(self._background_paused and not compact)
         self.toggle.setIcon(icons.icon("chevron-right" if compact else "chevron-left", COLORS["muted"], 16))
         self.toggle.setToolTip("Expand navigation" if compact else "Collapse navigation")
         for index, (button, _glyph, label) in enumerate(self._buttons):
@@ -329,6 +426,8 @@ class NavigationRail(QFrame):
             button.setStyleSheet("text-align: center; padding: 9px 0;" if compact else "")
             if compact:
                 self._badges[index].hide()
+            else:
+                self.set_badge(index, self._badge_counts[index])
         if user:
             self.compact_toggled.emit(compact)
 
@@ -370,7 +469,9 @@ class PageHeader(QFrame):
 
         self.search = SearchField("Filter")
         self.search.setAccessibleName(f"Filter {title}")
-        self.search.setFixedWidth(240)
+        self.search.setMinimumWidth(150)
+        self.search.setMaximumWidth(240)
+        self.search.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.search.setVisible(show_search)
         layout.addWidget(self.search)
 
@@ -424,6 +525,13 @@ class ChipRow(QWidget):
 
     def add_trailing(self, widget: QWidget):
         self.layout().addWidget(widget)
+
+    def set_compact(self, compact: bool):
+        self.layout().setSpacing(SPACE["xs"] if compact else SPACE["sm"])
+        for button in self._buttons:
+            button.setProperty("compact", bool(compact))
+            button.style().unpolish(button)
+            button.style().polish(button)
 
 
 class StateBanner(QFrame):
@@ -701,10 +809,13 @@ class HeroCard(QFrame):
     website_requested = Signal()
     settings_requested = Signal()
     unsubscribe_requested = Signal()
+    information_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("heroCard")
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
         layout.setSpacing(SPACE["lg"])
@@ -746,6 +857,12 @@ class HeroCard(QFrame):
         self.settings.setCursor(Qt.CursorShape.PointingHandCursor)
         self.settings.setToolTip("Playback settings for this podcast")
         self.settings.clicked.connect(self.settings_requested)
+        self.info = QPushButton("Info")
+        self.info.setObjectName("textButton")
+        self.info.setIcon(icons.icon("info", COLORS["muted"], 16))
+        self.info.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.info.setToolTip("Podcast information")
+        self.info.clicked.connect(self.information_requested)
         actions.addWidget(self.primary)
         actions.addWidget(self.refresh)
         actions.addWidget(self.website)
@@ -755,6 +872,7 @@ class HeroCard(QFrame):
         self.unsubscribe.setCursor(Qt.CursorShape.PointingHandCursor)
         self.unsubscribe.clicked.connect(self.unsubscribe_requested)
         actions.addWidget(self.settings)
+        actions.addWidget(self.info)
         actions.addStretch(1)
         actions.addWidget(self.unsubscribe)
         text.addWidget(self.eyebrow)
@@ -773,11 +891,15 @@ class HeroCard(QFrame):
         self.art.set_artwork(artwork_path, initials(title), accent)
         self.title.setText(title)
         self.meta.setText(meta)
+        self.meta.setToolTip(meta)
         self.description.setText(description)
+        self.description.setToolTip(description)
         self.description.setVisible(bool(description))
         self.primary.setText("Play latest" if subscribed else "Subscribe")
         self.primary.setIcon(icons.icon("play" if subscribed else "add", COLORS["on_accent"], 16))
-        self.refresh.setVisible(subscribed)
+        # Feed previews can be refreshed directly; subscribing is not required.
+        self.refresh.setVisible(True)
+        self.refresh.setToolTip("Refresh this podcast" if subscribed else "Refresh this feed preview")
         self.settings.setVisible(subscribed)
         self.unsubscribe.setVisible(subscribed)
         self.website.setVisible(has_website)
@@ -788,6 +910,39 @@ class HeroCard(QFrame):
             f"border: 1px solid {COLORS['hairline']}; border-radius: 16px; }}"
         )
         self.show()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, "unsubscribe"):
+            return
+        compact = self.width() < 760
+        for button, label in (
+            (self.refresh, "Refresh"),
+            (self.website, "Website"),
+            (self.settings, "Settings"),
+            (self.info, "Info"),
+            (self.unsubscribe, "Unsubscribe"),
+        ):
+            button.setText("" if compact else label)
+            button.setAccessibleName(label)
+            button.setToolTip(label if not button.toolTip() else button.toolTip())
+            if compact:
+                button.setFixedSize(34, 34)
+            else:
+                button.setMinimumSize(0, 0)
+                button.setMaximumSize(16777215, 16777215)
+
+    def _create_context_menu(self):
+        menu = QMenu(self)
+        menu.addAction(icons.icon("info", COLORS["text"], 16), "Podcast information…", self.information_requested.emit)
+        menu.addSeparator()
+        menu.addAction(icons.icon("refresh", COLORS["text"], 16), "Refresh", self.refresh_requested.emit)
+        website = menu.addAction(icons.icon("external", COLORS["text"], 16), "Open website", self.website_requested.emit)
+        website.setEnabled(self.website.isVisible())
+        return menu
+
+    def _show_context_menu(self, position):
+        self._create_context_menu().exec(self.mapToGlobal(position))
 
     def set_playing(self, playing_latest: bool, active: bool):
         if self._subscribe_mode:
@@ -860,11 +1015,17 @@ class SeekSlider(QSlider):
         self._ab = (None, None)
 
     def set_markers(self, fractions):
-        self._markers = tuple(fractions)
+        markers = tuple(fractions)
+        if markers == self._markers:
+            return
+        self._markers = markers
         self.update()
 
     def set_ab(self, start_fraction, end_fraction):
-        self._ab = (start_fraction, end_fraction)
+        markers = (start_fraction, end_fraction)
+        if markers == self._ab:
+            return
+        self._ab = markers
         self.update()
 
     def set_duration(self, seconds: float, formatter):
@@ -1018,23 +1179,46 @@ class VolumePopover(Popover):
 class SleepPopover(Popover):
     sleep_selected = Signal(int)
 
-    OPTIONS = ((0, "Off"), (5, "5 minutes"), (15, "15 minutes"), (30, "30 minutes"), (45, "45 minutes"), (60, "1 hour"))
-
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(SPACE["sm"], SPACE["sm"], SPACE["sm"], SPACE["sm"])
-        layout.setSpacing(2)
-        for minutes, label in self.OPTIONS:
-            button = QPushButton(label)
-            button.setObjectName("popoverItem")
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.clicked.connect(lambda checked=False, m=minutes: self._choose(m))
-            layout.addWidget(button)
+        layout.setContentsMargins(SPACE["md"], SPACE["md"], SPACE["md"], SPACE["md"])
+        layout.setSpacing(SPACE["sm"])
+        title = QLabel("Sleep in")
+        title.setObjectName("cardTitle")
+        layout.addWidget(title)
+        row = QHBoxLayout()
+        self.minutes = QSpinBox()
+        self.minutes.setRange(1, 480)
+        self.minutes.setValue(30)
+        self.minutes.setSuffix(" minutes")
+        self.minutes.setAccessibleName("Sleep timer minutes")
+        start = QPushButton("Start")
+        start.setObjectName("primaryButton")
+        start.clicked.connect(lambda: self._choose(self.minutes.value()))
+        row.addWidget(self.minutes)
+        row.addWidget(start)
+        layout.addLayout(row)
+        self.remaining = QLabel("No timer running")
+        self.remaining.setObjectName("meta")
+        layout.addWidget(self.remaining)
+        cancel = QPushButton("Cancel timer")
+        cancel.setObjectName("textButton")
+        cancel.clicked.connect(lambda: self._choose(0))
+        layout.addWidget(cancel, alignment=Qt.AlignmentFlag.AlignLeft)
 
     def _choose(self, minutes: int):
         self.sleep_selected.emit(minutes * 60)
         self.hide()
+
+    def set_deadline(self, deadline):
+        if deadline is None:
+            self.remaining.setText("No timer running")
+            return
+        import time
+        seconds = max(0, int(deadline - time.time()))
+        minutes, remainder = divmod(seconds, 60)
+        self.remaining.setText(f"{minutes}:{remainder:02d} remaining")
 
 
 class ContextPanel(QFrame):
@@ -1053,6 +1237,8 @@ class ContextPanel(QFrame):
     open_url_requested = Signal(str)
     download_menu_requested = Signal(int, object)
     queue_reordered = Signal(list)
+    information_requested = Signal(object)
+    favorite_requested = Signal(object, bool)
     closed = Signal()
 
     def __init__(self, parent=None):
@@ -1064,6 +1250,7 @@ class ContextPanel(QFrame):
         self._episode_id = 0
         self._show_id = 0
         self._preview_url = ""
+        self._current_item = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
         layout.setSpacing(SPACE["md"])
@@ -1084,6 +1271,10 @@ class ContextPanel(QFrame):
             top.addWidget(button)
         self.selected_mode.setChecked(True)
         top.addStretch(1)
+        self.info_button = icon_button("info", "Podcast or episode information")
+        self.info_button.setEnabled(False)
+        self.info_button.clicked.connect(self._information_clicked)
+        top.addWidget(self.info_button)
         self.close_button = icon_button("close", "Close details")
         self.close_button.clicked.connect(self.closed)
         top.addWidget(self.close_button)
@@ -1125,7 +1316,7 @@ class ContextPanel(QFrame):
         links_layout.setSpacing(SPACE["xs"])
         links_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         self.links.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self._apple_url = ""
+        self._directory_url = ""
         self._website_url = ""
         self.episodes_link = QPushButton("Episodes")
         self.episodes_link.setIcon(icons.icon("episodes", COLORS["muted"], 16))
@@ -1133,10 +1324,10 @@ class ContextPanel(QFrame):
         self.website_link = QPushButton("Website")
         self.website_link.setIcon(icons.icon("external", COLORS["muted"], 16))
         self.website_link.clicked.connect(lambda: self.open_url_requested.emit(self._website_url))
-        self.apple_link = QPushButton("Apple Podcasts")
-        self.apple_link.setIcon(icons.icon("external", COLORS["muted"], 16))
-        self.apple_link.clicked.connect(lambda: self.open_url_requested.emit(self._apple_url))
-        for button in (self.episodes_link, self.website_link, self.apple_link):
+        self.directory_link = QPushButton("Directory page")
+        self.directory_link.setIcon(icons.icon("external", COLORS["muted"], 16))
+        self.directory_link.clicked.connect(lambda: self.open_url_requested.emit(self._directory_url))
+        for button in (self.episodes_link, self.website_link, self.directory_link):
             button.setObjectName("textButton")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             links_layout.addWidget(button)
@@ -1200,7 +1391,8 @@ class ContextPanel(QFrame):
         self.body = QTextBrowser()
         self.body.setObjectName("contextBody")
         self.body.setReadOnly(True)
-        self.body.setOpenExternalLinks(True)
+        self.body.setOpenExternalLinks(False)
+        self.body.anchorClicked.connect(lambda url: self.open_url_requested.emit(url.toString()))
         self.body.setFrameShape(QFrame.Shape.NoFrame)
         self.tabs.addTab(self.body, "Details")
         self.chapter_list = QListWidget()
@@ -1224,7 +1416,8 @@ class ContextPanel(QFrame):
         self.bookmark_list.setAccessibleName("Bookmarks")
         self.bookmark_list.itemClicked.connect(self._seek_item)
         self.bookmark_list.itemActivated.connect(self._seek_item)
-        self.tabs.addTab(self.bookmark_list, "Bookmarks")
+        self.tabs.addTab(self.bookmark_list, "Saved")
+        self.tabs.setTabToolTip(3, "Bookmarks")
         selected_layout.addWidget(self.tabs, 1)
         selected_layout.addStretch(0)
         self.selected_scroll = QScrollArea()
@@ -1233,6 +1426,8 @@ class ContextPanel(QFrame):
         self.selected_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.selected_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.selected_scroll.setWidget(selected)
+        self.selected_scroll.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.selected_scroll.customContextMenuRequested.connect(self._show_information_menu)
         self.body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.body.document().documentLayout().documentSizeChanged.connect(self._grow_body)
         self.stack.addWidget(self.selected_scroll)
@@ -1288,6 +1483,7 @@ class ContextPanel(QFrame):
     def set_mode(self, index: int):
         self.stack.setCurrentIndex(index)
         (self.selected_mode if index == 0 else self.queue_mode).setChecked(True)
+        self.info_button.setEnabled(index == 0 and self._current_item is not None)
 
     def mode(self) -> int:
         return self.stack.currentIndex()
@@ -1308,7 +1504,8 @@ class ContextPanel(QFrame):
             placeholder = QListWidgetItem("No chapters provided")
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.chapter_list.addItem(placeholder)
-        self.tabs.setTabText(1, f"Chapters ({len(chapters)})" if chapters else "Chapters")
+        self.tabs.setTabText(1, "Chapters")
+        self.tabs.setTabToolTip(1, f"{len(chapters)} chapter{'s' if len(chapters) != 1 else ''}")
 
     def set_transcript(self, segments):
         segments = list(segments)
@@ -1327,9 +1524,11 @@ class ContextPanel(QFrame):
             placeholder = QListWidgetItem("No bookmarks yet")
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.bookmark_list.addItem(placeholder)
-        self.tabs.setTabText(3, f"Bookmarks ({len(bookmarks)})" if bookmarks else "Bookmarks")
+        self.tabs.setTabText(3, "Saved")
+        self.tabs.setTabToolTip(3, f"{len(bookmarks)} bookmark{'s' if len(bookmarks) != 1 else ''}")
 
     def show_podcast(self, podcast):
+        self._set_current_item(podcast)
         self.set_mode(0)
         self.art.set_artwork(podcast.artwork_path, initials(podcast.author if podcast.is_episode else podcast.title), podcast.accent)
         self.title.setText(podcast.title)
@@ -1374,12 +1573,12 @@ class ContextPanel(QFrame):
                 title = title[:69].rstrip() + "…"
             self.latest_episode.setText(f"{title}\n{podcast.latest_episode_date}")
         self._preview_url = self._feed_url
-        self._apple_url = podcast.apple_url
+        self._directory_url = podcast.directory_url
         self._website_url = podcast.website_url
         self.links.setVisible(bool(self._feed_url))
         self.episodes_link.setVisible(bool(self._feed_url))
         self.website_link.setVisible(bool(self._website_url))
-        self.apple_link.setVisible(bool(self._apple_url))
+        self.directory_link.setVisible(bool(self._directory_url))
         description = podcast.description
         if self._feed_url and not description:
             description = "Loading feed details…"
@@ -1435,6 +1634,7 @@ class ContextPanel(QFrame):
         self._set_body(f"Couldn’t load feed details: {message}\n\nYou can still subscribe; episodes are fetched after subscribing.")
 
     def show_episode(self, episode):
+        self._set_current_item(episode)
         self.set_mode(0)
         self._preview_url = ""
         self.links.hide()
@@ -1474,6 +1674,7 @@ class ContextPanel(QFrame):
             self.download.setEnabled(bool(self._episode_id))
 
     def show_empty(self):
+        self._set_current_item(None)
         self._preview_url = ""
         self.links.hide()
         self.art.set_artwork("", "—", "")
@@ -1494,15 +1695,58 @@ class ContextPanel(QFrame):
         self.download.setEnabled(False)
         self.secondary.setEnabled(False)
 
+    def _set_current_item(self, item):
+        def item_key(value):
+            if value is None:
+                return None
+            episode_id = getattr(value, "episode_id", 0)
+            if episode_id:
+                return ("episode", episode_id)
+            show_id = getattr(value, "show_id", 0)
+            if show_id:
+                return ("show", show_id)
+            return ("feed", getattr(value, "feed_url", ""), getattr(value, "title", ""))
+
+        changed = item_key(item) != item_key(self._current_item)
+        self._current_item = item
+        self.info_button.setEnabled(self.mode() == 0 and item is not None)
+        if changed:
+            self.tabs.setCurrentIndex(0)
+            QTimer.singleShot(
+                0, lambda: self.selected_scroll.verticalScrollBar().setValue(0)
+            )
+
+    def _information_clicked(self):
+        if self._current_item is not None:
+            self.information_requested.emit(self._current_item)
+
+    def _create_information_menu(self):
+        menu = QMenu(self)
+        action = menu.addAction(
+            icons.icon("info", COLORS["text"], 16),
+            "Podcast information…" if hasattr(self._current_item, "feed_url") else "Episode information…",
+            self._information_clicked,
+        )
+        action.setEnabled(self._current_item is not None)
+        if self._current_item is not None and hasattr(self._current_item, "favorite") and getattr(self._current_item, "episode_id", 0):
+            menu.addAction(
+                icons.icon("favorite", COLORS["accent"] if self._current_item.favorite else COLORS["text"], 16),
+                "Remove from favorites" if self._current_item.favorite else "Add to favorites",
+                lambda: self.favorite_requested.emit(self._current_item, not self._current_item.favorite),
+            )
+        return menu
+
+    def _show_information_menu(self, position):
+        self._create_information_menu().exec(
+            self.selected_scroll.viewport().mapToGlobal(position)
+        )
+
     def _grow_body(self, size):
         # The notes editor grows with its content so the pane scrolls as one surface.
         self.body.setMinimumHeight(int(size.height()) + 12)
 
     def _set_body(self, text: str):
-        if ("<" in text and ">" in text) or "&" in text:
-            self.body.setHtml(text.replace("\n", "<br>") if "<" not in text else text)
-        else:
-            self.body.setPlainText(text)
+        self.body.setHtml(safe_feed_html(text))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1587,11 +1831,15 @@ class NowPlayingView(QFrame):
     seek_requested = Signal(float)
     close_requested = Signal()
     show_requested = Signal(int)
+    open_url_requested = Signal(str)
+    information_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("nowPlaying")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
         self._episode_id = 0
         self._show_id = 0
         self._chapters = []
@@ -1609,6 +1857,9 @@ class NowPlayingView(QFrame):
         eyebrow.setObjectName("eyebrow")
         top.addWidget(eyebrow)
         top.addStretch(1)
+        self.info_button = icon_button("info", "Episode information")
+        self.info_button.clicked.connect(self.information_requested)
+        top.addWidget(self.info_button)
         self.close_button = icon_button("chevron-down", "Close now playing  ·  Esc")
         self.close_button.clicked.connect(self.close_requested)
         top.addWidget(self.close_button)
@@ -1644,7 +1895,8 @@ class NowPlayingView(QFrame):
         self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
         self.notes = QTextBrowser()
         self.notes.setReadOnly(True)
-        self.notes.setOpenExternalLinks(True)
+        self.notes.setOpenExternalLinks(False)
+        self.notes.anchorClicked.connect(lambda url: self.open_url_requested.emit(url.toString()))
         self.notes.setFrameShape(QFrame.Shape.NoFrame)
         self.tabs.addTab(self.notes, "Show notes")
         self.chapter_list = QListWidget()
@@ -1670,6 +1922,17 @@ class NowPlayingView(QFrame):
         layout.addLayout(right, 1)
         self.hide()
 
+    def _create_context_menu(self):
+        menu = QMenu(self)
+        info = menu.addAction(icons.icon("info", COLORS["text"], 16), "Episode information…", self.information_requested.emit)
+        info.setEnabled(bool(self._episode_id))
+        show = menu.addAction(icons.icon("podcasts", COLORS["text"], 16), "Go to podcast", lambda: self.show_requested.emit(self._show_id))
+        show.setEnabled(bool(self._show_id))
+        return menu
+
+    def _show_context_menu(self, position):
+        self._create_context_menu().exec(self.mapToGlobal(position))
+
     def set_episode(self, snapshot, description: str, chapters, segments, bookmarks, accent: str):
         self._episode_id = snapshot.episode_id or 0
         self._show_id = snapshot.show_id or 0
@@ -1677,10 +1940,7 @@ class NowPlayingView(QFrame):
         self.title.setText(snapshot.title)
         self.show_link.setText(snapshot.show_title)
         self.show_link.setVisible(bool(snapshot.show_title))
-        if ("<" in description and ">" in description) or "&" in description:
-            self.notes.setHtml(description)
-        else:
-            self.notes.setPlainText(description or "No show notes provided for this episode.")
+        self.notes.setHtml(safe_feed_html(description or "No show notes provided for this episode."))
         self._chapters = list(chapters)
         self.chapter_list.clear()
         for chapter in self._chapters:
@@ -1764,6 +2024,7 @@ class SearchOverlay(QFrame):
     podcast_chosen = Signal(object)
     episode_chosen = Signal(object)
     directory_chosen = Signal(str)
+    menu_requested = Signal(object, object)
     closed = Signal()
 
     def __init__(self, parent=None):
@@ -1779,15 +2040,20 @@ class SearchOverlay(QFrame):
         card_layout = QVBoxLayout(self.card)
         card_layout.setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
         card_layout.setSpacing(SPACE["md"])
-        self.field = SearchField("Search podcasts, episodes, or Apple Podcasts")
+        self.field = SearchField("Search podcasts, episodes, or the directory")
         self.field.setAccessibleName("Global search")
         self.field.textChanged.connect(self._debounce)
         self.field.returnPressed.connect(self._activate_current)
         card_layout.addWidget(self.field)
         self.results = QListWidget()
         self.results.setAccessibleName("Search results")
+        self.results.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.results.customContextMenuRequested.connect(self._show_result_menu)
         self.results.setUniformItemSizes(False)
+        self.results.setWordWrap(True)
         self.results.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.results.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.results.verticalScrollBar().setSingleStep(40)
         self.results.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.results.itemActivated.connect(self._activate)
         self.results.itemClicked.connect(self._activate)
@@ -1821,18 +2087,22 @@ class SearchOverlay(QFrame):
         if podcasts:
             self._section("PODCASTS")
             for podcast in podcasts[:6]:
-                item = QListWidgetItem(icons.icon("podcasts", COLORS["muted"], 16), f"{podcast.title}   ·   {podcast.author}")
+                item = QListWidgetItem(icons.icon("podcasts", COLORS["muted"], 16), f"{podcast.title}\n{podcast.author}")
+                item.setSizeHint(QSize(0, 54))
                 item.setData(Qt.ItemDataRole.UserRole, ("podcast", podcast))
                 self.results.addItem(item)
         if episodes:
             self._section("EPISODES")
             for episode in episodes[:12]:
-                item = QListWidgetItem(icons.icon("episodes", COLORS["muted"], 16), f"{episode.title}   ·   {episode.show}  ·  {episode.published}")
+                meta = "  ·  ".join(value for value in (episode.show, episode.published) if value)
+                item = QListWidgetItem(icons.icon("episodes", COLORS["muted"], 16), f"{episode.title}\n{meta}")
+                item.setSizeHint(QSize(0, 62))
                 item.setData(Qt.ItemDataRole.UserRole, ("episode", episode))
                 self.results.addItem(item)
         if query:
             self._section("DIRECTORY")
-            item = QListWidgetItem(icons.icon("discover", COLORS["accent"], 16), f"Search Apple Podcasts for “{query}”")
+            item = QListWidgetItem(icons.icon("discover", COLORS["accent"], 16), f"Search the podcast directory for “{query}”")
+            item.setSizeHint(QSize(0, 42))
             item.setData(Qt.ItemDataRole.UserRole, ("directory", query))
             self.results.addItem(item)
         elif not podcasts and not episodes:
@@ -1846,6 +2116,7 @@ class SearchOverlay(QFrame):
 
     def _section(self, title: str):
         item = QListWidgetItem(title)
+        item.setSizeHint(QSize(0, 28))
         item.setFlags(Qt.ItemFlag.NoItemFlags)
         item.setForeground(QColor(COLORS["subtle"]))
         self.results.addItem(item)
@@ -1868,6 +2139,13 @@ class SearchOverlay(QFrame):
             self.episode_chosen.emit(value)
         else:
             self.directory_chosen.emit(value)
+
+    def _show_result_menu(self, position):
+        item = self.results.itemAt(position)
+        payload = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if payload:
+            self.results.setCurrentItem(item)
+            self.menu_requested.emit(payload, self.results.viewport().mapToGlobal(position))
 
     def eventFilter(self, watched, event):
         if watched is self.field and event.type() == QEvent.Type.KeyPress:
@@ -1909,10 +2187,13 @@ class PlayerBar(QFrame):
     ab_requested = Signal()
     trim_requested = Signal()
     sleep_requested = Signal(int)
+    information_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("playerBar")
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
         self.setFixedHeight(88)
         self._duration = 0.0
         self._capabilities = None
@@ -1921,6 +2202,7 @@ class PlayerBar(QFrame):
         self._skip_back = 15
         self._skip_forward = 30
         self._has_episode = False
+        self._durable_episode = False
         self._ab_active = False
         self._trim_active = False
         self._sleep_active = False
@@ -2097,7 +2379,8 @@ class PlayerBar(QFrame):
             text = "Streaming"
         else:
             text = ""
-        self.next_label.setText(text)
+        if self.next_label.text() != text:
+            self.next_label.setText(text)
 
     def set_tint(self, color: str):
         """Blend the playing show's colour into the bar background."""
@@ -2134,7 +2417,11 @@ class PlayerBar(QFrame):
 
     # -- state -------------------------------------------------------------
     def set_snapshot(self, snapshot):
-        self._has_episode = snapshot.episode_id is not None
+        # Directory previews are valid URL-only streams without a durable
+        # episode ID. Transport controls should still treat them as a track.
+        self._has_episode = bool(snapshot.source)
+        durable_episode = snapshot.episode_id is not None
+        self._durable_episode = durable_episode
         self.title.setText(snapshot.title if self._has_episode else "Nothing playing")
         self.show_label.setText(snapshot.show_title or ("Choose an episode to begin" if not self._has_episode else ""))
         self.art.set_artwork(snapshot.artwork_path, initials(snapshot.show_title or snapshot.title), "")
@@ -2169,6 +2456,7 @@ class PlayerBar(QFrame):
         self.trim.setChecked(snapshot.trim_level != "off")
         self.trim.setToolTip(f"Silence trim: {snapshot.trim_level}  ·  Ctrl+T")
         sleeping = snapshot.sleep_deadline is not None
+        self.sleep_popover.set_deadline(snapshot.sleep_deadline)
         self.sleep.setChecked(sleeping)
         self.sleep.setToolTip("Sleep timer running — click to change" if sleeping else "Sleep timer")
         playing = str(snapshot.state) == "playing"
@@ -2178,8 +2466,20 @@ class PlayerBar(QFrame):
         self.play.setToolTip("Opening…" if loading else ("Pause" if playing else "Play") + "  ·  Ctrl+Space")
         self.set_transport_state(loading, getattr(snapshot, "buffering", None), getattr(self, "_streaming", False))
         self.set_enabled(self._has_episode and str(snapshot.state) != "shutdown")
+        self.bookmark.setEnabled(self._has_episode and durable_episode)
         if loading:
             self.play.setEnabled(False)
+
+    def _create_context_menu(self):
+        menu = QMenu(self)
+        show = menu.addAction(icons.icon("playing", COLORS["text"], 16), "Show Now Playing", self.now_playing_requested.emit)
+        show.setEnabled(self._has_episode)
+        info = menu.addAction(icons.icon("info", COLORS["text"], 16), "Episode information…", self.information_requested.emit)
+        info.setEnabled(self._durable_episode)
+        return menu
+
+    def _show_context_menu(self, position):
+        self._create_context_menu().exec(self.mapToGlobal(position))
 
     def set_queue_open(self, open_: bool):
         self.queue.setChecked(open_)

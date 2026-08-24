@@ -166,6 +166,36 @@ def main() -> int:
         settle(app, window)
         require(window.pages.currentIndex() == 2, "podcast did not open Episodes")
         require(window.episode_page.model.rowCount() == 2, "podcast episode flow differs")
+        # Opening Now Playing from the bottom-bar title/artwork must also make
+        # the side pane follow the currently playing episode.
+        from types import SimpleNamespace
+        from bs_podcasts.playback.service import PlaybackSnapshot, PlaybackState
+        playing = episodes[0]
+        other = window._ui_episode(episodes[1])
+        window._show_item(other)
+        snapshot = PlaybackSnapshot(
+            state=PlaybackState.PLAYING,
+            episode_id=playing.id,
+            show_id=show.id,
+            title=playing.title,
+            show_title=playing.show_title,
+            source=playing.media_url,
+            duration=float(playing.duration_seconds),
+        )
+        window.playback = SimpleNamespace(snapshot=snapshot)
+        window._playing_episode_id = playing.id
+        window._playing_state = "playing"
+        window._show_now_playing()
+        require(window.now_playing.isVisible(), "Now Playing did not open from player state")
+        require(window.context._episode_id == playing.id, "side pane did not follow Now Playing")
+        require(window.context.title.text() == playing.title, "side pane shows the wrong episode")
+        scroll = window.context.selected_scroll.verticalScrollBar()
+        scroll.setValue(scroll.maximum())
+        window._show_item(other)
+        app.processEvents()
+        require(scroll.value() == 0, "new side-pane selection did not return artwork to view")
+        window._hide_now_playing()
+        window.playback = None
         handled = window.eventFilter(
             window.episode_page.view.viewport(),
             MouseNavigationEvent(Qt.MouseButton.BackButton),
@@ -185,10 +215,30 @@ def main() -> int:
         )
 
         window.navigation.select(5)
+        require(window.discover_page.header.search.placeholderText() == "Search", "Discover search label is too verbose")
         require(window._discover_loading or window.discover_page.model.rowCount() == 30, "Discover did not auto-load For You")
         while window._discover_loading:
             app.processEvents()
         require(window.discover_page.model.rowCount() == 30, "For You did not load")
+        window.discover_page.category.blockSignals(True)
+        window.discover_page.category.setCurrentIndex(1)
+        window.discover_page.category.blockSignals(False)
+        window.discover_page.set_category_topics(window.discover_page.category.currentText())
+        window.discover_page.header.search.setText("daily news")
+        window._directory_search()
+        while window._discover_loading:
+            app.processEvents()
+        require(window.discover_page.category.currentText() == "All Categories", "search did not reset category")
+        require(window.discover_page.topic.currentText() == "No additional topics", "search did not reset topic")
+        require(window._discover_search_history == ["daily news"], "search was not added to history")
+        require("daily news" in library.setting("discover.search_history"), "search history was not persisted")
+        history_menu = window._create_discover_search_history_menu()
+        history_rows = [action.defaultWidget() for action in history_menu.actions() if hasattr(action, "defaultWidget") and action.defaultWidget()]
+        require(len(history_rows) == 1, "search history menu does not show its entry")
+        remove_buttons = history_rows[0].findChildren(type(window.discover_page.header.action))
+        require(any("Remove daily news" in button.toolTip() for button in remove_buttons), "history entry lacks its remove button")
+        window._remove_discover_search("daily news")
+        require(not window._discover_search_history, "history entry was not removed")
         app.processEvents()
         stable_window_size = window.size()
         stable_toolbar_geometry = window.discover_page.discover_toolbar.geometry()
@@ -234,7 +284,7 @@ def main() -> int:
         require(window.discover_page.model.rowCount() == 30, "Top Shows chart differs")
         require_stable_discover_geometry("chart mode selection")
         require(
-            "Apple Top Shows" in window.discover_page.result_summary.text(),
+            "Top Shows" in window.discover_page.result_summary.text(),
             "Top Shows chart summary is missing",
         )
         require(window.discover_page.load_more.isVisible(), "Chart continuation is missing")
@@ -243,6 +293,35 @@ def main() -> int:
             app.processEvents()
         require(window.discover_page.model.rowCount() == 60, "Chart did not load more")
         require_stable_discover_geometry("chart continuation")
+
+        # Episodes rail context menu: Show New, clear badges without changing
+        # played state, or mark all new episodes played.
+        with repository.database.connect() as connection:
+            connection.execute("UPDATE episodes SET is_new=1, played=0")
+        window._reload_library()
+        window.resize(1440, 900)
+        app.processEvents()
+        require(window._new_episode_total == 2, window._new_episode_total)
+        require(window.navigation._badges[2].isVisible(), "Episodes badge is not visible")
+        window._show_new_episodes()
+        require(window.episode_page.model.rowCount() == 2, "New filter disagrees with badge")
+        menu = window._create_episodes_nav_menu()
+        actions = {action.text(): action for action in menu.actions()}
+        require("Show new episodes (2)" in actions, "Episodes menu lacks Show New")
+        actions["Clear all new badges"].trigger()
+        settle(app, window)
+        require(window._new_episode_total == 0 and not window.navigation._badges[2].isVisible(), "clear did not remove Episodes badge")
+        require(not any(episode.played for episode in library.episodes()), "clear badges marked episodes played")
+        require(window.episode_page.model.rowCount() == 0, "New filter retained cleared episodes")
+
+        with repository.database.connect() as connection:
+            connection.execute("UPDATE episodes SET is_new=1, played=0")
+        window._reload_library()
+        menu = window._create_episodes_nav_menu()
+        next(action for action in menu.actions() if action.text() == "Mark all new episodes as played").trigger()
+        settle(app, window)
+        require(window._new_episode_total == 0, "mark-all-played did not clear badge")
+        require(all(episode.played and not episode.is_new for episode in library.episodes()), "mark-all-played did not update new episodes")
 
         window.close()
         jobs.shutdown(wait=True)

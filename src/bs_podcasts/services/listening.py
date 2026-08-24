@@ -66,3 +66,6 @@ class ListeningService:
 
     def bookmarks(self, episode_id: int | None = None):
         return self.repository.bookmarks(episode_id)
+
+    def statistics(self):
+        return self.repository.statistics()

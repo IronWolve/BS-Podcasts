@@ -4,9 +4,9 @@ from dataclasses import dataclass
 import html
 import re
 
-from PySide6.QtCore import QAbstractListModel, QMimeData, QModelIndex, QRect, QSize, Signal, Qt
+from PySide6.QtCore import QAbstractListModel, QEvent, QMimeData, QModelIndex, QRect, QSize, Signal, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QStyledItemDelegate, QStyle
+from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QToolTip
 
 from . import icons
 from .pixmaps import cover, initials
@@ -33,7 +33,7 @@ class Podcast:
     latest_episode_title: str = ""
     latest_episode_date: str = ""
     latest_sort_key: str = ""
-    apple_url: str = ""
+    directory_url: str = ""
     website_url: str = ""
     last_refresh_text: str = ""
     is_episode: bool = False
@@ -59,6 +59,22 @@ class Episode:
     bookmark_id: int = 0
     bookmark_position: float = 0.0
     is_new: bool = False
+    published_at: str = ""
+    mime_type: str = "audio/*"
+    external_id: str = ""
+    website_url: str = ""
+    author: str = ""
+    season_number: int | None = None
+    episode_number: int | None = None
+    episode_type: str = ""
+    explicit: bool | None = None
+    enclosure_bytes: int = 0
+    transcript_url: str = ""
+    transcript_type: str = ""
+    chapters_url: str = ""
+    artwork_url: str = ""
+    played: bool = False
+    favorite: bool = False
 
 
 class ItemRoles:
@@ -67,6 +83,7 @@ class ItemRoles:
 
 _TAG = re.compile(r"<[^>]+>")
 _WS = re.compile(r"\s+")
+_LONG_TOKEN = re.compile(r"\S{32,}")
 
 
 def plain_snippet(text: str, limit: int = 240) -> str:
@@ -76,6 +93,27 @@ def plain_snippet(text: str, limit: int = 240) -> str:
     stripped = html.unescape(_TAG.sub(" ", text))
     collapsed = _WS.sub(" ", stripped).strip()
     return collapsed[:limit]
+
+
+def _tooltip_html(title: str, subtitle: str = "", detail: str = "", width: int = 360) -> str:
+    """A bounded rich tooltip that wraps long episode titles and URLs."""
+    def safe(value: str) -> str:
+        value = _LONG_TOKEN.sub(
+            lambda match: "\u200b".join(
+                match.group(0)[offset:offset + 24]
+                for offset in range(0, len(match.group(0)), 24)
+            ),
+            value or "",
+        )
+        return html.escape(value)
+
+    parts = [f'<div style="width: {width}px; white-space: normal">', f"<b>{safe(title)}</b>"]
+    if subtitle:
+        parts.append(f"<br>{safe(subtitle)}")
+    if detail:
+        parts.append(f"<br><br>{safe(detail)}")
+    parts.append("</div>")
+    return "".join(parts)
 
 
 def _same_rows(old, new, key) -> bool:
@@ -119,7 +157,8 @@ class PodcastModel(QAbstractListModel):
             return item.title
         if role == Qt.ItemDataRole.ToolTipRole:
             health = HEALTH_LABELS.get(item.health, "") if item.show_id else ""
-            return "\n".join(value for value in (item.title, item.author, item.display_meta, health) if value)
+            detail = " · ".join(value for value in (item.display_meta, health) if value)
+            return _tooltip_html(item.title, item.author, detail)
         if role == ItemRoles.ITEM:
             return item
         return None
@@ -162,7 +201,7 @@ class EpisodeModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return item.title
         if role == Qt.ItemDataRole.ToolTipRole:
-            return "\n".join(value for value in (item.title, item.show, plain_snippet(item.description, 160)) if value)
+            return _tooltip_html(item.title, item.show, plain_snippet(item.description, 180))
         if role == ItemRoles.ITEM:
             return item
         return None
@@ -318,7 +357,7 @@ class PodcastDelegate(QStyledItemDelegate):
             meta_color = COLORS["warning"]
         if item.is_episode:
             meta = item.author
-        elif item.directory_result and not item.show_id and item.latest_episode_date and item.latest_episode_date != "Unknown date":
+        elif item.directory_result and item.latest_episode_date and item.latest_episode_date != "Unknown date":
             meta = f"Latest {item.latest_episode_date}"
         painter.setPen(QColor(meta_color))
         painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, meta_rect.width()))
@@ -382,15 +421,27 @@ class EpisodeDelegate(QStyledItemDelegate):
         self.compact = compact
         self.reorder = reorder
         self.playing_id = 0
+        self.playing_source = ""
         self.playing_active = False
-        self._snippets: dict[int, str] = {}
+        self._snippets: dict[tuple[int, str], str] = {}
 
-    def set_playing(self, episode_id: int, active: bool):
+    def set_playing(self, episode_id: int, active: bool, source: str = ""):
         self.playing_id = episode_id or 0
+        self.playing_source = source or ""
         self.playing_active = active
 
     def sizeHint(self, option, index):
         return QSize(1, self.COMPACT_HEIGHT if self.compact else self.ROW_HEIGHT)
+
+    def helpEvent(self, event, view, option, index):
+        """Keep the episode tooltip anchored to the row that owns it."""
+        if event.type() == QEvent.Type.ToolTip and index.isValid():
+            tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
+            if tooltip:
+                QToolTip.showText(event.globalPos(), tooltip, view.viewport(), option.rect, 5000)
+                return True
+        QToolTip.hideText()
+        return False
 
     def play_rect(self, rect: QRect) -> QRect:
         row = rect.adjusted(2, 3, -4, -3)
@@ -407,7 +458,10 @@ class EpisodeDelegate(QStyledItemDelegate):
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         focused = bool(option.state & QStyle.StateFlag.State_HasFocus)
-        playing = bool(item.episode_id) and item.episode_id == self.playing_id
+        playing = (
+            (bool(item.episode_id) and item.episode_id == self.playing_id)
+            or (not item.episode_id and bool(item.media_url) and item.media_url == self.playing_source)
+        )
         radius = 12
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(COLORS["surface_raised"] if selected or hovered else COLORS["surface"]))
@@ -439,7 +493,7 @@ class EpisodeDelegate(QStyledItemDelegate):
         play_zone = self.PLAY_ZONE + 8
         badge_reserve = 0
         state_color = STATE_COLORS.get(item.state, item.accent)
-        show_badge = item.state not in {"New", "Played"}
+        show_badge = item.state not in {"New", "Unplayed", "Played"}
         if show_badge:
             painter.setFont(app_font(11, QFont.Weight.DemiBold))
             badge_reserve = painter.fontMetrics().horizontalAdvance(item.state.upper()) + 36
@@ -463,6 +517,10 @@ class EpisodeDelegate(QStyledItemDelegate):
             painter.drawEllipse(QRect(title_rect.x(), title_rect.center().y() - 3, 7, 7))
             title_rect.adjust(13, 0, 0, 0)
             painter.setPen(QColor(COLORS["text_strong"] if playing else COLORS["text"]))
+        if item.favorite:
+            star = QRect(title_rect.x(), title_rect.center().y() - 7, 14, 14)
+            icons.paint(painter, "favorite", COLORS["accent"], star, scale)
+            title_rect.adjust(19, 0, 0, 0)
         painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(item.title, Qt.TextElideMode.ElideRight, title_rect.width()))
 
         if snippet_rect is not None:
@@ -508,10 +566,12 @@ class EpisodeDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _snippet(self, item) -> str:
-        key = item.episode_id or id(item)
+        key = (item.episode_id or id(item), item.description)
         cached = self._snippets.get(key)
         if cached is None:
             cached = plain_snippet(item.description)
             if item.episode_id:
                 self._snippets[key] = cached
+                if len(self._snippets) > 5000:
+                    del self._snippets[next(iter(self._snippets))]
         return cached

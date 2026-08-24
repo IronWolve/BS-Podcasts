@@ -69,6 +69,23 @@ def _duration(value: str) -> int:
     return 0
 
 
+def _integer(value: str) -> int | None:
+    try:
+        number = int(value.strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _explicit(element) -> bool | None:
+    value = _text(element, "explicit").strip().lower()
+    if value in {"yes", "true", "explicit", "1"}:
+        return True
+    if value in {"no", "false", "clean", "0"}:
+        return False
+    return None
+
+
 def _artwork(element) -> str:
     for child in element:
         if _local(child.tag) == "image":
@@ -81,7 +98,46 @@ def _artwork(element) -> str:
     return ""
 
 
-def _rss_enclosure(item) -> tuple[str, str]:
+def _categories(element) -> tuple[str, ...]:
+    """Return useful leaf categories from RSS/iTunes or Atom metadata."""
+    values = []
+
+    def add(value: str):
+        value = " ".join((value or "").split())
+        if value and value.casefold() not in {item.casefold() for item in values}:
+            values.append(value)
+
+    def visit(node):
+        nested = _children(node, "category")
+        if nested:
+            for child in nested:
+                visit(child)
+        else:
+            add(
+                node.attrib.get("text", "")
+                or node.attrib.get("term", "")
+                or "".join(node.itertext()).strip()
+            )
+
+    for category in _children(element, "category"):
+        visit(category)
+    return tuple(values)
+
+
+def _rss_link(element) -> str:
+    """Text RSS links plus alternate-style links used by some hybrid feeds."""
+    for child in _children(element, "link"):
+        value = "".join(child.itertext()).strip()
+        if value:
+            return value
+        if child.attrib.get("rel", "alternate").lower() == "alternate":
+            href = child.attrib.get("href", "").strip()
+            if href:
+                return href
+    return ""
+
+
+def _rss_enclosure(item) -> tuple[str, str, int]:
     for child in item:
         if _local(child.tag) not in {"enclosure", "content"}:
             continue
@@ -98,8 +154,8 @@ def _rss_enclosure(item) -> tuple[str, str]:
         mime = child.attrib.get("type", "").strip().lower()
         if mime and not mime.startswith("audio/"):
             continue
-        return url, mime or "audio/*"
-    return "", "audio/*"
+        return url, mime or "audio/*", _integer(length) or 0
+    return "", "audio/*", 0
 
 
 def _transcript(element) -> tuple[str, str]:
@@ -120,7 +176,7 @@ def _chapters(element) -> str:
     return ""
 
 
-def _atom_link(element, relation: str) -> tuple[str, str]:
+def _atom_link(element, relation: str) -> tuple[str, str, int]:
     for link in _children(element, "link"):
         if link.attrib.get("rel", "alternate") != relation:
             continue
@@ -130,8 +186,12 @@ def _atom_link(element, relation: str) -> tuple[str, str]:
         mime = link.attrib.get("type", "").strip().lower()
         if relation == "enclosure" and mime and not mime.startswith("audio/"):
             continue
-        return href, mime or ("audio/*" if relation == "enclosure" else "")
-    return "", ""
+        return (
+            href,
+            mime or ("audio/*" if relation == "enclosure" else ""),
+            _integer(link.attrib.get("length", "")) or 0,
+        )
+    return "", "", 0
 
 
 def _external_id(title: str, published: str, media_url: str, explicit: str) -> str:
@@ -150,7 +210,7 @@ def _parse_rss(root) -> FeedData:
     seen = set()
     for item in _children(channel, "item")[:MAX_EPISODES]:
         title = _text(item, "title") or "Untitled episode"
-        media_url, mime = _rss_enclosure(item)
+        media_url, mime, enclosure_bytes = _rss_enclosure(item)
         if not media_url:
             continue
         published = _date(_text(item, "pubdate", "published", "date"))
@@ -174,6 +234,13 @@ def _parse_rss(root) -> FeedData:
                 transcript_type=transcript_type,
                 chapters_url=chapters_url,
                 artwork_url=item_artwork,
+                website_url=_rss_link(item),
+                author=_text(item, "author", "creator"),
+                season_number=_integer(_text(item, "season")),
+                episode_number=_integer(_text(item, "episode")),
+                episode_type=_text(item, "episodetype").lower(),
+                explicit=_explicit(item),
+                enclosure_bytes=enclosure_bytes,
             )
         )
 
@@ -181,8 +248,9 @@ def _parse_rss(root) -> FeedData:
         title=_text(channel, "title") or "Untitled podcast",
         author=_text(channel, "author", "managingeditor"),
         description=_text(channel, "description", "subtitle"),
-        website_url=_text(channel, "link"),
+        website_url=_rss_link(channel),
         artwork_url=_artwork(channel),
+        categories=_categories(channel),
         episodes=tuple(episodes),
     )
 
@@ -192,7 +260,7 @@ def _parse_atom(root) -> FeedData:
     seen = set()
     for entry in _children(root, "entry")[:MAX_EPISODES]:
         title = _text(entry, "title") or "Untitled episode"
-        media_url, mime = _atom_link(entry, "enclosure")
+        media_url, mime, enclosure_bytes = _atom_link(entry, "enclosure")
         if not media_url:
             continue
         published = _date(_text(entry, "published", "updated"))
@@ -203,6 +271,8 @@ def _parse_atom(root) -> FeedData:
         transcript_url, transcript_type = _transcript(entry)
         chapters_url = _chapters(entry)
         item_artwork = _artwork(entry)
+        website_url, _website_mime, _website_size = _atom_link(entry, "alternate")
+        author = _first(entry, "author")
         episodes.append(
             FeedEpisodeData(
                 external_id=external,
@@ -216,10 +286,17 @@ def _parse_atom(root) -> FeedData:
                 transcript_type=transcript_type,
                 chapters_url=chapters_url,
                 artwork_url=item_artwork,
+                website_url=website_url,
+                author=(_text(author, "name") if author is not None else "") or _text(entry, "creator", "author"),
+                season_number=_integer(_text(entry, "season")),
+                episode_number=_integer(_text(entry, "episode")),
+                episode_type=_text(entry, "episodetype").lower(),
+                explicit=_explicit(entry),
+                enclosure_bytes=enclosure_bytes,
             )
         )
 
-    website_url, _mime = _atom_link(root, "alternate")
+    website_url, _mime, _size = _atom_link(root, "alternate")
     author = _first(root, "author")
     return FeedData(
         title=_text(root, "title") or "Untitled podcast",
@@ -227,6 +304,7 @@ def _parse_atom(root) -> FeedData:
         description=_text(root, "subtitle"),
         website_url=website_url,
         artwork_url=_text(root, "logo", "icon"),
+        categories=_categories(root),
         episodes=tuple(episodes),
     )
 

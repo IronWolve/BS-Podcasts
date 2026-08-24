@@ -1,5 +1,5 @@
-from .apple_charts import AppleCharts
+from .charts import DirectoryCharts
 from .base import DirectoryError, DirectoryService
-from .itunes import ItunesDirectory
+from .catalog import PublicDirectory
 
-__all__ = ["AppleCharts", "DirectoryError", "DirectoryService", "ItunesDirectory"]
+__all__ = ["DirectoryCharts", "DirectoryError", "DirectoryService", "PublicDirectory"]

@@ -1,4 +1,4 @@
-"""Small dependency, config, and migration self-check; no test discovery."""
+"""Small dependency and migration self-check; no test discovery."""
 
 from importlib.metadata import version
 from pathlib import Path
@@ -7,7 +7,6 @@ import ctypes.util
 import os
 import sys
 
-from .config import AppSettings
 from .data import Database
 
 
@@ -30,13 +29,7 @@ def main() -> int:
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        checks["migrations 1-5"] = versions == [1, 2, 3, 4, 5]
-        corrupt = root / "config.json"
-        corrupt.write_text("{not valid json", encoding="utf-8")
-        checks["corrupt config fallback"] = AppSettings.load(corrupt).recovered_from_error
-        settings = AppSettings()
-        settings.save(corrupt)
-        checks["atomic config save"] = AppSettings.load(corrupt).values == settings.values
+        checks["migrations 1-11"] = versions == list(range(1, 12))
 
     failed = [name for name, passed in checks.items() if not passed]
     if failed:

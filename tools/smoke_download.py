@@ -52,6 +52,7 @@ class LocalResponse:
         self.status_code = status_code
         self.headers = {"Content-Length": str(len(content))}
         self.interrupt = interrupt
+        self.closed = False
 
     def raise_for_status(self):
         return None
@@ -63,20 +64,28 @@ class LocalResponse:
             raise requests.ConnectionError("intentional local interruption")
         yield self.content[midpoint:]
 
+    def close(self):
+        self.closed = True
+
 
 class ResumeSession:
     def __init__(self, content: bytes):
         self.content = content
         self.calls = 0
+        self.responses = []
 
     def get(self, url, headers, **kwargs):
         self.calls += 1
         range_header = headers.get("Range", "")
         if self.calls == 1:
-            return LocalResponse(self.content, 200, interrupt=True)
+            response = LocalResponse(self.content, 200, interrupt=True)
+            self.responses.append(response)
+            return response
         require(range_header.startswith("bytes="), "retry did not request a byte range")
         start = int(range_header.removeprefix("bytes=").removesuffix("-"))
-        return LocalResponse(self.content[start:], 206)
+        response = LocalResponse(self.content[start:], 206)
+        self.responses.append(response)
+        return response
 
 
 def main() -> int:
@@ -108,21 +117,13 @@ def main() -> int:
         episode = library.list_episodes(show.id)[0]
         session = ResumeSession(media)
         service = DownloadService(library, downloads, root / "downloads", session=session)
-
-        try:
-            service.download(episode.id)
-        except DownloadError:
-            pass
-        else:
-            raise RuntimeError("intentional interrupted transfer reported success")
-        interrupted = downloads.get(episode.id)
-        partial = Path(interrupted.partial_path)
-        require(interrupted.state == DownloadState.ERROR, "interruption state was not saved")
-        require(partial.is_file() and partial.stat().st_size > 0, "partial file was not retained")
-
+        service.RETRY_DELAYS = (0.0,)
         completed = service.download(episode.id)
         target = Path(completed.target_path)
+        partial = Path(completed.partial_path)
         require(completed.state == DownloadState.COMPLETE, "retry did not complete")
+        require(session.calls == 2, f"stream failure was not retried: {session.calls}")
+        require(all(response.closed for response in session.responses), "stream response was not closed")
         require(target.read_bytes() == media, "resumed file differs from source")
         require(not partial.exists(), "partial file remained after atomic completion")
         with wave.open(str(target), "rb") as audio:

@@ -36,6 +36,7 @@ class TrayController:
         self.tray = None
         self.window = window
         self.playback = playback
+        self._message_callback = None
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         tray = QSystemTrayIcon(_tray_icon(), window)
@@ -53,7 +54,7 @@ class TrayController:
         self.forward = QAction("Skip forward", menu)
         self.forward.triggered.connect(playback.skip_forward)
         quit_action = QAction("Quit", menu)
-        quit_action.triggered.connect(QApplication.instance().quit)
+        quit_action.triggered.connect(self._quit)
         menu.addAction(self.now_playing)
         menu.addSeparator()
         menu.addAction(show)
@@ -65,6 +66,7 @@ class TrayController:
         menu.addAction(quit_action)
         tray.setContextMenu(menu)
         tray.activated.connect(lambda _reason: self._show_window())
+        tray.messageClicked.connect(self._message_clicked)
         tray.show()
         self.tray = tray
         bridge = getattr(window, "_bridge", None)
@@ -89,3 +91,21 @@ class TrayController:
         self.window.showNormal()
         self.window.raise_()
         self.window.activateWindow()
+
+    def notify(self, title: str, message: str, callback=None):
+        if self.tray is None:
+            return False
+        self._message_callback = callback
+        self.tray.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 7000)
+        return True
+
+    def _message_clicked(self):
+        callback, self._message_callback = self._message_callback, None
+        self._show_window()
+        if callback is not None:
+            callback()
+
+    def _quit(self):
+        self.window._force_quit = True
+        self.window.close()
+        QApplication.instance().quit()

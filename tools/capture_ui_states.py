@@ -189,8 +189,9 @@ def main() -> int:
                 self.loads += 1
 
         first = episodes[0]
-        snapshot = PlaybackSnapshot(state=PlaybackState.PLAYING, episode_id=first.id, show_id=show.id, title=first.title, show_title="Workshop Radio", position=600.0, duration=float(first.duration_seconds or 2520))
-        loading = PlaybackSnapshot(state=PlaybackState.LOADING, episode_id=first.id, show_id=show.id, title=first.title, show_title="Workshop Radio", duration=2520.0)
+        source = "https://media.invalid/workshop.mp3"
+        snapshot = PlaybackSnapshot(state=PlaybackState.PLAYING, episode_id=first.id, show_id=show.id, title=first.title, show_title="Workshop Radio", source=source, position=600.0, duration=float(first.duration_seconds or 2520))
+        loading = PlaybackSnapshot(state=PlaybackState.LOADING, episode_id=first.id, show_id=show.id, title=first.title, show_title="Workshop Radio", source=source, duration=2520.0)
         window.playback = FakePlayback(loading)
         window._playback_changed(loading)
         QApplication.processEvents()
@@ -198,7 +199,7 @@ def main() -> int:
         assert not window.player.play.isEnabled(), "play should be busy while opening"
         assert window.context.title.text() == first.title, "side pane did not follow the playing episode"
         grab(window, "player-opening")
-        buffering = PlaybackSnapshot(state=PlaybackState.PLAYING, episode_id=first.id, show_id=show.id, title=first.title, show_title="Workshop Radio", position=5.0, duration=2520.0, buffering=42)
+        buffering = PlaybackSnapshot(state=PlaybackState.PLAYING, episode_id=first.id, show_id=show.id, title=first.title, show_title="Workshop Radio", source=source, position=5.0, duration=2520.0, buffering=42)
         window._playback_changed(buffering)
         assert window.player.next_label.text() == "Buffering 42%", window.player.next_label.text()
         window.playback = FakePlayback(snapshot)
@@ -272,7 +273,7 @@ def main() -> int:
         downloads.downloads.complete(episodes[0].id, str(media), 4096)
         window._reload_library()
         window.navigation.select(4)
-        QApplication.processEvents()
+        settle(window_app_ref[0], window)
         assert window.download_page.model.rowCount() == 1
         row = window.download_page.model.index(0, 0).data(257)
         assert row.downloaded_path == str(media), row.downloaded_path
@@ -285,6 +286,7 @@ def main() -> int:
         freed = downloads.delete(episodes[0].id)
         assert freed == 4096 and not media.exists(), "delete did not remove the file"
         window._reload_library()
+        settle(window_app_ref[0], window)
         assert window.download_page.model.rowCount() == 0
         assert not library.episode(episodes[0].id).downloaded_path
 
@@ -293,6 +295,7 @@ def main() -> int:
         listening.rename_bookmark(bookmark.id, "Great point")
         assert listening.bookmarks()[0].title == "Great point"
         window._reload_bookmarks()
+        settle(window_app_ref[0], window)
         assert window.bookmark_page.model.index(0, 0).data(257).bookmark_id == bookmark.id
         listening.delete_bookmark(bookmark.id)
         assert not listening.bookmarks()
@@ -357,6 +360,16 @@ def main() -> int:
         window.search_overlay._activate_current()
         settle(window_app_ref[0], window)
         assert window.pages.currentIndex() == 2 and window.episode_page.model.rowCount() == 2, "search result did not open the podcast"
+
+        # Readable podcast information: artwork, human-facing actions, about,
+        # and collapsed technical URLs.
+        with repository.database.connect() as connection:
+            connection.execute("UPDATE shows SET categories='Technology, Education' WHERE id=?", (show.id,))
+        stored_show = repository.get_show(show.id)
+        from bs_podcasts.ui.dialogs import PodcastInfoDialog
+        podcast_info = PodcastInfoDialog(window._ui_podcast(stored_show), stored_show, window)
+        QTimer.singleShot(50, lambda: (podcast_info.grab().save(str(OUTPUT / "state-podcast-info.png"), "PNG"), print(OUTPUT / "state-podcast-info.png"), podcast_info.reject()))
+        podcast_info.exec()
 
         # Unsubscribe with preview, without deleting anything until confirmed.
         preview = library.removal_preview(show.id)

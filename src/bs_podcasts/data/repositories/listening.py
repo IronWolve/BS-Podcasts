@@ -141,6 +141,53 @@ class ListeningRepository:
             ).fetchone()
         return float(row["silence_saved"] if row else 0)
 
+    def add_listening(self, show_id: int, seconds: float):
+        if not show_id or seconds <= 0:
+            return
+        seconds = float(seconds)
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE playback_metrics SET listened_seconds=listened_seconds+? WHERE singleton_id=1",
+                (seconds,),
+            )
+            connection.execute(
+                """INSERT INTO listening_stats(show_id, listened_seconds)
+                   VALUES (?, ?) ON CONFLICT(show_id) DO UPDATE SET
+                   listened_seconds=listening_stats.listened_seconds+excluded.listened_seconds""",
+                (show_id, seconds),
+            )
+
+    def increment_completed(self, show_id: int):
+        if not show_id:
+            return
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE playback_metrics SET completed_episodes=completed_episodes+1 WHERE singleton_id=1"
+            )
+            connection.execute(
+                """INSERT INTO listening_stats(show_id, completed_episodes)
+                   VALUES (?, 1) ON CONFLICT(show_id) DO UPDATE SET
+                   completed_episodes=listening_stats.completed_episodes+1""",
+                (show_id,),
+            )
+
+    def statistics(self) -> dict:
+        with self.database.connect() as connection:
+            total = connection.execute(
+                "SELECT listened_seconds, completed_episodes, silence_saved FROM playback_metrics WHERE singleton_id=1"
+            ).fetchone()
+            top = connection.execute(
+                """SELECT s.title, ls.listened_seconds, ls.completed_episodes
+                   FROM listening_stats ls JOIN shows s ON s.id=ls.show_id
+                   ORDER BY ls.listened_seconds DESC LIMIT 5"""
+            ).fetchall()
+        return {
+            "listened_seconds": float(total["listened_seconds"] if total else 0),
+            "completed_episodes": int(total["completed_episodes"] if total else 0),
+            "silence_saved": float(total["silence_saved"] if total else 0),
+            "top": [(row["title"], float(row["listened_seconds"]), int(row["completed_episodes"])) for row in top],
+        }
+
     def create_folder(self, name: str) -> int:
         with self.database.connect() as connection:
             connection.execute(

@@ -40,6 +40,11 @@ class Show:
     skip_forward: int = 30
     auto_continue: bool = True
     trim_level: str = "off"
+    auto_download_override: bool | None = None
+    auto_download_limit: int | None = None
+    retention_keep: int | None = None
+    retention_days: int | None = None
+    categories: str = ""
 
 
 @dataclass(frozen=True)
@@ -64,6 +69,14 @@ class Episode:
     artwork_path: str = ""
     chapters_url: str = ""
     artwork_url: str = ""
+    website_url: str = ""
+    author: str = ""
+    season_number: int | None = None
+    episode_number: int | None = None
+    episode_type: str = ""
+    explicit: bool | None = None
+    enclosure_bytes: int = 0
+    favorite: bool = False
 
 
 @dataclass(frozen=True)
@@ -79,6 +92,13 @@ class FeedEpisodeData:
     transcript_type: str = ""
     chapters_url: str = ""
     artwork_url: str = ""
+    website_url: str = ""
+    author: str = ""
+    season_number: int | None = None
+    episode_number: int | None = None
+    episode_type: str = ""
+    explicit: bool | None = None
+    enclosure_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -120,6 +140,7 @@ class FeedData:
     description: str = ""
     website_url: str = ""
     artwork_url: str = ""
+    categories: tuple[str, ...] = ()
     episodes: tuple[FeedEpisodeData, ...] = ()
 
 
@@ -132,7 +153,7 @@ class DirectoryCandidate:
     genre: str = ""
     rank: int = 0
     chart_type: str = ""
-    apple_url: str = ""
+    directory_url: str = ""
 
 
 class DownloadState(StrEnum):

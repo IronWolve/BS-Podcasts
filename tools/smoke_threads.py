@@ -14,7 +14,7 @@ from bs_podcasts.data.repositories import DownloadRepository, LibraryRepository
 from bs_podcasts.domain import FeedData, FeedEpisodeData
 from bs_podcasts.downloads import DownloadService
 from bs_podcasts.jobs import JobRunner
-from bs_podcasts.net import make_session
+from bs_podcasts.net import USER_AGENT, make_session
 
 
 def require(condition, message):
@@ -54,7 +54,7 @@ def main() -> int:
     session = make_session()
     adapter = session.get_adapter("https://example.invalid/")
     require(adapter.max_retries.total == 2 and 503 in adapter.max_retries.status_forcelist, "session retry policy")
-    require("BS-Podcasts" in session.headers["User-Agent"], "session user agent")
+    require(session.headers["User-Agent"] == USER_AGENT, "session user agent")
 
     # Bounded join: a stuck job must not hold the process; join reports it.
     runner = JobRunner(max_workers=1)

@@ -15,7 +15,7 @@ from bs_podcasts.app import create_application
 from bs_podcasts.artwork import ArtworkCache
 from bs_podcasts.data import Database
 from bs_podcasts.data.repositories import LibraryRepository
-from bs_podcasts.directories import DirectoryService, ItunesDirectory
+from bs_podcasts.directories import DirectoryService, PublicDirectory
 from bs_podcasts.feeds import FeedFetcher, RefreshService
 from bs_podcasts.jobs import JobRunner
 from bs_podcasts.services import LibraryService
@@ -52,7 +52,7 @@ def main() -> int:
         FeedFetcher(),
         ArtworkCache(DATA / "artwork"),
     )
-    directory = DirectoryService([ItunesDirectory()])
+    directory = DirectoryService([PublicDirectory()])
     window = MainWindow(
         library=library,
         jobs=jobs,

@@ -67,6 +67,7 @@ COLORS = dict(DARK)
 # Semantic colours for episode/download states.
 STATE_COLORS = {
     "New": COLORS["accent"],
+    "Unplayed": COLORS["subtle"],
     "In progress": COLORS["blue"],
     "Downloaded": COLORS["success"],
     "Downloading": COLORS["blue"],
@@ -90,6 +91,7 @@ HEALTH_COLORS = {
 def _rebuild_semantic():
     STATE_COLORS.update({
         "New": COLORS["accent"],
+        "Unplayed": COLORS["subtle"],
         "In progress": COLORS["blue"],
         "Downloaded": COLORS["success"],
         "Downloading": COLORS["blue"],
@@ -408,6 +410,7 @@ def stylesheet() -> str:
         padding: 4px 12px; font-weight: 500;
     }}
     QPushButton#chip:hover {{ color: {c['text']}; background: {c['surface_raised']}; }}
+    QPushButton#chip[compact="true"] {{ padding: 4px 4px; }}
     QPushButton#chip:focus {{ border: {focus_ring}; }}
     QPushButton#chip:checked {{
         color: {c['text_strong']}; background: {c['surface_soft']}; border-color: {c['surface_soft']};
@@ -432,7 +435,9 @@ def stylesheet() -> str:
     QWidget#settingsContent {{ background: {c['canvas']}; border: 0; }}
     QScrollArea#contextScroll, QScrollArea#contextScroll QWidget#qt_scrollarea_viewport,
     QScrollArea#contextScroll > QWidget > QWidget {{ background: transparent; border: 0; }}
-    QListWidget, QTextEdit {{ background: transparent; border: 0; color: {c['text']}; }}
+    QScrollArea#dialogScroll, QScrollArea#dialogScroll QWidget#qt_scrollarea_viewport,
+    QScrollArea#dialogScroll > QWidget > QWidget {{ background: transparent; border: 0; }}
+    QListWidget, QTextEdit, QTextBrowser {{ background: transparent; border: 0; color: {c['text']}; }}
     QListWidget::item {{ padding: 7px 8px; border-radius: 6px; }}
     QListWidget::item:hover {{ background: {c['surface_raised']}; }}
     QListWidget::item:selected {{ background: {c['surface_soft']}; color: {c['text_strong']}; }}
@@ -462,7 +467,7 @@ def stylesheet() -> str:
     QTabWidget#contextTabs QTabBar::tab {{
         background: transparent; color: {c['muted']}; border: 0;
         border-bottom: 2px solid transparent;
-        padding: 7px 0; margin-right: 2px; font-weight: 500; font-size: {small + 1}px;
+        padding: 7px 0; margin-right: 1px; font-weight: 500; font-size: {small}px;
     }}
     QTabWidget#contextTabs QTabBar::tab:hover {{ color: {c['text']}; }}
     QTabWidget#contextTabs QTabBar::tab:selected {{

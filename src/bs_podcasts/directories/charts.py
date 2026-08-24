@@ -1,4 +1,4 @@
-"""Current Apple Podcasts web-chart reader using serialized page data."""
+"""Current public podcast-chart reader using serialized page data."""
 
 from html import unescape
 import json
@@ -11,7 +11,7 @@ from ..net import make_session
 
 from ..domain import DirectoryCandidate
 from .base import DirectoryError
-from .itunes import CATEGORY_IDS
+from .catalog import CATEGORY_IDS
 
 
 CHART_TITLES = {
@@ -22,7 +22,7 @@ CHART_TITLES = {
 }
 
 
-class AppleCharts:
+class DirectoryCharts:
     endpoint = "https://podcasts.apple.com/us/charts"
 
     def __init__(self, session=None, cache_seconds: int = 900):
@@ -33,7 +33,7 @@ class AppleCharts:
 
     def chart(self, chart_type: str, category: str = ""):
         if chart_type not in CHART_TITLES:
-            raise DirectoryError("Unknown Apple chart type.")
+            raise DirectoryError("Unknown directory chart type.")
         chart_category = category if chart_type in {"top_shows", "trending"} else ""
         key = (chart_type, chart_category)
         cached = self._cache.get(key)
@@ -65,7 +65,7 @@ class AppleCharts:
                 re.S,
             )
             if not match:
-                raise DirectoryError("Apple chart data was not present.")
+                raise DirectoryError("Directory chart data was not present.")
             payload = json.loads(unescape(match.group(1)))
             shelves = payload["data"][0]["data"]["shelves"]
         except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
@@ -81,7 +81,7 @@ class AppleCharts:
             None,
         )
         if shelf is None:
-            raise DirectoryError(f"Apple did not provide {wanted}.")
+                raise DirectoryError(f"The directory did not provide {wanted}.")
         results = [
             candidate
             for position, item in enumerate(shelf.get("items", []), start=1)
@@ -142,14 +142,14 @@ class AppleCharts:
                 r'<script[^>]+src="([^"]*index[^"]+\.js)', page
             )
             if not script:
-                raise DirectoryError("Apple web script was not present.")
+                raise DirectoryError("Directory web script was not present.")
             script_url = script.group(1)
             if script_url.startswith("/"):
                 script_url = "https://podcasts.apple.com" + script_url
             javascript = self.session.get(script_url, timeout=(8, 20)).text
             token = re.search(r'const al="(eyJ[^"]+)"', javascript)
             if not token:
-                raise DirectoryError("Apple web chart token was not present.")
+                raise DirectoryError("Directory web chart token was not present.")
             self._developer_token = token.group(1)
             return self._developer_token
         except requests.RequestException as exc:
@@ -191,7 +191,7 @@ class AppleCharts:
             genre=genre,
             rank=rank,
             chart_type=chart_type,
-            apple_url=str(attributes.get("url") or ""),
+            directory_url=str(attributes.get("url") or ""),
         )
 
     def _candidate(self, item, chart_type: str, position: int):
@@ -223,7 +223,7 @@ class AppleCharts:
             genre=genre,
             rank=rank,
             chart_type=chart_type,
-            apple_url=str(item.get("clickAction", {}).get("pageUrl") or ""),
+            directory_url=str(item.get("clickAction", {}).get("pageUrl") or ""),
         )
 
     @staticmethod
