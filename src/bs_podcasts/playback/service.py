@@ -279,12 +279,15 @@ class PlaybackService:
                 self.listening.add_silence_saved(self._unsaved_silence)
                 self._unsaved_silence = 0.0
             self.cancel_sleep_timer()
+            self._cancel_load_watchdog()
             self._dead = True
             self.repository.set_current_playback(
                 self.snapshot.episode_id, PlaybackState.SHUTDOWN.value
             )
-            self.engine.shutdown()
             self.snapshot = replace(self.snapshot, state=PlaybackState.SHUTDOWN)
+        # Terminate mpv *outside* the lock: its event thread may be waiting in
+        # _engine_event for this lock, and terminate() joins that thread.
+        self.engine.shutdown()
 
     def _engine_event(self, event: EngineEvent):
         with self._lock:

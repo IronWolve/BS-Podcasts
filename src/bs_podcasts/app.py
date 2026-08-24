@@ -68,8 +68,11 @@ def _claim_single_instance(app):
     if probe.waitForConnected(300):
         probe.write(b"raise")
         probe.waitForBytesWritten(300)
-        probe.disconnectFromServer()
-        return None
+        # A live instance answers; a hung one leaves the socket open but silent.
+        if probe.waitForReadyRead(1500) and probe.readAll().data().startswith(b"ok"):
+            probe.disconnectFromServer()
+            return None
+        probe.abort()
     QLocalServer.removeServer(name)
     server = QLocalServer(app)
     server.listen(name)
@@ -159,6 +162,9 @@ def main() -> int:
     def raise_existing():
         socket = server.nextPendingConnection()
         if socket is not None:
+            socket.write(b"ok")
+            socket.flush()
+            socket.disconnectFromServer()
             socket.deleteLater()
         window = state["window"]
         if window is not None:
