@@ -81,6 +81,15 @@ class FakeEngine:
     def skip(self, seconds):
         return None
 
+    def set_silence_trim(self, level):
+        self.trim_level = level
+
+    def set_ab_repeat(self, start, end):
+        self.ab = (start, end)
+
+    def clear_ab_repeat(self):
+        self.ab = None
+
     def set_speed(self, speed):
         return None
 

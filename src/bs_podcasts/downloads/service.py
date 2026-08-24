@@ -152,6 +152,33 @@ class DownloadService:
     def cleanup_preview(self, episode_id: int):
         return self.downloads.cleanup_preview(episode_id)
 
+    def played_previews(self):
+        """Exact targets for every completed download whose episode is played."""
+        previews = []
+        for episode_id in self.downloads.played_complete():
+            preview = self.downloads.cleanup_preview(episode_id)
+            if preview is not None:
+                previews.append(preview)
+        return previews
+
+    def delete(self, episode_id: int) -> int:
+        """Cancel if active, unlink the files, forget the record. Returns bytes freed."""
+        self.cancel(episode_id)
+        record = self.downloads.get(episode_id)
+        if record is None:
+            return 0
+        freed = 0
+        for candidate in (record.target_path, record.partial_path):
+            path = Path(candidate) if candidate else None
+            if path is not None and path.is_file():
+                try:
+                    freed += path.stat().st_size
+                    path.unlink()
+                except OSError:
+                    pass
+        self.downloads.remove(episode_id)
+        return freed
+
     def _target(self, episode_id: int, url: str) -> Path:
         suffix = Path(urlparse(url).path).suffix.lower()
         if not suffix or len(suffix) > 8:

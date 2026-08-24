@@ -31,7 +31,7 @@ from ..domain import Health
 from ..feeds.parser import parse_feed
 from ..jobs import JobResult, JobStatus
 from . import icons
-from .dialogs import AboutDialog, AddPodcastDialog, PodcastSettingsDialog, RemovePodcastDialog
+from .dialogs import AboutDialog, AddPodcastDialog, ConfirmDialog, DeleteFilesDialog, PodcastSettingsDialog, RemovePodcastDialog, TextInputDialog
 from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast as UiPodcast, plain_snippet
 from .pixmaps import dominant_color
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
@@ -193,7 +193,7 @@ class MainWindow(QMainWindow):
         self.podcast_page = PodcastGridPage()
         self.episode_page = EpisodeListPage()
         self.playlist_page = EpisodeListPage(
-            "Up Next", "", items=(), reorder=True, filters=(), action="", sortable=False,
+            "Up Next", "", items=(), reorder=True, filters=(), action="Clear Up Next", sortable=False,
             empty=("Nothing queued", "Add episodes to Up Next and they play in this order. Drag rows to reorder.", "Browse episodes"),
             glyph="queue",
         )
@@ -210,7 +210,7 @@ class MainWindow(QMainWindow):
             empty=("No bookmarks yet", "Press the bookmark button in the player (Ctrl+B) to keep a moment.", ""), glyph="bookmark",
         )
         self.history_page = EpisodeListPage(
-            "History", "", items=(), filters=(), action="", sortable=False,
+            "History", "", items=(), filters=(), action="Clear history", sortable=False,
             empty=("Nothing played yet", "Episodes you play show up here, most recent first.", ""), glyph="history",
         )
         self.settings_page = SettingsPage()
@@ -227,6 +227,17 @@ class MainWindow(QMainWindow):
             page.play_requested.connect(lambda item: self._play_episode(item.episode_id))
         self.episode_page.play_requested.connect(self._play_episode_item)
         self.bookmark_page.play_requested.connect(self._play_bookmark)
+        for page in (self.playlist_page, self.history_page):
+            page.header.action.setObjectName("dangerButton")
+        self.playlist_page.header.action.clicked.connect(self._clear_queue)
+        self.history_page.header.action.clicked.connect(self._clear_history)
+        self.download_page.remove_requested.connect(self._delete_downloads)
+        self.bookmark_page.remove_requested.connect(self._delete_bookmarks)
+        self.history_page.remove_requested.connect(lambda items: [self._remove_history(item.episode_id) for item in items])
+        self.context.download_menu_requested.connect(self._download_menu)
+        self.context.bookmark_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.context.bookmark_list.customContextMenuRequested.connect(self._pane_bookmark_menu)
+        self.settings_page.cleanup_played_requested.connect(self._cleanup_played)
         self.playlist_page.order_changed.connect(self._queue_reordered)
         self.playlist_page.remove_requested.connect(lambda items: [self._remove_from_queue(item.episode_id) for item in items])
         self.playlist_page.empty_action_requested.connect(lambda: self.navigation.select(PAGE_EPISODES))
@@ -293,6 +304,9 @@ class MainWindow(QMainWindow):
         )
         self._apply_skip_settings()
         self.settings_page.load_theme(self.library.setting("ui.theme", "system"))
+        self.settings_page.load_downloads(
+            self.library.setting("downloads.auto", "0") == "1", int(self.library.setting("downloads.auto_limit", "3"))
+        )
         self.settings_page.set_shortcuts(self.shortcuts.bindings())
         self._refresh_storage_settings()
         self.home_page.new_requested.connect(self._show_new_episodes)
@@ -447,7 +461,7 @@ class MainWindow(QMainWindow):
         show = preview["show"]
         if self.playback is not None and self.playback.snapshot.show_id == show_id:
             try:
-                self.playback.engine.pause()
+                self.playback.stop()
             except Exception:
                 pass
         result = self.library.remove_subscription(show_id, dialog.delete_files.isChecked())
@@ -617,7 +631,7 @@ class MainWindow(QMainWindow):
         stored_shows = self.library.shows()
         shows = [self._ui_podcast(show) for show in stored_shows]
         stored_episodes = self.library.episodes(limit=5000)
-        episodes = [self._ui_episode(episode) for episode in stored_episodes]
+        episodes = self._ui_episodes(stored_episodes)
         in_progress = [self._ui_episode(episode) for episode in stored_episodes if episode.position_seconds > 0 and not episode.played]
         queued = [self._ui_episode(episode) for episode in self.library.queue()]
         history = [self._ui_episode(episode) for episode in self.library.history()]
@@ -680,6 +694,7 @@ class MainWindow(QMainWindow):
         menu.addAction(icons.icon("podcasts", COLORS["text"], 16), "Import local audio…", self._import_local_audio)
         menu.addSeparator()
         menu.addAction(icons.icon("discover", COLORS["text"], 16), "Browse Discover", lambda: self.navigation.select(PAGE_DISCOVER))
+        menu.addAction(icons.icon("refresh", COLORS["text"], 16), "Refresh all podcasts", self._refresh_all)
         menu.addAction(icons.icon("external", COLORS["text"], 16), "Export OPML…", self._export_opml)
         menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
@@ -793,7 +808,7 @@ class MainWindow(QMainWindow):
     def _open_podcast(self, podcast):
         if not podcast.show_id or self.library is None:
             return
-        episodes = [self._ui_episode(episode) for episode in self.library.episodes(show_id=podcast.show_id)]
+        episodes = self._ui_episodes(self.library.episodes(show_id=podcast.show_id))
         self.episode_page.header.title_label.setText(podcast.title)
         self.episode_page.header.set_subtitle("")
         show = self.library.repository.get_show(podcast.show_id)
@@ -828,6 +843,11 @@ class MainWindow(QMainWindow):
             menu.addAction(icons.icon("refresh", COLORS["text"], 16), "Refresh now", lambda: self._submit_refresh(podcast.show_id))
             if podcast.health == "suspended":
                 menu.addAction("Resume refreshing", lambda: self._rearm_podcast(podcast.show_id))
+            menu.addSeparator()
+            menu.addAction(icons.icon("check", COLORS["text"], 16), "Mark all as played", lambda: self._mark_show_played(podcast.show_id, True))
+            menu.addAction("Mark all as unplayed", lambda: self._mark_show_played(podcast.show_id, False))
+            if podcast.website_url:
+                menu.addAction(icons.icon("external", COLORS["text"], 16), "Open website", lambda: self._open_url(podcast.website_url))
             menu.addSeparator()
             menu.addAction(icons.icon("trash", COLORS["text"], 16), "Unsubscribe…", lambda: self._unsubscribe(podcast.show_id))
         elif podcast.feed_url:
@@ -890,6 +910,27 @@ class MainWindow(QMainWindow):
                 menu.addAction(icons.icon("download", COLORS["text"], 16), "Download", lambda: self._download_episode(episode.episode_id))
         else:
             menu.addAction(icons.icon("download", COLORS["text"], 16), "Download", lambda: self._download_many(targets))
+        if page is self.bookmark_page and not many:
+            menu.addSeparator()
+            menu.addAction(icons.icon("play", COLORS["text"], 16), f"Play from {self.player._time(episode.bookmark_position)}", lambda: self._play_bookmark(episode))
+            menu.addAction("Rename bookmark…", lambda: self._rename_bookmark(episode))
+            delete_bookmark = menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete bookmark", lambda: self._delete_bookmarks([episode]))
+            delete_bookmark.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+        if page is self.history_page:
+            menu.addSeparator()
+            remove_history = menu.addAction("Remove from history", lambda: [self._remove_history(item.episode_id) for item in targets])
+            remove_history.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+        if page is self.playlist_page and not many:
+            menu.addAction(icons.icon("next", COLORS["text"], 16), "Play next", lambda: self._queue_to_front(episode.episode_id))
+        if episode.downloaded_path or page is self.download_page:
+            menu.addSeparator()
+            if episode.downloaded_path:
+                menu.addAction(icons.icon("folder", COLORS["text"], 16), "Open file location", lambda: self._open_location(episode.downloaded_path))
+            delete_download = menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete download…" if not many else f"Delete {len(targets)} downloads…", lambda: self._delete_downloads(targets))
+            if page is self.download_page:
+                delete_download.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+        if not many and episode.media_url:
+            menu.addAction("Copy media URL", lambda: QApplication.clipboard().setText(episode.media_url))
         menu.addSeparator()
         if many or episode.state != "Played":
             menu.addAction(icons.icon("check", COLORS["text"], 16), "Mark as played", lambda: self._mark_played_many(targets, True))
@@ -905,6 +946,160 @@ class MainWindow(QMainWindow):
             self.library.dequeue(episode_id)
             self._reload_library()
             self._notify("Removed from Up Next", "info", "Undo", lambda: self._queue_episode(episode_id, quiet=True))
+
+    def _auto_download(self, show_id: int):
+        if self.library is None or self.downloads is None or self.library.setting("downloads.auto", "0") != "1":
+            return
+        limit = int(self.library.setting("downloads.auto_limit", "3"))
+        active = {record.episode_id for record in self.downloads.records()}
+        candidates = [
+            episode for episode in self.library.episodes(show_id=show_id, limit=limit * 3)
+            if episode.is_new and not episode.downloaded_path and episode.id not in active and episode.media_url
+        ][:limit]
+        for episode in candidates:
+            self._download_episode(episode.id, quiet=True)
+        if candidates:
+            self._notify(f"Auto-downloading {len(candidates)} new episode{'s' if len(candidates) != 1 else ''}", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
+
+    # ------------------------------------------------------- item management
+    @staticmethod
+    def _open_location(path: str):
+        if path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
+
+    def _download_menu(self, episode_id: int, global_position):
+        episode = self.library.episode(episode_id) if self.library else None
+        if episode is None:
+            return
+        item = self._ui_episode(episode)
+        menu = QMenu(self)
+        menu.addAction(icons.icon("folder", COLORS["text"], 16), "Open file location", lambda: self._open_location(item.downloaded_path))
+        menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete download…", lambda: self._delete_downloads([item]))
+        menu.exec(global_position)
+
+    def _delete_downloads(self, items):
+        if self.downloads is None:
+            return
+        previews = [preview for preview in (self.downloads.cleanup_preview(item.episode_id) for item in items if item.episode_id) if preview is not None]
+        if not previews:
+            self._notify("Nothing to delete for this selection")
+            return
+        dialog = DeleteFilesDialog(
+            "Delete download" if len(previews) == 1 else f"Delete {len(previews)} downloads",
+            "The episode stays in your library; only the local file is removed.", previews, self._format_bytes, self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        freed = sum(self.downloads.delete(preview.episode_id) for preview in previews)
+        self._reload_library()
+        self._refresh_storage_settings()
+        self._notify(f"Deleted {len(previews)} download{'s' if len(previews) != 1 else ''}  ·  {self._format_bytes(freed)} reclaimed", "success")
+
+    def _cleanup_played(self):
+        if self.downloads is None:
+            return
+        previews = self.downloads.played_previews()
+        if not previews:
+            self._notify("No played episodes have downloads to delete")
+            return
+        dialog = DeleteFilesDialog("Delete played downloads", "Downloads for episodes you've finished. Episodes stay in your library.", previews, self._format_bytes, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        freed = sum(self.downloads.delete(preview.episode_id) for preview in previews)
+        self._reload_library()
+        self._refresh_storage_settings()
+        self._notify(f"Deleted {len(previews)} download{'s' if len(previews) != 1 else ''}  ·  {self._format_bytes(freed)} reclaimed", "success")
+
+    def _delete_bookmarks(self, items):
+        if self.listening is None:
+            return
+        ids = [item.bookmark_id for item in items if item.bookmark_id]
+        for bookmark_id in ids:
+            self.listening.delete_bookmark(bookmark_id)
+        if ids:
+            self._reload_bookmarks()
+            if self._playing_episode_id:
+                self._load_listening_details(self._playing_episode_id)
+            self._notify(f"Deleted {len(ids)} bookmark{'s' if len(ids) != 1 else ''}", "success")
+
+    def _pane_bookmark_menu(self, position):
+        entry = self.context.bookmark_list.itemAt(position)
+        if entry is None or entry.data(Qt.ItemDataRole.UserRole) is None or self.listening is None:
+            return
+        episode_id = self.context._episode_id
+        seconds = float(entry.data(Qt.ItemDataRole.UserRole))
+        bookmark = next((b for b in self.listening.bookmarks(episode_id) if abs(b.position_seconds - seconds) < 0.5), None)
+        if bookmark is None:
+            return
+        item = UiEpisode(title=bookmark.title, show=bookmark.show_title, published="", duration="", progress=0.0, state="Bookmark", accent="",
+                         episode_id=episode_id, bookmark_id=bookmark.id, bookmark_position=bookmark.position_seconds, detail=bookmark.episode_title)
+        menu = QMenu(self)
+        menu.addAction(icons.icon("play", COLORS["text"], 16), f"Play from {self.player._time(seconds)}", lambda: self._play_bookmark(item))
+        menu.addAction("Rename bookmark…", lambda: (self._rename_bookmark(item), self._load_listening_details(episode_id)))
+        menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete bookmark", lambda: (self._delete_bookmarks([item]), self._load_listening_details(episode_id)))
+        menu.exec(self.context.bookmark_list.viewport().mapToGlobal(position))
+
+    def _rename_bookmark(self, item):
+        if self.listening is None or not item.bookmark_id:
+            return
+        dialog = TextInputDialog("Rename bookmark", f"At {self.player._time(item.bookmark_position)} in {item.detail or item.show}.", item.title, "Rename", self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.value:
+            self.listening.rename_bookmark(item.bookmark_id, dialog.value)
+            self._reload_bookmarks()
+            self._notify("Bookmark renamed", "success")
+
+    def _remove_history(self, episode_id: int):
+        if self.library is None or not episode_id:
+            return
+        self.library.clear_history(episode_id)
+        self._reload_library()
+
+    def _clear_history(self):
+        if self.library is None:
+            return
+        count = self.history_page.model.rowCount()
+        if not count:
+            return
+        dialog = ConfirmDialog("Clear history?", f"Removes {count} episode{'s' if count != 1 else ''} from History. Playback positions and played marks are kept.", "Clear history", destructive=True, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.library.clear_history()
+            self._reload_library()
+            self._notify("History cleared", "success")
+
+    def _clear_queue(self):
+        if self.library is None:
+            return
+        queued = self.library.queue()
+        if not queued:
+            return
+        dialog = ConfirmDialog("Clear Up Next?", f"Removes {len(queued)} episode{'s' if len(queued) != 1 else ''} from the queue. Nothing is deleted.", "Clear Up Next", destructive=True, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            ids = [episode.id for episode in queued]
+            self.library.clear_queue()
+            self._reload_library()
+
+            def undo():
+                for episode_id in ids:
+                    self.library.enqueue(episode_id)
+                self._reload_library()
+
+            self._notify("Up Next cleared", "success", "Undo", undo)
+
+    def _queue_to_front(self, episode_id: int):
+        if self.library is None or not episode_id:
+            return
+        if episode_id not in {episode.id for episode in self.library.queue()}:
+            self.library.enqueue(episode_id)
+        self.library.queue_to_front(episode_id)
+        self._reload_library()
+        self._notify("Playing next", "success")
+
+    def _mark_show_played(self, show_id: int, played: bool):
+        if self.library is None:
+            return
+        changed = self.library.mark_show_played(show_id, played)
+        self._reload_library()
+        self._notify(f"Marked {changed} episode{'s' if changed != 1 else ''} as {'played' if played else 'unplayed'}", "success", "Undo", lambda: (self.library.mark_show_played(show_id, not played), self._reload_library()))
 
     def _rearm_podcast(self, show_id: int):
         self.library.rearm(show_id)
@@ -934,8 +1129,8 @@ class MainWindow(QMainWindow):
             return
         try:
             self.playback.load_episode(item.episode_id, autoplay=True)
-            if item.duration_seconds and item.progress:
-                self.playback.seek(item.duration_seconds * item.progress)
+            if item.bookmark_position:
+                self.playback.seek(item.bookmark_position)
         except Exception as exc:
             self._notify(f"Couldn’t play this bookmark: {exc}", "error")
 
@@ -1163,9 +1358,12 @@ class MainWindow(QMainWindow):
                     progress=(record.bytes_done / record.bytes_total) if record.bytes_total and state != "Downloaded" else 0.0,
                     state=state, accent=item.accent, episode_id=item.episode_id, show_id=item.show_id,
                     description=item.description, artwork_path=item.artwork_path, duration_seconds=item.duration_seconds, detail=detail,
+                    media_url=item.media_url, downloaded_path=record.target_path if state == "Downloaded" else "",
                 )
             )
         self.download_page.set_items(items)
+        used, free, _total = self.downloads.storage()
+        self.download_page.header.set_subtitle(f"{self._format_bytes(used)} on disk  ·  {self._format_bytes(free)} free" if items else "")
         if self.download_page.header.action:
             self.download_page.header.action.setVisible(any(record.state.value == "downloading" for record in records))
         self.download_page.banner.clear()
@@ -1186,6 +1384,8 @@ class MainWindow(QMainWindow):
                     duration=item.duration, progress=(bookmark.position_seconds / episode.duration_seconds) if episode.duration_seconds else 0.0,
                     state="Bookmark", accent=item.accent, episode_id=item.episode_id, show_id=item.show_id, description=item.description,
                     artwork_path=item.artwork_path, duration_seconds=item.duration_seconds, detail=item.title,
+                    media_url=item.media_url, downloaded_path=item.downloaded_path,
+                    bookmark_id=bookmark.id, bookmark_position=bookmark.position_seconds,
                 )
             )
         self.bookmark_page.set_items(items)
@@ -1209,7 +1409,7 @@ class MainWindow(QMainWindow):
         self.episode_page.header.title_label.setText(f"Results for “{query}”")
         self.episode_page.header.set_subtitle(f"{len(shows)} podcast{'s' if len(shows) != 1 else ''}  ·  {len(episodes)} episode{'s' if len(episodes) != 1 else ''}")
         self.episode_page.set_filter("All")
-        self.episode_page.set_items([self._ui_episode(episode) for episode in episodes], preserve_scroll=False)
+        self.episode_page.set_items(self._ui_episodes(episodes), preserve_scroll=False)
         self._episode_navigation_prepared = bool(episodes)
         self.navigation.select(PAGE_EPISODES if episodes else PAGE_PODCASTS)
         if not episodes:
@@ -1437,11 +1637,13 @@ class MainWindow(QMainWindow):
                 self._notify(result.message or "Download failed", "error", "Retry", lambda: self._download_episode(identifier))
             return
         self._reload_library()
+        if result.status == JobStatus.OK and getattr(result.value, "imported", 0):
+            self._auto_download(identifier)
         total, done, new_episodes = self._refresh_batch
         if total:
             done += 1
             report = result.value if result.status == JobStatus.OK else None
-            new_episodes += getattr(report, "new_episodes", 0) or 0
+            new_episodes += getattr(report, "imported", 0) or 0
             self._refresh_batch = [total, done, new_episodes]
             if done < total:
                 self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
@@ -1581,7 +1783,7 @@ class MainWindow(QMainWindow):
     def _show_all_episodes(self):
         if self.library is None:
             return
-        episodes = [self._ui_episode(episode) for episode in self.library.episodes(limit=5000)]
+        episodes = self._ui_episodes(self.library.episodes(limit=5000))
         self.episode_page.header.title_label.setText("Episodes")
         self.episode_page.header.set_subtitle("")
         self.episode_page.hero.hide()
@@ -1650,9 +1852,11 @@ class MainWindow(QMainWindow):
             if isinstance(item, UiEpisode):
                 menu = QMenu(self)
                 menu.addAction(icons.icon("play", COLORS["text"], 16), "Play now", lambda: self._play_episode(item.episode_id))
+                menu.addAction(icons.icon("next", COLORS["text"], 16), "Play next", lambda: self._queue_to_front(item.episode_id))
                 menu.addAction(icons.icon("info", COLORS["text"], 16), "Show details", lambda: self._show_item(item))
                 menu.addSeparator()
                 menu.addAction(icons.icon("close", COLORS["text"], 16), "Remove from Up Next", lambda: self._remove_from_queue(item.episode_id))
+                menu.addAction("Clear Up Next…", self._clear_queue)
                 menu.exec(self.context.queue_view.viewport().mapToGlobal(event.pos()))
                 return True
         return super().eventFilter(watched, event)
@@ -1777,6 +1981,29 @@ class MainWindow(QMainWindow):
         if self._pending_episodes_url == feed_url:
             self._show_preview_episodes(feed_url)
 
+    def _ui_episodes(self, stored) -> list:
+        """Convert stored episodes and overlay any in-flight download state."""
+        active_records = {
+            record.episode_id: record for record in (self.downloads.records() if self.downloads else ())
+            if record.state.value != "complete"
+        }
+        return [self._with_download_state(self._ui_episode(episode), active_records.get(episode.id)) for episode in stored]
+
+    def _with_download_state(self, item: UiEpisode, record) -> UiEpisode:
+        """Reflect an in-flight download on an episode row anywhere in the app."""
+        if record is None:
+            return item
+        state = "Downloading" if record.state.value == "downloading" else record.state.value.title()
+        detail = ""
+        if record.bytes_total and state == "Downloading":
+            detail = f"{self._format_bytes(record.bytes_done)} of {self._format_bytes(record.bytes_total)}"
+        elif record.error_message:
+            detail = record.error_message
+        return replace_item(
+            item, state=state, detail=detail,
+            progress=(record.bytes_done / record.bytes_total) if record.bytes_total else item.progress,
+        )
+
     def _with_preview(self, item: UiPodcast, feed) -> UiPodcast:
         """Merge fetched feed freshness into an unsubscribed directory card."""
         if feed is None or item.show_id:
@@ -1821,6 +2048,7 @@ class MainWindow(QMainWindow):
             description=show.description,
             latest_episode_title=show.latest_episode_title,
             latest_episode_date=MainWindow._display_full_date(show.latest_episode_published_at),
+            website_url=show.website_url,
         )
 
     @staticmethod
@@ -1841,6 +2069,8 @@ class MainWindow(QMainWindow):
             description=episode.description,
             artwork_path=episode.artwork_path,
             duration_seconds=episode.duration_seconds,
+            media_url=episode.media_url,
+            downloaded_path=episode.downloaded_path,
         )
 
     @staticmethod

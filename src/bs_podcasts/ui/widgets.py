@@ -1011,6 +1011,7 @@ class ContextPanel(QFrame):
     open_show_requested = Signal(int)
     preview_episodes_requested = Signal(str)
     open_url_requested = Signal(str)
+    download_menu_requested = Signal(int, object)
     queue_reordered = Signal(list)
     closed = Signal()
 
@@ -1393,8 +1394,10 @@ class ContextPanel(QFrame):
         if episode.state == "Downloaded":
             self.download.setText("Downloaded")
             self.download.setIcon(icons.icon("downloaded", COLORS["success"], 16, disabled=COLORS["success"]))
-            self.download.setEnabled(False)
+            self.download.setEnabled(True)
+            self.download.setToolTip("Downloaded — open location or delete")
         else:
+            self.download.setToolTip("")
             self.download.setText("Retry download" if episode.state == "Error" else "Download")
             self.download.setIcon(icons.icon("download", COLORS["text"], 16, disabled=COLORS["border"]))
             self.download.setEnabled(bool(self._episode_id))
@@ -1449,7 +1452,11 @@ class ContextPanel(QFrame):
             self.queue_episode_requested.emit(self._episode_id)
 
     def _download_clicked(self):
-        if self._episode_id:
+        if not self._episode_id:
+            return
+        if self.download.text() == "Downloaded":
+            self.download_menu_requested.emit(self._episode_id, self.download.mapToGlobal(self.download.rect().bottomLeft()))
+        else:
             self.download_episode_requested.emit(self._episode_id)
 
     def _seek_item(self, item):

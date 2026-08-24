@@ -52,6 +52,10 @@ class Episode:
     artwork_path: str = ""
     duration_seconds: int = 0
     detail: str = ""
+    media_url: str = ""
+    downloaded_path: str = ""
+    bookmark_id: int = 0
+    bookmark_position: float = 0.0
 
 
 class ItemRoles:

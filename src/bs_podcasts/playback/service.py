@@ -114,6 +114,22 @@ class PlaybackService:
             elif self.snapshot.episode_id is not None:
                 self.engine.play()
 
+    def stop(self):
+        """Unload the current episode: pause, persist position, go idle."""
+        if self.snapshot.episode_id is None:
+            return
+        try:
+            self.engine.pause()
+        except Exception:
+            pass
+        try:
+            self._persist_position(force=True)
+        except Exception:
+            pass
+        self.snapshot = PlaybackSnapshot(speed=self.snapshot.speed, volume=self.snapshot.volume)
+        self.repository.set_current_playback(None, PlaybackState.IDLE.value)
+        self._emit()
+
     def next(self):
         self._guard()
         if self.snapshot.episode_id is not None:
