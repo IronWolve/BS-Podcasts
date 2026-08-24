@@ -809,6 +809,9 @@ class MainWindow(QMainWindow):
         if not podcast.show_id or self.library is None:
             return
         episodes = self._ui_episodes(self.library.episodes(show_id=podcast.show_id))
+        self._preview_episodes_url = ""
+        if self.episode_page.banner.state == "empty":
+            self.episode_page.banner.clear()
         self.episode_page.header.title_label.setText(podcast.title)
         self.episode_page.header.set_subtitle("")
         show = self.library.repository.get_show(podcast.show_id)
@@ -1788,6 +1791,9 @@ class MainWindow(QMainWindow):
         self.episode_page.header.set_subtitle("")
         self.episode_page.hero.hide()
         self._hero_show_id = 0
+        self._preview_episodes_url = ""
+        if self.episode_page.banner.state == "empty":
+            self.episode_page.banner.clear()
         self.episode_page.set_filter("All")
         self.episode_page.set_items(episodes)
 
