@@ -79,7 +79,7 @@ def main() -> int:
     downloads = DownloadService(
         repository,
         DownloadRepository(database),
-        root / "downloads",
+        library.setting("downloads.directory", "") or (root / "downloads"),
     )
     state = {"window": None}
 

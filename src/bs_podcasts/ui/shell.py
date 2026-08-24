@@ -238,6 +238,7 @@ class MainWindow(QMainWindow):
         self.context.bookmark_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.context.bookmark_list.customContextMenuRequested.connect(self._pane_bookmark_menu)
         self.settings_page.cleanup_played_requested.connect(self._cleanup_played)
+        self.settings_page.change_download_folder_requested.connect(self._change_download_folder)
         self.playlist_page.order_changed.connect(self._queue_reordered)
         self.playlist_page.remove_requested.connect(lambda items: [self._remove_from_queue(item.episode_id) for item in items])
         self.playlist_page.empty_action_requested.connect(lambda: self.navigation.select(PAGE_EPISODES))
@@ -906,8 +907,10 @@ class MainWindow(QMainWindow):
             queue.setShortcut(QKeySequence(self.shortcuts.bindings().get("queue_selected", "")))
         if not many:
             if episode.state == "Downloading":
-                menu.addAction("Cancel download", lambda: self.downloads.cancel(episode.episode_id))
-            elif episode.state in {"Error", "Paused"}:
+                menu.addAction(icons.icon("pause", COLORS["text"], 16), "Pause download", lambda: self._pause_download(episode.episode_id))
+            elif episode.state == "Paused":
+                menu.addAction(icons.icon("play", COLORS["text"], 16), "Resume download", lambda: self._download_episode(episode.episode_id))
+            elif episode.state == "Error":
                 menu.addAction(icons.icon("download", COLORS["text"], 16), "Retry download", lambda: self._download_episode(episode.episode_id))
             elif episode.state != "Downloaded":
                 menu.addAction(icons.icon("download", COLORS["text"], 16), "Download", lambda: self._download_episode(episode.episode_id))
@@ -976,6 +979,11 @@ class MainWindow(QMainWindow):
             return
         item = self._ui_episode(episode)
         menu = QMenu(self)
+        record = next((r for r in self.downloads.records() if r.episode_id == episode_id), None) if self.downloads else None
+        if record is not None and record.state.value == "downloading":
+            menu.addAction(icons.icon("pause", COLORS["text"], 16), "Pause download", lambda: self._pause_download(episode_id))
+            menu.exec(global_position)
+            return
         menu.addAction(icons.icon("folder", COLORS["text"], 16), "Open file location", lambda: self._open_location(item.downloaded_path))
         menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete download…", lambda: self._delete_downloads([item]))
         menu.exec(global_position)
@@ -1322,6 +1330,30 @@ class MainWindow(QMainWindow):
         future.add_done_callback(finished)
         if not quiet:
             self._notify("Download started", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
+
+    def _pause_download(self, episode_id: int):
+        if self.downloads is not None and self.downloads.cancel(episode_id):
+            self._notify("Download paused — resume any time from its menu")
+
+    def _change_download_folder(self):
+        if self.downloads is None or self.library is None:
+            return
+        chosen = QFileDialog.getExistingDirectory(self, "Choose downloads folder", str(self.downloads.directory))
+        if not chosen:
+            return
+        target = Path(chosen)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".bs-podcasts-write-test"
+            probe.write_bytes(b"")
+            probe.unlink()
+        except OSError as exc:
+            self._notify(f"Can’t use that folder: {exc}", "error")
+            return
+        self.downloads.directory = target
+        self.library.set_setting("downloads.directory", str(target))
+        self._refresh_storage_settings()
+        self._notify(f"New downloads go to {target}", "success")
 
     def _cancel_downloads(self):
         if self.downloads is None:
