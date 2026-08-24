@@ -22,4 +22,4 @@ bs-podcasts = "bs_podcasts.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-bs_podcasts = ["data/migrations/*.sql", "assets/branding/*.png"]
+bs_podcasts = ["data/migrations/*.sql", "assets/branding/*.png", "assets/fonts/*.ttf", "assets/fonts/OFL.txt"]

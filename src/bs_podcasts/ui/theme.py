@@ -172,6 +172,21 @@ FONT_FAMILY = '"Inter", "Inter Display", "Noto Sans", "DejaVu Sans", sans-serif'
 FONT_STACK = ("Inter", "Noto Sans", "DejaVu Sans")
 
 
+def load_fonts() -> list[str]:
+    """Register the bundled Inter files so the UI looks identical on every machine.
+
+    Returns the family names that were registered; safe to call more than once.
+    """
+    from ..assets import font_paths
+
+    families = []
+    for path in font_paths():
+        font_id = QFontDatabase.addApplicationFont(str(path))
+        if font_id >= 0:
+            families.extend(QFontDatabase.applicationFontFamilies(font_id))
+    return families
+
+
 def app_font(size_px: int = TYPE["body"][0], weight: int = QFont.Weight.Normal) -> QFont:
     """Return the application font at a pixel size so lists match QSS text."""
     families = set(QFontDatabase.families())
