@@ -56,7 +56,6 @@ class AppleCharts:
             response = self.session.get(
                 self.endpoint,
                 params=params,
-                headers={"User-Agent": "BS-Podcasts/0.1"},
                 timeout=(8, 20),
             )
             response.raise_for_status()
@@ -117,7 +116,6 @@ class AppleCharts:
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Origin": "https://podcasts.apple.com",
-                    "User-Agent": "BS-Podcasts/0.1",
                 },
                 timeout=(8, 20),
             )

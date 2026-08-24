@@ -172,6 +172,8 @@ def _parse_rss(root) -> FeedData:
                 duration_seconds=_duration(_text(item, "duration")),
                 transcript_url=transcript_url,
                 transcript_type=transcript_type,
+                chapters_url=chapters_url,
+                artwork_url=item_artwork,
             )
         )
 

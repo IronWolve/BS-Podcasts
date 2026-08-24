@@ -76,19 +76,27 @@ class ArtworkCache:
         if target.is_file() and target.stat().st_size > 0:
             return target
         # Two workers asking for the same image must not race on the .part file.
-        with self._lock_for(url):
-            if target.is_file() and target.stat().st_size > 0:
-                return target
-            return self._fetch_locked(url, target)
+        lock = self._lock_for(url)
+        with lock:
+            try:
+                if target.is_file() and target.stat().st_size > 0:
+                    return target
+                return self._fetch_locked(url, target)
+            finally:
+                self._release_lock(url, lock)
+
+    def _release_lock(self, url: str, lock: Lock):
+        with self._locks_guard:
+            if self._url_locks.get(url) is lock:
+                del self._url_locks[url]
 
     def _fetch_locked(self, url: str, target: Path) -> Path:
-
         self.directory.mkdir(parents=True, exist_ok=True)
         partial = target.with_suffix(".part")
+        response = None
         try:
             response = self.session.get(url, timeout=(8, 20), stream=True)
             response.raise_for_status()
-            response_close = response.close
             content_type = response.headers.get("Content-Type", "").lower()
             if content_type and not content_type.startswith("image/"):
                 raise ArtworkError("Artwork response is not an image.")
@@ -102,7 +110,6 @@ class ArtworkCache:
             if size == 0:
                 raise ArtworkError("Artwork response was empty.")
             os.replace(partial, target)
-            response_close()
             return target
         except ArtworkError:
             partial.unlink(missing_ok=True)
@@ -110,3 +117,6 @@ class ArtworkCache:
         except (OSError, requests.RequestException) as exc:
             partial.unlink(missing_ok=True)
             raise ArtworkError(str(exc)) from exc
+        finally:
+            if response is not None:
+                response.close()
