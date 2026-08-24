@@ -41,7 +41,7 @@ LIGHT = {
     "surface_raised": "#F1F4F9",
     "surface_soft": "#E3E8F1",
     "border": "#C9D2E0",
-    "hairline": "rgba(15, 23, 42, 0.08)",
+    "hairline": "rgba(15, 23, 42, 0.14)",
     "text": "#1B2233",
     "text_strong": "#0B0F18",
     "muted": "#5B6779",
@@ -382,7 +382,7 @@ def stylesheet() -> str:
         background: transparent; border: 1px solid transparent; color: {c['muted']};
         border-radius: {r['sm']}px; padding: 5px 8px; font-weight: 500;
     }}
-    QPushButton#textButton:hover {{ color: {c['text']}; background: {c['surface_raised']}; }}
+    QPushButton#textButton:hover {{ color: {c['text_strong']}; background: {c['surface_soft']}; }}
     QPushButton#textButton:focus {{ border: {focus_ring}; }}
     QPushButton#textButton:disabled {{ color: {c['border']}; }}
     QPushButton:disabled {{ color: {c['subtle']}; }}

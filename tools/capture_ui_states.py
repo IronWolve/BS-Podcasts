@@ -103,7 +103,8 @@ def main() -> int:
         window.resize(1440, 900)
         window.navigation.select(5)
         candidate = UiPodcast("Workshop Radio (directory)", "Sample Directory", 0, 0, "#7CA8FF", feed_url="https://samples.invalid/preview.xml", directory_result=True, display_meta="Sample Directory · Technology")
-        window.discover_page.set_items([candidate])
+        trending = UiPodcast("Measure twice", "Workshop Radio", 0, 0, "#58D6C2", feed_url="https://samples.invalid/trending.xml", directory_result=True, display_meta="Technology", rank=3, is_episode=True)
+        window.discover_page.set_items([candidate, trending])
         window._show_item(candidate)
         deadline = 200
         while "Loading feed details" in window.context.body.toPlainText() and deadline:
@@ -113,6 +114,20 @@ def main() -> int:
         assert window.context.latest_card.isVisible(), "preview did not fill latest episode"
         grab(window, "discover-preview")
         assert window.context.episodes_link.isVisible(), "details pane lacks Episodes link"
+        # Trending card resolves to the matching episode in the feed.
+        window._show_item(trending)
+        deadline = 200
+        while "Loading feed details" in window.context.body.toPlainText() and deadline:
+            QApplication.processEvents()
+            deadline -= 1
+        assert window.context.meta.text().startswith("Episode of Workshop Radio"), window.context.meta.text()
+        assert window.context.primary.text() == "Subscribe to show"
+        grab(window, "discover-trending")
+        window._show_item(candidate)
+        deadline = 200
+        while "Loading feed details" in window.context.body.toPlainText() and deadline:
+            QApplication.processEvents()
+            deadline -= 1
         # Newest-episode sort picks up the fetched freshness on the card.
         window.discover_page.set_discover_sort("newest")
         card = window.discover_page.model.index(0, 0).data(257)
@@ -245,6 +260,43 @@ def main() -> int:
         assert all(e.played for e in library.episodes(show_id=show.id))
         library.mark_show_played(show.id, False)
         window._reload_library()
+
+        # Dedupe: same feed via http/www/trailing slash is rejected; OPML skips it.
+        try:
+            library.add_subscription("http://www.samples.invalid/ui.xml/")
+        except ValueError as exc:
+            assert "Already subscribed" in str(exc), exc
+        else:
+            raise AssertionError("duplicate feed was accepted")
+        opml = b'<?xml version="1.0"?><opml version="2.0"><body><outline type="rss" text="Dup" xmlUrl="https://samples.invalid/ui.xml"/><outline type="rss" text="New" xmlUrl="https://samples.invalid/other.xml"/></body></opml>'
+        added = library.import_opml(opml)
+        assert [show.feed_url for show in added] == ["https://samples.invalid/other.xml"], added
+        library.remove_subscription(added[0].id)
+
+        # Density switch relayouts without rebuilding.
+        window._apply_density(True)
+        QApplication.processEvents()
+        assert window.episode_page.delegate.compact and window.episode_page.view.sizeHintForRow(0) <= 64
+        window._apply_density(False)
+
+        # Diff-aware replace keeps the current index across a same-shape reload.
+        window.navigation.select(2)
+        window.episode_page.view.setCurrentIndex(window.episode_page.model.index(1, 0))
+        before = window.episode_page.view.currentIndex().row()
+        window._reload_library()
+        assert window.episode_page.view.currentIndex().row() == before, "reload moved the selection"
+
+        # Artwork cache prune keeps referenced files.
+        from bs_podcasts.artwork import ArtworkCache
+        cache_dir = root / "artwork"
+        cache_dir.mkdir(exist_ok=True)
+        keep_file = cache_dir / "keep.img"
+        drop_file = cache_dir / "drop.img"
+        keep_file.write_bytes(b"k" * 100)
+        drop_file.write_bytes(b"d" * 100)
+        cache = ArtworkCache(cache_dir)
+        removed, freed = cache.prune({str(keep_file)}, None)
+        assert removed == 1 and freed == 100 and keep_file.exists() and not drop_file.exists(), (removed, freed)
 
         # Global search overlay.
         window.navigation.select(0)

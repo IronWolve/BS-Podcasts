@@ -36,6 +36,7 @@ class Podcast:
     apple_url: str = ""
     website_url: str = ""
     last_refresh_text: str = ""
+    is_episode: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,14 +77,28 @@ def plain_snippet(text: str, limit: int = 240) -> str:
     return collapsed[:limit]
 
 
+def _same_rows(old, new, key) -> bool:
+    return len(old) == len(new) and all(key(a) == key(b) for a, b in zip(old, new))
+
+
 class PodcastModel(QAbstractListModel):
     def __init__(self, items=(), parent=None):
         super().__init__(parent)
         self._items = list(items)
 
+    @staticmethod
+    def _key(item):
+        return (item.show_id, item.feed_url, item.title)
+
     def replace(self, items):
+        items = list(items)
+        if self._items and _same_rows(self._items, items, self._key):
+            # Same rows, possibly new data: update in place so selection and scroll survive.
+            self._items = items
+            self.dataChanged.emit(self.index(0, 0), self.index(len(items) - 1, 0))
+            return
         self.beginResetModel()
-        self._items = list(items)
+        self._items = items
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()):
@@ -116,9 +131,18 @@ class EpisodeModel(QAbstractListModel):
         super().__init__(parent)
         self._items = list(items)
 
+    @staticmethod
+    def _key(item):
+        return (item.episode_id, item.bookmark_id, item.title)
+
     def replace(self, items):
+        items = list(items)
+        if self._items and _same_rows(self._items, items, self._key):
+            self._items = items
+            self.dataChanged.emit(self.index(0, 0), self.index(len(items) - 1, 0))
+            return
         self.beginResetModel()
-        self._items = list(items)
+        self._items = items
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()):
@@ -222,7 +246,7 @@ def _badge(painter: QPainter, right: int, top: int, text: str, color: str, fille
 
 
 class PodcastDelegate(QStyledItemDelegate):
-    MIN_CARD_WIDTH = 168
+    MIN_CARD_WIDTH = 140
     CARD_PAD = 10
     TEXT_BLOCK = 74
 
@@ -285,12 +309,17 @@ class PodcastDelegate(QStyledItemDelegate):
         painter.setPen(QColor(COLORS["muted"]))
         meta_rect = QRect(title_rect.x(), title_rect.bottom() + 4, title_rect.width() - 14, 16)
         meta = item.display_meta or f"{item.episode_count} episodes"
-        if item.directory_result and not item.show_id and item.latest_episode_date and item.latest_episode_date != "Unknown date":
+        if item.is_episode:
+            meta = item.author
+        elif item.directory_result and not item.show_id and item.latest_episode_date and item.latest_episode_date != "Unknown date":
             meta = f"Latest {item.latest_episode_date}"
         painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, meta_rect.width()))
 
         if item.rank:
             _badge(painter, art.x() + 8 + painter.fontMetrics().horizontalAdvance(f"#{item.rank}") + 16, art.y() + 8, f"#{item.rank}", COLORS["accent"], filled=True)
+        if item.is_episode:
+            painter.setFont(app_font(11, QFont.Weight.DemiBold))
+            _badge(painter, art.x() + 8 + painter.fontMetrics().horizontalAdvance("EPISODE") + 16, art.bottom() - 28, "EPISODE", COLORS["teal"], filled=True)
         badge_right = art.right() - 7
         if item.new_count:
             rect = _badge(painter, badge_right, art.y() + 8, f"{item.new_count} new", COLORS["accent"], filled=True)
@@ -298,7 +327,7 @@ class PodcastDelegate(QStyledItemDelegate):
         if item.directory_result and item.subscribed:
             _badge(painter, badge_right, art.y() + 8, "Saved", COLORS["success"], filled=True)
 
-        if hovered or selected:
+        if (hovered or selected) and not item.is_episode:
             action = self.action_rect(option.rect)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["accent"] if hovered else COLORS["surface_soft"]))

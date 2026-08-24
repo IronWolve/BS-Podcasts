@@ -311,11 +311,15 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         super().showEvent(event)
         QTimer.singleShot(0, self._layout_cards)
 
+    def set_density(self, compact: bool):
+        self._compact = compact
+        self._layout_cards()
+
     def _layout_cards(self):
         available = self.view.viewport().width() - 4
         if available <= 0:
             return
-        columns = max(2, available // 196)
+        columns = max(2, available // (156 if getattr(self, "_compact", False) else 196))
         width = available // columns
         self.delegate.set_card_width(width)
         self.view.setGridSize(self.delegate.sizeHint(None, None))
@@ -586,6 +590,11 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self.delegate.set_playing(episode_id, active)
         self.view.viewport().update()
 
+    def set_density(self, compact: bool):
+        self.delegate.compact = compact
+        self.view.doItemsLayout()
+        self.view.viewport().update()
+
     def eventFilter(self, watched, event):
         if watched is self.view.viewport() and event.type() == QEvent.Type.ContextMenu:
             self._menu(event.pos())
@@ -749,6 +758,16 @@ class HomePage(BasePage, _ListPageMixin):
         self.view.viewport().update()
         self.resume_view.viewport().update()
 
+    def set_density(self, compact: bool):
+        self.delegate.compact = compact
+        self.resume_delegate.compact = compact
+        row_height = EpisodeDelegate.COMPACT_HEIGHT if compact else EpisodeDelegate.ROW_HEIGHT
+        count = self.resume_model.rowCount()
+        self.resume_view.setFixedHeight(min(count, self.RESUME_ROWS) * row_height + 4)
+        for view in (self.view, self.resume_view):
+            view.doItemsLayout()
+            view.viewport().update()
+
     def set_counts(self, new_count: int, queue_count: int, download_count: int):
         for button, count in zip(self.summary_buttons, (new_count, queue_count, download_count)):
             button.set_count(count)
@@ -833,6 +852,7 @@ class SettingsPage(BasePage):
     cleanup_played_requested = Signal()
     change_download_folder_requested = Signal()
     open_log_requested = Signal()
+    clear_artwork_requested = Signal()
 
     FIELD_WIDTH = 180
 
@@ -908,8 +928,14 @@ class SettingsPage(BasePage):
         self.theme.addItem("Light", "light")
         self.theme.setFixedWidth(self.FIELD_WIDTH)
         appearance_form.addRow("Theme", self.theme)
+        self.density = QComboBox()
+        self.density.addItem("Comfortable", "comfortable")
+        self.density.addItem("Compact", "compact")
+        self.density.setFixedWidth(self.FIELD_WIDTH)
+        appearance_form.addRow("Density", self.density)
         self.settings_content.addWidget(appearance_card)
         self.theme.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.theme", self.theme.itemData(index)))
+        self.density.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.density", self.density.itemData(index)))
 
         # Shortcuts ----------------------------------------------------------
         shortcut_card = QFrame()
@@ -991,6 +1017,12 @@ class SettingsPage(BasePage):
         change_folder.setToolTip("Existing downloads stay where they are; new ones use the new folder")
         change_folder.clicked.connect(self.change_download_folder_requested)
         storage_actions.addWidget(change_folder)
+        clear_art = QPushButton("Clear artwork cache…")
+        clear_art.setObjectName("quietButton")
+        clear_art.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_art.setToolTip("Removes cached images no podcast or episode uses; shows the totals first")
+        clear_art.clicked.connect(self.clear_artwork_requested)
+        storage_actions.addWidget(clear_art)
         cleanup = QPushButton("Delete played downloads…")
         cleanup.setObjectName("dangerButton")
         cleanup.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1066,6 +1098,11 @@ class SettingsPage(BasePage):
         self.refresh_interval.blockSignals(True)
         self.refresh_interval.setValue(minutes)
         self.refresh_interval.blockSignals(False)
+
+    def load_density(self, value: str):
+        self.density.blockSignals(True)
+        self.density.setCurrentIndex(max(0, self.density.findData(value)))
+        self.density.blockSignals(False)
 
     def load_theme(self, value: str):
         self.theme.blockSignals(True)

@@ -1315,9 +1315,12 @@ class ContextPanel(QFrame):
 
     def show_podcast(self, podcast):
         self.set_mode(0)
-        self.art.set_artwork(podcast.artwork_path, initials(podcast.title), podcast.accent)
+        self.art.set_artwork(podcast.artwork_path, initials(podcast.author if podcast.is_episode else podcast.title), podcast.accent)
         self.title.setText(podcast.title)
-        if podcast.directory_result and not podcast.show_id:
+        self._episode_candidate = podcast.is_episode
+        if podcast.is_episode:
+            self.meta.setText(f"Episode of {podcast.author}" + (f"  ·  {podcast.display_meta}" if podcast.display_meta else ""))
+        elif podcast.directory_result and not podcast.show_id:
             self.meta.setText(podcast.display_meta or podcast.author)
         else:
             new_text = f"  ·  {podcast.new_count} new" if podcast.new_count else ""
@@ -1338,7 +1341,7 @@ class ContextPanel(QFrame):
         self.set_transcript(())
         self.set_bookmarks(())
         if self._feed_url:
-            self.primary.setText("Subscribe")
+            self.primary.setText("Subscribe to show" if podcast.is_episode else "Subscribe")
             self.primary.setIcon(icons.icon("add", COLORS["on_accent"], 18))
         else:
             self.primary.setText("Play latest")
@@ -1370,9 +1373,25 @@ class ContextPanel(QFrame):
         """Feed URL of the unsubscribed directory result currently shown, if any."""
         return self._preview_url
 
-    def show_preview(self, feed_url: str, author: str, episode_count: int, latest_title: str, latest_date: str, description: str, recent, website_url: str = ""):
-        """Fill in details fetched for a directory result that is not yet subscribed."""
+    def show_preview(self, feed_url: str, author: str, episode_count: int, latest_title: str, latest_date: str, description: str, recent, website_url: str = "", episode=None):
+        """Fill in details fetched for a directory result that is not yet subscribed.
+
+        `episode` (title, date, description) is set when the card is a trending
+        episode and it was found in the feed; the pane then describes that episode.
+        """
         if feed_url != self._preview_url:
+            return
+        if episode is not None:
+            e_title, e_date, e_description = episode
+            self.meta.setText(f"Episode of {author}  ·  {e_date}  ·  {episode_count} episodes in feed")
+            self.latest_card.setVisible(False)
+            body = e_description or description or "No show notes provided for this episode."
+            self._set_body(body)
+            if website_url:
+                self._website_url = website_url
+                self.website_link.setVisible(True)
+            self.primary.setText("Subscribe to show")
+            self.primary.setEnabled(True)
             return
         if website_url:
             self._website_url = website_url

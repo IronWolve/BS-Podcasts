@@ -318,6 +318,10 @@ class MainWindow(QMainWindow):
         )
         self._apply_skip_settings()
         self.settings_page.load_theme(self.library.setting("ui.theme", "system"))
+        self.settings_page.load_density(self.library.setting("ui.density", "comfortable"))
+        self._apply_density(self.library.setting("ui.density", "comfortable") == "compact")
+        self.settings_page.clear_artwork_requested.connect(self._clear_artwork_cache)
+        QTimer.singleShot(4000, self._prune_artwork_cache)
         self.settings_page.load_downloads(
             self.library.setting("downloads.auto", "0") == "1", int(self.library.setting("downloads.auto_limit", "3")),
             self.library.setting("downloads.delete_played", "0") == "1",
@@ -406,6 +410,54 @@ class MainWindow(QMainWindow):
         self._rail_user_compact = compact
 
     # ------------------------------------------------------------------ helpers
+    def _apply_density(self, compact: bool):
+        for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.history_page, self.bookmark_page):
+            page.set_density(compact)
+        for page in (self.podcast_page, self.discover_page):
+            page.set_density(compact)
+
+    def _referenced_artwork(self) -> set:
+        keep = set()
+        if self.library is None:
+            return keep
+        keep.update(show.artwork_path for show in self.library.shows() if show.artwork_path)
+        keep.update(episode.artwork_path for episode in self.library.episodes(limit=100000) if episode.artwork_path)
+        return keep
+
+    def _prune_artwork_cache(self):
+        """Keep the cache under 400 MB in the background; only unreferenced files go."""
+        if self.refresh is None or getattr(self.refresh, "artwork", None) is None or self.jobs is None:
+            return
+        cache = self.refresh.artwork
+        if not hasattr(cache, "prune"):
+            return
+        keep = self._referenced_artwork()
+        future = self.jobs.submit(cache.prune, keep, 400 * 1024 * 1024)
+        self._pending_jobs.add(future)
+        future.add_done_callback(lambda completed: self._pending_jobs.discard(completed))
+
+    def _clear_artwork_cache(self):
+        cache = getattr(self.refresh, "artwork", None) if self.refresh is not None else None
+        if cache is None or not hasattr(cache, "prune"):
+            self._notify("Artwork cache is unavailable in this session")
+            return
+        keep = self._referenced_artwork()
+        stale = [path for path in cache.files() if str(path) not in keep]
+        if not stale:
+            self._notify("No unused artwork to remove")
+            return
+        total = sum(path.stat().st_size for path in stale)
+        dialog = ConfirmDialog(
+            "Clear artwork cache?",
+            f"Removes {len(stale)} cached image{'s' if len(stale) != 1 else ''} ({self._format_bytes(total)}) that no podcast or episode uses. Artwork for your library is kept.",
+            "Clear cache", destructive=True, parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        removed, freed = cache.prune(keep, None)
+        self._refresh_storage_settings()
+        self._notify(f"Removed {removed} image{'s' if removed != 1 else ''}  ·  {self._format_bytes(freed)} reclaimed", "success")
+
     def _show_shortcuts(self):
         from .pages import SHORTCUT_GROUPS
 
@@ -567,7 +619,7 @@ class MainWindow(QMainWindow):
         for episode_id in ids:
             self.library.enqueue(episode_id)
         if ids:
-            self._reload_library()
+            self._reload_queue()
             self._notify(f"Added {len(ids)} episode{'s' if len(ids) != 1 else ''} to Up Next", "success", "Show", self._show_queue)
 
     def _queue_ids(self, ids):
@@ -577,7 +629,7 @@ class MainWindow(QMainWindow):
         for episode_id in ids:
             self.library.enqueue(episode_id)
         if ids:
-            self._reload_library()
+            self._reload_queue()
             self._notify(f"Added {len(ids)} episode{'s' if len(ids) != 1 else ''} to Up Next", "success", "Show", self._show_queue)
 
     def _podcast_settings(self):
@@ -632,6 +684,8 @@ class MainWindow(QMainWindow):
                 self._apply_skip_settings()
             elif key == "refresh.interval_minutes":
                 self._arm_refresh_timer()
+            elif key == "ui.density":
+                self._apply_density(value == "compact")
             elif key == "ui.theme":
                 apply_theme(resolve_theme(value))
                 self._save_layout()
@@ -744,6 +798,17 @@ class MainWindow(QMainWindow):
         if not shows and not episodes:
             self.context.show_empty()
         self._apply_playing_marker()
+
+    def _reload_queue(self):
+        """Cheap refresh for queue-only changes: queue views, badges, counts."""
+        if self.library is None:
+            return
+        queued = [self._ui_episode(episode) for episode in self.library.queue()]
+        self.playlist_page.set_items(queued)
+        self.context.set_queue(queued)
+        self.player.set_next(next((e.title for e in queued if e.episode_id != self._playing_episode_id), ""))
+        self.navigation.set_badge(PAGE_QUEUE, len(queued))
+        self.home_page.summary_buttons[1].set_count(len(queued))
 
     def _add_podcast(self):
         if self.library is None:
@@ -1026,7 +1091,7 @@ class MainWindow(QMainWindow):
     def _remove_from_queue(self, episode_id: int):
         if self.library is not None:
             self.library.dequeue(episode_id)
-            self._reload_library()
+            self._reload_queue()
             self._notify("Removed from Up Next", "info", "Undo", lambda: self._queue_episode(episode_id, quiet=True))
 
     def _auto_download(self, show_id: int):
@@ -1219,12 +1284,12 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             ids = [episode.id for episode in queued]
             self.library.clear_queue()
-            self._reload_library()
+            self._reload_queue()
 
             def undo():
                 for episode_id in ids:
                     self.library.enqueue(episode_id)
-                self._reload_library()
+                self._reload_queue()
 
             self._notify("Up Next cleared", "success", "Undo", undo)
 
@@ -1234,7 +1299,7 @@ class MainWindow(QMainWindow):
         if episode_id not in {episode.id for episode in self.library.queue()}:
             self.library.enqueue(episode_id)
         self.library.queue_to_front(episode_id)
-        self._reload_library()
+        self._reload_queue()
         self._notify("Playing next", "success")
 
     def _mark_show_played(self, show_id: int, played: bool):
@@ -1285,16 +1350,14 @@ class MainWindow(QMainWindow):
         if self.library is None or not episode_id:
             return
         self.library.enqueue(episode_id)
-        self._reload_library()
+        self._reload_queue()
         if not quiet:
             self._notify("Added to Up Next", "success", "Show", self._show_queue)
 
     def _queue_reordered(self, episode_ids: list[int]):
         if self.library is not None:
             self.library.reorder_queue(episode_ids)
-            queued = [self._ui_episode(episode) for episode in self.library.queue()]
-            self.context.set_queue(queued)
-            self.playlist_page.set_items(queued)
+            self._reload_queue()
 
     def _play_pause(self):
         if self.playback is not None:
@@ -1941,6 +2004,7 @@ class MainWindow(QMainWindow):
                     latest_episode_title=saved.latest_episode_title if saved else "",
                     latest_episode_date=self._display_full_date(saved.latest_episode_published_at if saved else ""),
                     apple_url=candidate.apple_url,
+                    is_episode=candidate.chart_type == "trending",
                 )
             )
         podcasts = [self._with_preview(item, self._previews.get(item.feed_url)) for item in podcasts]
@@ -2210,15 +2274,23 @@ class MainWindow(QMainWindow):
         episodes = sorted(feed.episodes, key=lambda episode: episode.published_at or "", reverse=True)
         latest = episodes[0] if episodes else None
         recent = [(episode.title, self._display_full_date(episode.published_at)) for episode in episodes[:5]]
+        card = next((item for item in self.discover_page._all_items if item.feed_url == feed_url), None)
+        matched = None
+        if card is not None and card.is_episode:
+            wanted = card.title.strip().lower()
+            hit = next((e for e in episodes if e.title.strip().lower() == wanted), None) or next((e for e in episodes if wanted and wanted in e.title.lower()), None)
+            if hit is not None:
+                matched = (hit.title, self._display_full_date(hit.published_at), hit.description)
         self.context.show_preview(
             feed_url,
-            feed.author,
+            (feed.title or (card.author if card else "")) if matched else (feed.author or (card.author if card else "")),
             len(feed.episodes),
             latest.title if latest else "",
             self._display_full_date(latest.published_at) if latest else "",
             feed.description,
             recent,
             feed.website_url,
+            matched,
         )
         if self._pending_episodes_url == feed_url:
             self._show_preview_episodes(feed_url)

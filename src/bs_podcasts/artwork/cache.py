@@ -19,6 +19,40 @@ class ArtworkCache:
         self.directory = Path(directory)
         self.session = session or requests.Session()
 
+    def files(self):
+        if not self.directory.is_dir():
+            return []
+        return [path for path in self.directory.iterdir() if path.is_file() and path.suffix == ".img"]
+
+    def usage(self) -> tuple[int, int]:
+        files = self.files()
+        return len(files), sum(path.stat().st_size for path in files)
+
+    def prune(self, keep: set[str], max_bytes: int | None = None) -> tuple[int, int]:
+        """Delete cached files not in `keep`, oldest first, until under `max_bytes`.
+
+        With max_bytes=None every unreferenced file goes. Returns (count, bytes).
+        """
+        candidates = sorted(
+            (path for path in self.files() if str(path) not in keep),
+            key=lambda path: path.stat().st_mtime,
+        )
+        removed = 0
+        freed = 0
+        total = sum(path.stat().st_size for path in self.files())
+        for path in candidates:
+            if max_bytes is not None and total <= max_bytes:
+                break
+            size = path.stat().st_size
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+            freed += size
+            total -= size
+        return removed, freed
+
     def path_for(self, url: str) -> Path:
         digest = sha256(url.encode("utf-8")).hexdigest()
         return self.directory / f"{digest}.img"
