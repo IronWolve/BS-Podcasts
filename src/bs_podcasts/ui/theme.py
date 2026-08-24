@@ -451,7 +451,7 @@ def stylesheet() -> str:
     QTabWidget#nowPlayingTabWidget QTabBar {{ qproperty-drawBase: 0; }}
     QTabWidget#nowPlayingTabWidget QTabBar::tab {{
         background: transparent; color: {c['muted']}; border: 0;
-        border-bottom: 2px solid transparent; padding: 8px 2px; margin-right: 22px;
+        border-bottom: 2px solid transparent; padding: 8px 2px; margin-right: 14px;
         font-size: {body}px; font-weight: 500;
     }}
     QTabWidget#nowPlayingTabWidget QTabBar::tab:hover {{ color: {c['text']}; }}

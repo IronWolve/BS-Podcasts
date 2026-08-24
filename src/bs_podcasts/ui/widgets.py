@@ -1632,6 +1632,8 @@ class NowPlayingView(QFrame):
         self.tabs.setObjectName("nowPlayingTabWidget")
         self.tabs.setDocumentMode(True)
         self.tabs.tabBar().setExpanding(False)
+        self.tabs.tabBar().setUsesScrollButtons(False)
+        self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
         self.notes = QTextBrowser()
         self.notes.setReadOnly(True)
         self.notes.setOpenExternalLinks(True)
