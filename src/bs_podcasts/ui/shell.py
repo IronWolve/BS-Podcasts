@@ -1493,6 +1493,7 @@ class MainWindow(QMainWindow):
                     if self.pages.currentIndex() != PAGE_SETTINGS and not self.now_playing.isVisible():
                         self.context.set_mode(0)
                         self.context.show_episode(self._ui_episode(episode))
+                        self.context.set_playing(episode_id, state == "playing", state == "loading")
                         self._load_listening_details(episode_id)
                         if self._last_mode in {"wide", "medium"}:
                             self.context.show()

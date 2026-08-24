@@ -1906,6 +1906,9 @@ class PlayerBar(QFrame):
         self._skip_back = 15
         self._skip_forward = 30
         self._has_episode = False
+        self._ab_active = False
+        self._trim_active = False
+        self._sleep_active = False
         layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE["lg"], SPACE["sm"], SPACE["lg"], SPACE["sm"])
         layout.setSpacing(SPACE["md"])
@@ -2003,14 +2006,14 @@ class PlayerBar(QFrame):
         self.speed.clicked.connect(self._show_speed)
         self.bookmark = icon_button("bookmark-add", "Bookmark this moment  ·  Ctrl+B")
         self.bookmark.clicked.connect(self.bookmark_requested)
-        self.ab = icon_button("loop", "A–B repeat: set point A  ·  Ctrl+Shift+A")
-        self.ab.clicked.connect(self.ab_requested)
-        self.trim = icon_button("trim", "Silence trim: off  ·  Ctrl+T")
-        self.trim.clicked.connect(self.trim_requested)
-        self.sleep = icon_button("sleep", "Sleep timer")
+        self.ab = icon_button("loop", "A–B repeat: set point A  ·  Ctrl+Shift+A", checkable=True)
+        self.ab.clicked.connect(lambda: (self.ab.setChecked(self._ab_active), self.ab_requested.emit()))
+        self.trim = icon_button("trim", "Silence trim: off  ·  Ctrl+T", checkable=True)
+        self.trim.clicked.connect(lambda: (self.trim.setChecked(self._trim_active), self.trim_requested.emit()))
+        self.sleep = icon_button("sleep", "Sleep timer", checkable=True)
         self.sleep_popover = SleepPopover(self)
         self.sleep_popover.sleep_selected.connect(self.sleep_requested)
-        self.sleep.clicked.connect(lambda: self.sleep_popover.show_above(self.sleep))
+        self.sleep.clicked.connect(lambda: (self.sleep.setChecked(self._sleep_active), self.sleep_popover.show_above(self.sleep)))
         self.queue = icon_button("panel", "Show Up Next", checkable=True)
         self.queue.clicked.connect(self.context_requested)
         self.volume = icon_button("volume", "Volume")
@@ -2136,6 +2139,9 @@ class PlayerBar(QFrame):
         self.volume_popover.set_volume(self._volume)
         self.volume.setIcon(icons.icon("mute" if self._volume == 0 else "volume", COLORS["text"], 20, disabled=COLORS["border"]))
         self.volume.setToolTip("Muted" if self._volume == 0 else f"Volume {int(self._volume)}")
+        self._ab_active = snapshot.ab_start is not None
+        self._trim_active = snapshot.trim_level != "off"
+        self._sleep_active = snapshot.sleep_deadline is not None
         if snapshot.ab_start is None:
             self.ab.setChecked(False)
             self.ab.setToolTip("A–B repeat: set point A  ·  Ctrl+Shift+A")
