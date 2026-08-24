@@ -1,10 +1,13 @@
-"""Optional system tray controls using an original generated mark."""
+"""Optional system tray controls using the packaged original mark."""
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from ..assets import icon_path
+
+
+APP_TITLE = "BS Podcasts"
 
 
 def _tray_icon() -> QIcon:
@@ -18,7 +21,7 @@ def _tray_icon() -> QIcon:
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(QColor("#FFB45E"))
     painter.drawRoundedRect(1, 1, 30, 30, 8, 8)
-    painter.setPen(QColor("#0E1320"))
+    painter.setPen(QColor("#0B0F18"))
     font = QFont()
     font.setBold(True)
     font.setPixelSize(13)
@@ -31,35 +34,58 @@ def _tray_icon() -> QIcon:
 class TrayController:
     def __init__(self, window, playback):
         self.tray = None
+        self.window = window
+        self.playback = playback
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         tray = QSystemTrayIcon(_tray_icon(), window)
-        tray.setToolTip("BS Podcasts")
+        tray.setToolTip(APP_TITLE)
         menu = QMenu()
-        show = QAction("Show BS Podcasts", menu)
+        self.now_playing = QAction("Nothing playing", menu)
+        self.now_playing.setEnabled(False)
+        show = QAction(f"Show {APP_TITLE}", menu)
         show.triggered.connect(self._show_window)
-        toggle = QAction("Play / Pause", menu)
-        toggle.triggered.connect(playback.play_pause)
-        back = QAction("Back 15 seconds", menu)
-        back.triggered.connect(lambda: playback.skip(-15))
-        forward = QAction("Forward 30 seconds", menu)
-        forward.triggered.connect(lambda: playback.skip(30))
+        self.toggle = QAction("Play / Pause", menu)
+        self.toggle.triggered.connect(playback.play_pause)
+        # Skip lengths follow the per-podcast settings via the playback service.
+        self.back = QAction("Skip back", menu)
+        self.back.triggered.connect(playback.skip_back)
+        self.forward = QAction("Skip forward", menu)
+        self.forward.triggered.connect(playback.skip_forward)
         quit_action = QAction("Quit", menu)
         quit_action.triggered.connect(QApplication.instance().quit)
+        menu.addAction(self.now_playing)
+        menu.addSeparator()
         menu.addAction(show)
         menu.addSeparator()
-        menu.addAction(toggle)
-        menu.addAction(back)
-        menu.addAction(forward)
+        menu.addAction(self.toggle)
+        menu.addAction(self.back)
+        menu.addAction(self.forward)
         menu.addSeparator()
         menu.addAction(quit_action)
         tray.setContextMenu(menu)
         tray.activated.connect(lambda _reason: self._show_window())
         tray.show()
-        self.window = window
         self.tray = tray
+        bridge = getattr(window, "_bridge", None)
+        if bridge is not None:
+            bridge.playback_event.connect(self._playback_changed)
+
+    def _playback_changed(self, snapshot):
+        if self.tray is None:
+            return
+        if snapshot.episode_id is None:
+            self.now_playing.setText("Nothing playing")
+            self.tray.setToolTip(APP_TITLE)
+            self.toggle.setText("Play / Pause")
+            return
+        title = snapshot.title if len(snapshot.title) <= 60 else snapshot.title[:57] + "…"
+        state = str(snapshot.state)
+        self.now_playing.setText(f"{'▶' if state == 'playing' else '⏸'}  {title}")
+        self.tray.setToolTip(f"{snapshot.title} — {snapshot.show_title}\n{APP_TITLE}")
+        self.toggle.setText("Pause" if state == "playing" else "Play")
 
     def _show_window(self):
-        self.window.show()
+        self.window.showNormal()
         self.window.raise_()
         self.window.activateWindow()

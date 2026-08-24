@@ -1,12 +1,16 @@
-"""Synthetic M0 data and model-backed collection views."""
+"""UI item dataclasses and model-backed collection views with painted delegates."""
 
 from dataclasses import dataclass
+import html
+import re
 
-from PySide6.QtCore import QAbstractListModel, QMimeData, QModelIndex, QSize, Signal, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
+from PySide6.QtCore import QAbstractListModel, QMimeData, QModelIndex, QRect, QSize, Signal, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle
 
-from .theme import COLORS
+from . import icons
+from .pixmaps import cover, initials
+from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, app_font
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,9 @@ class Podcast:
     description: str = ""
     latest_episode_title: str = ""
     latest_episode_date: str = ""
+    latest_sort_key: str = ""
+    apple_url: str = ""
+    website_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -43,37 +50,29 @@ class Episode:
     show_id: int = 0
     description: str = ""
     artwork_path: str = ""
-
-
-PODCASTS = (
-    Podcast("The Signal Room", "Northlight Audio", 148, 3, "#7CA8FF"),
-    Podcast("Small Hours", "Cedar House", 86, 1, "#58D6C2"),
-    Podcast("Field Notes", "Mara Bell", 212, 7, "#FFB45E"),
-    Podcast("Deep Current", "Independent", 64, 0, "#C794FF"),
-    Podcast("Working Theory", "Studio Twelve", 103, 2, "#FF7A88"),
-    Podcast("The Long Weekend", "Overland Media", 51, 0, "#76D68A"),
-    Podcast("Good Company", "Public Desk", 174, 4, "#F2C46D"),
-    Podcast("Night Archive", "Relay Network", 39, 1, "#91A7FF"),
-)
-
-
-EPISODES = (
-    Episode("The map is not the territory", "The Signal Room", "Today", "48 min", 0.42, "In progress", "#7CA8FF"),
-    Episode("A quiet system that actually works", "Working Theory", "Today", "36 min", 0.0, "New", "#FF7A88"),
-    Episode("After the last train", "Small Hours", "Yesterday", "52 min", 0.78, "In progress", "#58D6C2"),
-    Episode("What the tide brought back", "Deep Current", "Yesterday", "41 min", 0.0, "Downloaded", "#C794FF"),
-    Episode("Tools for an uncertain forecast", "Field Notes", "Aug 21", "29 min", 1.0, "Played", "#FFB45E"),
-    Episode("A table for eight", "Good Company", "Aug 20", "58 min", 0.0, "New", "#F2C46D"),
-    Episode("The road beyond the weather", "The Long Weekend", "Aug 19", "1 hr 12 min", 0.16, "In progress", "#76D68A"),
-)
+    duration_seconds: int = 0
+    detail: str = ""
 
 
 class ItemRoles:
     ITEM = Qt.ItemDataRole.UserRole + 1
 
 
+_TAG = re.compile(r"<[^>]+>")
+_WS = re.compile(r"\s+")
+
+
+def plain_snippet(text: str, limit: int = 240) -> str:
+    """One-line plain-text preview of possibly-HTML show notes."""
+    if not text:
+        return ""
+    stripped = html.unescape(_TAG.sub(" ", text))
+    collapsed = _WS.sub(" ", stripped).strip()
+    return collapsed[:limit]
+
+
 class PodcastModel(QAbstractListModel):
-    def __init__(self, items=PODCASTS, parent=None):
+    def __init__(self, items=(), parent=None):
         super().__init__(parent)
         self._items = list(items)
 
@@ -85,6 +84,12 @@ class PodcastModel(QAbstractListModel):
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._items)
 
+    def row_for_show(self, show_id: int) -> int:
+        for row, item in enumerate(self._items):
+            if item.show_id == show_id:
+                return row
+        return -1
+
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or not 0 <= index.row() < len(self._items):
             return None
@@ -92,11 +97,8 @@ class PodcastModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return item.title
         if role == Qt.ItemDataRole.ToolTipRole:
-            return "\n".join(
-                value
-                for value in (item.title, item.author, item.display_meta)
-                if value
-            )
+            health = HEALTH_LABELS.get(item.health, "") if item.show_id else ""
+            return "\n".join(value for value in (item.title, item.author, item.display_meta, health) if value)
         if role == ItemRoles.ITEM:
             return item
         return None
@@ -105,7 +107,7 @@ class PodcastModel(QAbstractListModel):
 class EpisodeModel(QAbstractListModel):
     order_changed = Signal(list)
 
-    def __init__(self, items=EPISODES, parent=None):
+    def __init__(self, items=(), parent=None):
         super().__init__(parent)
         self._items = list(items)
 
@@ -117,6 +119,12 @@ class EpisodeModel(QAbstractListModel):
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._items)
 
+    def row_for_episode(self, episode_id: int) -> int:
+        for row, item in enumerate(self._items):
+            if item.episode_id == episode_id:
+                return row
+        return -1
+
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or not 0 <= index.row() < len(self._items):
             return None
@@ -124,11 +132,7 @@ class EpisodeModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return item.title
         if role == Qt.ItemDataRole.ToolTipRole:
-            return "\n".join(
-                value
-                for value in (item.title, item.show, item.description)
-                if value
-            )
+            return "\n".join(value for value in (item.title, item.show, plain_snippet(item.description, 160)) if value)
         if role == ItemRoles.ITEM:
             return item
         return None
@@ -142,14 +146,20 @@ class EpisodeModel(QAbstractListModel):
     def supportedDropActions(self):
         return Qt.DropAction.MoveAction
 
+    ROW_MIME = "application/x-bs-podcasts-episode-row"
+    IDS_MIME = "application/x-bs-podcasts-episode-ids"
+
     def mimeTypes(self):
-        return ["application/x-bs-podcasts-episode-row"]
+        return [self.ROW_MIME, self.IDS_MIME]
 
     def mimeData(self, indexes):
         data = QMimeData()
         rows = sorted({index.row() for index in indexes if index.isValid()})
         if rows:
-            data.setData("application/x-bs-podcasts-episode-row", str(rows[0]).encode("ascii"))
+            data.setData(self.ROW_MIME, str(rows[0]).encode("ascii"))
+            ids = [self._items[row].episode_id for row in rows if 0 <= row < len(self._items) and self._items[row].episode_id]
+            data.setData(self.IDS_MIME, ",".join(str(i) for i in ids).encode("ascii"))
+            data.setText(", ".join(self._items[row].title for row in rows if 0 <= row < len(self._items)))
         return data
 
     def dropMimeData(self, data, action, row, column, parent):
@@ -170,9 +180,7 @@ class EpisodeModel(QAbstractListModel):
         if destination_child == source_row or destination_child == source_row + 1:
             return False
         destination_child = max(0, min(destination_child, len(self._items)))
-        self.beginMoveRows(
-            source_parent, source_row, source_row, destination_parent, destination_child
-        )
+        self.beginMoveRows(source_parent, source_row, source_row, destination_parent, destination_child)
         item = self._items.pop(source_row)
         insertion = destination_child - 1 if source_row < destination_child else destination_child
         self._items.insert(insertion, item)
@@ -181,199 +189,286 @@ class EpisodeModel(QAbstractListModel):
         return True
 
 
-def _initials(text: str) -> str:
-    words = [word for word in text.replace("The ", "").split() if word]
-    return "".join(word[0] for word in words[:2]).upper()
+def _draw_focus(painter: QPainter, rect: QRect, radius: int):
+    painter.setPen(QPen(QColor(COLORS["accent"]), 2))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), radius, radius)
+
+
+def _badge(painter: QPainter, right: int, top: int, text: str, color: str, filled: bool = False, height: int = 20):
+    """Draw a pill badge right-aligned at `right`; returns its rect."""
+    font = app_font(11, QFont.Weight.DemiBold)
+    painter.setFont(font)
+    width = painter.fontMetrics().horizontalAdvance(text) + 16
+    rect = QRect(right - width, top, width, height)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    if filled:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawRoundedRect(rect, height // 2, height // 2)
+        painter.setPen(QColor(COLORS["on_accent"]))
+    else:
+        painter.setPen(QPen(QColor(color), 1))
+        painter.setBrush(QColor(COLORS["canvas"]))
+        painter.drawRoundedRect(rect, height // 2, height // 2)
+        painter.setPen(QColor(color))
+    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+    return rect
 
 
 class PodcastDelegate(QStyledItemDelegate):
-    CARD_SIZE = QSize(184, 224)
+    MIN_CARD_WIDTH = 168
+    CARD_PAD = 10
+    TEXT_BLOCK = 74
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.card_width = 184
+
+    def set_card_width(self, width: int):
+        self.card_width = max(self.MIN_CARD_WIDTH, int(width))
 
     def sizeHint(self, option, index):
-        return self.CARD_SIZE
+        art = self.card_width - 2 * self.CARD_PAD
+        return QSize(self.card_width, art + self.TEXT_BLOCK + 8)
+
+    def action_rect(self, rect: QRect) -> QRect:
+        """Hover action button over the artwork's bottom-right corner."""
+        card = rect.adjusted(4, 4, -4, -4)
+        art_size = card.width() - 2 * self.CARD_PAD
+        art = QRect(card.x() + self.CARD_PAD, card.y() + self.CARD_PAD, art_size, art_size)
+        return QRect(art.right() - 46, art.bottom() - 46, 38, 38)
 
     def paint(self, painter: QPainter, option, index):
         item = index.data(ItemRoles.ITEM)
         if item is None:
             return
-
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        card = option.rect.adjusted(5, 5, -7, -7)
+        card = option.rect.adjusted(4, 4, -4, -4)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
-        fill = COLORS["surface_soft"] if selected or hovered else COLORS["surface"]
-        painter.setPen(QPen(QColor(COLORS["accent"] if selected else COLORS["border"]), 1))
-        painter.setBrush(QColor(fill))
+        focused = bool(option.state & QStyle.StateFlag.State_HasFocus)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(COLORS["surface_raised"] if selected or hovered else COLORS["surface"]))
         painter.drawRoundedRect(card, 14, 14)
+        if selected:
+            painter.setPen(QPen(QColor(COLORS["accent"] if focused else COLORS["border"]), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(card, 14, 14)
 
-        art = card.adjusted(10, 10, -10, -68)
-        font = QFont(option.font)
-        pixmap = QPixmap(item.artwork_path) if item.artwork_path else QPixmap()
-        if not pixmap.isNull():
-            painter.drawPixmap(art, pixmap)
-        else:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(item.accent))
-            painter.drawRoundedRect(art, 11, 11)
-            painter.setPen(QColor(COLORS["canvas"]))
-            font.setPointSize(23)
-            font.setWeight(QFont.Weight.Bold)
-            painter.setFont(font)
-            painter.drawText(art, Qt.AlignmentFlag.AlignCenter, _initials(item.title))
+        pad = self.CARD_PAD
+        art_size = card.width() - 2 * pad
+        art = QRect(card.x() + pad, card.y() + pad, art_size, art_size)
+        scale = painter.device().devicePixelRatioF() if hasattr(painter.device(), "devicePixelRatioF") else 1.0
+        painter.drawPixmap(art, cover(item.artwork_path, art.width(), art.height(), 10, initials(item.title), item.accent, scale))
 
-        title_rect = card.adjusted(12, art.height() + 18, -12, -34)
+        title_font = app_font(13, QFont.Weight.DemiBold)
+        painter.setFont(title_font)
         painter.setPen(QColor(COLORS["text"]))
-        font.setPointSize(10)
-        font.setWeight(QFont.Weight.DemiBold)
-        painter.setFont(font)
-        title = painter.fontMetrics().elidedText(item.title, Qt.TextElideMode.ElideRight, title_rect.width())
-        painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, title)
-
-        meta_rect = card.adjusted(12, art.height() + 38, -12, -10)
-        painter.setPen(QColor(COLORS["muted"]))
-        font.setPointSize(8)
-        font.setWeight(QFont.Weight.Normal)
-        painter.setFont(font)
-        meta = item.display_meta or f"{item.episode_count} episodes"
-        meta = painter.fontMetrics().elidedText(
-            meta, Qt.TextElideMode.ElideRight, meta_rect.width()
-        )
-        painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, meta)
-
-        if item.rank:
-            rank_badge = art.adjusted(8, 8, -(art.width() - 42), -(art.height() - 34))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(COLORS["accent"]))
-            painter.drawRoundedRect(rank_badge, 9, 9)
-            painter.setPen(QColor(COLORS["canvas"]))
-            font.setPointSize(8)
-            font.setWeight(QFont.Weight.Bold)
-            painter.setFont(font)
+        title_rect = QRect(card.x() + pad + 2, art.bottom() + 10, card.width() - 2 * pad - 4, 36)
+        metrics = painter.fontMetrics()
+        lines = _wrap_two_lines(metrics, item.title, title_rect.width())
+        for line_index, line in enumerate(lines):
             painter.drawText(
-                rank_badge, Qt.AlignmentFlag.AlignCenter, f"#{item.rank}"
+                QRect(title_rect.x(), title_rect.y() + line_index * 18, title_rect.width(), 18),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                line,
             )
 
-        if item.new_count:
-            badge = card.adjusted(card.width() - 42, 16, -16, -(card.height() - 42))
-            painter.setBrush(QColor(COLORS["canvas"]))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(badge, 9, 9)
-            painter.setPen(QColor(item.accent))
-            font.setPointSize(8)
-            font.setWeight(QFont.Weight.Bold)
-            painter.setFont(font)
-            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, str(item.new_count))
-        elif item.directory_result and item.subscribed:
-            badge = card.adjusted(card.width() - 70, 16, -16, -(card.height() - 42))
-            painter.setBrush(QColor(COLORS["canvas"]))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(badge, 9, 9)
-            painter.setPen(QColor(COLORS["success"]))
-            font.setPointSize(7)
-            font.setWeight(QFont.Weight.Bold)
-            painter.setFont(font)
-            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, "SAVED")
+        painter.setFont(app_font(12))
+        painter.setPen(QColor(COLORS["muted"]))
+        meta_rect = QRect(title_rect.x(), title_rect.bottom() + 4, title_rect.width() - 14, 16)
+        meta = item.display_meta or f"{item.episode_count} episodes"
+        if item.directory_result and not item.show_id and item.latest_episode_date and item.latest_episode_date != "Unknown date":
+            meta = f"Latest {item.latest_episode_date}"
+        painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, meta_rect.width()))
 
-        health_colors = {
-            "ok": COLORS["success"],
-            "partial": COLORS["warning"],
-            "error": COLORS["danger"],
-            "suspended": COLORS["muted"],
-            "loading": COLORS["blue"],
-        }
-        health_color = health_colors.get(item.health)
-        if health_color:
-            dot = card.adjusted(12, card.height() - 22, -(card.width() - 20), -14)
+        if item.rank:
+            _badge(painter, art.x() + 8 + painter.fontMetrics().horizontalAdvance(f"#{item.rank}") + 16, art.y() + 8, f"#{item.rank}", COLORS["accent"], filled=True)
+        if item.new_count:
+            _badge(painter, art.right() - 7, art.y() + 8, f"{item.new_count} new", COLORS["accent"], filled=True)
+        elif item.directory_result and item.subscribed:
+            _badge(painter, art.right() - 7, art.y() + 8, "Saved", COLORS["success"], filled=True)
+
+        if hovered or selected:
+            action = self.action_rect(option.rect)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(COLORS["accent"] if hovered else COLORS["surface_soft"]))
+            painter.drawEllipse(action)
+            glyph = "play" if item.show_id else ("check" if item.subscribed else "add")
+            icons.paint(painter, glyph, COLORS["on_accent"] if hovered else COLORS["text"], action.adjusted(9, 9, -9, -9), scale)
+
+        health_color = HEALTH_COLORS.get(item.health)
+        if health_color and item.show_id:
+            dot = QRect(card.right() - pad - 8, meta_rect.center().y() - 3, 7, 7)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(health_color))
             painter.drawEllipse(dot)
 
+        if focused and not selected:
+            _draw_focus(painter, card, 14)
         painter.restore()
 
 
+def _wrap_two_lines(metrics, text: str, width: int):
+    words = text.split()
+    if not words:
+        return [""]
+    first, rest = "", words
+    for index, word in enumerate(words):
+        candidate = (first + " " + word).strip()
+        if metrics.horizontalAdvance(candidate) > width and first:
+            rest = words[index:]
+            break
+        first = candidate
+        rest = words[index + 1:]
+    if not rest:
+        return [first]
+    return [first, metrics.elidedText(" ".join(rest), Qt.TextElideMode.ElideRight, width)]
+
+
 class EpisodeDelegate(QStyledItemDelegate):
+    ROW_HEIGHT = 88
+    COMPACT_HEIGHT = 64
+    PLAY_ZONE = 48
+
+    def __init__(self, parent=None, compact: bool = False, reorder: bool = False):
+        super().__init__(parent)
+        self.compact = compact
+        self.reorder = reorder
+        self.playing_id = 0
+        self.playing_active = False
+        self._snippets: dict[int, str] = {}
+
+    def set_playing(self, episode_id: int, active: bool):
+        self.playing_id = episode_id or 0
+        self.playing_active = active
+
     def sizeHint(self, option, index):
-        return QSize(1, 88)
+        return QSize(1, self.COMPACT_HEIGHT if self.compact else self.ROW_HEIGHT)
+
+    def play_rect(self, rect: QRect) -> QRect:
+        row = rect.adjusted(2, 3, -4, -3)
+        size = 36 if not self.compact else 30
+        return QRect(row.right() - size - 10, row.center().y() - size // 2, size, size)
 
     def paint(self, painter: QPainter, option, index):
         item = index.data(ItemRoles.ITEM)
         if item is None:
             return
-
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        row = option.rect.adjusted(4, 4, -6, -4)
+        row = option.rect.adjusted(2, 3, -4, -3)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
-        fill = COLORS["surface_soft"] if selected or hovered else COLORS["surface"]
-        painter.setPen(QPen(QColor(COLORS["accent"] if selected else COLORS["border"]), 1))
-        painter.setBrush(QColor(fill))
-        painter.drawRoundedRect(row, 12, 12)
-
-        art = row.adjusted(10, 10, -(row.width() - 64), -10)
-        font = QFont(option.font)
-        pixmap = QPixmap(item.artwork_path) if item.artwork_path else QPixmap()
-        if not pixmap.isNull():
-            painter.drawPixmap(art, pixmap)
-        else:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(item.accent))
-            painter.drawRoundedRect(art, 9, 9)
-            painter.setPen(QColor(COLORS["canvas"]))
-            font.setPointSize(12)
-            font.setWeight(QFont.Weight.Bold)
-            painter.setFont(font)
-            painter.drawText(art, Qt.AlignmentFlag.AlignCenter, _initials(item.show))
-
-        text_left = art.right() + 13
-        right_space = 116
-        title_rect = row.adjusted(text_left - row.left(), 10, -right_space, -45)
-        painter.setPen(QColor(COLORS["text"]))
-        font.setPointSize(10)
-        font.setWeight(QFont.Weight.DemiBold)
-        painter.setFont(font)
-        title = painter.fontMetrics().elidedText(item.title, Qt.TextElideMode.ElideRight, title_rect.width())
-        painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
-
-        meta_rect = row.adjusted(text_left - row.left(), 40, -right_space, -17)
-        painter.setPen(QColor(COLORS["muted"]))
-        font.setPointSize(8)
-        font.setWeight(QFont.Weight.Normal)
-        painter.setFont(font)
-        meta = f"{item.show}  ·  {item.published}  ·  {item.duration}"
-        meta = painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, meta_rect.width())
-        painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, meta)
-
-        badge = row.adjusted(row.width() - 104, 24, -38, -31)
-        badge_color = COLORS["success"] if item.state == "Downloaded" else item.accent
-        painter.setPen(QPen(QColor(badge_color), 1))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(badge, 10, 10)
-        painter.setPen(QColor(badge_color))
-        font.setPointSize(7)
-        font.setWeight(QFont.Weight.DemiBold)
-        painter.setFont(font)
-        painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, item.state.upper())
-
-        play = row.adjusted(row.width() - 33, 25, -9, -31)
+        focused = bool(option.state & QStyle.StateFlag.State_HasFocus)
+        playing = bool(item.episode_id) and item.episode_id == self.playing_id
+        radius = 12
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(COLORS["accent"]))
-        painter.drawEllipse(play)
-        painter.setPen(QColor(COLORS["canvas"]))
-        font.setPointSize(9)
-        font.setWeight(QFont.Weight.Bold)
-        painter.setFont(font)
-        painter.drawText(play.adjusted(1, 0, 0, 0), Qt.AlignmentFlag.AlignCenter, "▶")
+        painter.setBrush(QColor(COLORS["surface_raised"] if selected or hovered else COLORS["surface"]))
+        painter.drawRoundedRect(row, radius, radius)
+        if selected:
+            painter.setPen(QPen(QColor(COLORS["accent"] if focused else COLORS["border"]), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(row, radius, radius)
+        if playing:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(COLORS["accent"]))
+            painter.drawRoundedRect(QRect(row.x(), row.y() + 10, 3, row.height() - 20), 2, 2)
+
+        scale = painter.device().devicePixelRatioF() if hasattr(painter.device(), "devicePixelRatioF") else 1.0
+        left = row.x() + 12
+        if self.reorder:
+            icons.paint(painter, "grip", COLORS["subtle"], QRect(row.x() + 6, row.center().y() - 8, 16, 16), scale)
+            left = row.x() + 26
+        art_size = 44 if self.compact else 60
+        art = QRect(left, row.center().y() - art_size // 2, art_size, art_size)
+        painter.drawPixmap(art, cover(item.artwork_path, art_size, art_size, 8, initials(item.show), item.accent, scale))
+        if playing:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(11, 15, 24, 150))
+            painter.drawRoundedRect(art, 8, 8)
+            icons.paint(painter, "playing" if self.playing_active else "pause", COLORS["accent"], art.adjusted(art_size // 4, art_size // 4, -art_size // 4, -art_size // 4), scale)
+
+        text_left = art.right() + 14
+        play_zone = self.PLAY_ZONE + 8
+        badge_reserve = 0
+        state_color = STATE_COLORS.get(item.state, item.accent)
+        show_badge = item.state not in {"New", "Played"} and not self.compact
+        if show_badge and not self.compact:
+            badge_font = app_font(11, QFont.Weight.DemiBold)
+            badge_reserve = painter.fontMetrics().horizontalAdvance(item.state.upper()) + 40
+            painter.setFont(badge_font)
+            badge_reserve = painter.fontMetrics().horizontalAdvance(item.state.upper()) + 36
+        text_right = row.right() - play_zone - badge_reserve
+        text_width = max(40, text_right - text_left)
+
+        title_font = app_font(14, QFont.Weight.DemiBold)
+        painter.setFont(title_font)
+        painter.setPen(QColor(COLORS["text_strong"] if playing else COLORS["text"]))
+        if self.compact:
+            title_rect = QRect(text_left, row.y() + 12, text_width, 20)
+            meta_rect = QRect(text_left, row.y() + 33, text_width, 16)
+            snippet_rect = None
+        else:
+            title_rect = QRect(text_left, row.y() + 11, text_width, 20)
+            snippet_rect = QRect(text_left, row.y() + 32, text_width, 17)
+            meta_rect = QRect(text_left, row.y() + 52, text_width, 16)
+        if item.state == "New" and not self.compact:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(COLORS["accent"]))
+            painter.drawEllipse(QRect(title_rect.x(), title_rect.center().y() - 3, 7, 7))
+            title_rect.adjust(13, 0, 0, 0)
+            painter.setPen(QColor(COLORS["text_strong"] if playing else COLORS["text"]))
+        painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(item.title, Qt.TextElideMode.ElideRight, title_rect.width()))
+
+        if snippet_rect is not None:
+            snippet = item.detail or self._snippet(item)
+            if snippet:
+                painter.setFont(app_font(12))
+                painter.setPen(QColor(COLORS["muted"]))
+                painter.drawText(snippet_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(snippet, Qt.TextElideMode.ElideRight, text_width))
+
+        painter.setFont(app_font(12))
+        painter.setPen(QColor(COLORS["subtle"]))
+        remaining = ""
+        if 0 < item.progress < 1 and item.duration_seconds:
+            left_seconds = int(item.duration_seconds * (1 - item.progress))
+            hours, minutes = divmod(max(1, left_seconds // 60), 60)
+            remaining = f"{hours} hr {minutes} min left" if hours else f"{minutes} min left"
+        meta = "  ·  ".join(part for part in (item.show if not self.compact else "", item.published, remaining or item.duration) if part)
+        painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, text_width))
+
+        if show_badge:
+            _badge(painter, row.right() - play_zone - 4, row.center().y() - 10, item.state.upper(), state_color, filled=item.state in {"Downloading", "Error"})
+
+        play = self.play_rect(option.rect)
+        if hovered or selected or playing:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(COLORS["accent"] if hovered else COLORS["surface_soft"]))
+            painter.drawEllipse(play)
+            glyph = "pause" if playing and self.playing_active else "play"
+            icons.paint(painter, glyph, COLORS["on_accent"] if hovered else COLORS["text"], play.adjusted(8, 8, -8, -8), scale)
 
         if 0 < item.progress < 1:
-            track = row.adjusted(text_left - row.left(), row.height() - 12, -right_space, -9)
+            track_top = row.bottom() - 8 if not self.compact else row.bottom() - 6
+            track = QRect(text_left, track_top, text_width, 3)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["border"]))
-            painter.drawRoundedRect(track, 2, 2)
-            hidden_width = int(track.width() * (1 - item.progress))
-            progress = track.adjusted(0, 0, -hidden_width, 0)
-            painter.setBrush(QColor(item.accent))
-            painter.drawRoundedRect(progress, 2, 2)
+            painter.drawRoundedRect(track, 1, 1)
+            painter.setBrush(QColor(state_color if item.state in {"Downloading", "Paused"} else COLORS["accent"]))
+            painter.drawRoundedRect(QRect(track.x(), track.y(), int(track.width() * item.progress), 3), 1, 1)
 
+        if focused and not selected:
+            _draw_focus(painter, row, radius)
         painter.restore()
+
+    def _snippet(self, item) -> str:
+        key = item.episode_id or id(item)
+        cached = self._snippets.get(key)
+        if cached is None:
+            cached = plain_snippet(item.description)
+            if item.episode_id:
+                self._snippets[key] = cached
+        return cached

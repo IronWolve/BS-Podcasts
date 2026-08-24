@@ -1,5 +1,6 @@
 """Library persistence with no Qt dependencies."""
 
+from pathlib import Path
 import time
 
 from ...domain import Episode, FeedData, Health, Show
@@ -132,6 +133,59 @@ class LibraryRepository:
                     ),
                 )
         return len(feed.episodes)
+
+    def removal_preview(self, show_id: int) -> dict:
+        """Exact targets that removing a show would delete; nothing is touched."""
+        show = self.get_show(show_id)
+        if show is None:
+            return {}
+        with self.database.connect() as connection:
+            episode_count = connection.execute("SELECT COUNT(*) FROM episodes WHERE show_id=?", (show_id,)).fetchone()[0]
+            rows = connection.execute(
+                "SELECT d.target_path, d.partial_path, d.state FROM downloads d "
+                "JOIN episodes e ON e.id=d.episode_id WHERE e.show_id=?",
+                (show_id,),
+            ).fetchall()
+            queued = connection.execute(
+                "SELECT COUNT(*) FROM queue q JOIN episodes e ON e.id=q.episode_id WHERE e.show_id=?", (show_id,)
+            ).fetchone()[0]
+            bookmarks = connection.execute(
+                "SELECT COUNT(*) FROM bookmarks b JOIN episodes e ON e.id=b.episode_id WHERE e.show_id=?", (show_id,)
+            ).fetchone()[0]
+        files = []
+        for row in rows:
+            for candidate in (row["target_path"], row["partial_path"]):
+                path = Path(candidate) if candidate else None
+                if path is not None and path.is_file() and str(path) not in {f[0] for f in files}:
+                    files.append((str(path), path.stat().st_size))
+        if show.artwork_path and Path(show.artwork_path).is_file():
+            files.append((show.artwork_path, Path(show.artwork_path).stat().st_size))
+        return {
+            "show": show,
+            "episodes": episode_count,
+            "queued": queued,
+            "bookmarks": bookmarks,
+            "files": files,
+            "bytes": sum(size for _path, size in files),
+        }
+
+    def remove_show(self, show_id: int, delete_files: bool = True) -> dict:
+        """Delete a show, its episodes and dependent rows (cascade), and its files."""
+        preview = self.removal_preview(show_id)
+        if not preview:
+            return {}
+        removed_files = []
+        if delete_files:
+            for path, _size in preview["files"]:
+                try:
+                    Path(path).unlink()
+                    removed_files.append(path)
+                except OSError:
+                    pass
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM shows WHERE id=?", (show_id,))
+        preview["removed_files"] = removed_files
+        return preview
 
     def set_health(self, show_id: int, health: Health):
         with self.database.connect() as connection:

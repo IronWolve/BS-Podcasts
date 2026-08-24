@@ -82,5 +82,11 @@ class LibraryService:
     def import_local_audio(self, path):
         return LocalAudioImporter(self.repository).import_file(path)
 
+    def removal_preview(self, show_id: int) -> dict:
+        return self.repository.removal_preview(show_id)
+
+    def remove_subscription(self, show_id: int, delete_files: bool = True) -> dict:
+        return self.repository.remove_show(show_id, delete_files)
+
     def rearm(self, show_id: int):
         self.repository.rearm_show(show_id)
