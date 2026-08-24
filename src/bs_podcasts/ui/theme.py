@@ -447,7 +447,17 @@ def stylesheet() -> str:
     QFrame#contextDivider {{ background: {c['hairline']}; max-height: 1px; }}
     QTabWidget#contextTabs::pane {{ border: 0; background: transparent; }}
     QTabWidget#contextTabs QTabBar {{ qproperty-drawBase: 0; }}
-    QTabBar#nowPlayingTabs::tab {{ padding: 8px 14px 8px 0; margin-right: 18px; font-size: {body}px; }}
+    QTabWidget#nowPlayingTabWidget::pane {{ border: 0; background: transparent; }}
+    QTabWidget#nowPlayingTabWidget QTabBar {{ qproperty-drawBase: 0; }}
+    QTabWidget#nowPlayingTabWidget QTabBar::tab {{
+        background: transparent; color: {c['muted']}; border: 0;
+        border-bottom: 2px solid transparent; padding: 8px 2px; margin-right: 22px;
+        font-size: {body}px; font-weight: 500;
+    }}
+    QTabWidget#nowPlayingTabWidget QTabBar::tab:hover {{ color: {c['text']}; }}
+    QTabWidget#nowPlayingTabWidget QTabBar::tab:selected {{
+        color: {c['text_strong']}; border-bottom: 2px solid {c['accent']};
+    }}
     QFrame#nowPlayingPanel {{ background: {c['surface']}; border: 1px solid {c['hairline']}; border-radius: {r['lg']}px; }}
     QTabWidget#contextTabs QTabBar::tab {{
         background: transparent; color: {c['muted']}; border: 0;
