@@ -280,6 +280,52 @@ class RemovePodcastDialog(StyledDialog):
         self.add_buttons(remove, "Keep")
 
 
+class DeleteFilesDialog(StyledDialog):
+    """Show exact files and reclaimed space before deleting downloads."""
+
+    def __init__(self, title: str, message: str, previews, format_bytes, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.set_card_width(560)
+        total = sum(preview.bytes_reclaimed for preview in previews)
+        self.add_heading(title, message)
+        summary = QLabel(f"{len(previews)} file{'s' if len(previews) != 1 else ''}  ·  {format_bytes(total)} reclaimed")
+        summary.setObjectName("cardTitle")
+        self.card_layout.addWidget(summary)
+        listing = QLabel("\n".join(f"{p.path}  ({format_bytes(p.bytes_reclaimed)})" for p in previews[:8]) + ("\n…" if len(previews) > 8 else ""))
+        listing.setObjectName("settingHint")
+        listing.setWordWrap(True)
+        listing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.card_layout.addWidget(listing)
+        delete = QPushButton("Delete")
+        delete.setObjectName("dangerButton")
+        delete.clicked.connect(self.accept)
+        delete.setEnabled(bool(previews))
+        self.add_buttons(delete, "Keep")
+
+
+class TextInputDialog(StyledDialog):
+    def __init__(self, title: str, message: str, value: str, action: str = "Save", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.set_card_width(460)
+        self.add_heading(title, message)
+        self.field = QLineEdit(value)
+        self.field.setObjectName("searchField")
+        self.field.selectAll()
+        self.card_layout.addWidget(self.field)
+        save = QPushButton(action)
+        save.setObjectName("primaryButton")
+        save.clicked.connect(self.accept)
+        self.add_buttons(save)
+        self.field.returnPressed.connect(self.accept)
+        self.field.setFocus()
+
+    @property
+    def value(self) -> str:
+        return self.field.text().strip()
+
+
 class ConfirmDialog(StyledDialog):
     """Generic confirmation with an optional destructive primary action."""
 

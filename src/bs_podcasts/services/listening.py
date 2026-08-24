@@ -28,5 +28,11 @@ class ListeningService:
     def bookmark(self, episode_id: int, position: float, title: str = ""):
         return self.repository.add_bookmark(episode_id, position, title)
 
+    def delete_bookmark(self, bookmark_id: int):
+        self.repository.delete_bookmark(bookmark_id)
+
+    def rename_bookmark(self, bookmark_id: int, title: str):
+        self.repository.rename_bookmark(bookmark_id, title)
+
     def bookmarks(self, episode_id: int | None = None):
         return self.repository.bookmarks(episode_id)

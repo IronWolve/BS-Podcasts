@@ -304,6 +304,32 @@ class LibraryRepository:
                 (max(0.0, float(seconds)), time.time(), episode_id),
             )
 
+    def mark_show_played(self, show_id: int, played: bool = True) -> int:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE episodes SET played=?, is_new=0 WHERE show_id=? AND played!=?",
+                (int(played), show_id, int(played)),
+            )
+            return cursor.rowcount
+
+    def clear_history(self, episode_id: int | None = None) -> int:
+        with self.database.connect() as connection:
+            if episode_id is None:
+                cursor = connection.execute("UPDATE episodes SET last_played=NULL WHERE last_played IS NOT NULL")
+            else:
+                cursor = connection.execute("UPDATE episodes SET last_played=NULL WHERE id=?", (episode_id,))
+            return cursor.rowcount
+
+    def clear_queue(self) -> int:
+        with self.database.connect() as connection:
+            return connection.execute("DELETE FROM queue").rowcount
+
+    def queue_to_front(self, episode_id: int):
+        ids = [episode.id for episode in self.list_queue()]
+        if episode_id in ids:
+            ids.remove(episode_id)
+        self.reorder_queue([episode_id] + ids)
+
     def mark_played(self, episode_id: int, played: bool = True):
         with self.database.connect() as connection:
             connection.execute(

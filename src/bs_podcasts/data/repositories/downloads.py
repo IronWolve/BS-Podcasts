@@ -79,6 +79,20 @@ class DownloadRepository:
                 "UPDATE episodes SET downloaded_path=? WHERE id=?", (path, episode_id)
             )
 
+    def remove(self, episode_id: int):
+        """Forget a download record and clear the episode's local path."""
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM downloads WHERE episode_id=?", (episode_id,))
+            connection.execute("UPDATE episodes SET downloaded_path='' WHERE id=?", (episode_id,))
+
+    def played_complete(self) -> list[int]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT d.episode_id FROM downloads d JOIN episodes e ON e.id=d.episode_id "
+                "WHERE d.state='complete' AND e.played=1"
+            ).fetchall()
+        return [row["episode_id"] for row in rows]
+
     def cleanup_preview(self, episode_id: int) -> DeletionPreview | None:
         record = self.get(episode_id)
         if record is None:

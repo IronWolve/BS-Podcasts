@@ -829,6 +829,7 @@ class SettingsPage(BasePage):
     refresh_storage_requested = Signal()
     import_opml_requested = Signal()
     export_opml_requested = Signal()
+    cleanup_played_requested = Signal()
 
     FIELD_WIDTH = 180
 
@@ -867,6 +868,19 @@ class SettingsPage(BasePage):
         form.addRow("Skip forward", self.skip_forward)
         form.addRow("After an episode", self.auto_continue)
         self.settings_content.addWidget(card)
+
+        # Downloads --------------------------------------------------------------
+        downloads_card, downloads_form = self._card("Downloads", "New episodes found during a refresh can be downloaded automatically.")
+        self.auto_download = QCheckBox("Auto-download new episodes")
+        self.auto_download_limit = QSpinBox()
+        self.auto_download_limit.setRange(1, 10)
+        self.auto_download_limit.setSuffix(" per refresh")
+        self.auto_download_limit.setFixedWidth(self.FIELD_WIDTH)
+        downloads_form.addRow("After a refresh", self.auto_download)
+        downloads_form.addRow("At most", self.auto_download_limit)
+        self.settings_content.addWidget(downloads_card)
+        self.auto_download.toggled.connect(lambda value: self.setting_changed.emit("downloads.auto", "1" if value else "0"))
+        self.auto_download_limit.valueChanged.connect(lambda value: self.setting_changed.emit("downloads.auto_limit", str(value)))
 
         # Appearance ------------------------------------------------------------
         appearance_card, appearance_form = self._card("Appearance", "Changing the theme rebuilds the window; playback keeps going.")
@@ -944,8 +958,14 @@ class SettingsPage(BasePage):
         refresh_usage.setIcon(icons.icon("refresh", COLORS["text"], 16))
         refresh_usage.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_usage.clicked.connect(self.refresh_storage_requested)
+        cleanup = QPushButton("Delete played downloads…")
+        cleanup.setObjectName("dangerButton")
+        cleanup.setCursor(Qt.CursorShape.PointingHandCursor)
+        cleanup.setToolTip("Shows the exact files and space first")
+        cleanup.clicked.connect(self.cleanup_played_requested)
         storage_actions.addWidget(open_folder)
         storage_actions.addWidget(refresh_usage)
+        storage_actions.addWidget(cleanup)
         storage_actions.addStretch(1)
         storage_layout.addRow("", storage_actions)
         self.settings_content.addWidget(storage_card)
@@ -999,6 +1019,14 @@ class SettingsPage(BasePage):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         outer.addLayout(form)
         return card, form
+
+    def load_downloads(self, auto: bool, limit: int):
+        for control in (self.auto_download, self.auto_download_limit):
+            control.blockSignals(True)
+        self.auto_download.setChecked(auto)
+        self.auto_download_limit.setValue(limit)
+        for control in (self.auto_download, self.auto_download_limit):
+            control.blockSignals(False)
 
     def load_theme(self, value: str):
         self.theme.blockSignals(True)

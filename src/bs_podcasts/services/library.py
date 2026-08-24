@@ -82,6 +82,18 @@ class LibraryService:
     def import_local_audio(self, path):
         return LocalAudioImporter(self.repository).import_file(path)
 
+    def mark_show_played(self, show_id: int, played: bool = True) -> int:
+        return self.repository.mark_show_played(show_id, played)
+
+    def clear_history(self, episode_id: int | None = None) -> int:
+        return self.repository.clear_history(episode_id)
+
+    def clear_queue(self) -> int:
+        return self.repository.clear_queue()
+
+    def queue_to_front(self, episode_id: int):
+        self.repository.queue_to_front(episode_id)
+
     def removal_preview(self, show_id: int) -> dict:
         return self.repository.removal_preview(show_id)
 

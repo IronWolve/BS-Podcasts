@@ -165,6 +165,21 @@ def main() -> int:
         assert not window.now_playing.isVisible(), "Esc did not close now playing"
         window.playback = None
 
+        # An in-flight download shows on the episode row itself.
+        from bs_podcasts.domain import DownloadState
+        part = root / "downloads" / "episode-2.part"
+        part.parent.mkdir(parents=True, exist_ok=True)
+        downloads.downloads.prepare(episodes[1].id, "https://samples.invalid/b.mp3", part.with_suffix(".mp3"), part)
+        downloads.downloads.progress(episodes[1].id, DownloadState.DOWNLOADING, 512, 2048, "")
+        window._reload_library()
+        window.navigation.select(2)
+        rows = [window.episode_page.model.index(r, 0).data(257) for r in range(window.episode_page.model.rowCount())]
+        live = next(r for r in rows if r.episode_id == episodes[1].id)
+        assert live.state == "Downloading" and abs(live.progress - 0.25) < 0.01, (live.state, live.progress)
+        grab(window, "episodes-downloading")
+        downloads.downloads.remove(episodes[1].id)
+        window._reload_library()
+
         # Drop episodes onto the Up Next rail item.
         from PySide6.QtCore import QMimeData, QPointF
         from PySide6.QtGui import QDropEvent
@@ -188,6 +203,49 @@ def main() -> int:
         about = AboutDialog({"library": "1 podcast · 2 episodes", "data_root": str(root), "storage": "0 B of downloads · 10 GB free", "engine": "Mpv"}, window)
         QTimer.singleShot(50, lambda: (about.grab().save(str(OUTPUT / "state-about.png"), "PNG"), print(OUTPUT / "state-about.png"), about.reject()))
         about.exec()
+        # Download management: fake a completed download, preview, delete.
+        media = root / "downloads" / "episode-1.mp3"
+        media.parent.mkdir(parents=True, exist_ok=True)
+        media.write_bytes(b"\0" * 4096)
+        downloads.downloads.prepare(episodes[0].id, "https://samples.invalid/a.mp3", media, media.with_suffix(".part"))
+        downloads.downloads.complete(episodes[0].id, str(media), 4096)
+        window._reload_library()
+        window.navigation.select(4)
+        QApplication.processEvents()
+        assert window.download_page.model.rowCount() == 1
+        row = window.download_page.model.index(0, 0).data(257)
+        assert row.downloaded_path == str(media), row.downloaded_path
+        from bs_podcasts.ui.dialogs import DeleteFilesDialog
+        previews = [downloads.cleanup_preview(episodes[0].id)]
+        delete_dialog = DeleteFilesDialog("Delete download", "The episode stays in your library; only the local file is removed.", previews, window._format_bytes, window)
+        QTimer.singleShot(50, lambda: (delete_dialog.grab().save(str(OUTPUT / "state-delete-download.png"), "PNG"), print(OUTPUT / "state-delete-download.png"), delete_dialog.reject()))
+        delete_dialog.exec()
+        assert media.exists(), "rejecting must not delete"
+        freed = downloads.delete(episodes[0].id)
+        assert freed == 4096 and not media.exists(), "delete did not remove the file"
+        window._reload_library()
+        assert window.download_page.model.rowCount() == 0
+        assert not library.episode(episodes[0].id).downloaded_path
+
+        # Bookmarks: rename and delete; history clear; queue to front.
+        bookmark = listening.bookmark(episodes[0].id, 120.0, "Bookmark at 2:00")
+        listening.rename_bookmark(bookmark.id, "Great point")
+        assert listening.bookmarks()[0].title == "Great point"
+        window._reload_bookmarks()
+        assert window.bookmark_page.model.index(0, 0).data(257).bookmark_id == bookmark.id
+        listening.delete_bookmark(bookmark.id)
+        assert not listening.bookmarks()
+        library.queue_to_front(episodes[1].id)
+        assert library.queue()[0].id == episodes[1].id, "queue_to_front failed"
+        repository.update_position(episodes[1].id, 30)
+        assert library.history()
+        library.clear_history()
+        assert not library.history(), "clear_history failed"
+        library.mark_show_played(show.id, True)
+        assert all(e.played for e in library.episodes(show_id=show.id))
+        library.mark_show_played(show.id, False)
+        window._reload_library()
+
         # Global search overlay.
         window.navigation.select(0)
         window._open_search()

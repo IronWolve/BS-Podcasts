@@ -120,8 +120,8 @@ def main() -> int:
             window.home_page.summary_buttons[0].text().startswith("0\n"),
             "Home new count is not persisted data",
         )
-        require(window.playlist_page.header.action is None, "Playlist has a dead action")
-        require(window.history_page.header.action is None, "History has a dead action")
+        require(window.playlist_page.header.action.text() == "Clear Up Next", "Up Next lacks its clear action")
+        require(window.history_page.header.action.text() == "Clear history", "History lacks its clear action")
         require(window.bookmark_page.header.action is None, "Bookmarks has a dead action")
         require(not window.settings_page.header.search.isVisible(), "Settings has dead search")
         require(

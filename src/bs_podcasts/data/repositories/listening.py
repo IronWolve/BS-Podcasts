@@ -91,6 +91,14 @@ class ListeningRepository:
             bookmark_id = cursor.lastrowid
         return next(bookmark for bookmark in self.bookmarks() if bookmark.id == bookmark_id)
 
+    def delete_bookmark(self, bookmark_id: int):
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM bookmarks WHERE id=?", (bookmark_id,))
+
+    def rename_bookmark(self, bookmark_id: int, title: str):
+        with self.database.connect() as connection:
+            connection.execute("UPDATE bookmarks SET title=? WHERE id=?", (title.strip(), bookmark_id))
+
     def bookmarks(self, episode_id: int | None = None) -> list[Bookmark]:
         sql = (
             "SELECT b.*, e.title AS episode_title, s.title AS show_title "
