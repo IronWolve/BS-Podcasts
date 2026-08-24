@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self._last_mode = None
         self._pending_jobs = set()
         self._refresh_batch = [0, 0, 0]  # total, done, new episodes
+        self._refresh_failed = []
         self._discover_operation = ""
         self._discover_value = ""
         self._discover_limit = 30
@@ -267,6 +268,8 @@ class MainWindow(QMainWindow):
         self.playlist_page.empty_action_requested.connect(lambda: self.navigation.select(PAGE_EPISODES))
         self.podcast_page.empty_action_requested.connect(self._add_podcast)
         self.podcast_page.card_action_requested.connect(lambda item: self._play_latest(item.show_id))
+        self.podcast_page.remove_problems_requested.connect(self._remove_unreachable)
+        self.settings_page.reset_library_requested.connect(self._reset_library)
         self.discover_page.card_action_requested.connect(self._discover_card_action)
         self.episode_page.hero.play_latest_requested.connect(lambda: self._play_latest(self._hero_show_id))
         self.episode_page.hero.refresh_requested.connect(lambda: self._submit_refresh(self._hero_show_id) if self._hero_show_id else None)
@@ -520,6 +523,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_shows(self, shows, quiet: bool = False):
         self._refresh_batch = [len(shows), 0, 0]
+        self._refresh_failed = []
         if not quiet:
             self.episode_page.banner.show_state("loading", f"Refreshing 0 of {len(shows)} podcasts…")
             if self.episode_page.header.action:
@@ -527,6 +531,80 @@ class MainWindow(QMainWindow):
         self._refresh_quiet = quiet
         for show in shows:
             self._submit_refresh(show.id)
+
+    def _summarize_refresh(self, total: int, new_episodes: int, failed: int):
+        """Exactly one message per batch, whatever happened inside it."""
+        parts = [f"Refreshed {total} podcast{'s' if total != 1 else ''}"]
+        if new_episodes:
+            parts.append(f"{new_episodes} new episode{'s' if new_episodes != 1 else ''}")
+        if failed:
+            parts.append(f"{failed} unreachable")
+            self._notify("  ·  ".join(parts), "info", "Review", self._show_problem_podcasts)
+        elif new_episodes:
+            self._notify("  ·  ".join(parts), "success", "Show", self._show_new_episodes)
+        else:
+            self._notify(parts[0])
+
+    def _show_problem_podcasts(self):
+        self.navigation.select(PAGE_PODCASTS)
+        self.podcast_page.chips.select("Problems")
+        self.podcast_page._apply_filters()
+
+    def _remove_unreachable(self):
+        if self.library is None:
+            return
+        problems = [show for show in self.library.shows() if show.health.value in {"error", "suspended"}]
+        if not problems:
+            self._notify("No unreachable podcasts")
+            return
+        names = "\n".join(f"• {show.title}" for show in problems[:8]) + ("\n…" if len(problems) > 8 else "")
+        dialog = ConfirmDialog(
+            f"Remove {len(problems)} unreachable podcast{'s' if len(problems) != 1 else ''}?",
+            "Their feeds failed repeatedly. Subscriptions, listening progress and any downloads for them are deleted; you can re-add any of them later.\n\n" + names,
+            "Remove all", destructive=True, parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        removed = sum(1 for show in problems if self.library.remove_subscription(show.id, delete_files=True))
+        self._reload_library()
+        self.podcast_page.chips.select("All")
+        self.podcast_page._apply_filters()
+        self._notify(f"Removed {removed} unreachable podcast{'s' if removed != 1 else ''}", "success")
+
+    def _reset_library(self):
+        """Remove every subscription (import → reset → import testing loop)."""
+        if self.library is None:
+            return
+        shows = self.library.shows()
+        if not shows:
+            self._notify("The library is already empty")
+            return
+        previews = [self.library.removal_preview(show.id) for show in shows]
+        episodes = sum(p.get("episodes", 0) for p in previews)
+        files = sum(len(p.get("files", ())) for p in previews)
+        size = sum(p.get("bytes", 0) for p in previews)
+        dialog = ConfirmDialog(
+            "Reset the library?",
+            f"Removes all {len(shows)} podcast{'s' if len(shows) != 1 else ''} and {episodes} episode{'s' if episodes != 1 else ''}, "
+            f"including Up Next, history, bookmarks and {files} downloaded/artwork file{'s' if files != 1 else ''} ({self._format_bytes(size)}). "
+            "Settings and shortcuts are kept. This cannot be undone.",
+            "Reset library", destructive=True, parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if self.playback is not None:
+            try:
+                self.playback.stop()
+            except Exception:
+                pass
+        for show in shows:
+            self.library.remove_subscription(show.id, delete_files=True)
+        self._previews.clear()
+        self._ui_episode_cache.clear()
+        self._reload_library()
+        self._refresh_storage_settings()
+        self.context.show_empty()
+        self._notify(f"Library reset — removed {len(shows)} podcast{'s' if len(shows) != 1 else ''}", "success")
 
     def _show_about(self):
         info = {}
@@ -2026,25 +2104,29 @@ class MainWindow(QMainWindow):
                     self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
                 elif self.podcast_page.banner.state == "loading":
                     self.podcast_page.banner.show_state("loading", f"Fetching episodes… {done} of {total} podcasts done")
-            elif quiet:
+            failed = result.status != JobStatus.OK or getattr(result.value, "health", None) in {Health.ERROR, Health.SUSPENDED}
+            if failed:
+                self._refresh_failed.append(identifier)
+            if done >= total:
                 self._refresh_batch = [0, 0, 0]
-                if self.podcast_page.banner.state == "loading":
-                    self.podcast_page.banner.clear()
+                if quiet:
+                    if self.podcast_page.banner.state == "loading":
+                        self.podcast_page.banner.clear()
+                else:
+                    self.episode_page.banner.clear()
+                    if self.episode_page.header.action:
+                        self.episode_page.header.action.setEnabled(True)
                 self._reload_library()
-                if new_episodes:
-                    self._notify(f"{new_episodes} new episode{'s' if new_episodes != 1 else ''} arrived across {total} podcast{'s' if total != 1 else ''}", "success", "Show", self._show_new_episodes)
-            else:
-                self._refresh_batch = [0, 0, 0]
-                self.episode_page.banner.clear()
-                if self.episode_page.header.action:
-                    self.episode_page.header.action.setEnabled(True)
-                self._notify(f"Refreshed {total} podcast{'s' if total != 1 else ''}" + (f"  ·  {new_episodes} new episodes" if new_episodes else ""), "success")
+                self._summarize_refresh(total, new_episodes, len(self._refresh_failed))
+            # Batch: never one message per feed; problems are shown in place.
+            return
+        self.podcast_page.select_show(identifier)
         if result.status != JobStatus.OK:
-            self.podcast_page.banner.show_state("error", result.message or "Refresh failed.")
+            self.podcast_page.banner.show_state("error", result.message or "Refresh failed.", retry=True)
             return
         report = result.value
         if report.health in {Health.ERROR, Health.SUSPENDED}:
-            self.podcast_page.banner.show_state(report.health.value, report.message)
+            self.podcast_page.banner.show_state(report.health.value, report.message, retry=True)
         elif report.health == Health.PARTIAL:
             self.podcast_page.banner.show_state("partial", "The podcast refreshed but did not contain playable episodes.")
         elif not total:

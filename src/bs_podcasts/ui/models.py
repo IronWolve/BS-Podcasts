@@ -307,13 +307,20 @@ class PodcastDelegate(QStyledItemDelegate):
             )
 
         painter.setFont(app_font(12))
-        painter.setPen(QColor(COLORS["muted"]))
         meta_rect = QRect(title_rect.x(), title_rect.bottom() + 4, title_rect.width() - 14, 16)
         meta = item.display_meta or f"{item.episode_count} episodes"
+        meta_color = COLORS["muted"]
+        if item.show_id and item.health in {"error", "suspended"}:
+            meta = "Couldn’t reach feed" if item.health == "error" else "Unreachable — refresh paused"
+            meta_color = COLORS["danger"]
+        elif item.show_id and item.health == "partial":
+            meta = "No playable episodes"
+            meta_color = COLORS["warning"]
         if item.is_episode:
             meta = item.author
         elif item.directory_result and not item.show_id and item.latest_episode_date and item.latest_episode_date != "Unknown date":
             meta = f"Latest {item.latest_episode_date}"
+        painter.setPen(QColor(meta_color))
         painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, meta_rect.width()))
 
         if item.rank:
