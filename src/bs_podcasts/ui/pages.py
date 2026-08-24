@@ -147,6 +147,7 @@ class _ListPageMixin:
 class PodcastGridPage(BasePage, _ListPageMixin):
     open_requested = Signal(object)
     card_action_requested = Signal(object)
+    remove_problems_requested = Signal()
     menu_requested = Signal(object, object)
     near_end = Signal()
     load_more_requested = Signal()
@@ -162,7 +163,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             if discover
             else ("Your library is empty", "Add a podcast by feed URL, import an OPML file, or browse Discover.", "Add podcast")
         )
-        chips = () if discover else ("All", "New")
+        chips = () if discover else ("All", "New", "Problems")
         self.chips = ChipRow(chips)
         if discover:
             banner_policy = self.banner.sizePolicy()
@@ -272,6 +273,13 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.header.search.setPlaceholderText("Filter podcasts")
             if self.header.action:
                 self.header.action.setIcon(icons.icon("add", COLORS["on_accent"], 16))
+            self.remove_problems = QPushButton("Remove unreachable…")
+            self.remove_problems.setObjectName("dangerButton")
+            self.remove_problems.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.remove_problems.setToolTip("Unsubscribe from every podcast whose feed keeps failing (shows the list first)")
+            self.remove_problems.clicked.connect(self.remove_problems_requested)
+            self.remove_problems.hide()
+            self.chips.add_trailing(self.remove_problems)
             self.root.addWidget(self.chips)
 
         view = QListView()
@@ -337,8 +345,17 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         query = self.header.search.text().strip().lower()
         if query and not self.discover:
             items = [item for item in items if query in item.title.lower() or query in item.author.lower()]
-        if self.chips.current() == "New":
+        chip = self.chips.current()
+        if chip == "New":
             items = [item for item in items if item.new_count > 0]
+        elif chip == "Problems":
+            items = [item for item in items if item.health in {"error", "suspended", "partial"}]
+        if not self.discover and hasattr(self, "remove_problems"):
+            self.remove_problems.setVisible(chip == "Problems" and any(item.health in {"error", "suspended"} for item in items))
+            self._empty_text = (
+                ("No problems", "Every subscribed feed refreshed successfully.", "") if chip == "Problems"
+                else ("Your library is empty", "Add a podcast by feed URL, import an OPML file, or browse Discover.", "Add podcast")
+            )
         if self.discover and self._discover_sort == "title":
             items.sort(key=lambda item: item.title.lower())
         elif self.discover and self._discover_sort == "newest":
@@ -853,6 +870,7 @@ class SettingsPage(BasePage):
     change_download_folder_requested = Signal()
     open_log_requested = Signal()
     clear_artwork_requested = Signal()
+    reset_library_requested = Signal()
 
     FIELD_WIDTH = 180
 
@@ -997,12 +1015,13 @@ class SettingsPage(BasePage):
         storage_layout.addRow("Log file", self.log_path)
         storage_actions = QHBoxLayout()
         storage_actions.setSpacing(SPACE["sm"])
+        destructive_actions = QHBoxLayout()
+        destructive_actions.setSpacing(SPACE["sm"])
         open_log = QPushButton("Open log")
         open_log.setObjectName("quietButton")
         open_log.setIcon(icons.icon("info", COLORS["text"], 16))
         open_log.setCursor(Qt.CursorShape.PointingHandCursor)
         open_log.clicked.connect(self.open_log_requested)
-        storage_actions.addWidget(open_log)
         open_folder = QPushButton("Open data folder")
         open_folder.setObjectName("quietButton")
         open_folder.setIcon(icons.icon("folder", COLORS["text"], 16))
@@ -1019,23 +1038,33 @@ class SettingsPage(BasePage):
         change_folder.setCursor(Qt.CursorShape.PointingHandCursor)
         change_folder.setToolTip("Existing downloads stay where they are; new ones use the new folder")
         change_folder.clicked.connect(self.change_download_folder_requested)
-        storage_actions.addWidget(change_folder)
         clear_art = QPushButton("Clear artwork cache…")
-        clear_art.setObjectName("quietButton")
+        clear_art.setObjectName("dangerButton")
         clear_art.setCursor(Qt.CursorShape.PointingHandCursor)
         clear_art.setToolTip("Removes cached images no podcast or episode uses; shows the totals first")
         clear_art.clicked.connect(self.clear_artwork_requested)
-        storage_actions.addWidget(clear_art)
         cleanup = QPushButton("Delete played downloads…")
         cleanup.setObjectName("dangerButton")
         cleanup.setCursor(Qt.CursorShape.PointingHandCursor)
         cleanup.setToolTip("Shows the exact files and space first")
         cleanup.clicked.connect(self.cleanup_played_requested)
+        reset = QPushButton("Reset library…")
+        reset.setObjectName("dangerButton")
+        reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        reset.setToolTip("Remove every subscription, episode, download and bookmark; settings are kept")
+        reset.clicked.connect(self.reset_library_requested)
+        # Row 1: look around. Row 2: things that delete.
         storage_actions.addWidget(open_folder)
+        storage_actions.addWidget(open_log)
         storage_actions.addWidget(refresh_usage)
-        storage_actions.addWidget(cleanup)
+        storage_actions.addWidget(change_folder)
         storage_actions.addStretch(1)
+        destructive_actions.addWidget(cleanup)
+        destructive_actions.addWidget(clear_art)
+        destructive_actions.addWidget(reset)
+        destructive_actions.addStretch(1)
         storage_layout.addRow("", storage_actions)
+        storage_layout.addRow("", destructive_actions)
         self.settings_content.addWidget(storage_card)
 
         # Transfer ------------------------------------------------------------
