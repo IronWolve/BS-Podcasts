@@ -70,6 +70,12 @@ class PlaybackService:
     def subscribe(self, listener):
         self._listeners.append(listener)
 
+    def unsubscribe(self, listener):
+        try:
+            self._listeners.remove(listener)
+        except ValueError:
+            pass
+
     LOAD_TIMEOUT = 25.0
 
     def _arm_load_watchdog(self, episode_id: int):

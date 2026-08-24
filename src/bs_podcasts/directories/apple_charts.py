@@ -7,6 +7,8 @@ import time
 
 import requests
 
+from ..net import make_session
+
 from ..domain import DirectoryCandidate
 from .base import DirectoryError
 from .itunes import CATEGORY_IDS
@@ -24,7 +26,7 @@ class AppleCharts:
     endpoint = "https://podcasts.apple.com/us/charts"
 
     def __init__(self, session=None, cache_seconds: int = 900):
-        self.session = session or requests.Session()
+        self.session = session or make_session()
         self.cache_seconds = cache_seconds
         self._cache = {}
         self._developer_token = ""

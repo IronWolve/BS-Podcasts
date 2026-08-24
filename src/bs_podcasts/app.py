@@ -1,6 +1,7 @@
 """Application bootstrap."""
 
 import logging
+import os
 import sys
 import sqlite3
 import traceback
@@ -14,7 +15,7 @@ from PySide6.QtWidgets import QApplication
 from .artwork import ArtworkCache
 from .assets import icon_path
 from .config import APP_ID, APP_NAME, AppSettings, app_version
-from .config import data_dir as application_data_dir
+from .config import cache_dir, data_dir as application_data_dir, default_downloads_dir
 from .data import Database
 from .data.database import DatabaseIntegrityError
 from .data.repositories import DownloadRepository, LibraryRepository, ListeningRepository
@@ -108,7 +109,7 @@ def main() -> int:
     refresh = RefreshService(
         repository,
         fetcher=FeedFetcher(),
-        artwork=ArtworkCache(root / "artwork"),
+        artwork=ArtworkCache(cache_dir() / "artwork"),
     )
     directory = DirectoryService([ItunesDirectory()])
     try:
@@ -121,7 +122,7 @@ def main() -> int:
     downloads = DownloadService(
         repository,
         DownloadRepository(database),
-        library.setting("downloads.directory", "") or (root / "downloads"),
+        library.setting("downloads.directory", "") or default_downloads_dir(),
     )
     state = {"window": None}
 
@@ -175,6 +176,12 @@ def main() -> int:
     server.newConnection.connect(raise_existing)
     app.aboutToQuit.connect(lambda: state["window"].mpris.shutdown() if state["window"] is not None else None)
     app.aboutToQuit.connect(lambda: downloads.pause_all())
-    app.aboutToQuit.connect(jobs.shutdown)
-    app.aboutToQuit.connect(download_jobs.shutdown)
-    return app.exec()
+    code = app.exec()
+    # Bounded shutdown: cancel pending jobs, give running ones a moment, then
+    # leave. Non-daemon worker threads would otherwise hold the process open.
+    busy = jobs.join(3.0) + download_jobs.join(3.0)
+    if busy:
+        logging.getLogger("bs_podcasts").warning("Exiting with %d background job(s) still running.", busy)
+        logging.shutdown()
+        os._exit(code)
+    return code

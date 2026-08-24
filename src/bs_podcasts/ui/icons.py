@@ -153,9 +153,9 @@ def _cache_dir() -> Path:
     global _file_dir
     if _file_dir is None:
         try:
-            from ..config import data_dir
+            from ..config import cache_dir
 
-            base = data_dir() / "cache" / "icons"
+            base = cache_dir() / "icons"
             base.mkdir(parents=True, exist_ok=True)
         except OSError:
             base = Path(os.environ.get("TMPDIR") or tempfile.gettempdir()) / "bs-podcasts-icons"

@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
+import time
 from enum import StrEnum
 from typing import Any, Callable
 
@@ -41,3 +42,17 @@ class JobRunner:
 
     def shutdown(self, wait: bool = False):
         self._executor.shutdown(wait=wait, cancel_futures=True)
+
+    def join(self, grace_seconds: float = 3.0) -> int:
+        """Stop accepting work, wait up to `grace_seconds` for running jobs, and
+        return how many worker threads are still busy. Callers that get a
+        non-zero count should exit hard: the interpreter would otherwise block
+        at exit joining those (non-daemon) threads."""
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        deadline = time.monotonic() + grace_seconds
+        for thread in list(getattr(self._executor, "_threads", ())):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(remaining)
+        return sum(1 for thread in getattr(self._executor, "_threads", ()) if thread.is_alive())

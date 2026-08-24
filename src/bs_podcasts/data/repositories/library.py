@@ -44,7 +44,7 @@ class LibraryRepository:
 
     def list_episodes(self, show_id: int | None = None, limit: int = 500) -> list[Episode]:
         sql = (
-            "SELECT e.*, s.title AS show_title, s.artwork_path AS artwork_path FROM episodes e "
+            "SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM episodes e "
             "JOIN shows s ON s.id=e.show_id"
         )
         params: list[object] = []
@@ -60,7 +60,7 @@ class LibraryRepository:
     def get_episode(self, episode_id: int) -> Episode | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                """SELECT e.*, s.title AS show_title, s.artwork_path AS artwork_path FROM episodes e
+                """SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM episodes e
                    JOIN shows s ON s.id=e.show_id WHERE e.id=?""",
                 (episode_id,),
             ).fetchone()
@@ -69,7 +69,7 @@ class LibraryRepository:
     def list_history(self, limit: int = 200) -> list[Episode]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                """SELECT e.*, s.title AS show_title, s.artwork_path AS artwork_path FROM episodes e
+                """SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM episodes e
                    JOIN shows s ON s.id=e.show_id
                    WHERE e.last_played IS NOT NULL
                    ORDER BY e.last_played DESC LIMIT ?""",
@@ -273,7 +273,7 @@ class LibraryRepository:
     def list_queue(self) -> list[Episode]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                """SELECT e.*, s.title AS show_title, s.artwork_path AS artwork_path FROM queue q
+                """SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM queue q
                    JOIN episodes e ON e.id=q.episode_id
                    JOIN shows s ON s.id=e.show_id ORDER BY q.position"""
             ).fetchall()
@@ -312,7 +312,7 @@ class LibraryRepository:
 
     def set_episode_artwork_path(self, episode_id: int, path: str):
         with self.database.connect() as connection:
-            connection.execute("UPDATE episodes SET artwork_path=? WHERE id=?", (path, episode_id))
+            connection.execute("UPDATE episodes SET episode_artwork_path=? WHERE id=?", (path, episode_id))
 
     def mark_show_seen(self, show_id: int) -> int:
         """Opening a show clears its new-episode badge."""
@@ -404,7 +404,7 @@ class LibraryRepository:
                 (pattern, pattern, limit),
             ).fetchall()
             episode_rows = connection.execute(
-                """SELECT e.*, s.title AS show_title, s.artwork_path AS artwork_path FROM episodes e
+                """SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM episodes e
                    JOIN shows s ON s.id=e.show_id
                    WHERE e.title LIKE ? ESCAPE '\\'
                       OR e.description LIKE ? ESCAPE '\\'

@@ -6,6 +6,8 @@ from urllib.parse import urljoin
 
 import requests
 
+from ..net import make_session
+
 
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 USER_AGENT = "BS-Podcasts/0.1 (+desktop podcast client)"
@@ -46,7 +48,7 @@ class _FeedLinkParser(HTMLParser):
 
 class FeedFetcher:
     def __init__(self, session=None):
-        self.session = session or requests.Session()
+        self.session = session or make_session()
         self.session.max_redirects = 5
 
     def fetch(self, url: str, etag: str = "", last_modified: str = "") -> FeedResponse:
