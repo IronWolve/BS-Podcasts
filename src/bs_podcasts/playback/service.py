@@ -39,6 +39,7 @@ class PlaybackSnapshot:
     trim_level: str = "off"
     silence_saved: float = 0.0
     artwork_path: str = ""
+    buffering: int | None = None
 
 
 class PlaybackService:
@@ -53,6 +54,7 @@ class PlaybackService:
         self._lock = RLock()
         self._last_saved_position = -10.0
         self._sleep_timer: Timer | None = None
+        self._load_watchdog: Timer | None = None
         self._dead = False
         self._last_metric_time = None
         self._last_metric_position = None
@@ -67,6 +69,31 @@ class PlaybackService:
 
     def subscribe(self, listener):
         self._listeners.append(listener)
+
+    LOAD_TIMEOUT = 25.0
+
+    def _arm_load_watchdog(self, episode_id: int):
+        self._cancel_load_watchdog()
+        timer = Timer(self.LOAD_TIMEOUT, self._load_timed_out, args=(episode_id,))
+        timer.daemon = True
+        timer.start()
+        self._load_watchdog = timer
+
+    def _cancel_load_watchdog(self):
+        if self._load_watchdog is not None:
+            self._load_watchdog.cancel()
+            self._load_watchdog = None
+
+    def _load_timed_out(self, episode_id: int):
+        with self._lock:
+            if self._dead or self.snapshot.episode_id != episode_id or self.snapshot.state != PlaybackState.LOADING:
+                return
+            self.snapshot = replace(
+                self.snapshot, state=PlaybackState.ERROR,
+                message="Couldn’t open the stream (timed out). Check the connection or download the episode.",
+                buffering=None,
+            )
+        self._emit()
 
     def load_episode(self, episode_id: int, autoplay: bool = True):
         with self._lock:
@@ -109,6 +136,7 @@ class PlaybackService:
             if self.engine.capabilities.silence_trim:
                 self.engine.set_silence_trim(self.snapshot.trim_level)
             self.engine.load(source, episode.position_seconds, autoplay)
+            self._arm_load_watchdog(episode.id)
             self._emit()
 
     def resume_saved(self, autoplay: bool = False) -> bool:
@@ -274,10 +302,16 @@ class PlaybackService:
                 self.snapshot = replace(self.snapshot, state=state)
                 self.repository.set_current_playback(self.snapshot.episode_id, state.value)
             elif event.kind == "file_loaded":
+                self._cancel_load_watchdog()
                 self._last_metric_time = time.monotonic()
                 self._last_metric_position = self.snapshot.position
+                self.snapshot = replace(self.snapshot, buffering=None)
                 if self.snapshot.state == PlaybackState.LOADING:
                     self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED)
+            elif event.kind == "buffering":
+                self.snapshot = replace(self.snapshot, buffering=event.value)
+            elif event.kind == "loading":
+                pass
             elif event.kind == "eof":
                 self._finish_and_advance()
                 return
@@ -286,8 +320,9 @@ class PlaybackService:
             elif event.kind in {"stopped", "shutdown"}:
                 self._persist_position(force=True)
             elif event.kind == "error":
+                self._cancel_load_watchdog()
                 self.snapshot = replace(
-                    self.snapshot, state=PlaybackState.ERROR, message=str(event.value)
+                    self.snapshot, state=PlaybackState.ERROR, message=str(event.value), buffering=None
                 )
             self._emit()
 

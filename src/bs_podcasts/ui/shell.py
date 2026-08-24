@@ -100,6 +100,7 @@ class MainWindow(QMainWindow):
         self._last_sleep_deadline = None
         self._download_samples = {}
         self._previous_playing_id = 0
+        self._play_after_download = 0
         self._refresh_quiet = False
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._scheduled_refresh)
@@ -325,6 +326,7 @@ class MainWindow(QMainWindow):
         self.settings_page.load_downloads(
             self.library.setting("downloads.auto", "0") == "1", int(self.library.setting("downloads.auto_limit", "3")),
             self.library.setting("downloads.delete_played", "0") == "1",
+            self.library.setting("playback.download_first", "0") == "1",
         )
         self.settings_page.load_refresh_interval(int(self.library.setting("refresh.interval_minutes", "60")))
         self.settings_page.open_log_requested.connect(lambda: self._open_location(str(log_path())))
@@ -1315,11 +1317,21 @@ class MainWindow(QMainWindow):
         self._submit_refresh(show_id)
 
     # ----------------------------------------------------------------- playback
-    def _play_episode(self, episode_id: int):
+    def _play_episode(self, episode_id: int, force_stream: bool = False):
         if self.playback is None or not episode_id:
             if self.playback is None:
                 self._notify("Playback is not available", "error")
             return
+        episode = self.library.episode(episode_id) if self.library else None
+        if (
+            not force_stream and episode is not None and not episode.downloaded_path and episode.media_url
+            and self.downloads is not None and self.library.setting("playback.download_first", "0") == "1"
+        ):
+            self._play_after_download = episode_id
+            self._download_episode(episode_id, quiet=True)
+            self._notify("Downloading before playing…", "loading", "Stream instead", lambda: self._play_episode(episode_id, force_stream=True))
+            return
+        self._play_after_download = 0
         try:
             self.playback.load_episode(episode_id, autoplay=True)
         except Exception as exc:
@@ -1467,7 +1479,16 @@ class MainWindow(QMainWindow):
                 if episode is not None:
                     self._ensure_listening_details(episode)
                     self._ensure_episode_artwork(episode)
+                    self.player._streaming = not bool(episode.downloaded_path)
+                    # The side pane follows what just started playing.
+                    if self.pages.currentIndex() != PAGE_SETTINGS and not self.now_playing.isVisible():
+                        self.context.set_mode(0)
+                        self.context.show_episode(self._ui_episode(episode))
+                        self._load_listening_details(episode_id)
+                        if self._last_mode in {"wide", "medium"}:
+                            self.context.show()
             else:
+                self.player._streaming = False
                 self._apply_skip_settings()
             if self._previous_playing_id and self.library is not None and self.library.setting("downloads.delete_played", "0") == "1":
                 self._delete_played_quietly()
@@ -1921,6 +1942,10 @@ class MainWindow(QMainWindow):
             return
         if kind == "download":
             self._reload_library()
+            if result.status == JobStatus.OK and self._play_after_download == identifier:
+                self._play_after_download = 0
+                self._play_episode(identifier)
+                return
             if result.status == JobStatus.OK:
                 episode = self.library.episode(identifier) if self.library else None
                 self._notify(f"Downloaded {episode.title if episode else 'episode'}", "success", "Play", lambda: self._play_episode(identifier))

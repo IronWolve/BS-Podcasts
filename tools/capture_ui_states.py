@@ -167,6 +167,17 @@ def main() -> int:
 
         first = episodes[0]
         snapshot = PlaybackSnapshot(state=PlaybackState.PLAYING, episode_id=first.id, show_id=show.id, title=first.title, show_title="Workshop Radio", position=600.0, duration=float(first.duration_seconds or 2520))
+        loading = PlaybackSnapshot(state=PlaybackState.LOADING, episode_id=first.id, show_id=show.id, title=first.title, show_title="Workshop Radio", duration=2520.0)
+        window.playback = FakePlayback(loading)
+        window._playback_changed(loading)
+        QApplication.processEvents()
+        assert window.player.next_label.text().startswith("Opening"), window.player.next_label.text()
+        assert not window.player.play.isEnabled(), "play should be busy while opening"
+        assert window.context.title.text() == first.title, "side pane did not follow the playing episode"
+        grab(window, "player-opening")
+        buffering = PlaybackSnapshot(state=PlaybackState.PLAYING, episode_id=first.id, show_id=show.id, title=first.title, show_title="Workshop Radio", position=5.0, duration=2520.0, buffering=42)
+        window._playback_changed(buffering)
+        assert window.player.next_label.text() == "Buffering 42%", window.player.next_label.text()
         window.playback = FakePlayback(snapshot)
         window._playback_changed(snapshot)
         window.navigation.select(2)
