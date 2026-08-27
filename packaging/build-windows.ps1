@@ -14,7 +14,9 @@ $sourceDir = Join-Path $repo "dist\BS Podcasts"
 $sourceExe = Join-Path $sourceDir "BS Podcasts.exe"
 
 if (-not $LibMpvDll) {
-    $LibMpvDll = Join-Path $workspace "tmp\windows-build\libmpv\libmpv-2.dll"
+    # Default to the workspace-built LGPL libmpv (mpv -Dgpl=false + LGPL FFmpeg),
+    # required for binary-only distribution. See WINDOWS-BUILD.md to rebuild it.
+    $LibMpvDll = Join-Path $workspace "tmp\windows-build\libmpv-lgpl\libmpv-2.dll"
 }
 
 if (-not (Test-Path -LiteralPath $python)) {
@@ -53,6 +55,12 @@ if (Test-Path -LiteralPath $copiedDir) {
     Remove-Item -LiteralPath $copiedDir -Recurse -Force
 }
 Copy-Item -LiteralPath $sourceDir -Destination $copiedDir -Recurse -Force
+
+# Surface the third-party notices at the folder root where users can find them.
+$notices = Join-Path $copiedDir "_internal\THIRD-PARTY-NOTICES.txt"
+if (Test-Path -LiteralPath $notices) {
+    Copy-Item -LiteralPath $notices -Destination (Join-Path $copiedDir "THIRD-PARTY-NOTICES.txt") -Force
+}
 
 $copiedExe = Join-Path $copiedDir "BS Podcasts.exe"
 $size = (Get-ChildItem -LiteralPath $copiedDir -Recurse -File | Measure-Object -Sum Length).Sum
