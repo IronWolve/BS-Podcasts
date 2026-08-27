@@ -1,0 +1,80 @@
+BS Podcasts — Third-party software notices
+==========================================
+
+This application bundles the following third-party components. License texts
+are included in the "licenses" folder next to this file (inside the
+application's _internal directory); component source code is available from
+the projects listed below.
+
+Qt / PySide6 / Shiboken (The Qt Company)
+  License: GNU Lesser General Public License v3.0 (licenses/LGPL-3.0.txt,
+  which incorporates licenses/GPL-3.0.txt by reference)
+  https://www.qt.io / https://download.qt.io
+  The Qt libraries ship as separate, replaceable DLL files; you may replace
+  them with your own builds as provided for by the LGPL.
+
+mpv / libmpv (libmpv-2.dll)
+  License: GNU Lesser General Public License v2.1 or later
+  (licenses/LGPL-2.1.txt). This copy of libmpv was built from unmodified mpv
+  sources configured in LGPL mode (-Dgpl=false).
+  https://mpv.io / https://github.com/mpv-player/mpv
+
+FFmpeg (statically linked into libmpv-2.dll)
+  License: GNU Lesser General Public License v2.1 or later
+  (licenses/LGPL-2.1.txt), built from unmodified sources in the default LGPL
+  configuration (no --enable-gpl, no --enable-nonfree).
+  https://ffmpeg.org
+
+libplacebo (statically linked into libmpv-2.dll)
+  License: GNU Lesser General Public License v2.1 or later
+  https://code.videolan.org/videolan/libplacebo
+
+libass (statically linked into libmpv-2.dll)
+  License: ISC
+  https://github.com/libass/libass
+
+HarfBuzz (statically linked into libmpv-2.dll)
+  License: MIT ("Old MIT")
+  https://github.com/harfbuzz/harfbuzz
+
+FreeType (statically linked into libmpv-2.dll)
+  License: FreeType License (BSD-style, with credit clause)
+  https://freetype.org
+
+Fribidi (statically linked into libmpv-2.dll)
+  License: GNU Lesser General Public License v2.1 or later
+  https://github.com/fribidi/fribidi
+
+python-mpv
+  License: GNU Lesser General Public License v2.1 or later
+  (licenses/LGPL-2.1.txt)
+  https://github.com/jaseg/python-mpv
+
+Python (python.org) and its standard library
+  License: Python Software Foundation License
+  https://www.python.org
+
+requests — Apache License 2.0 (licenses/Apache-2.0.txt)
+  https://github.com/psf/requests
+urllib3 — MIT License
+  https://github.com/urllib3/urllib3
+charset-normalizer — MIT License
+  https://github.com/jawah/charset_normalizer
+idna — BSD 3-Clause License
+  https://github.com/kjd/idna
+certifi — Mozilla Public License 2.0 (licenses/MPL-2.0.txt)
+  https://github.com/certifi/python-certifi
+
+OpenSSL
+  License: Apache License 2.0 (licenses/Apache-2.0.txt)
+  https://www.openssl.org
+
+Inter font family
+  License: SIL Open Font License 1.1 (see OFL.txt in the application's
+  bundled assets/fonts folder)
+  https://github.com/rsms/inter
+
+Corresponding source for the LGPL components (mpv, FFmpeg, libplacebo,
+Fribidi, python-mpv, Qt) is available from the project pages above; the
+libmpv build recipe used for this application is available from the
+application's distributor on request.
