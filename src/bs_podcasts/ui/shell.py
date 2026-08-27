@@ -43,7 +43,7 @@ from ..jobs import JobResult, JobStatus
 from ..services.updates import check_for_update
 from . import icons
 from .dialogs import AboutDialog, AddPodcastDialog, ConfirmDialog, DeleteFilesDialog, EpisodeInfoDialog, PodcastInfoDialog, PodcastSettingsDialog, RemovePodcastDialog, ShortcutsDialog, TextInputDialog, episode_information_text
-from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast as UiPodcast, plain_snippet
+from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast as UiPodcast, plain_snippet, set_item_tooltips
 from .pixmaps import dominant_color, missing_accents, sample_accents
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
 from .shortcuts import ShortcutManager
@@ -387,6 +387,8 @@ class MainWindow(QMainWindow):
         self._apply_skip_settings()
         self.settings_page.load_theme(self.library.setting("ui.theme", "system"))
         self.settings_page.load_density(self.library.setting("ui.density", "comfortable"))
+        set_item_tooltips(self.library.setting("ui.item_tooltips", "0") == "1")
+        self.settings_page.load_hover_previews(self.library.setting("ui.item_tooltips", "0") == "1")
         self.settings_page.load_text_size(self.library.setting("ui.text_size", "comfortable"))
         self.settings_page.load_font(self.library.setting("ui.font", "Inter"))
         self._apply_density(self.library.setting("ui.density", "comfortable") == "compact")
@@ -1038,6 +1040,8 @@ class MainWindow(QMainWindow):
                 self._notify("Background work paused" if value == "1" else "Background work resumed", "info")
             elif key == "ui.density":
                 self._apply_density(value == "compact")
+            elif key == "ui.item_tooltips":
+                set_item_tooltips(value == "1")
             elif key in {"ui.text_size", "ui.font"}:
                 self._apply_typography()
             elif key == "ui.theme":

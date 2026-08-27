@@ -32,12 +32,29 @@ from .ui.dialogs import StartupErrorDialog
 from .ui.theme import app_font, apply_app_stylesheet, apply_theme, apply_typography, load_fonts, resolve_theme
 
 
+def _write_crash_file(text: str):
+    """Crash reports land in the OS temp directory (%TEMP%/%TMP% on Windows)."""
+    import tempfile
+    import time
+
+    try:
+        path = os.path.join(
+            tempfile.gettempdir(),
+            f"bs-podcasts-crash-{time.strftime('%Y%m%d-%H%M%S')}.log",
+        )
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(f"BS Podcasts {app_version()}\n{text}\n")
+    except OSError:
+        pass
+
+
 def _install_excepthook():
     logger = logging.getLogger("bs_podcasts")
 
     def hook(exc_type, exc_value, exc_traceback):
         text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
         logger.error("Unhandled exception:\n%s", text)
+        _write_crash_file(text)
         sys.__stderr__.write(text)
 
     sys.excepthook = hook
@@ -47,6 +64,7 @@ def _install_excepthook():
             return
         text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
         logger.error("Unhandled exception in thread %s:\n%s", getattr(args.thread, "name", "?"), text)
+        _write_crash_file(f"[thread {getattr(args.thread, 'name', '?')}]\n{text}")
 
     threading.excepthook = thread_hook
 

@@ -95,6 +95,19 @@ def plain_snippet(text: str, limit: int = 240) -> str:
     return collapsed[:limit]
 
 
+# Hover preview pop-ups over podcast/episode items; off unless the user turns
+# them on in Settings ("ui.item_tooltips"). Control tooltips are unaffected.
+_item_tooltips = {"enabled": False}
+
+
+def set_item_tooltips(enabled: bool):
+    _item_tooltips["enabled"] = bool(enabled)
+
+
+def item_tooltips_enabled() -> bool:
+    return _item_tooltips["enabled"]
+
+
 def _tooltip_html(title: str, subtitle: str = "", detail: str = "", width: int = 360) -> str:
     """A bounded rich tooltip that wraps long episode titles and URLs."""
     def safe(value: str) -> str:
@@ -156,6 +169,8 @@ class PodcastModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return item.title
         if role == Qt.ItemDataRole.ToolTipRole:
+            if not item_tooltips_enabled():
+                return None
             health = HEALTH_LABELS.get(item.health, "") if item.show_id else ""
             detail = " · ".join(value for value in (item.display_meta, health) if value)
             return _tooltip_html(item.title, item.author, detail)
@@ -201,6 +216,8 @@ class EpisodeModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return item.title
         if role == Qt.ItemDataRole.ToolTipRole:
+            if not item_tooltips_enabled():
+                return None
             return _tooltip_html(item.title, item.show, plain_snippet(item.description, 180))
         if role == ItemRoles.ITEM:
             return item

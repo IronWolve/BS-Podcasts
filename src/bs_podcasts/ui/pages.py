@@ -1198,11 +1198,14 @@ class SettingsPage(BasePage):
             self.ui_font.addItem(label, key)
         self.ui_font.setFixedWidth(scaled_px(220))
         appearance_form.addRow("Font", self.ui_font)
+        self.hover_previews = QCheckBox("Show preview pop-ups when hovering podcasts and episodes")
+        appearance_form.addRow("Hover previews", self.hover_previews)
         self.settings_content.addWidget(appearance_card)
         self.theme.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.theme", self.theme.itemData(index)))
         self.density.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.density", self.density.itemData(index)))
         self.text_size.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.text_size", self.text_size.itemData(index)))
         self.ui_font.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.font", self.ui_font.itemData(index)))
+        self.hover_previews.toggled.connect(lambda value: self.setting_changed.emit("ui.item_tooltips", "1" if value else "0"))
 
         # Desktop --------------------------------------------------------------
         desktop_card, desktop_form = self._card("Desktop", "Small, optional desktop conveniences.")
@@ -1512,6 +1515,11 @@ class SettingsPage(BasePage):
         self.density.blockSignals(True)
         self.density.setCurrentIndex(max(0, self.density.findData(value)))
         self.density.blockSignals(False)
+
+    def load_hover_previews(self, enabled: bool):
+        self.hover_previews.blockSignals(True)
+        self.hover_previews.setChecked(enabled)
+        self.hover_previews.blockSignals(False)
 
     def load_theme(self, value: str):
         self.theme.blockSignals(True)

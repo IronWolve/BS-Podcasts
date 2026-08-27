@@ -1,5 +1,5 @@
 #define MyAppName "BS Podcasts"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.9.5"
 #ifndef SourceDir
   #error SourceDir must point to the built onedir application folder
 #endif

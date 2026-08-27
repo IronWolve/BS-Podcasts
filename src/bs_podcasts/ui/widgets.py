@@ -2362,8 +2362,11 @@ class PlayerBar(QFrame):
         now.setSpacing(1)
         self.title = QPushButton("Nothing playing")
         self.title.setObjectName("textButton")
-        self.title.setStyleSheet("text-align: left; padding: 0; font-weight: 600;")
+        # Vertical padding keeps descenders visible when hover/focus grows the
+        # 1px transparent border to the 2px ring; _title_metrics sizes to font.
+        self.title.setStyleSheet("text-align: left; padding: 2px 0; font-weight: 600;")
         self.title.clicked.connect(self._open_now_playing)
+        self._title_metrics()
         self.show_label = QLabel("Choose an episode to begin")
         self.show_label.setObjectName("playerShow")
         self.next_label = QLabel("")
@@ -2480,7 +2483,13 @@ class PlayerBar(QFrame):
         self.apply_metrics()
         self._refresh_chrome()
 
+    def _title_metrics(self):
+        """The now-playing title must fit its full font height plus the 2px
+        focus ring and padding, or descenders get shaved off."""
+        self.title.setMinimumHeight(self.title.fontMetrics().height() + 8)
+
     def apply_metrics(self):
+        self._title_metrics()
         self.setFixedHeight(scaled_px(80 if self._compact else 88))
         self.layout().setContentsMargins(SPACE["lg"], SPACE["sm"], SPACE["lg"], SPACE["sm"])
         self.layout().setSpacing(SPACE["md"])
