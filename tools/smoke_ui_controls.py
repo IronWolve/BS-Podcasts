@@ -133,7 +133,7 @@ def main() -> int:
         window.settings_page.skip_back.setValue(15)
         require(window.discover_page.model.rowCount() == 0, "Discover contains demo rows")
         require(
-            window.home_page.summary_buttons[0].text().startswith("0\n"),
+            window.home_page.summary_buttons[0].text() in {"0\nnew episodes", "—\nnew episodes"},
             "Home new count is not persisted data",
         )
         require(window.playlist_page.header.action.text() == "Clear Up Next", "Up Next lacks its clear action")
@@ -229,7 +229,7 @@ def main() -> int:
         while window._discover_loading:
             app.processEvents()
         require(window.discover_page.category.currentText() == "All Categories", "search did not reset category")
-        require(window.discover_page.topic.currentText() == "No additional topics", "search did not reset topic")
+        require(window.discover_page.topic.currentText() == "Choose a category first", "search did not reset topic")
         require(window._discover_search_history == ["daily news"], "search was not added to history")
         require("daily news" in library.setting("discover.search_history"), "search history was not persisted")
         history_menu = window._create_discover_search_history_menu()

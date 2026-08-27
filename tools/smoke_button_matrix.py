@@ -359,13 +359,13 @@ def main() -> int:
         latest_id = library.episodes(show_id=show.id, limit=1)[0].id
         hero.primary.click()
         process(app)
-        expected = "Pause latest" if playback.snapshot.state == PlaybackState.PLAYING else "Resume latest"
+        expected = "Pause" if playback.snapshot.state == PlaybackState.PLAYING else "Resume"
         check(playback.snapshot.episode_id == latest_id, "hero Play latest is not on the latest episode")
         check(hero.primary.text() == expected, f"hero button: {hero.primary.text()} vs {expected}")
         toggles = playback.count("play_pause")
         hero.primary.click()
         process(app)
-        expected = "Pause latest" if playback.snapshot.state == PlaybackState.PLAYING else "Resume latest"
+        expected = "Pause" if playback.snapshot.state == PlaybackState.PLAYING else "Resume"
         check(playback.count("play_pause") == toggles + 1 and hero.primary.text() == expected, "hero button did not toggle the playing episode")
         dialog_answers["PodcastSettingsDialog"] = QDialog.DialogCode.Accepted
         hero.settings.click()

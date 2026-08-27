@@ -1,6 +1,6 @@
 """Reusable shell components."""
 
-from html import escape as html_escape
+from html import escape as html_escape, unescape as html_unescape
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
 from ..assets import icon_path
 from . import icons
 from .pixmaps import cover, initials
-from .theme import COLORS, HEALTH_LABELS, SPACE, app_font
+from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, scaled_px, theme_name
 
 
 NAV_ITEMS = (
@@ -128,7 +128,7 @@ def safe_feed_html(text: str) -> str:
     if not text:
         return ""
     if "<" not in text or ">" not in text:
-        return html_escape(text).replace("\n", "<br>")
+        return html_escape(html_unescape(text)).replace("\n", "<br>")
     parser = _SafeFeedHtml()
     parser.feed(text)
     parser.close()
@@ -214,7 +214,7 @@ class NavigationRail(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("navigationRail")
-        self.setFixedWidth(RAIL_WIDTH)
+        self.setFixedWidth(scaled_px(RAIL_WIDTH))
         self.setAcceptDrops(True)
         self._drop_armed = False
         self.current_index = 0
@@ -240,17 +240,20 @@ class NavigationRail(QFrame):
         self.mark.setAccessibleName("About BS Podcasts")
         self.mark.setToolTip("About BS Podcasts")
         self.mark.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.mark.setFixedSize(40, 40)
+        self.mark.setFixedSize(scaled_px(40), scaled_px(40))
         self.mark.installEventFilter(self)
         self.brand_text = QWidget()
         brand_col = QVBoxLayout(self.brand_text)
         brand_col.setContentsMargins(0, 0, 0, 0)
         brand_col.setSpacing(0)
-        name = QLabel("BS Podcasts")
-        name.setObjectName("brandName")
+        self.brand_name = QLabel("BS Podcasts")
+        self.brand_name.setObjectName("brandName")
+        self.brand_name.setToolTip("About BS Podcasts")
+        self.brand_name.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.brand_name.installEventFilter(self)
         self.summary = QLabel("Library")
         self.summary.setObjectName("brandSub")
-        brand_col.addWidget(name)
+        brand_col.addWidget(self.brand_name)
         brand_col.addWidget(self.summary)
         brand.addWidget(self.mark)
         brand.addWidget(self.brand_text, 1)
@@ -306,6 +309,7 @@ class NavigationRail(QFrame):
         self.version.setObjectName("eyebrow")
         self.toggle = icon_button("chevron-left", "Collapse navigation", "railToggle", 16)
         self.toggle.clicked.connect(lambda: self.set_compact(not self._compact, user=True))
+        self.version.hide()
         footer.addWidget(self.version, 1)
         footer.addWidget(self.toggle)
         layout.addLayout(footer)
@@ -315,7 +319,7 @@ class NavigationRail(QFrame):
         self.background_status.setVisible(self._background_paused and not self._compact)
 
     def eventFilter(self, watched, event):
-        if watched is self.mark and event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+        if watched in {self.mark, self.brand_name} and event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
             self.about_requested.emit()
             return True
         return super().eventFilter(watched, event)
@@ -375,10 +379,12 @@ class NavigationRail(QFrame):
         return f"v{version}" if version else ""
 
     def _paint_icons(self):
+        size = scaled_px(20)
         for button, glyph, _label in self._buttons:
             active = button.property("active") is True
             color = COLORS["accent"] if active else COLORS["muted"]
-            button.setIcon(icons.icon(glyph, color, 20))
+            button.setIcon(icons.icon(glyph, color, size))
+            button.setIconSize(QSize(size, size))
 
     def select(self, index: int):
         if not 0 <= index < len(self._buttons):
@@ -411,25 +417,38 @@ class NavigationRail(QFrame):
         self.summary.setText(text)
 
     def set_compact(self, compact: bool, user: bool = False):
-        if compact == self._compact:
-            return
+        changed = compact != self._compact
         self._compact = compact
-        self.setFixedWidth(RAIL_COMPACT_WIDTH if compact else RAIL_WIDTH)
         self.brand_text.setVisible(not compact)
-        self.version.setVisible(not compact)
+        self.version.setVisible(False)
         self.background_status.setVisible(self._background_paused and not compact)
-        self.toggle.setIcon(icons.icon("chevron-right" if compact else "chevron-left", COLORS["muted"], 16))
+        self.toggle.setIcon(icons.icon("chevron-right" if compact else "chevron-left", COLORS["muted"], scaled_px(16)))
         self.toggle.setToolTip("Expand navigation" if compact else "Collapse navigation")
         for index, (button, _glyph, label) in enumerate(self._buttons):
             button.setText("" if compact else label)
             button.setToolTip(f"{label}  ·  Ctrl+{index + 1}")
-            button.setStyleSheet("text-align: center; padding: 9px 0;" if compact else "")
+            button.setStyleSheet(f"text-align: center; padding: {scaled_px(9)}px 0;" if compact else "")
             if compact:
                 self._badges[index].hide()
             else:
                 self.set_badge(index, self._badge_counts[index])
-        if user:
+        self.apply_metrics()
+        if user and changed:
             self.compact_toggled.emit(compact)
+
+    def apply_metrics(self):
+        width = scaled_px(RAIL_COMPACT_WIDTH if self._compact else RAIL_WIDTH)
+        self.setFixedWidth(width)
+        self.layout().setContentsMargins(SPACE["md"], SPACE["lg"], SPACE["md"], SPACE["md"])
+        self.layout().setSpacing(SPACE["xs"])
+        side = scaled_px(40)
+        self.mark.setFixedSize(side, side)
+        self.mark.setPixmap(
+            QPixmap(str(icon_path(64))).scaled(
+                side, side, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            )
+        )
+        self._paint_icons()
 
 
 class SearchField(QLineEdit):
@@ -469,8 +488,8 @@ class PageHeader(QFrame):
 
         self.search = SearchField("Filter")
         self.search.setAccessibleName(f"Filter {title}")
-        self.search.setMinimumWidth(150)
-        self.search.setMaximumWidth(240)
+        self.search.setMinimumWidth(scaled_px(150))
+        self.search.setMaximumWidth(scaled_px(240))
         self.search.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.search.setVisible(show_search)
         layout.addWidget(self.search)
@@ -485,6 +504,11 @@ class PageHeader(QFrame):
     def set_subtitle(self, text: str):
         self.subtitle_label.setText(text)
         self.subtitle_label.setVisible(bool(text))
+
+    def apply_metrics(self):
+        self.layout().setSpacing(SPACE["md"])
+        self.search.setMinimumWidth(scaled_px(150))
+        self.search.setMaximumWidth(scaled_px(240))
 
 
 class ChipRow(QWidget):
@@ -511,6 +535,7 @@ class ChipRow(QWidget):
             self._buttons.append(button)
             layout.addWidget(button)
         layout.addStretch(1)
+        self._compact = False
         self.setVisible(bool(labels))
 
     def select(self, label: str):
@@ -527,11 +552,15 @@ class ChipRow(QWidget):
         self.layout().addWidget(widget)
 
     def set_compact(self, compact: bool):
-        self.layout().setSpacing(SPACE["xs"] if compact else SPACE["sm"])
+        self._compact = bool(compact)
+        self.layout().setSpacing(SPACE["xs"] if self._compact else SPACE["sm"])
         for button in self._buttons:
-            button.setProperty("compact", bool(compact))
+            button.setProperty("compact", self._compact)
             button.style().unpolish(button)
             button.style().polish(button)
+
+    def apply_metrics(self):
+        self.set_compact(self._compact)
 
 
 class StateBanner(QFrame):
@@ -560,7 +589,7 @@ class StateBanner(QFrame):
         row.setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["sm"], SPACE["sm"])
         row.setSpacing(SPACE["sm"])
         self.icon = QLabel()
-        self.icon.setFixedSize(18, 18)
+        self.icon.setFixedSize(scaled_px(18), scaled_px(18))
         self.prefix = QLabel()
         self.prefix.setObjectName("bannerPrefix")
         self.label = QLabel()
@@ -592,7 +621,9 @@ class StateBanner(QFrame):
         self.setProperty("state", state)
         self.style().unpolish(self)
         self.style().polish(self)
-        self.icon.setPixmap(icons.pixmap(glyph, COLORS[tone], 18, self.devicePixelRatioF()))
+        size = scaled_px(18)
+        self.icon.setFixedSize(size, size)
+        self.icon.setPixmap(icons.pixmap(glyph, COLORS[tone], size, self.devicePixelRatioF()))
         self.prefix.setText(prefix)
         self.prefix.setVisible(bool(prefix))
         self.label.setText(message)
@@ -601,6 +632,12 @@ class StateBanner(QFrame):
         self.progress.setVisible(state == "loading")
         self.setAccessibleName(f"{prefix}: {message}" if prefix else message)
         self.show()
+
+    def apply_metrics(self):
+        size = scaled_px(18)
+        self.icon.setFixedSize(size, size)
+        self.layout().itemAt(0).layout().setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["sm"], SPACE["sm"])
+        self.layout().itemAt(0).layout().setSpacing(SPACE["sm"])
 
     def clear(self):
         self.state = ""
@@ -620,7 +657,7 @@ class Toast(QFrame):
         layout.setContentsMargins(SPACE["lg"], SPACE["sm"] + 2, SPACE["sm"], SPACE["sm"] + 2)
         layout.setSpacing(SPACE["md"])
         self.icon = QLabel()
-        self.icon.setFixedSize(18, 18)
+        self.icon.setFixedSize(scaled_px(18), scaled_px(18))
         self.text = QLabel()
         self.text.setObjectName("toastText")
         self.action = QPushButton()
@@ -642,7 +679,15 @@ class Toast(QFrame):
         self._timer.timeout.connect(self.dismiss)
         self._queue = []
         self._callback = None
+        self._closing = False
+        self._animation.finished.connect(self._animation_finished)
         self.hide()
+
+    def apply_metrics(self):
+        size = scaled_px(18)
+        self.icon.setFixedSize(size, size)
+        self.layout().setContentsMargins(SPACE["lg"], SPACE["sm"] + 2, SPACE["sm"], SPACE["sm"] + 2)
+        self.layout().setSpacing(SPACE["md"])
 
     MAX_QUEUE = 3
 
@@ -659,11 +704,14 @@ class Toast(QFrame):
         self.setProperty("tone", tone)
         self.style().unpolish(self)
         self.style().polish(self)
-        self.icon.setPixmap(icons.pixmap(glyph, COLORS[color], 18, self.devicePixelRatioF()))
+        size = scaled_px(18)
+        self.icon.setFixedSize(size, size)
+        self.icon.setPixmap(icons.pixmap(glyph, COLORS[color], size, self.devicePixelRatioF()))
         self.text.setText(message)
         self.action.setText(action)
         self.action.setVisible(bool(action))
         self._callback = callback
+        self._closing = False
         self.adjustSize()
         self.reposition()
         self.setAccessibleName(message)
@@ -687,6 +735,19 @@ class Toast(QFrame):
 
     def dismiss(self):
         self._timer.stop()
+        if not self.isVisible() or self._closing:
+            return
+        self._closing = True
+        current = self._effect.opacity()
+        self._animation.stop()
+        self._animation.setStartValue(current)
+        self._animation.setEndValue(0.0)
+        self._animation.start()
+
+    def _animation_finished(self):
+        if not self._closing:
+            return
+        self._closing = False
         self.hide()
         if self._queue:
             QTimer.singleShot(120, lambda: self.show_message(*self._queue.pop(0)))
@@ -708,14 +769,15 @@ class EmptyState(QWidget):
         layout.setContentsMargins(SPACE["xl"], SPACE["xxl"], SPACE["xl"], SPACE["xxl"])
         layout.setSpacing(SPACE["sm"])
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        badge = QFrame()
-        badge.setObjectName("emptyGlyph")
-        badge.setFixedSize(56, 56)
-        badge_layout = QVBoxLayout(badge)
+        self._glyph_name = glyph
+        self.badge = QFrame()
+        self.badge.setObjectName("emptyGlyph")
+        self.badge.setFixedSize(scaled_px(56), scaled_px(56))
+        badge_layout = QVBoxLayout(self.badge)
         badge_layout.setContentsMargins(0, 0, 0, 0)
         self.glyph = QLabel()
         self.glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.glyph.setPixmap(icons.pixmap(glyph, COLORS["muted"], 24, self.devicePixelRatioF()))
+        self.glyph.setPixmap(icons.pixmap(glyph, COLORS["muted"], scaled_px(24), self.devicePixelRatioF()))
         badge_layout.addWidget(self.glyph)
         self.heading = QLabel(title)
         self.heading.setObjectName("emptyTitle")
@@ -724,8 +786,8 @@ class EmptyState(QWidget):
         self.body_label.setObjectName("emptyBody")
         self.body_label.setWordWrap(True)
         self.body_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.body_label.setMaximumWidth(380)
-        layout.addWidget(badge, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.body_label.setMaximumWidth(scaled_px(380))
+        layout.addWidget(self.badge, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.heading, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.body_label, alignment=Qt.AlignmentFlag.AlignCenter)
         self.button = QPushButton(action)
@@ -735,6 +797,14 @@ class EmptyState(QWidget):
         self.button.setVisible(bool(action))
         layout.addSpacing(SPACE["sm"])
         layout.addWidget(self.button, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    def apply_metrics(self):
+        self.layout().setContentsMargins(SPACE["xl"], SPACE["xxl"], SPACE["xl"], SPACE["xxl"])
+        self.layout().setSpacing(SPACE["sm"])
+        side = scaled_px(56)
+        self.badge.setFixedSize(side, side)
+        self.glyph.setPixmap(icons.pixmap(self._glyph_name, COLORS["muted"], scaled_px(24), self.devicePixelRatioF()))
+        self.body_label.setMaximumWidth(scaled_px(380))
 
     def set_text(self, title: str, body: str, action: str = ""):
         self.heading.setText(title)
@@ -884,6 +954,38 @@ class HeroCard(QFrame):
         layout.addLayout(text, 1)
         self._subscribe_mode = False
         self.hide()
+        self.apply_metrics()
+
+    def apply_metrics(self):
+        self.layout().setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
+        self.layout().setSpacing(SPACE["lg"])
+        self.art.set_bounds(scaled_px(96), scaled_px(160))
+        self.art.set_side(scaled_px(128))
+        self.description.setMaximumHeight(scaled_px(44))
+        self._apply_compact_chrome()
+
+    def _apply_compact_chrome(self):
+        if not hasattr(self, "unsubscribe"):
+            return
+        if self.width() <= 0:
+            return
+        compact = self.width() < 760
+        side = scaled_px(34)
+        for button, label in (
+            (self.refresh, "Refresh"),
+            (self.website, "Website"),
+            (self.settings, "Settings"),
+            (self.info, "Info"),
+            (self.unsubscribe, "Unsubscribe"),
+        ):
+            button.setText("" if compact else label)
+            button.setAccessibleName(label)
+            button.setToolTip(label)
+            if compact:
+                button.setFixedSize(side, side)
+            else:
+                button.setMinimumSize(0, 0)
+                button.setMaximumSize(16777215, 16777215)
 
     def show_podcast(self, title, author, artwork_path, accent, meta, description, subscribed: bool, has_website: bool):
         self._subscribe_mode = not subscribed
@@ -913,24 +1015,7 @@ class HeroCard(QFrame):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if not hasattr(self, "unsubscribe"):
-            return
-        compact = self.width() < 760
-        for button, label in (
-            (self.refresh, "Refresh"),
-            (self.website, "Website"),
-            (self.settings, "Settings"),
-            (self.info, "Info"),
-            (self.unsubscribe, "Unsubscribe"),
-        ):
-            button.setText("" if compact else label)
-            button.setAccessibleName(label)
-            button.setToolTip(label if not button.toolTip() else button.toolTip())
-            if compact:
-                button.setFixedSize(34, 34)
-            else:
-                button.setMinimumSize(0, 0)
-                button.setMaximumSize(16777215, 16777215)
+        self._apply_compact_chrome()
 
     def _create_context_menu(self):
         menu = QMenu(self)
@@ -948,7 +1033,7 @@ class HeroCard(QFrame):
         if self._subscribe_mode:
             return
         if playing_latest:
-            self.primary.setText("Pause latest" if active else "Resume latest")
+            self.primary.setText("Pause" if active else "Resume")
             self.primary.setIcon(icons.icon("pause" if active else "play", COLORS["on_accent"], 16))
         else:
             self.primary.setText("Play latest")
@@ -1009,6 +1094,9 @@ class SeekSlider(QSlider):
         super().__init__(Qt.Orientation.Horizontal, parent)
         self.setObjectName("seekSlider")
         self.setMouseTracking(True)
+        # The whole widget is the click target; keep it taller than the groove
+        # so seeking doesn't require pixel-perfect aim.
+        self.setMinimumHeight(scaled_px(22))
         self._markers = ()
         self._formatter = None
         self._duration = 0.0
@@ -1102,7 +1190,7 @@ class Popover(QFrame):
     """Small level-2 surface anchored above a button."""
 
     def __init__(self, parent=None):
-        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self.setObjectName("popover")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
@@ -1158,16 +1246,22 @@ class VolumePopover(Popover):
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setObjectName("volumeSlider")
         self.slider.setRange(0, 100)
-        self.slider.setFixedWidth(140)
+        self.slider.setFixedWidth(scaled_px(140))
         self.slider.setAccessibleName("Volume")
         self.slider.valueChanged.connect(lambda value: self.volume_changed.emit(float(value)))
         self.value = QLabel("100")
         self.value.setObjectName("meta")
-        self.value.setFixedWidth(28)
+        self.value.setFixedWidth(scaled_px(28))
         self.value.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.slider.valueChanged.connect(lambda value: self.value.setText(str(value)))
         layout.addWidget(self.slider)
         layout.addWidget(self.value)
+
+    def apply_metrics(self):
+        self.layout().setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["md"], SPACE["sm"])
+        self.layout().setSpacing(SPACE["sm"])
+        self.slider.setFixedWidth(scaled_px(140))
+        self.value.setFixedWidth(scaled_px(28))
 
     def set_volume(self, volume: float):
         self.slider.blockSignals(True)
@@ -1244,8 +1338,8 @@ class ContextPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("contextPanel")
-        self.setMinimumWidth(320)
-        self.setMaximumWidth(440)
+        self.setMinimumWidth(scaled_px(320))
+        self.setMaximumWidth(scaled_px(440))
         self._feed_url = ""
         self._episode_id = 0
         self._show_id = 0
@@ -1259,17 +1353,23 @@ class ContextPanel(QFrame):
         top.setSpacing(SPACE["xs"])
         self.mode_group = QButtonGroup(self)
         self.mode_group.setExclusive(True)
+        modes = QFrame()
+        modes.setObjectName("contextModes")
+        mode_row = QHBoxLayout(modes)
+        mode_row.setContentsMargins(0, 0, 0, 0)
+        mode_row.setSpacing(0)
         self.selected_mode = QPushButton("Selected")
         self.queue_mode = QPushButton("Up Next")
         for index, button in enumerate((self.selected_mode, self.queue_mode)):
-            button.setObjectName("chip")
+            button.setObjectName("contextMode")
             button.setCheckable(True)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
             button.clicked.connect(lambda checked=False, i=index: self.set_mode(i))
             self.mode_group.addButton(button, index)
-            top.addWidget(button)
+            mode_row.addWidget(button)
         self.selected_mode.setChecked(True)
+        top.addWidget(modes)
         top.addStretch(1)
         self.info_button = icon_button("info", "Podcast or episode information")
         self.info_button.setEnabled(False)
@@ -1296,7 +1396,7 @@ class ContextPanel(QFrame):
         art_row.addWidget(self.art)
         art_row.addStretch(1)
         selected_layout.addLayout(art_row)
-        self.title = QLabel("Nothing selected")
+        self.title = QLabel("Select a podcast or episode")
         self.title.setObjectName("contextTitle")
         self.title.setWordWrap(True)
         self.meta = QLabel("")
@@ -1387,7 +1487,7 @@ class ContextPanel(QFrame):
         self.tabs.tabBar().setExpanding(True)
         self.tabs.tabBar().setUsesScrollButtons(False)
         self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
-        self.tabs.setMinimumHeight(150)
+        self.tabs.setMinimumHeight(scaled_px(150))
         self.body = QTextBrowser()
         self.body.setObjectName("contextBody")
         self.body.setReadOnly(True)
@@ -1416,7 +1516,7 @@ class ContextPanel(QFrame):
         self.bookmark_list.setAccessibleName("Bookmarks")
         self.bookmark_list.itemClicked.connect(self._seek_item)
         self.bookmark_list.itemActivated.connect(self._seek_item)
-        self.tabs.addTab(self.bookmark_list, "Saved")
+        self.tabs.addTab(self.bookmark_list, "Bookmarks")
         self.tabs.setTabToolTip(3, "Bookmarks")
         selected_layout.addWidget(self.tabs, 1)
         selected_layout.addStretch(0)
@@ -1447,6 +1547,7 @@ class ContextPanel(QFrame):
         self.queue_view.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.queue_view.setUniformItemSizes(True)
         self.queue_view.setMouseTracking(True)
+        self.queue_view.viewport().setMouseTracking(True)
         self.queue_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.queue_view.doubleClicked.connect(self._queue_activated)
         self.queue_view.activated.connect(self._queue_activated)
@@ -1524,12 +1625,17 @@ class ContextPanel(QFrame):
             placeholder = QListWidgetItem("No bookmarks yet")
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.bookmark_list.addItem(placeholder)
-        self.tabs.setTabText(3, "Saved")
+        self.tabs.setTabText(3, "Bookmarks")
         self.tabs.setTabToolTip(3, f"{len(bookmarks)} bookmark{'s' if len(bookmarks) != 1 else ''}")
 
     def show_podcast(self, podcast):
         self._set_current_item(podcast)
         self.set_mode(0)
+        self.art.show()
+        self.primary.show()
+        self.secondary.setVisible(False)
+        self.download.setVisible(False)
+        self.tabs.show()
         self.art.set_artwork(podcast.artwork_path, initials(podcast.author if podcast.is_episode else podcast.title), podcast.accent)
         self.title.setText(podcast.title)
         self._episode_candidate = podcast.is_episode
@@ -1636,6 +1742,11 @@ class ContextPanel(QFrame):
     def show_episode(self, episode):
         self._set_current_item(episode)
         self.set_mode(0)
+        self.art.show()
+        self.primary.show()
+        self.secondary.show()
+        self.download.show()
+        self.tabs.show()
         self._preview_url = ""
         self.links.hide()
         self.art.set_artwork(episode.artwork_path, initials(episode.show), episode.accent)
@@ -1677,23 +1788,33 @@ class ContextPanel(QFrame):
         self._set_current_item(None)
         self._preview_url = ""
         self.links.hide()
-        self.art.set_artwork("", "—", "")
-        self.title.setText("Nothing selected")
+        self.art.hide()
+        self.title.setText("Select a podcast or episode")
         self.meta.setText("")
         self.show_link.setVisible(False)
         self.health.setVisible(False)
         self.latest_card.setVisible(False)
-        self._set_body("Select a podcast or episode to see its details here.")
-        for index in range(1, self.tabs.count()):
-            self.tabs.setTabVisible(index, False)
+        self._set_body("")
+        self.tabs.hide()
         self._feed_url = ""
         self._episode_id = 0
         self._show_id = 0
-        self.primary.setText("Play")
-        self.primary.setEnabled(False)
-        self.download.setText("Download")
-        self.download.setEnabled(False)
-        self.secondary.setEnabled(False)
+        self.primary.hide()
+        self.secondary.hide()
+        self.download.hide()
+
+    def set_dismissible(self, dismissible: bool):
+        self.close_button.setVisible(bool(dismissible))
+
+    def apply_metrics(self):
+        self.setMinimumWidth(scaled_px(320))
+        self.setMaximumWidth(scaled_px(440))
+        self.layout().setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
+        self.layout().setSpacing(SPACE["md"])
+        self.art.set_bounds(scaled_px(120), scaled_px(240))
+        self.art.set_side(min(self.art.width() or scaled_px(240), scaled_px(240)))
+        self.tabs.setMinimumHeight(scaled_px(150))
+        self.queue_empty.apply_metrics()
 
     def _set_current_item(self, item):
         def item_key(value):
@@ -1864,8 +1985,8 @@ class NowPlayingView(QFrame):
         self.close_button.clicked.connect(self.close_requested)
         top.addWidget(self.close_button)
         left.addLayout(top)
-        self.art = Artwork(320, 20)
-        self.art.set_bounds(160, 420)
+        self.art = Artwork(scaled_px(320), 20)
+        self.art.set_bounds(scaled_px(160), scaled_px(420))
         left.addWidget(self.art, 0, Qt.AlignmentFlag.AlignHCenter)
         self.title = QLabel("Nothing playing")
         self.title.setObjectName("contextTitle")
@@ -1882,10 +2003,10 @@ class NowPlayingView(QFrame):
         left.addWidget(self.show_link, 0, Qt.AlignmentFlag.AlignHCenter)
         left.addWidget(self.meta)
         left.addStretch(1)
-        left_wrap = QWidget()
-        left_wrap.setLayout(left)
-        left_wrap.setMaximumWidth(460)
-        layout.addWidget(left_wrap, 0)
+        self.left_wrap = QWidget()
+        self.left_wrap.setLayout(left)
+        self.left_wrap.setMaximumWidth(scaled_px(460))
+        layout.addWidget(self.left_wrap, 0)
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("nowPlayingTabWidget")
@@ -1921,6 +2042,13 @@ class NowPlayingView(QFrame):
         right.addWidget(panel, 1)
         layout.addLayout(right, 1)
         self.hide()
+
+    def apply_metrics(self):
+        self.layout().setContentsMargins(SPACE["xxl"], SPACE["xl"], SPACE["xxl"], SPACE["xl"])
+        self.layout().setSpacing(SPACE["xxl"])
+        self.art.set_bounds(scaled_px(160), scaled_px(420))
+        self.art.set_side(min(self.art.width() or scaled_px(320), scaled_px(320)))
+        self.left_wrap.setMaximumWidth(scaled_px(460))
 
     def _create_context_menu(self):
         menu = QMenu(self)
@@ -2035,8 +2163,8 @@ class SearchOverlay(QFrame):
         outer.setContentsMargins(SPACE["xxl"] * 2, SPACE["xxl"], SPACE["xxl"] * 2, SPACE["xxl"])
         self.card = QFrame()
         self.card.setObjectName("popover")
-        self.card.setMinimumWidth(640)
-        self.card.setMaximumWidth(760)
+        self.card.setMinimumWidth(scaled_px(640))
+        self.card.setMaximumWidth(scaled_px(760))
         card_layout = QVBoxLayout(self.card)
         card_layout.setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
         card_layout.setSpacing(SPACE["md"])
@@ -2057,7 +2185,7 @@ class SearchOverlay(QFrame):
         self.results.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.results.itemActivated.connect(self._activate)
         self.results.itemClicked.connect(self._activate)
-        self.results.setMinimumHeight(240)
+        self.results.setMinimumHeight(scaled_px(240))
         card_layout.addWidget(self.results, 1)
         self.hint = QLabel("↑↓ to move  ·  Enter to open  ·  Esc to close")
         self.hint.setObjectName("settingHint")
@@ -2070,6 +2198,20 @@ class SearchOverlay(QFrame):
         self._timer.timeout.connect(lambda: self.query_changed.emit(self.field.text().strip()))
         self.field.installEventFilter(self)
         self.hide()
+
+    def apply_metrics(self):
+        self.layout().setContentsMargins(SPACE["xxl"] * 2, SPACE["xxl"], SPACE["xxl"] * 2, SPACE["xxl"])
+        self.card.setMinimumWidth(scaled_px(640))
+        self.card.setMaximumWidth(scaled_px(760))
+        self.card.layout().setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
+        self.card.layout().setSpacing(SPACE["md"])
+        self.results.setMinimumHeight(scaled_px(240))
+        heights = {"podcast": 54, "episode": 62, "directory": 42}
+        for row in range(self.results.count()):
+            item = self.results.item(row)
+            payload = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            if payload and payload[0] in heights:
+                item.setSizeHint(QSize(0, scaled_px(heights[payload[0]])))
 
     def open(self):
         self.show()
@@ -2088,7 +2230,7 @@ class SearchOverlay(QFrame):
             self._section("PODCASTS")
             for podcast in podcasts[:6]:
                 item = QListWidgetItem(icons.icon("podcasts", COLORS["muted"], 16), f"{podcast.title}\n{podcast.author}")
-                item.setSizeHint(QSize(0, 54))
+                item.setSizeHint(QSize(0, scaled_px(54)))
                 item.setData(Qt.ItemDataRole.UserRole, ("podcast", podcast))
                 self.results.addItem(item)
         if episodes:
@@ -2096,13 +2238,13 @@ class SearchOverlay(QFrame):
             for episode in episodes[:12]:
                 meta = "  ·  ".join(value for value in (episode.show, episode.published) if value)
                 item = QListWidgetItem(icons.icon("episodes", COLORS["muted"], 16), f"{episode.title}\n{meta}")
-                item.setSizeHint(QSize(0, 62))
+                item.setSizeHint(QSize(0, scaled_px(62)))
                 item.setData(Qt.ItemDataRole.UserRole, ("episode", episode))
                 self.results.addItem(item)
         if query:
             self._section("DIRECTORY")
             item = QListWidgetItem(icons.icon("discover", COLORS["accent"], 16), f"Search the podcast directory for “{query}”")
-            item.setSizeHint(QSize(0, 42))
+            item.setSizeHint(QSize(0, scaled_px(42)))
             item.setData(Qt.ItemDataRole.UserRole, ("directory", query))
             self.results.addItem(item)
         elif not podcasts and not episodes:
@@ -2194,7 +2336,7 @@ class PlayerBar(QFrame):
         self.setObjectName("playerBar")
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
-        self.setFixedHeight(88)
+        self.setFixedHeight(scaled_px(88))
         self._duration = 0.0
         self._capabilities = None
         self._speed = 1.0
@@ -2206,15 +2348,14 @@ class PlayerBar(QFrame):
         self._ab_active = False
         self._trim_active = False
         self._sleep_active = False
+        self._compact = False
         layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE["lg"], SPACE["sm"], SPACE["lg"], SPACE["sm"])
         layout.setSpacing(SPACE["md"])
 
         self.art = Artwork(56, 10)
         self.art.setAccessibleName("Now playing artwork")
-        self.art.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.art.setToolTip("Show now playing")
-        self.art.clicked.connect(self.now_playing_requested)
+        self.art.clicked.connect(self._open_now_playing)
         layout.addWidget(self.art)
 
         now = QVBoxLayout()
@@ -2222,9 +2363,7 @@ class PlayerBar(QFrame):
         self.title = QPushButton("Nothing playing")
         self.title.setObjectName("textButton")
         self.title.setStyleSheet("text-align: left; padding: 0; font-weight: 600;")
-        self.title.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.title.setToolTip("Show now playing")
-        self.title.clicked.connect(self.now_playing_requested)
+        self.title.clicked.connect(self._open_now_playing)
         self.show_label = QLabel("Choose an episode to begin")
         self.show_label.setObjectName("playerShow")
         self.next_label = QLabel("")
@@ -2234,8 +2373,9 @@ class PlayerBar(QFrame):
         now.addWidget(self.next_label)
         now_wrap = QWidget()
         now_wrap.setLayout(now)
-        now_wrap.setMinimumWidth(180)
-        now_wrap.setMaximumWidth(280)
+        now_wrap.setMinimumWidth(scaled_px(180))
+        now_wrap.setMaximumWidth(scaled_px(280))
+        self.now_wrap = now_wrap
         layout.addWidget(now_wrap)
 
         transport = QVBoxLayout()
@@ -2297,7 +2437,7 @@ class PlayerBar(QFrame):
         self.speed.setToolTip("Playback speed")
         self.speed.setAccessibleName("Playback speed")
         self.speed.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.speed.setFixedWidth(52)
+        self.speed.setFixedWidth(scaled_px(52))
         self.speed_popover = SpeedPopover(self)
         self.speed_popover.speed_selected.connect(self.speed_requested)
         self.speed.clicked.connect(self._show_speed)
@@ -2322,6 +2462,7 @@ class PlayerBar(QFrame):
             tools.addWidget(widget)
         layout.addLayout(tools)
         self.set_enabled(False)
+        self._refresh_chrome()
 
     # -- configuration -----------------------------------------------------
     def set_skip_values(self, back: int, forward: int):
@@ -2335,10 +2476,28 @@ class PlayerBar(QFrame):
         self.forward.setAccessibleName(f"Forward {self._skip_forward} seconds")
 
     def set_compact(self, compact: bool):
-        self.setFixedHeight(80 if compact else 88)
-        for widget in (self.bookmark, self.ab, self.trim, self.sleep):
-            widget.setVisible(not compact)
-        self.next_label.setVisible(not compact)
+        self._compact = bool(compact)
+        self.apply_metrics()
+        self._refresh_chrome()
+
+    def apply_metrics(self):
+        self.setFixedHeight(scaled_px(80 if self._compact else 88))
+        self.layout().setContentsMargins(SPACE["lg"], SPACE["sm"], SPACE["lg"], SPACE["sm"])
+        self.layout().setSpacing(SPACE["md"])
+        art = scaled_px(56)
+        self.art.set_bounds(scaled_px(40), scaled_px(72))
+        self.art.set_side(art)
+        self.now_wrap.setMinimumWidth(scaled_px(180))
+        self.now_wrap.setMaximumWidth(scaled_px(280))
+        self.speed.setFixedWidth(scaled_px(52))
+        skip = scaled_px(20)
+        self.back.setIconSize(QSize(skip, skip))
+        self.forward.setIconSize(QSize(skip, skip))
+        play = scaled_px(22)
+        self.play.setIconSize(QSize(play, play))
+        for button in (self.next, self.bookmark, self.ab, self.trim, self.sleep, self.queue, self.volume):
+            button.setIconSize(QSize(skip, skip))
+        self.volume_popover.apply_metrics()
 
     def set_capabilities(self, capabilities):
         self._capabilities = capabilities
@@ -2388,9 +2547,12 @@ class PlayerBar(QFrame):
             self.setStyleSheet("")
             return
         tint = QColor(color)
+        light = theme_name() == "light"
+        alpha = 0.22 if light else 0.14
+        end = COLORS["accent_soft"] if light else COLORS["nav"]
         self.setStyleSheet(
             f"QFrame#playerBar {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-            f"stop:0 rgba({tint.red()}, {tint.green()}, {tint.blue()}, 0.14), stop:0.45 {COLORS['nav']}); "
+            f"stop:0 rgba({tint.red()}, {tint.green()}, {tint.blue()}, {alpha}), stop:0.45 {end}); "
             f"border-top: 1px solid {COLORS['hairline']}; }}"
         )
 
@@ -2408,12 +2570,43 @@ class PlayerBar(QFrame):
         self.forward.setEnabled(can_seek)
         self.slider.setEnabled(can_seek)
         self.speed.setEnabled(enabled and (caps is None or caps.speed))
-        self.volume.setEnabled(enabled and (caps is None or caps.volume))
+        self.volume.setEnabled(True if not enabled else (caps is None or caps.volume))
         self.bookmark.setEnabled(enabled)
         self.sleep.setEnabled(enabled)
         self.next.setEnabled(enabled)
         self.ab.setEnabled(enabled and (caps is None or caps.ab_repeat))
         self.trim.setEnabled(enabled and (caps is None or caps.silence_trim))
+        for widget, active in (
+            (self.play, enabled),
+            (self.back, can_seek),
+            (self.forward, can_seek),
+            (self.speed, self.speed.isEnabled()),
+            (self.bookmark, enabled),
+            (self.sleep, enabled),
+            (self.next, enabled),
+            (self.ab, self.ab.isEnabled()),
+            (self.trim, self.trim.isEnabled()),
+            (self.volume, self.volume.isEnabled()),
+        ):
+            widget.setCursor(Qt.CursorShape.PointingHandCursor if active else Qt.CursorShape.ArrowCursor)
+
+    def _open_now_playing(self):
+        if self._has_episode:
+            self.now_playing_requested.emit()
+
+    def _refresh_chrome(self):
+        has = self._has_episode
+        compact = self._compact
+        for widget in (self.back, self.forward, self.next, self.slider, self.elapsed, self.remaining, self.speed):
+            widget.setVisible(has)
+        for widget in (self.bookmark, self.ab, self.trim, self.sleep):
+            widget.setVisible(has and not compact)
+        self.next_label.setVisible(has and not compact)
+        hand = Qt.CursorShape.PointingHandCursor if has else Qt.CursorShape.ArrowCursor
+        self.art.setCursor(hand)
+        self.title.setCursor(hand)
+        self.art.setToolTip("Show now playing" if has else "")
+        self.title.setToolTip("Show now playing" if has else "")
 
     # -- state -------------------------------------------------------------
     def set_snapshot(self, snapshot):
@@ -2469,6 +2662,8 @@ class PlayerBar(QFrame):
         self.bookmark.setEnabled(self._has_episode and durable_episode)
         if loading:
             self.play.setEnabled(False)
+            self.play.setCursor(Qt.CursorShape.ArrowCursor)
+        self._refresh_chrome()
 
     def _create_context_menu(self):
         menu = QMenu(self)

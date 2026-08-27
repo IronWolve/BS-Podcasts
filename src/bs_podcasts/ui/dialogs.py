@@ -29,7 +29,7 @@ from ..assets import logo_path
 from ..config import APP_NAME, APP_TAGLINE, GITHUB_URL, app_version
 from . import icons
 from .pixmaps import cover, initials
-from .theme import COLORS, SPACE
+from .theme import COLORS, SPACE, scaled_px
 from .widgets import safe_feed_html
 
 
@@ -293,13 +293,24 @@ class StyledDialog(QDialog):
             text.setWordWrap(True)
             self.card_layout.addWidget(text)
 
-    def add_buttons(self, primary: QPushButton, cancel_label: str = "Cancel"):
+    def add_buttons(self, primary: QPushButton, cancel_label: str = "Cancel", *, default_primary: bool = True):
         row = QHBoxLayout()
         row.setSpacing(SPACE["sm"])
         row.addStretch(1)
         cancel = QPushButton(cancel_label)
         cancel.setObjectName("quietButton")
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel.clicked.connect(self.reject)
+        primary.setCursor(Qt.CursorShape.PointingHandCursor)
+        if default_primary:
+            primary.setDefault(True)
+            primary.setAutoDefault(True)
+            cancel.setAutoDefault(False)
+        else:
+            cancel.setDefault(True)
+            cancel.setAutoDefault(True)
+            primary.setAutoDefault(False)
+            cancel.setFocus()
         row.addWidget(cancel)
         row.addWidget(primary)
         self.card_layout.addSpacing(SPACE["xs"])
@@ -400,7 +411,7 @@ class PodcastSettingsDialog(StyledDialog):
         self.auto_continue = QCheckBox("Continue with the next queued episode")
         self.auto_continue.setChecked(auto_continue)
         for field in (self.speed, self.skip_back, self.skip_forward, self.trim):
-            field.setFixedWidth(180)
+            field.setFixedWidth(scaled_px(180))
         form.addRow("Playback speed", self.speed)
         form.addRow("Skip back", self.skip_back)
         form.addRow("Skip forward", self.skip_forward)
@@ -427,7 +438,9 @@ class PodcastSettingsDialog(StyledDialog):
         self.retention_days.setSuffix(" days")
         self.retention_days.setValue(retention_days or 0)
         for field in (self.auto_download, self.auto_download_limit, self.retention_keep, self.retention_days):
-            field.setFixedWidth(180)
+            field.setFixedWidth(scaled_px(200))
+        for index in range(self.auto_download.count()):
+            self.auto_download.setItemData(index, self.auto_download.itemText(index), Qt.ItemDataRole.ToolTipRole)
         form.addRow("Automatic downloads", self.auto_download)
         form.addRow("Download at most", self.auto_download_limit)
         form.addRow("Keep downloads", self.retention_keep)
@@ -477,7 +490,7 @@ class RemovePodcastDialog(StyledDialog):
             row = QHBoxLayout()
             key = QLabel(label)
             key.setObjectName("muted")
-            key.setFixedWidth(130)
+            key.setFixedWidth(scaled_px(130))
             val = QLabel(value)
             row.addWidget(key)
             row.addWidget(val, 1)
@@ -498,7 +511,7 @@ class RemovePodcastDialog(StyledDialog):
         remove = QPushButton("Unsubscribe")
         remove.setObjectName("dangerButton")
         remove.clicked.connect(self.accept)
-        self.add_buttons(remove, "Keep")
+        self.add_buttons(remove, "Keep", default_primary=False)
 
 
 class DeleteFilesDialog(StyledDialog):
@@ -522,7 +535,7 @@ class DeleteFilesDialog(StyledDialog):
         delete.setObjectName("dangerButton")
         delete.clicked.connect(self.accept)
         delete.setEnabled(bool(previews))
-        self.add_buttons(delete, "Keep")
+        self.add_buttons(delete, "Keep", default_primary=False)
 
 
 class TextInputDialog(StyledDialog):
@@ -648,10 +661,11 @@ class PodcastInfoDialog(StyledDialog):
         hero = QHBoxLayout()
         hero.setSpacing(SPACE["lg"])
         artwork = QLabel()
-        artwork.setFixedSize(148, 148)
+        art_side = scaled_px(148)
+        artwork.setFixedSize(art_side, art_side)
         artwork.setPixmap(
             cover(
-                artwork_path, 148, 148, 14, initials(title),
+                artwork_path, art_side, art_side, 14, initials(title),
                 getattr(podcast, "accent", ""), self.devicePixelRatioF(),
             )
         )
@@ -835,7 +849,7 @@ class ShortcutsDialog(StyledDialog):
                 row = QHBoxLayout()
                 key_label = QLabel(key)
                 key_label.setObjectName("cardTitle")
-                key_label.setFixedWidth(110)
+                key_label.setFixedWidth(scaled_px(110))
                 text = QLabel(label)
                 text.setObjectName("muted")
                 text.setWordWrap(True)
@@ -868,7 +882,7 @@ class ConfirmDialog(StyledDialog):
         action = QPushButton(action_label)
         action.setObjectName("dangerButton" if destructive else "primaryButton")
         action.clicked.connect(self.accept)
-        self.add_buttons(action)
+        self.add_buttons(action, default_primary=not destructive)
 
 
 class StartupErrorDialog(StyledDialog):
@@ -928,7 +942,7 @@ class AboutDialog(StyledDialog):
             row = QHBoxLayout()
             key = QLabel(label)
             key.setObjectName("muted")
-            key.setFixedWidth(120)
+            key.setFixedWidth(scaled_px(120))
             val = QLabel(value)
             val.setWordWrap(True)
             val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)

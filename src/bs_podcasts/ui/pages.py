@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 from . import icons
 from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner
-from .theme import COLORS, SPACE
+from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, scaled_px
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 
 
@@ -48,12 +48,31 @@ class BasePage(QWidget):
     def __init__(self, title: str, subtitle: str, action: str = "", show_search: bool = True, parent=None):
         super().__init__(parent)
         self.root = QVBoxLayout(self)
-        self.root.setContentsMargins(SPACE["page"], SPACE["xl"] - 4, SPACE["page"], SPACE["lg"])
+        self.root.setContentsMargins(SPACE["page"], SPACE["xl"], SPACE["page"], SPACE["lg"])
         self.root.setSpacing(SPACE["md"])
         self.header = PageHeader(title, subtitle, action, show_search)
         self.banner = StateBanner()
         self.root.addWidget(self.header)
         self.root.addWidget(self.banner)
+
+    def apply_metrics(self):
+        self.root.setContentsMargins(SPACE["page"], SPACE["xl"], SPACE["page"], SPACE["lg"])
+        self.root.setSpacing(SPACE["md"])
+        self.header.apply_metrics()
+        self.banner.apply_metrics()
+        empty = getattr(self, "empty", None)
+        if empty is not None and hasattr(empty, "apply_metrics"):
+            empty.apply_metrics()
+        hero = getattr(self, "hero", None)
+        if hero is not None and hasattr(hero, "apply_metrics"):
+            hero.apply_metrics()
+        chips = getattr(self, "chips", None)
+        if chips is not None and hasattr(chips, "apply_metrics"):
+            chips.apply_metrics()
+        view = getattr(self, "view", None)
+        if view is not None:
+            view.doItemsLayout()
+            view.viewport().update()
 
 
 class _ListPageMixin:
@@ -167,6 +186,10 @@ class _ListPageMixin:
             self.empty.set_text("No matches", f"Nothing matches “{query}”.", "")
         elif not has_rows:
             self.empty.set_text(*self._empty_text)
+        if not getattr(self, "_persist_search", False):
+            self.header.search.setVisible(has_rows or bool(query))
+        if getattr(self, "_hide_action_when_empty", False) and self.header.action is not None:
+            self.header.action.setVisible(bool(getattr(self, "_all_items", ())))
 
     def _menu(self, position):
         index = self.view.indexAt(position)
@@ -191,8 +214,9 @@ class PodcastGridPage(BasePage, _ListPageMixin):
     def __init__(self, title="Podcasts", subtitle="", discover=False, parent=None):
         super().__init__(title, subtitle, "Add podcast" if not discover else "Refresh", parent=parent)
         self.discover = discover
+        self._persist_search = bool(discover)
         self._empty_text = (
-            ("Nothing here yet", "Search or choose a category to discover podcasts.", "")
+            ("Find a podcast", "Search or pick a category. For You fills in from your library.", "")
             if discover
             else ("Your library is empty", "Add a podcast by feed URL, import an OPML file, or browse Discover.", "Add podcast")
         )
@@ -202,10 +226,10 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             banner_policy = self.banner.sizePolicy()
             banner_policy.setRetainSizeWhenHidden(True)
             self.banner.setSizePolicy(banner_policy)
-            self.banner.setFixedHeight(42)
+            self.banner.setFixedHeight(scaled_px(42))
             filters = QWidget()
             filters.setObjectName("discoverToolbar")
-            filters.setFixedHeight(88)
+            filters.setFixedHeight(scaled_px(88))
             self.discover_toolbar = filters
             filter_layout = QVBoxLayout(filters)
             filter_layout.setContentsMargins(0, 0, 0, 0)
@@ -218,7 +242,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.chart.setExpanding(True)
             self.chart.setUsesScrollButtons(True)
             self.chart.setElideMode(Qt.TextElideMode.ElideRight)
-            self.chart.setFixedHeight(40)
+            self.chart.setFixedHeight(scaled_px(40))
             self.chart.setCursor(Qt.CursorShape.PointingHandCursor)
             for label, value in (
                 ("For You", "explore"),
@@ -242,7 +266,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             primary_filters.addWidget(self.chart, 1)
             filter_layout.addLayout(primary_filters)
             self.secondary_filters_widget = QWidget()
-            self.secondary_filters_widget.setFixedHeight(40)
+            self.secondary_filters_widget.setFixedHeight(scaled_px(40))
             # Filters must never raise the page's minimum width; the splitter would
             # otherwise re-balance whenever a combo is shown or hidden.
             self.secondary_filters_widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -268,13 +292,13 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.category.setAccessibleName("Podcast category")
             self.category.addItem("All Categories")
             self.category.addItems(CATEGORY_IDS.keys())
-            self.category.setMinimumWidth(140)
-            self.category.setMaximumWidth(220)
+            self.category.setMinimumWidth(scaled_px(140))
+            self.category.setMaximumWidth(scaled_px(220))
             secondary_filters.addWidget(self.category)
             self.topic = QComboBox()
             self.topic.setAccessibleName("Podcast subcategory or topic")
-            self.topic.setMinimumWidth(140)
-            self.topic.setMaximumWidth(220)
+            self.topic.setMinimumWidth(scaled_px(140))
+            self.topic.setMaximumWidth(scaled_px(220))
             self.topic.setEnabled(False)
             self.topic.addItem("Choose a category first")
             secondary_filters.addWidget(self.topic)
@@ -282,7 +306,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.root.addWidget(filters)
             self.result_summary = QLabel("Choose For You, search, or select a category.")
             self.result_summary.setObjectName("meta")
-            self.result_summary.setFixedHeight(22)
+            self.result_summary.setFixedHeight(scaled_px(22))
             self.root.addWidget(self.result_summary)
             self.header.search.setPlaceholderText("Search")
             self.header.search.setAccessibleName("Search the podcast directory")
@@ -292,7 +316,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
                 self.header.action.setIcon(icons.icon("refresh", COLORS["text"], 20))
                 self.header.action.setToolTip("Refresh current Discover view")
                 self.header.action.setAccessibleName("Refresh Discover")
-                self.header.action.setFixedSize(38, 38)
+                self.header.action.setFixedSize(scaled_px(38), scaled_px(38))
         else:
             self.chart = None
             self.discover_toolbar = None
@@ -343,7 +367,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             load_more_policy = self.load_more.sizePolicy()
             load_more_policy.setRetainSizeWhenHidden(True)
             self.load_more.setSizePolicy(load_more_policy)
-        self.load_more.setFixedHeight(38)
+        self.load_more.setFixedHeight(scaled_px(38))
         self.load_more.setVisible(False)
         self.root.addWidget(self.load_more, alignment=Qt.AlignmentFlag.AlignHCenter)
         self._update_empty()
@@ -468,8 +492,14 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             return True
         if watched is self.view.viewport() and event.type() == QEvent.Type.MouseMove:
             index = self.view.indexAt(event.position().toPoint())
-            over = index.isValid() and self.delegate.action_rect(self.view.visualRect(index)).contains(event.position().toPoint())
-            self.view.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over else Qt.CursorShape.ArrowCursor)
+            over_card = index.isValid()
+            over_action = over_card and self.delegate.action_rect(self.view.visualRect(index)).contains(event.position().toPoint())
+            self.view.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over_card else Qt.CursorShape.ArrowCursor)
+            if over_action:
+                item = index.data(ItemRoles.ITEM)
+                if item is not None:
+                    tip = "Play latest" if item.show_id else ("Subscribed" if item.subscribed else "Subscribe")
+                    QToolTip.showText(event.globalPosition().toPoint(), tip, self.view.viewport())
         if (
             watched is self.view.viewport()
             and event.type() == QEvent.Type.MouseButtonRelease
@@ -516,10 +546,38 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.topic.addItem(f"All {category}")
             self.topic.addItems(topics)
             self.topic.setEnabled(True)
-        else:
+        elif category:
             self.topic.addItem("No additional topics")
             self.topic.setEnabled(False)
+        else:
+            self.topic.addItem("Choose a category first")
+            self.topic.setEnabled(False)
         self.topic.blockSignals(False)
+
+    def apply_metrics(self):
+        super().apply_metrics()
+        if self.discover:
+            self.banner.setFixedHeight(scaled_px(42))
+            if self.discover_toolbar is not None:
+                self.discover_toolbar.setFixedHeight(scaled_px(88))
+            if self.chart is not None:
+                self.chart.setFixedHeight(scaled_px(40))
+            if self.secondary_filters_widget is not None:
+                self.secondary_filters_widget.setFixedHeight(scaled_px(40))
+            if self.category is not None:
+                self.category.setMinimumWidth(scaled_px(140))
+                self.category.setMaximumWidth(scaled_px(220))
+            if self.topic is not None:
+                self.topic.setMinimumWidth(scaled_px(140))
+                self.topic.setMaximumWidth(scaled_px(220))
+            if self.result_summary is not None:
+                self.result_summary.setFixedHeight(scaled_px(22))
+            if self.header.action is not None:
+                side = scaled_px(38)
+                self.header.action.setFixedSize(side, side)
+                self.header.action.setIcon(icons.icon("refresh", COLORS["text"], scaled_px(20)))
+        self.load_more.setFixedHeight(scaled_px(38))
+        self._layout_cards()
 
     def set_discover_summary(self, text: str):
         if self.result_summary is not None:
@@ -571,6 +629,8 @@ class EpisodeListPage(BasePage, _ListPageMixin):
     ):
         super().__init__(title, subtitle, action, show_search, parent)
         self._empty_text = empty
+        self._persist_search = False
+        self._hide_action_when_empty = False
         self._filter = "All"
         self._sort = "newest"
         self.reorder = reorder
@@ -701,9 +761,10 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self.chips.set_compact(narrow)
         if self.sort_button is not None:
             self.sort_button.setText("" if narrow else dict(SORT_OPTIONS).get(self._sort, "Newest first"))
-            self.sort_button.setFixedWidth(38 if narrow else 0)
-            self.sort_button.setMinimumWidth(38 if narrow else 0)
-            self.sort_button.setMaximumWidth(38 if narrow else 16777215)
+            compact_width = scaled_px(38)
+            self.sort_button.setFixedWidth(compact_width if narrow else 0)
+            self.sort_button.setMinimumWidth(compact_width if narrow else 0)
+            self.sort_button.setMaximumWidth(compact_width if narrow else 16777215)
 
     def eventFilter(self, watched, event):
         if watched is self.view.viewport():
@@ -713,8 +774,21 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             return True
         if watched is self.view.viewport() and event.type() == QEvent.Type.MouseMove:
             index = self.view.indexAt(event.position().toPoint())
-            over_play = index.isValid() and self.delegate.play_rect(self.view.visualRect(index)).contains(event.position().toPoint())
-            self.view.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over_play else Qt.CursorShape.ArrowCursor)
+            position = event.position().toPoint()
+            visual = self.view.visualRect(index) if index.isValid() else None
+            over_play = index.isValid() and self.delegate.play_rect(visual).contains(position)
+            over_grip = (
+                index.isValid()
+                and self.reorder
+                and self.delegate.grip_rect(visual).contains(position)
+            )
+            if over_play:
+                cursor = Qt.CursorShape.PointingHandCursor
+            elif over_grip:
+                cursor = Qt.CursorShape.SizeAllCursor
+            else:
+                cursor = Qt.CursorShape.ArrowCursor
+            self.view.viewport().setCursor(cursor)
         if (
             watched is self.view.viewport()
             and event.type() == QEvent.Type.MouseButtonRelease
@@ -735,9 +809,8 @@ class SummaryCard(QPushButton):
         super().__init__(parent)
         self.setObjectName("summaryCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(84)
-        self.setMinimumWidth(150)
         self.setAccessibleName(label)
+        self._glyph = glyph
         layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE["lg"], SPACE["md"], SPACE["lg"], SPACE["md"])
         layout.setSpacing(SPACE["md"])
@@ -751,14 +824,23 @@ class SummaryCard(QPushButton):
         text.addWidget(self.number)
         text.addWidget(self.label)
         layout.addLayout(text, 1)
-        icon = QLabel()
-        icon.setPixmap(icons.pixmap(glyph, COLORS["subtle"], 22, self.devicePixelRatioF()))
-        icon.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
-        layout.addWidget(icon)
+        self.icon = QLabel()
+        self.icon.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+        layout.addWidget(self.icon)
         self._label_text = label
+        self.apply_metrics()
+
+    def apply_metrics(self):
+        self.setMinimumHeight(scaled_px(84))
+        self.setMinimumWidth(scaled_px(150))
+        self.layout().setContentsMargins(SPACE["lg"], SPACE["md"], SPACE["lg"], SPACE["md"])
+        self.layout().setSpacing(SPACE["md"])
+        self.icon.setPixmap(icons.pixmap(self._glyph, COLORS["subtle"], scaled_px(22), self.devicePixelRatioF()))
 
     def set_count(self, count: int):
-        self.number.setText(str(count))
+        empty = count <= 0
+        self.number.setText("—" if empty else str(count))
+        self.number.setStyleSheet(f"color: {COLORS['subtle']};" if empty else "")
         self.setAccessibleName(f"{count} {self._label_text}")
 
     def text(self):  # compatibility with tooling that reads "count\nlabel"
@@ -769,6 +851,7 @@ class HomePage(BasePage, _ListPageMixin):
     play_requested = Signal(object)
     new_requested = Signal()
     resume_all_requested = Signal()
+    resume_remove_requested = Signal(list)
     queue_requested = Signal()
     downloads_requested = Signal()
     menu_requested = Signal(object, object)
@@ -777,10 +860,15 @@ class HomePage(BasePage, _ListPageMixin):
     activate_requested = Signal(object)
 
     def __init__(self, parent=None):
-        super().__init__(self._greeting(), "", parent=parent)
+        super().__init__("Home", self._greeting(), parent=parent)
         self.header.search.setPlaceholderText("Search library")
         self.header.search.setAccessibleName("Search your library")
-        self._empty_text = ("Nothing to pick up", "Play something and it will be waiting for you here.", "")
+        self._persist_search = True
+        self._empty_text = (
+            "Nothing new yet",
+            "New episodes from your podcasts land here after a refresh.",
+            "Discover podcasts",
+        )
         stats = QHBoxLayout()
         stats.setSpacing(SPACE["md"])
         self.summary_buttons = []
@@ -816,6 +904,9 @@ class HomePage(BasePage, _ListPageMixin):
         self.resume_view.activated.connect(self._activated_once)
         self.resume_view.doubleClicked.connect(self._activated_once)
         self.resume_view.viewport().installEventFilter(self)
+        resume_delete = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.resume_view)
+        resume_delete.setContext(Qt.ShortcutContext.WidgetShortcut)
+        resume_delete.activated.connect(self._remove_resume_selected)
         self.root.addWidget(self.resume_view)
         self.latest_title = SectionHeader("New episodes")
         self.latest_title.see_all_requested.connect(self.new_requested)
@@ -825,7 +916,11 @@ class HomePage(BasePage, _ListPageMixin):
         view.setAccessibleName("New episodes")
         self.delegate = EpisodeDelegate(view)
         view.setItemDelegate(self.delegate)
-        self._init_list(view, EpisodeModel(()), EmptyState("Nothing new yet", "New episodes from your podcasts land here after a refresh.", glyph="episodes"))
+        self._init_list(
+            view,
+            EpisodeModel(()),
+            EmptyState(*self._empty_text, glyph="episodes"),
+        )
         for drag_view in (self.view, self.resume_view):
             drag_view.setDragEnabled(True)
             drag_view.setDragDropMode(QListView.DragDropMode.DragOnly)
@@ -833,7 +928,7 @@ class HomePage(BasePage, _ListPageMixin):
         self.root.addWidget(self.stack, 1)
         self._set_resume_rows(0)
         self._greeting_timer = QTimer(self)
-        self._greeting_timer.timeout.connect(lambda: self.header.title_label.setText(self._greeting()))
+        self._greeting_timer.timeout.connect(lambda: self.header.set_subtitle(self._greeting()))
         self._greeting_timer.start(60_000)
         self._update_empty()
 
@@ -844,11 +939,15 @@ class HomePage(BasePage, _ListPageMixin):
 
     RESUME_ROWS = 3
 
+    def _resume_row_height(self) -> int:
+        compact = bool(getattr(self.delegate, "compact", False))
+        return scaled_px(EpisodeDelegate.COMPACT_HEIGHT if compact else EpisodeDelegate.ROW_HEIGHT)
+
     def _set_resume_rows(self, count: int):
         visible = count > 0
         self.section_title.setVisible(visible)
         self.resume_view.setVisible(visible)
-        self.resume_view.setFixedHeight(min(count, self.RESUME_ROWS) * EpisodeDelegate.ROW_HEIGHT + 4)
+        self.resume_view.setFixedHeight(min(count, self.RESUME_ROWS) * self._resume_row_height() + 4)
 
     def set_sections(self, in_progress, latest):
         key = self._current_key()
@@ -870,12 +969,20 @@ class HomePage(BasePage, _ListPageMixin):
         self.view.viewport().update()
         self.resume_view.viewport().update()
 
+    def apply_metrics(self):
+        super().apply_metrics()
+        for button in self.summary_buttons:
+            button.apply_metrics()
+        self._set_resume_rows(self.resume_model.rowCount())
+        for view in (self.view, self.resume_view):
+            view.doItemsLayout()
+            view.viewport().update()
+
     def set_density(self, compact: bool):
         self.delegate.compact = compact
         self.resume_delegate.compact = compact
-        row_height = EpisodeDelegate.COMPACT_HEIGHT if compact else EpisodeDelegate.ROW_HEIGHT
         count = self.resume_model.rowCount()
-        self.resume_view.setFixedHeight(min(count, self.RESUME_ROWS) * row_height + 4)
+        self.resume_view.setFixedHeight(min(count, self.RESUME_ROWS) * self._resume_row_height() + 4)
         for view in (self.view, self.resume_view):
             view.doItemsLayout()
             view.viewport().update()
@@ -902,10 +1009,23 @@ class HomePage(BasePage, _ListPageMixin):
                 return [items[row] for row in rows if 0 <= row < len(items)]
         return []
 
+    def resume_items(self):
+        return list(self.resume_model._items)
+
+    def _remove_resume_selected(self):
+        rows = sorted({index.row() for index in self.resume_view.selectionModel().selectedIndexes()})
+        items = [self.resume_model._items[row] for row in rows if 0 <= row < len(self.resume_model._items)]
+        if items:
+            self.resume_remove_requested.emit(items)
+
     def eventFilter(self, watched, event):
         view, delegate = self._view_for(watched)
         if view is not None:
             self._track_item_tooltip(view, event)
+        if view is not None and event.type() == QEvent.Type.MouseMove:
+            index = view.indexAt(event.position().toPoint())
+            over_play = index.isValid() and delegate.play_rect(view.visualRect(index)).contains(event.position().toPoint())
+            view.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over_play else Qt.CursorShape.ArrowCursor)
         if view is not None and event.type() == QEvent.Type.ContextMenu:
             index = view.indexAt(event.pos())
             if index.isValid():
@@ -979,6 +1099,7 @@ class SettingsPage(BasePage):
 
     def __init__(self, parent=None):
         super().__init__("Settings", "", show_search=False, parent=parent)
+        self._setting_sections = []
         self.settings_scroll = QScrollArea()
         self.settings_scroll.setObjectName("settingsScroll")
         self.settings_scroll.setWidgetResizable(True)
@@ -1052,7 +1173,10 @@ class SettingsPage(BasePage):
         self.auto_download_limit.valueChanged.connect(lambda value: self.setting_changed.emit("downloads.auto_limit", str(value)))
 
         # Appearance ------------------------------------------------------------
-        appearance_card, appearance_form = self._card("Appearance", "Changing the theme rebuilds the window; playback keeps going.")
+        appearance_card, appearance_form = self._card(
+            "Appearance",
+            "Text size and font apply immediately. Changing the theme rebuilds the window; playback keeps going.",
+        )
         self.theme = QComboBox()
         self.theme.addItem("Follow system", "system")
         self.theme.addItem("Dark", "dark")
@@ -1064,9 +1188,21 @@ class SettingsPage(BasePage):
         self.density.addItem("Compact", "compact")
         self.density.setFixedWidth(self.FIELD_WIDTH)
         appearance_form.addRow("Density", self.density)
+        self.text_size = QComboBox()
+        for key, label, _scale in TEXT_SIZES:
+            self.text_size.addItem(label, key)
+        self.text_size.setFixedWidth(self.FIELD_WIDTH)
+        appearance_form.addRow("Text size", self.text_size)
+        self.ui_font = QComboBox()
+        for label, key in available_ui_fonts():
+            self.ui_font.addItem(label, key)
+        self.ui_font.setFixedWidth(scaled_px(220))
+        appearance_form.addRow("Font", self.ui_font)
         self.settings_content.addWidget(appearance_card)
         self.theme.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.theme", self.theme.itemData(index)))
         self.density.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.density", self.density.itemData(index)))
+        self.text_size.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.text_size", self.text_size.itemData(index)))
+        self.ui_font.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.font", self.ui_font.itemData(index)))
 
         # Desktop --------------------------------------------------------------
         desktop_card, desktop_form = self._card("Desktop", "Small, optional desktop conveniences.")
@@ -1080,7 +1216,7 @@ class SettingsPage(BasePage):
 
         # Listening statistics -------------------------------------------------
         stats_card, stats_form = self._card("Listening statistics", "Stored only in your local library.")
-        self.statistics = QLabel("Choose Refresh to calculate your totals.")
+        self.statistics = QLabel("Not calculated yet.")
         self.statistics.setObjectName("meta")
         self.statistics.setWordWrap(True)
         stats_refresh = QPushButton("Refresh statistics")
@@ -1157,7 +1293,9 @@ class SettingsPage(BasePage):
         self.shortcut_error.hide()
         shortcut_layout.addWidget(self.shortcut_error)
         self.settings_content.addWidget(shortcut_card)
+        self._setting_sections.append(("Keyboard shortcuts", shortcut_card))
         self._shortcut_editors: dict[str, QKeySequenceEdit] = {}
+        self._shortcut_bindings: dict[str, str] = {}
 
         # Storage --------------------------------------------------------------
         storage_card, storage_layout = self._card("Files & storage", "")
@@ -1175,7 +1313,7 @@ class SettingsPage(BasePage):
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             label.setWordWrap(True)
             label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            label.setMinimumWidth(120)
+            label.setMinimumWidth(scaled_px(120))
         self.download_usage.setObjectName("meta")
         self.artwork_usage.setObjectName("meta")
         storage_layout.addRow("Application data", self.data_root)
@@ -1266,14 +1404,14 @@ class SettingsPage(BasePage):
         transfer_layout.addRow(transfer_actions)
         self.settings_content.addWidget(transfer_card)
         self.settings_content.addStretch(1)
+        self._build_settings_nav()
 
         self.speed.valueChanged.connect(lambda value: self.setting_changed.emit("playback.default_speed", str(value)))
         self.skip_back.valueChanged.connect(lambda value: self.setting_changed.emit("playback.skip_back", str(value)))
         self.skip_forward.valueChanged.connect(lambda value: self.setting_changed.emit("playback.skip_forward", str(value)))
         self.auto_continue.toggled.connect(lambda value: self.setting_changed.emit("playback.auto_continue", "1" if value else "0"))
 
-    @staticmethod
-    def _card(title: str, hint: str):
+    def _card(self, title: str, hint: str):
         card = QFrame()
         card.setObjectName("settingCard")
         outer = QVBoxLayout(card)
@@ -1293,7 +1431,38 @@ class SettingsPage(BasePage):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         outer.addLayout(form)
+        self._setting_sections.append((title, card))
         return card, form
+
+    def _build_settings_nav(self):
+        labels = {
+            "Playback": "Playback",
+            "Library": "Library",
+            "Downloads": "Downloads",
+            "Appearance": "Appearance",
+            "Desktop": "Desktop",
+            "Keyboard shortcuts": "Shortcuts",
+            "Files & storage": "Storage",
+        }
+        nav = QWidget()
+        row = QHBoxLayout(nav)
+        row.setContentsMargins(0, 0, 0, SPACE["sm"])
+        row.setSpacing(SPACE["xs"])
+        for title, card in self._setting_sections:
+            label = labels.get(title)
+            if not label:
+                continue
+            button = QPushButton(label)
+            button.setObjectName("textButton")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setToolTip(title)
+            button.clicked.connect(lambda _checked=False, target=card: self._scroll_to_setting(target))
+            row.addWidget(button)
+        row.addStretch(1)
+        self.root.insertWidget(self.root.indexOf(self.settings_scroll), nav)
+
+    def _scroll_to_setting(self, card: QWidget):
+        self.settings_scroll.ensureWidgetVisible(card, 0, 24)
 
     def load_downloads(self, auto: bool, limit: int, delete_played: bool = False, download_first: bool = False):
         for control in (self.auto_download, self.auto_download_limit, self.delete_played, self.download_first):
@@ -1350,6 +1519,41 @@ class SettingsPage(BasePage):
         self.theme.setCurrentIndex(index)
         self.theme.blockSignals(False)
 
+    def load_text_size(self, value: str):
+        self.text_size.blockSignals(True)
+        self.text_size.setCurrentIndex(max(0, self.text_size.findData(value)))
+        self.text_size.blockSignals(False)
+
+    def load_font(self, value: str):
+        self.ui_font.blockSignals(True)
+        index = self.ui_font.findData(value)
+        self.ui_font.setCurrentIndex(index if index >= 0 else 0)
+        self.ui_font.blockSignals(False)
+
+    def apply_metrics(self):
+        super().apply_metrics()
+        width = scaled_px(self.FIELD_WIDTH)
+        for field in (
+            self.speed, self.skip_back, self.skip_forward, self.refresh_interval,
+            self.auto_download_limit, self.theme, self.density, self.text_size,
+        ):
+            field.setFixedWidth(width)
+        self.ui_font.setFixedWidth(scaled_px(220))
+        for editor in self._shortcut_editors.values():
+            editor.setFixedWidth(width)
+            row = editor.parentWidget()
+            layout = row.layout() if row is not None else None
+            if layout is not None:
+                layout.setSpacing(SPACE["lg"])
+                label = layout.itemAt(0).widget()
+                if isinstance(label, QLabel):
+                    label.setFixedWidth(scaled_px(260))
+        for path_label in (
+            self.data_root, self.library_path, self.download_path,
+            self.artwork_path, self.temp_path, self.log_path,
+        ):
+            path_label.setMinimumWidth(scaled_px(120))
+
     def load_values(self, speed: float, skip_back: int, skip_forward: int, auto_continue: bool):
         for control in (self.speed, self.skip_back, self.skip_forward, self.auto_continue):
             control.blockSignals(True)
@@ -1361,6 +1565,7 @@ class SettingsPage(BasePage):
             control.blockSignals(False)
 
     def set_shortcuts(self, bindings: dict[str, str]):
+        self._shortcut_bindings = dict(bindings)
         while self.shortcut_form.count():
             item = self.shortcut_form.takeAt(0)
             widget = item.widget()
@@ -1380,9 +1585,9 @@ class SettingsPage(BasePage):
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.setSpacing(SPACE["lg"])
                 text = QLabel(label)
-                text.setFixedWidth(260)
+                text.setFixedWidth(scaled_px(260))
                 editor = QKeySequenceEdit()
-                editor.setFixedWidth(self.FIELD_WIDTH)
+                editor.setFixedWidth(scaled_px(self.FIELD_WIDTH))
                 editor.setKeySequence(bindings.get(name, ""))
                 editor.setAccessibleName(f"Shortcut for {label}")
                 editor.editingFinished.connect(lambda key=name, ed=editor: self.shortcut_changed.emit(key, ed.keySequence().toString()))
