@@ -1,8 +1,9 @@
-"""One place for outbound HTTP policy: pool sizes, retries, and identity."""
+"""One place for outbound HTTP policy: pool sizes, retries, and identity.
 
-from requests import Session
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+`requests` (and its urllib3 stack) is deliberately imported inside
+`make_session`: it costs ~150 ms and nothing may touch the network before
+the first window paints, so no startup path should pay for it.
+"""
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -10,13 +11,17 @@ USER_AGENT = (
 )
 
 
-def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_retries: bool = True) -> Session:
+def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_retries: bool = True):
     """A Session safe to share across the job pool.
 
     `retries` covers connection errors and 429/5xx responses with backoff;
     long streaming transfers pass `read_retries=False` so a mid-body failure
     is reported (and resumed by the caller) rather than replayed from zero.
     """
+    from requests import Session
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
     session = Session()
     session.headers["User-Agent"] = USER_AGENT
     retry = Retry(

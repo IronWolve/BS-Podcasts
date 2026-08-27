@@ -25,12 +25,11 @@ from .feeds import FeedFetcher, RefreshService
 from .jobs import JobRunner
 from .integrations import MprisController, TrayController
 from .logging_setup import configure_logging
-from .playback import ExternalPlayerEngine, MpvEngine, PlaybackService
+from .playback import ExternalPlayerEngine, LazyMpvEngine, PlaybackService
 from .services import LibraryService, ListeningService
 from .ui.shell import MainWindow
 from .ui.dialogs import StartupErrorDialog
-from .ui.icons import resolve_stylesheet
-from .ui.theme import app_font, apply_theme, apply_typography, load_fonts, resolve_theme, stylesheet
+from .ui.theme import app_font, apply_app_stylesheet, apply_theme, apply_typography, load_fonts, resolve_theme
 
 
 def _install_excepthook():
@@ -92,29 +91,46 @@ def create_application(argv=None) -> QApplication:
     app.setWindowIcon(QIcon(str(icon_path(256))))
     load_fonts()
     app.setFont(app_font())
-    app.setStyleSheet(resolve_stylesheet(stylesheet()))
+    apply_app_stylesheet(app)
     QCoreApplication.setApplicationVersion(app_version())
     if os.environ.get("BS_PODCASTS_TRACE"):
         _install_stall_monitor(app)
     return app
 
 
-def _claim_single_instance(app):
-    """Raise the running window instead of opening a second one."""
-    name = f"{APP_ID}-{getpass.getuser()}"
+def _probe_running_instance(name: str, timeout_ms: int = 300) -> bool:
+    """True when a live instance answered the raise request."""
     probe = QLocalSocket()
     probe.connectToServer(name)
-    if probe.waitForConnected(300):
-        probe.write(b"raise")
-        probe.waitForBytesWritten(300)
-        # A live instance answers; a hung one leaves the socket open but silent.
-        if probe.waitForReadyRead(1500) and probe.readAll().data().startswith(b"ok"):
-            probe.disconnectFromServer()
-            return None
-        probe.abort()
+    if not probe.waitForConnected(timeout_ms):
+        return False
+    probe.write(b"raise")
+    probe.waitForBytesWritten(300)
+    # A live instance answers; a hung one leaves the socket open but silent.
+    if probe.waitForReadyRead(1500) and probe.readAll().data().startswith(b"ok"):
+        probe.disconnectFromServer()
+        return True
+    probe.abort()
+    return False
+
+
+def _claim_single_instance(app):
+    """Raise the running window instead of opening a second one.
+
+    Two instances double-clicked during a slow start can both find no server
+    and race to listen; on Windows two named-pipe servers with one name can
+    even coexist. Checking the listen() result and re-probing closes that
+    hole. Returns None when a live instance took over, otherwise a server
+    (which may not be listening — running unguarded beats not launching)."""
+    name = f"{APP_ID}-{getpass.getuser()}"
+    if _probe_running_instance(name):
+        return None
     QLocalServer.removeServer(name)
     server = QLocalServer(app)
-    server.listen(name)
+    if not server.listen(name):
+        # Lost the race: someone else claimed the name between probe and listen.
+        if _probe_running_instance(name, timeout_ms=1500):
+            return None
     return server
 
 
@@ -139,9 +155,12 @@ def main() -> int:
     apply_theme(resolve_theme(library.setting("ui.theme", "system")))
     apply_typography(library.setting("ui.text_size", "comfortable"), library.setting("ui.font", "Inter"))
     app.setFont(app_font())
-    app.setStyleSheet(resolve_stylesheet(stylesheet()))
+    apply_app_stylesheet(app)
     jobs = JobRunner(max_workers=4)
     download_jobs = JobRunner(max_workers=2)
+    # Feed refreshes get their own small pool so a batch can never occupy the
+    # workers the UI needs for reads, search, and artwork.
+    refresh_jobs = JobRunner(max_workers=2)
     refresh = RefreshService(
         repository,
         fetcher=FeedFetcher(),
@@ -150,7 +169,7 @@ def main() -> int:
     directory = DirectoryService([PublicDirectory()])
     logger = logging.getLogger("bs_podcasts")
     try:
-        engine = MpvEngine()
+        engine = LazyMpvEngine()
     except Exception as exc:
         logger.warning("Internal playback unavailable; using external player: %s", exc)
         engine = ExternalPlayerEngine()
@@ -174,6 +193,7 @@ def main() -> int:
             downloads=downloads,
             listening=listening,
             download_jobs=download_jobs,
+            refresh_jobs=refresh_jobs,
         )
         window.tray = TrayController(window, playback)
         window.mpris = MprisController(window, playback)
@@ -184,7 +204,7 @@ def main() -> int:
 
     def rebuild_window():
         old = state["window"]
-        app.setStyleSheet(resolve_stylesheet(stylesheet()))
+        apply_app_stylesheet(app)
         if old is not None:
             if getattr(old, "tray", None) is not None and old.tray.tray is not None:
                 old.tray.tray.hide()
@@ -218,7 +238,7 @@ def main() -> int:
     code = app.exec()
     # Bounded shutdown: cancel pending jobs, give running ones a moment, then
     # leave. Non-daemon worker threads would otherwise hold the process open.
-    busy = jobs.join(3.0) + download_jobs.join(3.0)
+    busy = jobs.join(3.0) + download_jobs.join(3.0) + refresh_jobs.join(3.0)
     if busy:
         logging.getLogger("bs_podcasts").warning("Exiting with %d background job(s) still running.", busy)
         logging.shutdown()

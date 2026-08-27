@@ -4,8 +4,6 @@ from dataclasses import dataclass
 import json
 import re
 
-import requests
-
 from ..net import USER_AGENT, make_session
 
 

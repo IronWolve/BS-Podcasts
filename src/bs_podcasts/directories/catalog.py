@@ -1,7 +1,5 @@
 """Public podcast-directory adapter; no authentication required."""
 
-import requests
-
 from ..net import make_session
 
 from ..domain import DirectoryCandidate
@@ -80,11 +78,22 @@ class PublicDirectory:
     endpoint = "https://itunes.apple.com/search"
 
     def __init__(self, session=None):
-        self.session = session or make_session()
+        self._session = session
         self._browse_cache = {}
         from .charts import DirectoryCharts
 
-        self.charts = DirectoryCharts(self.session)
+        self.charts = DirectoryCharts(session)
+
+    @property
+    def session(self):
+        # Created on first request so constructing the directory stays network-free.
+        if self._session is None:
+            self._session = make_session()
+        return self._session
+
+    @session.setter
+    def session(self, value):
+        self._session = value
 
     def search(self, query: str, limit: int = 30) -> list[DirectoryCandidate]:
         query = query.strip()
@@ -196,6 +205,8 @@ class PublicDirectory:
         return merged[:limit]
 
     def _request(self, params) -> list[DirectoryCandidate]:
+        import requests
+
         try:
             response = self.session.get(self.endpoint, params=params, timeout=(8, 20))
             response.raise_for_status()

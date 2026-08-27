@@ -5,8 +5,6 @@ import json
 import re
 import time
 
-import requests
-
 from ..net import make_session
 
 from ..domain import DirectoryCandidate
@@ -26,10 +24,21 @@ class DirectoryCharts:
     endpoint = "https://podcasts.apple.com/us/charts"
 
     def __init__(self, session=None, cache_seconds: int = 900):
-        self.session = session or make_session()
+        self._session = session
         self.cache_seconds = cache_seconds
         self._cache = {}
         self._developer_token = ""
+
+    @property
+    def session(self):
+        # Created on first request so constructing the charts client stays network-free.
+        if self._session is None:
+            self._session = make_session()
+        return self._session
+
+    @session.setter
+    def session(self, value):
+        self._session = value
 
     def chart(self, chart_type: str, category: str = ""):
         if chart_type not in CHART_TITLES:
@@ -91,6 +100,8 @@ class DirectoryCharts:
         return results
 
     def _full_chart(self, chart_type: str, category: str):
+        import requests
+
         token = self._web_developer_token()
         chart_names = {
             "top_shows": ("top", "podcasts"),
@@ -134,6 +145,8 @@ class DirectoryCharts:
         ]
 
     def _web_developer_token(self):
+        import requests
+
         if self._developer_token:
             return self._developer_token
         try:

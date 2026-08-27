@@ -47,7 +47,7 @@ from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast
 from .pixmaps import dominant_color, missing_accents, sample_accents
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
 from .shortcuts import ShortcutManager
-from .theme import COLORS, app_font, apply_theme, apply_typography, resolve_theme, scaled_px, stylesheet
+from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px, stylesheet
 from .widgets import ContextPanel, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast
 
 
@@ -64,11 +64,14 @@ class _JobBridge(QObject):
 class MainWindow(QMainWindow):
     relaunch_requested = Signal()
 
-    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, parent=None):
+    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, parent=None):
         super().__init__(parent)
         self.library = library
         self.jobs = jobs
         self.download_jobs = download_jobs or jobs
+        # Batch feed refreshes run on their own pool so UI reads never queue
+        # behind network fetches; without one they share the general pool.
+        self.refresh_jobs = refresh_jobs or jobs
         self.refresh = refresh
         self.directory = directory
         self.playback = playback
@@ -532,7 +535,7 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.setFont(app_font())
-            app.setStyleSheet(icons.resolve_stylesheet(stylesheet()))
+            apply_app_stylesheet(app)
         self.navigation.apply_metrics()
         self.context.apply_metrics()
         self.player.apply_metrics()
@@ -649,6 +652,11 @@ class MainWindow(QMainWindow):
         if minutes > 0:
             self._refresh_timer.start(minutes * 60 * 1000)
 
+    def _start_quiet_refresh(self, shows):
+        """Apply a scheduler's off-thread show read unless a batch started since."""
+        if shows and not self._refresh_batch[0] and not self._background_paused():
+            self._refresh_shows(shows, quiet=True)
+
     def _refresh_if_stale(self):
         if self.library is None or self.jobs is None or getattr(self.refresh, "refresh", None) is None or self._background_paused():
             return
@@ -656,16 +664,23 @@ class MainWindow(QMainWindow):
         if minutes <= 0:
             return
         cutoff = time.time() - minutes * 60
-        stale = [show for show in self.library.shows() if not show.suspended and (show.last_refresh is None or show.last_refresh < cutoff)]
-        if stale:
-            self._refresh_shows(stale, quiet=True)
+
+        def read_stale():
+            return [
+                show for show in self.library.shows()
+                if not show.suspended and (show.last_refresh is None or show.last_refresh < cutoff)
+            ]
+
+        self._run_read(read_stale, self._start_quiet_refresh, "scheduled-refresh")
 
     def _scheduled_refresh(self):
         if self.library is None or self._refresh_batch[0] or getattr(self.refresh, "refresh", None) is None or self._background_paused():
             return
-        shows = [show for show in self.library.shows() if not show.suspended]
-        if shows:
-            self._refresh_shows(shows, quiet=True)
+
+        def read_all():
+            return [show for show in self.library.shows() if not show.suspended]
+
+        self._run_read(read_all, self._start_quiet_refresh, "scheduled-refresh")
 
     def _refresh_shows(self, shows, quiet: bool = False):
         if quiet and self._background_paused():
@@ -682,8 +697,8 @@ class MainWindow(QMainWindow):
         self._pump_refresh_queue()
 
     def _pump_refresh_queue(self):
-        """Keep at most four batch refreshes queued so later UI reads stay fair."""
-        while self._refresh_waiting and len(self._refresh_in_flight) < 4:
+        """Keep at most two batch refreshes in flight — the refresh pool's size."""
+        while self._refresh_waiting and len(self._refresh_in_flight) < 2:
             show_id = self._refresh_waiting.pop(0)
             self._refresh_in_flight.add(show_id)
             self._submit_refresh(show_id, batch=True)
@@ -1360,6 +1375,17 @@ class MainWindow(QMainWindow):
         self._reload_timer.setInterval(1500 if self._refresh_batch[0] else 200)
         if not self._reload_timer.isActive():
             self._reload_timer.start()
+
+    def _update_new_badge(self):
+        """Counters-only refresh while a quiet batch runs; no model resets."""
+        if self.library is None or self.jobs is None or self._closed:
+            return
+        self._run_read(self.library.new_episode_count, self._apply_new_badge, "new-badge")
+
+    def _apply_new_badge(self, count: int):
+        self._new_episode_total = count
+        self.navigation.set_badge(PAGE_EPISODES, count)
+        self.home_page.summary_buttons[0].set_count(count)
 
     def _reload_queue(self):
         """Cheap refresh for queue-only changes: queue views, badges, counts."""
@@ -2967,7 +2993,7 @@ class MainWindow(QMainWindow):
     def _submit_refresh(self, show_id: int, batch: bool = False):
         if self.jobs is None or self.refresh is None:
             return
-        future = self.jobs.submit(self.refresh.refresh, show_id)
+        future = self.refresh_jobs.submit(self.refresh.refresh, show_id)
         self._pending_jobs.add(future)
 
         def finished(completed):
@@ -3192,10 +3218,14 @@ class MainWindow(QMainWindow):
         identifier, batch_refresh = identifier if isinstance(identifier, tuple) else (identifier, False)
         if batch_refresh:
             self._refresh_in_flight.discard(identifier)
-        self._request_reload()
+        else:
+            self._request_reload()
         if result.status == JobStatus.OK and getattr(result.value, "imported", 0):
             self._auto_download(identifier)
         total, done, new_episodes = self._refresh_batch
+        if batch_refresh and not total:
+            # The batch record was reset mid-flight; keep the views consistent.
+            self._request_reload()
         if total and batch_refresh:
             done += 1
             report = result.value if result.status == JobStatus.OK else None
@@ -3204,6 +3234,9 @@ class MainWindow(QMainWindow):
             quiet = getattr(self, "_refresh_quiet", False)
             if done < total:
                 self._pump_refresh_queue()
+                # Counters only while the batch runs; the single full reload at
+                # the end keeps large model resets from repeating per feed.
+                self._update_new_badge()
                 if not quiet:
                     self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
                 elif self.podcast_page.banner.state == "loading":
@@ -3222,6 +3255,7 @@ class MainWindow(QMainWindow):
                     self.episode_page.banner.clear()
                     if self.episode_page.header.action:
                         self.episode_page.header.action.setEnabled(True)
+                self._request_reload()
                 self._summarize_refresh(total, new_episodes, len(self._refresh_failed))
             # Batch: never one message per feed; problems are shown in place.
             return

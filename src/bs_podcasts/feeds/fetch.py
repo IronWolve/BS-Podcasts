@@ -4,8 +4,6 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
-import requests
-
 from ..net import USER_AGENT, make_session
 
 
@@ -47,8 +45,21 @@ class _FeedLinkParser(HTMLParser):
 
 class FeedFetcher:
     def __init__(self, session=None):
-        self.session = session or make_session()
-        self.session.max_redirects = 5
+        self._session = session
+        if session is not None:
+            session.max_redirects = 5
+
+    @property
+    def session(self):
+        # Created on first fetch so constructing the fetcher stays network-free.
+        if self._session is None:
+            self._session = make_session()
+            self._session.max_redirects = 5
+        return self._session
+
+    @session.setter
+    def session(self, value):
+        self._session = value
 
     def fetch(self, url: str, etag: str = "", last_modified: str = "") -> FeedResponse:
         return self._fetch(url, etag, last_modified, allow_discovery=True)
@@ -60,6 +71,8 @@ class FeedFetcher:
         last_modified: str = "",
         allow_discovery: bool = True,
     ) -> FeedResponse:
+        import requests
+
         headers = {
             "User-Agent": USER_AGENT,
             "Accept": (
