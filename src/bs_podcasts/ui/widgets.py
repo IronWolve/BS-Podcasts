@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QFrame,
+    QGridLayout,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
@@ -2002,6 +2003,15 @@ class NowPlayingView(QFrame):
         left.addWidget(self.title)
         left.addWidget(self.show_link, 0, Qt.AlignmentFlag.AlignHCenter)
         left.addWidget(self.meta)
+        self.stats = QFrame()
+        self.stats.setObjectName("nowPlayingStats")
+        self._stats_grid = QGridLayout(self.stats)
+        self._stats_grid.setContentsMargins(SPACE["md"], SPACE["sm"] + 2, SPACE["md"], SPACE["sm"] + 2)
+        self._stats_grid.setHorizontalSpacing(SPACE["md"])
+        self._stats_grid.setVerticalSpacing(4)
+        self._stats_grid.setColumnStretch(1, 1)
+        self.stats.hide()
+        left.addWidget(self.stats)
         left.addStretch(1)
         self.left_wrap = QWidget()
         self.left_wrap.setLayout(left)
@@ -2060,6 +2070,27 @@ class NowPlayingView(QFrame):
 
     def _show_context_menu(self, position):
         self._create_context_menu().exec(self.mapToGlobal(position))
+
+    def set_stats(self, rows):
+        """Fill the info card under the time line: (label, value) pairs."""
+        while self._stats_grid.count():
+            item = self._stats_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        rows = [(label, value) for label, value in rows if value]
+        for index, (label, value) in enumerate(rows):
+            key = QLabel(label)
+            key.setObjectName("statKey")
+            key.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+            text = QLabel()
+            text.setObjectName("statValue")
+            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            metrics = text.fontMetrics()
+            text.setText(metrics.elidedText(value, Qt.TextElideMode.ElideMiddle, scaled_px(300)))
+            self._stats_grid.addWidget(key, index, 0)
+            self._stats_grid.addWidget(text, index, 1)
+        self.stats.setVisible(bool(rows))
 
     def set_episode(self, snapshot, description: str, chapters, segments, bookmarks, accent: str):
         self._episode_id = snapshot.episode_id or 0

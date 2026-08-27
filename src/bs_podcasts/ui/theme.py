@@ -583,6 +583,9 @@ def stylesheet() -> str:
         color: {c['text_strong']}; border-bottom: 2px solid {c['accent']};
     }}
     QFrame#nowPlayingPanel {{ background: {c['surface']}; border: 1px solid {c['hairline']}; border-radius: {r['lg']}px; }}
+    QFrame#nowPlayingStats {{ background: {c['surface']}; border: 1px solid {c['hairline']}; border-radius: {r['md']}px; }}
+    QLabel#statKey {{ color: {c['subtle']}; font-size: {micro}px; font-weight: 600; letter-spacing: 0.4px; }}
+    QLabel#statValue {{ color: {c['muted']}; font-size: {small}px; }}
     QTabWidget#contextTabs QTabBar::tab {{
         background: transparent; color: {c['muted']}; border: 0;
         border-bottom: 2px solid transparent;
