@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QToolTip
 
 from . import icons
 from .pixmaps import cover, initials
-from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, app_font
+from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, app_font, scaled_px
 
 
 @dataclass(frozen=True)
@@ -299,14 +299,16 @@ class PodcastDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         art = self.card_width - 2 * self.CARD_PAD
-        return QSize(self.card_width, art + self.TEXT_BLOCK + 8)
+        return QSize(self.card_width, art + scaled_px(self.TEXT_BLOCK) + 8)
 
     def action_rect(self, rect: QRect) -> QRect:
         """Hover action button over the artwork's bottom-right corner."""
         card = rect.adjusted(4, 4, -4, -4)
         art_size = card.width() - 2 * self.CARD_PAD
         art = QRect(card.x() + self.CARD_PAD, card.y() + self.CARD_PAD, art_size, art_size)
-        return QRect(art.right() - 46, art.bottom() - 46, 38, 38)
+        side = scaled_px(38)
+        inset = scaled_px(8)
+        return QRect(art.right() - side - inset, art.bottom() - side - inset, side, side)
 
     def paint(self, painter: QPainter, option, index):
         item = index.data(ItemRoles.ITEM)
@@ -335,18 +337,19 @@ class PodcastDelegate(QStyledItemDelegate):
         title_font = app_font(13, QFont.Weight.DemiBold)
         painter.setFont(title_font)
         painter.setPen(QColor(COLORS["text"]))
-        title_rect = QRect(card.x() + pad + 2, art.bottom() + 10, card.width() - 2 * pad - 4, 36)
+        line_height = scaled_px(18)
+        title_rect = QRect(card.x() + pad + 2, art.bottom() + scaled_px(10), card.width() - 2 * pad - 4, line_height * 2)
         metrics = painter.fontMetrics()
         lines = _wrap_two_lines(metrics, item.title, title_rect.width())
         for line_index, line in enumerate(lines):
             painter.drawText(
-                QRect(title_rect.x(), title_rect.y() + line_index * 18, title_rect.width(), 18),
+                QRect(title_rect.x(), title_rect.y() + line_index * line_height, title_rect.width(), line_height),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 line,
             )
 
         painter.setFont(app_font(12))
-        meta_rect = QRect(title_rect.x(), title_rect.bottom() + 4, title_rect.width() - 14, 16)
+        meta_rect = QRect(title_rect.x(), title_rect.bottom() + scaled_px(4), title_rect.width() - scaled_px(14), scaled_px(16))
         meta = item.display_meta or f"{item.episode_count} episodes"
         meta_color = COLORS["muted"]
         if item.show_id and item.health in {"error", "suspended"}:
@@ -363,6 +366,7 @@ class PodcastDelegate(QStyledItemDelegate):
         painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, meta_rect.width()))
 
         if item.rank:
+            painter.setFont(app_font(11, QFont.Weight.DemiBold))
             _badge(painter, art.x() + 8 + painter.fontMetrics().horizontalAdvance(f"#{item.rank}") + 16, art.y() + 8, f"#{item.rank}", COLORS["accent"], filled=True)
         if item.is_episode:
             painter.setFont(app_font(11, QFont.Weight.DemiBold))
@@ -380,7 +384,8 @@ class PodcastDelegate(QStyledItemDelegate):
             painter.setBrush(QColor(COLORS["accent"] if hovered else COLORS["surface_soft"]))
             painter.drawEllipse(action)
             glyph = "play" if item.show_id else ("check" if item.subscribed else "add")
-            icons.paint(painter, glyph, COLORS["on_accent"] if hovered else COLORS["text"], action.adjusted(9, 9, -9, -9), scale)
+            inset = scaled_px(9)
+            icons.paint(painter, glyph, COLORS["on_accent"] if hovered else COLORS["text"], action.adjusted(inset, inset, -inset, -inset), scale)
 
         health_color = HEALTH_COLORS.get(item.health)
         if health_color and item.show_id:
@@ -431,7 +436,7 @@ class EpisodeDelegate(QStyledItemDelegate):
         self.playing_active = active
 
     def sizeHint(self, option, index):
-        return QSize(1, self.COMPACT_HEIGHT if self.compact else self.ROW_HEIGHT)
+        return QSize(1, scaled_px(self.COMPACT_HEIGHT if self.compact else self.ROW_HEIGHT))
 
     def helpEvent(self, event, view, option, index):
         """Keep the episode tooltip anchored to the row that owns it."""
@@ -445,8 +450,13 @@ class EpisodeDelegate(QStyledItemDelegate):
 
     def play_rect(self, rect: QRect) -> QRect:
         row = rect.adjusted(2, 3, -4, -3)
-        size = 36 if not self.compact else 30
-        return QRect(row.right() - size - 10, row.center().y() - size // 2, size, size)
+        size = scaled_px(30 if self.compact else 36)
+        pad = scaled_px(10)
+        return QRect(row.right() - size - pad, row.center().y() - size // 2, size, size)
+
+    def grip_rect(self, rect: QRect) -> QRect:
+        row = rect.adjusted(2, 3, -4, -3)
+        return QRect(row.x(), row.y(), scaled_px(28), row.height())
 
     def paint(self, painter: QPainter, option, index):
         item = index.data(ItemRoles.ITEM)
@@ -476,11 +486,12 @@ class EpisodeDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(QRect(row.x(), row.y() + 10, 3, row.height() - 20), 2, 2)
 
         scale = painter.device().devicePixelRatioF() if hasattr(painter.device(), "devicePixelRatioF") else 1.0
-        left = row.x() + 12
+        left = row.x() + scaled_px(12)
         if self.reorder:
-            icons.paint(painter, "grip", COLORS["subtle"], QRect(row.x() + 6, row.center().y() - 8, 16, 16), scale)
-            left = row.x() + 26
-        art_size = 44 if self.compact else 60
+            grip = scaled_px(16)
+            icons.paint(painter, "grip", COLORS["subtle"], QRect(row.x() + scaled_px(6), row.center().y() - grip // 2, grip, grip), scale)
+            left = row.x() + scaled_px(26)
+        art_size = scaled_px(44 if self.compact else 60)
         art = QRect(left, row.center().y() - art_size // 2, art_size, art_size)
         painter.drawPixmap(art, cover(item.artwork_path, art_size, art_size, 8, initials(item.show), item.accent, scale))
         if playing:
@@ -489,14 +500,14 @@ class EpisodeDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(art, 8, 8)
             icons.paint(painter, "playing" if self.playing_active else "pause", COLORS["accent"], art.adjusted(art_size // 4, art_size // 4, -art_size // 4, -art_size // 4), scale)
 
-        text_left = art.right() + 14
-        play_zone = self.PLAY_ZONE + 8
+        text_left = art.right() + scaled_px(14)
+        play_zone = scaled_px(self.PLAY_ZONE + 8)
         badge_reserve = 0
         state_color = STATE_COLORS.get(item.state, item.accent)
-        show_badge = item.state not in {"New", "Unplayed", "Played"}
+        show_badge = item.state not in {"New", "Unplayed", "Played", "Preview"}
         if show_badge:
             painter.setFont(app_font(11, QFont.Weight.DemiBold))
-            badge_reserve = painter.fontMetrics().horizontalAdvance(item.state.upper()) + 36
+            badge_reserve = painter.fontMetrics().horizontalAdvance(item.state.upper()) + scaled_px(36)
         text_right = row.right() - play_zone - badge_reserve
         text_width = max(40, text_right - text_left)
 
@@ -504,23 +515,25 @@ class EpisodeDelegate(QStyledItemDelegate):
         painter.setFont(title_font)
         painter.setPen(QColor(COLORS["text_strong"] if playing else COLORS["text"]))
         if self.compact:
-            title_rect = QRect(text_left, row.y() + 12, text_width, 20)
-            meta_rect = QRect(text_left, row.y() + 33, text_width, 16)
+            title_rect = QRect(text_left, row.y() + scaled_px(12), text_width, scaled_px(20))
+            meta_rect = QRect(text_left, row.y() + scaled_px(33), text_width, scaled_px(16))
             snippet_rect = None
         else:
-            title_rect = QRect(text_left, row.y() + 11, text_width, 20)
-            snippet_rect = QRect(text_left, row.y() + 32, text_width, 17)
-            meta_rect = QRect(text_left, row.y() + 52, text_width, 16)
+            title_rect = QRect(text_left, row.y() + scaled_px(11), text_width, scaled_px(20))
+            snippet_rect = QRect(text_left, row.y() + scaled_px(32), text_width, scaled_px(17))
+            meta_rect = QRect(text_left, row.y() + scaled_px(52), text_width, scaled_px(16))
         if item.state == "New":
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["accent"]))
-            painter.drawEllipse(QRect(title_rect.x(), title_rect.center().y() - 3, 7, 7))
-            title_rect.adjust(13, 0, 0, 0)
+            dot = scaled_px(7)
+            painter.drawEllipse(QRect(title_rect.x(), title_rect.center().y() - dot // 2, dot, dot))
+            title_rect.adjust(scaled_px(13), 0, 0, 0)
             painter.setPen(QColor(COLORS["text_strong"] if playing else COLORS["text"]))
         if item.favorite:
-            star = QRect(title_rect.x(), title_rect.center().y() - 7, 14, 14)
+            star_side = scaled_px(14)
+            star = QRect(title_rect.x(), title_rect.center().y() - star_side // 2, star_side, star_side)
             icons.paint(painter, "favorite", COLORS["accent"], star, scale)
-            title_rect.adjust(19, 0, 0, 0)
+            title_rect.adjust(scaled_px(19), 0, 0, 0)
         painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(item.title, Qt.TextElideMode.ElideRight, title_rect.width()))
 
         if snippet_rect is not None:
@@ -550,10 +563,11 @@ class EpisodeDelegate(QStyledItemDelegate):
             painter.setBrush(QColor(COLORS["accent"] if hovered else COLORS["surface_soft"]))
             painter.drawEllipse(play)
             glyph = "pause" if playing and self.playing_active else "play"
-            icons.paint(painter, glyph, COLORS["on_accent"] if hovered else COLORS["text"], play.adjusted(8, 8, -8, -8), scale)
+            inset = scaled_px(8)
+            icons.paint(painter, glyph, COLORS["on_accent"] if hovered else COLORS["text"], play.adjusted(inset, inset, -inset, -inset), scale)
 
         if 0 < item.progress < 1:
-            track_top = row.bottom() - 8 if not self.compact else row.bottom() - 6
+            track_top = row.bottom() - scaled_px(8 if not self.compact else 6)
             track = QRect(text_left, track_top, text_width, 3)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["border"]))

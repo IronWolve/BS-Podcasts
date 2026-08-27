@@ -7,7 +7,7 @@ import sys
 
 APP_NAME = "BS Podcasts"
 APP_ID = "bs-podcasts"
-APP_TAGLINE = "A wide, mobile-inspired desktop podcast player"
+APP_TAGLINE = "A desktop player for the podcasts you already have."
 GITHUB_URL = "https://github.com/example"
 RELEASES_URL = "https://github.com/example/bs-podcasts/releases"
 RELEASES_API_URL = "https://api.github.com/repos/example/bs-podcasts/releases/latest"

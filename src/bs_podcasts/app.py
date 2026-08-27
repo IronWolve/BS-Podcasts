@@ -30,7 +30,7 @@ from .services import LibraryService, ListeningService
 from .ui.shell import MainWindow
 from .ui.dialogs import StartupErrorDialog
 from .ui.icons import resolve_stylesheet
-from .ui.theme import app_font, apply_theme, load_fonts, resolve_theme, stylesheet
+from .ui.theme import app_font, apply_theme, apply_typography, load_fonts, resolve_theme, stylesheet
 
 
 def _install_excepthook():
@@ -137,6 +137,8 @@ def main() -> int:
     repository = LibraryRepository(database)
     library = LibraryService(repository)
     apply_theme(resolve_theme(library.setting("ui.theme", "system")))
+    apply_typography(library.setting("ui.text_size", "comfortable"), library.setting("ui.font", "Inter"))
+    app.setFont(app_font())
     app.setStyleSheet(resolve_stylesheet(stylesheet()))
     jobs = JobRunner(max_workers=4)
     download_jobs = JobRunner(max_workers=2)

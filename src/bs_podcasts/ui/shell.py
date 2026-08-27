@@ -47,7 +47,7 @@ from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast
 from .pixmaps import dominant_color, missing_accents, sample_accents
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
 from .shortcuts import ShortcutManager
-from .theme import COLORS, apply_theme, resolve_theme
+from .theme import COLORS, app_font, apply_theme, apply_typography, resolve_theme, scaled_px, stylesheet
 from .widgets import ContextPanel, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast
 
 
@@ -76,7 +76,7 @@ class MainWindow(QMainWindow):
         self.listening = listening
         self.setObjectName("mainWindow")
         self.setWindowTitle(APP_NAME)
-        self.setMinimumSize(760, 600)
+        self.setMinimumSize(scaled_px(760), scaled_px(600))
         self._context_forced = False
         self._rail_user_compact = None
         self._last_mode = None
@@ -194,7 +194,7 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.context)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
-        self.splitter.setSizes([820, 360])
+        self.splitter.setSizes([820, scaled_px(360)])
         body.addWidget(self.splitter, 1)
         body_wrap = QWidget()
         body_wrap.setLayout(body)
@@ -274,6 +274,10 @@ class MainWindow(QMainWindow):
             "History", "", items=(), filters=(), action="Clear history", sortable=False,
             empty=("Nothing played yet", "Episodes you play show up here, most recent first.", ""), glyph="history",
         )
+        self.playlist_page._hide_action_when_empty = True
+        self.history_page._hide_action_when_empty = True
+        self.playlist_page._update_empty()
+        self.history_page._update_empty()
         self.settings_page = SettingsPage()
         pages = (
             self.home_page, self.podcast_page, self.episode_page, self.playlist_page, self.download_page,
@@ -292,8 +296,11 @@ class MainWindow(QMainWindow):
         self.bookmark_page.play_requested.connect(self._play_bookmark)
         for page in (self.playlist_page, self.history_page):
             page.header.action.setObjectName("dangerButton")
+        self.playlist_page._hide_action_when_empty = True
+        self.history_page._hide_action_when_empty = True
         self.playlist_page.header.action.clicked.connect(self._clear_queue)
         self.history_page.header.action.clicked.connect(self._clear_history)
+        self.home_page.empty_action_requested.connect(lambda: self.navigation.select(PAGE_DISCOVER))
         self.download_page.remove_requested.connect(self._delete_downloads)
         self.bookmark_page.remove_requested.connect(self._delete_bookmarks)
         self.history_page.remove_requested.connect(lambda items: [self._remove_history(item.episode_id) for item in items])
@@ -317,6 +324,7 @@ class MainWindow(QMainWindow):
         self.episode_page.hero.subscribe_requested.connect(lambda: self._subscribe_url(self._preview_episodes_url))
         self.episode_page.hero.website_requested.connect(lambda: self._open_url(self._hero_website))
         self.home_page.resume_all_requested.connect(self._show_in_progress)
+        self.home_page.resume_remove_requested.connect(self._remove_from_continue_listening)
         self.episode_page.hero.settings_requested.connect(self._podcast_settings)
         self.episode_page.hero.unsubscribe_requested.connect(lambda: self._unsubscribe(self._hero_show_id))
         self.episode_page.hero.information_requested.connect(self._show_hero_information)
@@ -352,7 +360,7 @@ class MainWindow(QMainWindow):
             self.navigation.select(0)
             return
         if self.podcast_page.header.action:
-            self.podcast_page.header.action.setText("Add")
+            self.podcast_page.header.action.setText("Add ▾")
             self.podcast_page.header.action.clicked.connect(self._show_library_menu)
         if self.episode_page.header.action:
             self.episode_page.header.action.setObjectName("quietButton")
@@ -376,7 +384,10 @@ class MainWindow(QMainWindow):
         self._apply_skip_settings()
         self.settings_page.load_theme(self.library.setting("ui.theme", "system"))
         self.settings_page.load_density(self.library.setting("ui.density", "comfortable"))
+        self.settings_page.load_text_size(self.library.setting("ui.text_size", "comfortable"))
+        self.settings_page.load_font(self.library.setting("ui.font", "Inter"))
         self._apply_density(self.library.setting("ui.density", "comfortable") == "compact")
+        self._apply_typography()
         self.settings_page.clear_artwork_requested.connect(self._clear_artwork_cache)
         QTimer.singleShot(4000, self._prune_artwork_cache)
         self.settings_page.load_downloads(
@@ -419,7 +430,6 @@ class MainWindow(QMainWindow):
             page.menu_requested.connect(self._episode_menu)
         if self.directory is not None and self.jobs is not None:
             self.discover_page.set_items([])
-            self.discover_page.banner.show_state("empty", "Search or choose a category to discover podcasts.")
             self.discover_page.header.search.returnPressed.connect(self._directory_search)
             self._load_discover_search_history()
             self._discover_history_action = QAction(
@@ -511,6 +521,34 @@ class MainWindow(QMainWindow):
             page.set_density(compact)
         for page in (self.podcast_page, self.discover_page):
             page.set_density(compact)
+
+    def _pane_width(self) -> int:
+        return scaled_px(360)
+
+    def _apply_typography(self):
+        size = self.library.setting("ui.text_size", "comfortable") if self.library else "comfortable"
+        family = self.library.setting("ui.font", "Inter") if self.library else "Inter"
+        apply_typography(size, family)
+        app = QApplication.instance()
+        if app is not None:
+            app.setFont(app_font())
+            app.setStyleSheet(icons.resolve_stylesheet(stylesheet()))
+        self.navigation.apply_metrics()
+        self.context.apply_metrics()
+        self.player.apply_metrics()
+        self.search_overlay.apply_metrics()
+        self.now_playing.apply_metrics()
+        self.toast.apply_metrics()
+        self.setMinimumSize(scaled_px(760), scaled_px(600))
+        for index in range(self.pages.count()):
+            page = self.pages.widget(index)
+            if hasattr(page, "apply_metrics"):
+                page.apply_metrics()
+        pane = self._pane_width()
+        if self.context.isVisible():
+            self.splitter.setSizes([max(scaled_px(480), self.width() - self.navigation.width() - pane), pane])
+        compact = self.library is not None and self.library.setting("ui.density", "comfortable") == "compact"
+        self._apply_density(compact)
 
     def _referenced_artwork(self) -> set:
         return self.library.repository.artwork_paths() if self.library is not None else set()
@@ -940,6 +978,26 @@ class MainWindow(QMainWindow):
             if played and self.library.setting("downloads.delete_played", "0") == "1":
                 self._delete_played_quietly()
 
+    def _remove_from_continue_listening(self, items):
+        if self.library is None:
+            return
+        ids = [item.episode_id for item in items if getattr(item, "episode_id", 0)]
+        if not ids:
+            return
+        for episode_id in ids:
+            self.library.repository.mark_played(episode_id, True)
+        self._request_reload()
+
+        def undo():
+            for episode_id in ids:
+                self.library.repository.mark_played(episode_id, False)
+            self._request_reload()
+
+        label = "Removed from Continue listening" if len(ids) == 1 else f"Removed {len(ids)} from Continue listening"
+        self._notify(label, "success", "Undo", undo)
+        if self.library.setting("downloads.delete_played", "0") == "1":
+            self._delete_played_quietly()
+
     def _set_favorites(self, items, favorite: bool):
         if self.library is None:
             return
@@ -965,6 +1023,8 @@ class MainWindow(QMainWindow):
                 self._notify("Background work paused" if value == "1" else "Background work resumed", "info")
             elif key == "ui.density":
                 self._apply_density(value == "compact")
+            elif key in {"ui.text_size", "ui.font"}:
+                self._apply_typography()
             elif key == "ui.theme":
                 apply_theme(resolve_theme(value))
                 self._save_layout()
@@ -1771,6 +1831,12 @@ class MainWindow(QMainWindow):
             "Remove from favorites" if (not many and episode.favorite) else "Add to favorites",
             lambda: self._set_favorites(targets, not (not many and episode.favorite)),
         )
+        downloaded = bool(episode.downloaded_path)
+        status = "downloaded" if downloaded else "not downloaded"
+        status_pages = page in {self.home_page, self.history_page, self.episode_page}
+        continue_listening = page is self.home_page and episode.episode_id in {
+            item.episode_id for item in self.home_page.resume_items()
+        }
         if page is self.playlist_page:
             remove = menu.addAction(icons.icon("close", COLORS["text"], 16), "Remove from Up Next", lambda: [self._remove_from_queue(item.episode_id) for item in targets])
             remove.setShortcut(QKeySequence(Qt.Key.Key_Delete))
@@ -1784,20 +1850,51 @@ class MainWindow(QMainWindow):
                 menu.addAction(icons.icon("play", COLORS["text"], 16), "Resume download", lambda: self._download_episode(episode.episode_id))
             elif episode.state == "Error":
                 menu.addAction(icons.icon("download", COLORS["text"], 16), "Retry download", lambda: self._download_episode(episode.episode_id))
-            elif episode.state != "Downloaded":
-                menu.addAction(icons.icon("download", COLORS["text"], 16), "Download", lambda: self._download_episode(episode.episode_id))
-        else:
-            menu.addAction(icons.icon("download", COLORS["text"], 16), "Download", lambda: self._download_many(targets))
+            elif not downloaded:
+                label = f"Download ({status})" if status_pages else "Download"
+                menu.addAction(icons.icon("download", COLORS["text"], 16), label, lambda: self._download_episode(episode.episode_id))
+        elif not downloaded:
+            label = f"Download ({status})" if status_pages else "Download"
+            menu.addAction(icons.icon("download", COLORS["text"], 16), label, lambda: self._download_many(targets))
         if page is self.bookmark_page and not many:
             menu.addSeparator()
             menu.addAction(icons.icon("play", COLORS["text"], 16), f"Play from {self.player._time(episode.bookmark_position)}", lambda: self._play_bookmark(episode))
             menu.addAction("Rename bookmark…", lambda: self._rename_bookmark(episode))
             delete_bookmark = menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete bookmark", lambda: self._delete_bookmarks([episode]))
             delete_bookmark.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+        added_remove_download = False
         if page is self.history_page:
             menu.addSeparator()
-            remove_history = menu.addAction("Remove from history", lambda: [self._remove_history(item.episode_id) for item in targets])
+            remove_history = menu.addAction(
+                icons.icon("close", COLORS["text"], 16),
+                f"Remove from history ({status})",
+                lambda: [self._remove_history(item.episode_id) for item in targets],
+            )
             remove_history.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+        if continue_listening:
+            menu.addSeparator()
+            remove_resume = menu.addAction(
+                icons.icon("close", COLORS["text"], 16),
+                f"Remove from Continue listening ({status})",
+                lambda: self._remove_from_continue_listening(targets),
+            )
+            remove_resume.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+        if status_pages and downloaded:
+            if page is self.episode_page or (page is self.home_page and not continue_listening):
+                menu.addSeparator()
+            remove_download_label = (
+                "Remove download"
+                if continue_listening or page is self.history_page
+                else f"Remove download ({status})"
+            )
+            if many:
+                remove_download_label = f"Remove {len(targets)} downloads ({status})" if status_pages else f"Remove {len(targets)} downloads"
+            menu.addAction(
+                icons.icon("trash", COLORS["text"], 16),
+                remove_download_label,
+                lambda: self._delete_downloads(targets),
+            )
+            added_remove_download = True
         if page is self.playlist_page and not many:
             menu.addAction(icons.icon("next", COLORS["text"], 16), "Play next", lambda: self._queue_to_front(episode.episode_id))
         if episode.downloaded_path or page is self.download_page:
@@ -1811,9 +1908,14 @@ class MainWindow(QMainWindow):
                     "Export media…" if len(exportable) == 1 else f"Export {len(exportable)} media files…",
                     lambda: self._export_downloads(exportable),
                 )
-            delete_download = menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete download…" if not many else f"Delete {len(targets)} downloads…", lambda: self._delete_downloads(targets))
-            if page is self.download_page:
-                delete_download.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+            if not added_remove_download:
+                delete_download = menu.addAction(
+                    icons.icon("trash", COLORS["text"], 16),
+                    "Remove download" if not many else f"Remove {len(targets)} downloads",
+                    lambda: self._delete_downloads(targets),
+                )
+                if page is self.download_page:
+                    delete_download.setShortcut(QKeySequence(Qt.Key.Key_Delete))
         if not many:
             menu.addSeparator()
             self._add_episode_copy_menu(menu, episode, show)
@@ -1931,7 +2033,7 @@ class MainWindow(QMainWindow):
             menu.exec(global_position)
             return
         menu.addAction(icons.icon("folder", COLORS["text"], 16), "Open file location", lambda: self._open_location(item.downloaded_path))
-        menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete download…", lambda: self._delete_downloads([item]))
+        menu.addAction(icons.icon("trash", COLORS["text"], 16), "Remove download", lambda: self._delete_downloads([item]))
         menu.exec(global_position)
 
     def _delete_downloads(self, items):
@@ -2236,7 +2338,7 @@ class MainWindow(QMainWindow):
         self._playing_state = state
         if state_changed:
             if source:
-                self.setWindowTitle(f"{'▶ ' if state == 'playing' else ''}{snapshot.title} — {snapshot.show_title or APP_NAME}")
+                self.setWindowTitle(f"{snapshot.title} — {snapshot.show_title or APP_NAME}")
             else:
                 self.setWindowTitle(APP_NAME)
             self._apply_playing_marker()
@@ -2565,23 +2667,6 @@ class MainWindow(QMainWindow):
         self._open_search()
         self._global_query(query)
 
-    def _global_search(self):
-        if self.library is None:
-            return
-        query = self.home_page.header.search.text().strip()
-        if not query:
-            return
-        shows, episodes = self.library.search(query)
-        self.podcast_page.set_items([self._ui_podcast(show) for show in shows])
-        self.episode_page.hero.hide()
-        self.episode_page.header.title_label.setText(f"Results for “{query}”")
-        self.episode_page.header.set_subtitle(f"{len(shows)} podcast{'s' if len(shows) != 1 else ''}  ·  {len(episodes)} episode{'s' if len(episodes) != 1 else ''}")
-        self.episode_page.set_filter("All")
-        self.episode_page.set_items(self._ui_episodes(episodes), preserve_scroll=False)
-        self._episode_navigation_prepared = bool(episodes)
-        self.navigation.select(PAGE_EPISODES if episodes else PAGE_PODCASTS)
-        if not episodes:
-            self.podcast_page.banner.show_state("partial", f"No episodes matched “{query}”.")
 
     # ---------------------------------------------------------------- discover
     def _load_discover_search_history(self):
@@ -2636,8 +2721,8 @@ class MainWindow(QMainWindow):
             choose.setToolTip(f"Search for {query}")
             remove = QPushButton()
             remove.setObjectName("iconButton")
-            remove.setIcon(icons.icon("close", COLORS["muted"], 12))
-            remove.setFixedSize(26, 26)
+            remove.setIcon(icons.icon("close", COLORS["muted"], scaled_px(12)))
+            remove.setFixedSize(scaled_px(26), scaled_px(26))
             remove.setToolTip(f"Remove {query} from search history")
             choose.clicked.connect(
                 lambda _checked=False, value=query, owner=menu: (
@@ -2662,7 +2747,7 @@ class MainWindow(QMainWindow):
     def _directory_search(self):
         query = self.discover_page.header.search.text().strip()
         if not query:
-            self.discover_page.banner.show_state("partial", "Enter a podcast search term.")
+            self.discover_page.banner.clear()
             return
         self._remember_discover_search(query)
         self.discover_page.chart.blockSignals(True)
@@ -3277,7 +3362,7 @@ class MainWindow(QMainWindow):
             ending = "End of available results" if self._discover_exhausted else "Scroll for more"
             self.discover_page.set_discover_summary(f"{len(podcasts)} {description}  ·  {ending}")
         else:
-            self.discover_page.banner.show_state("partial", "No podcasts matched.")
+            self.discover_page.banner.clear()
             self.discover_page.set_discover_summary("No podcasts matched this selection.")
         if self.discover_page.discover_sort_key() == "newest":
             self._discover_newest_summary = self.discover_page.result_summary.text()
@@ -3329,6 +3414,7 @@ class MainWindow(QMainWindow):
         else:
             self.context.hide()
         self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)
+        self._sync_context_dismissible()
 
     def _show_all_episodes(self, filter_value: str = "All"):
         if self.library is None:
@@ -3409,10 +3495,14 @@ class MainWindow(QMainWindow):
             and isinstance(watched, QWidget)
             and (watched is self or self.isAncestorOf(watched))
             and not isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QKeySequenceEdit, QAbstractSpinBox, QComboBox))
-            and self._playing_episode_id
         ):
-            self._play_pause()
-            return True
+            if self._playing_episode_id:
+                self._play_pause()
+                return True
+            selected = self._selected_episode_ids()
+            if selected:
+                self._play_or_toggle(selected[0])
+                return True
         if event.type() == QEvent.Type.MouseButtonPress and isinstance(watched, QWidget) and (watched is self or self.isAncestorOf(watched)):
             if event.button() == Qt.MouseButton.BackButton:
                 self.navigate_back()
@@ -3420,6 +3510,20 @@ class MainWindow(QMainWindow):
             if event.button() == Qt.MouseButton.ForwardButton:
                 self.navigate_forward()
                 return True
+        if watched is self.context.queue_view.viewport() and event.type() == QEvent.Type.MouseMove:
+            view = self.context.queue_view
+            delegate = view.itemDelegate()
+            index = view.indexAt(event.position().toPoint())
+            position = event.position().toPoint()
+            visual = view.visualRect(index) if index.isValid() else None
+            over_play = index.isValid() and hasattr(delegate, "play_rect") and delegate.play_rect(visual).contains(position)
+            over_grip = index.isValid() and hasattr(delegate, "grip_rect") and delegate.grip_rect(visual).contains(position)
+            if over_play:
+                view.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+            elif over_grip:
+                view.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
+            else:
+                view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
         if watched is self.pages and event.type() == QEvent.Type.Resize:
             self.now_playing.setGeometry(self.pages.rect())
             self.search_overlay.setGeometry(self.pages.rect())
@@ -3864,13 +3968,19 @@ class MainWindow(QMainWindow):
         self.context.set_mode(1)
         self._context_forced = True
         self.context.show()
-        self.splitter.setSizes([max(480, self.width() - self.navigation.width() - 360), 360])
+        self.context.set_dismissible(True)
+        self.splitter.setSizes([max(480, self.width() - self.navigation.width() - self._pane_width()), self._pane_width()])
         self.player.set_queue_open(True)
 
     def _hide_context(self):
         self._context_forced = False
         self.context.hide()
         self.player.set_queue_open(False)
+        self._sync_context_dismissible()
+
+    def _sync_context_dismissible(self):
+        mode = self._last_mode or "wide"
+        self.context.set_dismissible(mode == "narrow" or self._context_forced)
 
     def resizeEvent(self, event):
         width = event.size().width()
@@ -3884,11 +3994,12 @@ class MainWindow(QMainWindow):
             self.player.set_compact(mode == "narrow")
             if mode in {"wide", "medium"} and self.pages.currentIndex() != PAGE_SETTINGS:
                 self.context.show()
-                self.splitter.setSizes([max(520, width - self.navigation.width() - 360), 360])
+                self.splitter.setSizes([max(520, width - self.navigation.width() - self._pane_width()), self._pane_width()])
             elif not self._context_forced:
                 self.context.hide()
             self._last_mode = mode
             self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)
+            self._sync_context_dismissible()
         self.toast.reposition()
         super().resizeEvent(event)
         self._layout_save_timer.start()
