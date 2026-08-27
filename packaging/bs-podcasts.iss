@@ -1,7 +1,7 @@
 #define MyAppName "BS Podcasts"
 #define MyAppVersion "0.1.0"
-#ifndef SourceExe
-  #error SourceExe must point to the built BS Podcasts.exe
+#ifndef SourceDir
+  #error SourceDir must point to the built onedir application folder
 #endif
 #ifndef OutputDir
   #define OutputDir "."
@@ -25,7 +25,7 @@ UninstallDisplayIcon={app}\BS Podcasts.exe
 WizardStyle=modern
 
 [Files]
-Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\BS Podcasts.exe"
