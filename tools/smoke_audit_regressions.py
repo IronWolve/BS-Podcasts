@@ -165,8 +165,8 @@ def main() -> int:
         assert contained == [True]
 
         window._refresh_shows([SimpleNamespace(id=value) for value in range(1, 11)], quiet=True)
-        pump(app, lambda: len(started) == 4)
-        assert len(window._refresh_in_flight) == 4 and len(window._refresh_waiting) == 6
+        pump(app, lambda: len(started) == 2)
+        assert len(window._refresh_in_flight) == 2 and len(window._refresh_waiting) == 8
         gate.set()
         pump(app, lambda: window._refresh_batch[0] == 0)
 

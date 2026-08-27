@@ -10,7 +10,8 @@ $repo = Split-Path -Parent $PSScriptRoot
 $workspace = Split-Path -Parent $repo
 $python = Join-Path $repo ".venv-win\Scripts\python.exe"
 $spec = Join-Path $repo "packaging\bs-podcasts.spec"
-$sourceExe = Join-Path $repo "dist\BS Podcasts.exe"
+$sourceDir = Join-Path $repo "dist\BS Podcasts"
+$sourceExe = Join-Path $sourceDir "BS Podcasts.exe"
 
 if (-not $LibMpvDll) {
     $LibMpvDll = Join-Path $workspace "tmp\windows-build\libmpv\libmpv-2.dll"
@@ -40,15 +41,26 @@ finally {
     Pop-Location
 }
 
-New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-$copiedExe = Join-Path $Destination "BS Podcasts.exe"
-Copy-Item -LiteralPath $sourceExe -Destination $copiedExe -Force
+if (-not (Test-Path -LiteralPath $sourceExe)) {
+    throw "Build finished but the application folder is missing: $sourceExe"
+}
 
-$item = Get-Item -LiteralPath $copiedExe
+# The application is a onedir folder; replace the previous copy wholesale so
+# removed DLLs do not linger.
+New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+$copiedDir = Join-Path $Destination "BS Podcasts"
+if (Test-Path -LiteralPath $copiedDir) {
+    Remove-Item -LiteralPath $copiedDir -Recurse -Force
+}
+Copy-Item -LiteralPath $sourceDir -Destination $copiedDir -Recurse -Force
+
+$copiedExe = Join-Path $copiedDir "BS Podcasts.exe"
+$size = (Get-ChildItem -LiteralPath $copiedDir -Recurse -File | Measure-Object -Sum Length).Sum
 $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $copiedExe
-Write-Output "Copied binary: $($item.FullName)"
-Write-Output "Size: $($item.Length) bytes"
-Write-Output "SHA-256: $($hash.Hash)"
+Write-Output "Copied application: $copiedDir"
+Write-Output "Launcher: $copiedExe"
+Write-Output "Total size: $size bytes"
+Write-Output "Launcher SHA-256: $($hash.Hash)"
 
 if ($Installer) {
     $iscc = @(
@@ -56,10 +68,10 @@ if ($Installer) {
         (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
     ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
     if (-not $iscc) {
-        throw "-Installer was requested, but Inno Setup 6 was not found. The binary was still copied to $copiedExe"
+        throw "-Installer was requested, but Inno Setup 6 was not found. The application was still copied to $copiedDir"
     }
     $installerSpec = Join-Path $repo "packaging\bs-podcasts.iss"
-    & $iscc "/DSourceExe=$copiedExe" "/DOutputDir=$Destination" $installerSpec
+    & $iscc "/DSourceDir=$copiedDir" "/DOutputDir=$Destination" $installerSpec
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup failed with exit code $LASTEXITCODE"
     }
