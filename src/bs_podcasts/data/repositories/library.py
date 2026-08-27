@@ -1,6 +1,7 @@
 """Library persistence with no Qt dependencies."""
 
 from pathlib import Path
+import threading
 import time
 
 from ...domain import Episode, FeedData, Health, Show
@@ -13,6 +14,8 @@ MAX_REFRESH_FAILURES = 3
 class LibraryRepository:
     def __init__(self, database: Database):
         self.database = database
+        self._settings_cache: dict[str, str] | None = None
+        self._settings_lock = threading.Lock()
 
     def add_show(self, feed_url: str, title: str = "", source: str = "rss") -> Show:
         now = time.time()
@@ -91,10 +94,16 @@ class LibraryRepository:
         self, show_id: int, keep_latest: int | None, older_than_days: int | None
     ) -> list[Episode]:
         """Downloaded episodes a feed rule may remove; favorites never qualify."""
-        episodes = [
-            episode for episode in self.list_episodes(show_id, limit=100_000)
-            if episode.downloaded_path and not episode.favorite
-        ]
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """SELECT e.*, s.title AS show_title,
+                   COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path
+                   FROM episodes e JOIN shows s ON s.id=e.show_id
+                   WHERE e.show_id=? AND e.downloaded_path != '' AND e.favorite=0
+                   ORDER BY e.published_at DESC, e.id DESC""",
+                (show_id,),
+            ).fetchall()
+        episodes = [self._episode(row) for row in rows]
         keep_latest = max(0, int(keep_latest or 0))
         cutoff = time.time() - max(0, int(older_than_days or 0)) * 86400
         candidates = []
@@ -135,18 +144,42 @@ class LibraryRepository:
                     show_id,
                 ),
             )
-            initial_import = connection.execute(
-                "SELECT 1 FROM episodes WHERE show_id=? LIMIT 1", (show_id,)
-            ).fetchone() is None
-            existing_ids = {
-                row["external_id"]
+            # Most refreshes carry the same episodes again; comparing against the
+            # stored rows keeps the transaction (and the write lock SQLite takes
+            # for it) proportional to what actually changed.
+            existing = {
+                row["external_id"]: (
+                    row["title"], row["description"], row["media_url"], row["mime_type"],
+                    row["published_at"], row["duration_seconds"], row["transcript_url"],
+                    row["transcript_type"], row["chapters_url"], row["artwork_url"],
+                    row["website_url"], row["author"], row["season_number"],
+                    row["episode_number"], row["episode_type"], row["explicit"],
+                    row["enclosure_bytes"],
+                )
                 for row in connection.execute(
-                    "SELECT external_id FROM episodes WHERE show_id=?", (show_id,)
+                    """SELECT external_id, title, description, media_url, mime_type,
+                       published_at, duration_seconds, transcript_url, transcript_type,
+                       chapters_url, artwork_url, website_url, author, season_number,
+                       episode_number, episode_type, explicit, enclosure_bytes
+                       FROM episodes WHERE show_id=?""",
+                    (show_id,),
                 ).fetchall()
             }
-            imported = sum(episode.external_id not in existing_ids for episode in feed.episodes)
+            initial_import = not existing
+            imported = sum(episode.external_id not in existing for episode in feed.episodes)
             new_flag = 0 if initial_import else 1
             for episode in feed.episodes:
+                incoming = (
+                    episode.title, episode.description, episode.media_url, episode.mime_type,
+                    episode.published_at, episode.duration_seconds, episode.transcript_url,
+                    episode.transcript_type, episode.chapters_url, episode.artwork_url,
+                    episode.website_url, episode.author, episode.season_number,
+                    episode.episode_number, episode.episode_type,
+                    None if episode.explicit is None else int(episode.explicit),
+                    episode.enclosure_bytes,
+                )
+                if existing.get(episode.external_id) == incoming:
+                    continue
                 connection.execute(
                     """INSERT INTO episodes(
                        show_id, external_id, title, description, media_url,
@@ -342,11 +375,21 @@ class LibraryRepository:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+        with self._settings_lock:
+            if self._settings_cache is not None:
+                self._settings_cache[key] = value
 
     def get_setting(self, key: str, default: str = "") -> str:
-        with self.database.connect() as connection:
-            row = connection.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-        return row["value"] if row else default
+        # Settings are read on hot paths (startup wiring, every scheduler tick);
+        # one read of the tiny table replaces a connection round-trip per call.
+        with self._settings_lock:
+            if self._settings_cache is None:
+                with self.database.connect() as connection:
+                    self._settings_cache = {
+                        row["key"]: row["value"]
+                        for row in connection.execute("SELECT key, value FROM settings").fetchall()
+                    }
+            return self._settings_cache.get(key, default)
 
     def enqueue(self, episode_id: int):
         with self.database.connect() as connection:
@@ -537,16 +580,24 @@ class LibraryRepository:
 
     @staticmethod
     def _show_select() -> str:
+        # One pass over episodes per query instead of an aggregate join plus two
+        # correlated subqueries per show. With exactly one max() aggregate,
+        # SQLite documents that the bare columns (title, published_at) come from
+        # the row where that max was reached; the appended '~'-prefixed id
+        # breaks published_at ties the same way ORDER BY ... , id DESC did.
         return (
-            "SELECT s.*, COUNT(e.id) AS episode_count, "
-            "COALESCE(SUM(CASE WHEN e.is_new=1 THEN 1 ELSE 0 END), 0) AS new_count, "
-            "COALESCE((SELECT e2.title FROM episodes e2 WHERE e2.show_id=s.id "
-            "ORDER BY e2.published_at DESC, e2.id DESC LIMIT 1), '') "
-            "AS latest_episode_title, "
-            "COALESCE((SELECT e3.published_at FROM episodes e3 WHERE e3.show_id=s.id "
-            "ORDER BY e3.published_at DESC, e3.id DESC LIMIT 1), '') "
-            "AS latest_episode_published_at "
-            "FROM shows s LEFT JOIN episodes e ON e.show_id=s.id"
+            "SELECT s.*, COALESCE(agg.episode_count, 0) AS episode_count, "
+            "COALESCE(agg.new_count, 0) AS new_count, "
+            "COALESCE(agg.latest_episode_title, '') AS latest_episode_title, "
+            "COALESCE(agg.latest_episode_published_at, '') AS latest_episode_published_at "
+            "FROM shows s LEFT JOIN ("
+            "SELECT show_id, COUNT(*) AS episode_count, "
+            "COALESCE(SUM(CASE WHEN is_new=1 THEN 1 ELSE 0 END), 0) AS new_count, "
+            "MAX(published_at || printf('~%012d', id)) AS latest_key, "
+            "title AS latest_episode_title, "
+            "published_at AS latest_episode_published_at "
+            "FROM episodes GROUP BY show_id"
+            ") agg ON agg.show_id=s.id"
         )
 
     @staticmethod
