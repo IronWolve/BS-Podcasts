@@ -2502,7 +2502,48 @@ class MainWindow(QMainWindow):
         bookmarks = self.listening.bookmarks(snapshot.episode_id) if self.listening else ()
         accent = dominant_color(snapshot.artwork_path, "")
         self.now_playing.set_episode(snapshot, episode.description if episode else "", chapters, segments, bookmarks, accent)
+        self.now_playing.set_stats(self._now_playing_stats(snapshot, episode))
         self.now_playing.set_position(float(snapshot.position), float(snapshot.duration))
+
+    def _now_playing_stats(self, snapshot, episode) -> list:
+        """Episode facts shown under the time line on Now Playing."""
+        if episode is None:
+            return []
+        source = snapshot.source or ""
+        if source.startswith(("http://", "https://")):
+            from urllib.parse import urlsplit
+
+            playing = "  ·  ".join(part for part in ("Streaming", urlsplit(source).hostname or "") if part)
+        elif source:
+            playing = "Downloaded file"
+        else:
+            playing = ""
+        format_parts = [self._pretty_mime(episode.mime_type)]
+        if episode.enclosure_bytes:
+            format_parts.append(self._format_bytes(episode.enclosure_bytes))
+        number = ""
+        if episode.episode_number:
+            number = f"Episode {episode.episode_number}"
+            if episode.season_number:
+                number = f"Season {episode.season_number}  ·  {number}"
+        return [
+            ("PLAYING", playing),
+            ("AUDIO URL", episode.media_url),
+            ("FORMAT", "  ·  ".join(part for part in format_parts if part)),
+            ("PUBLISHED", self._display_full_date(episode.published_at)),
+            ("EPISODE", number),
+        ]
+
+    @staticmethod
+    def _pretty_mime(mime: str) -> str:
+        mapping = {
+            "audio/mpeg": "MP3", "audio/mp3": "MP3", "audio/aac": "AAC",
+            "audio/mp4": "AAC (M4A)", "audio/x-m4a": "M4A", "audio/m4a": "M4A",
+            "audio/ogg": "Ogg", "audio/opus": "Opus", "audio/flac": "FLAC",
+            "audio/wav": "WAV", "audio/x-wav": "WAV", "audio/webm": "WebM",
+        }
+        value = (mime or "").split(";")[0].strip().lower()
+        return mapping.get(value, value or "")
 
     # ---------------------------------------------------------------- downloads
     def _download_episode(self, episode_id: int, quiet: bool = False):
