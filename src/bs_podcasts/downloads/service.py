@@ -7,8 +7,6 @@ from urllib.parse import urlparse
 import os
 import shutil
 
-import requests
-
 from ..net import make_session
 
 from ..data.repositories import DownloadRepository, LibraryRepository
@@ -43,10 +41,21 @@ class DownloadService:
         self.library = library
         self.downloads = downloads
         self.directory = Path(directory)
-        self.session = session or make_session(read_retries=False)
+        self._session = session
         self._cancellations: dict[int, Event] = {}
         self._listeners = []
         self._lock = Lock()
+
+    @property
+    def session(self):
+        # Created on first download so constructing the service stays network-free.
+        if self._session is None:
+            self._session = make_session(read_retries=False)
+        return self._session
+
+    @session.setter
+    def session(self, value):
+        self._session = value
 
     def subscribe(self, listener):
         self._listeners.append(listener)
@@ -66,6 +75,8 @@ class DownloadService:
 
     def download(self, episode_id: int):
         """Download with bounded automatic retry on transient network errors."""
+        import requests
+
         episode = self.library.get_episode(episode_id)
         if episode is None or not episode.media_url:
             raise DownloadError("Episode has no downloadable media URL.")
@@ -117,6 +128,8 @@ class DownloadService:
         return len(active)
 
     def _download_once(self, episode_id: int, cancellation: Event):
+        import requests
+
         episode = self.library.get_episode(episode_id)
         if episode is None or not episode.media_url:
             raise DownloadError("Episode has no downloadable media URL.")

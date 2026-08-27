@@ -1,6 +1,7 @@
 """Guarded adapter for the installed python-mpv 1.0.8 API."""
 
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, Callable
 
 
@@ -193,3 +194,56 @@ class MpvEngine:
                 self._emit("eof" if reason == event.data.EOF else "stopped", reason)
         elif event_id == mpv.MpvEventID.SHUTDOWN:
             self._emit("shutdown")
+
+
+class LazyMpvEngine:
+    """MpvEngine that defers libmpv player construction to first use.
+
+    Importing python-mpv (which loads the libmpv library) happens here in the
+    constructor so the external-player fallback decision is still made at
+    startup; the mpv core itself — threads, audio init — is only built when
+    playback first needs it. `PlaybackService` already defers media loading to
+    the first play, so on a normal launch nothing constructs the core at all.
+    """
+
+    capabilities = MpvEngine.capabilities
+
+    def __init__(self, **options):
+        global mpv
+        if mpv is None:
+            import mpv as mpv_module
+
+            mpv = mpv_module
+        self._options = options
+        self._engine: MpvEngine | None = None
+        self._handler: Callable[[EngineEvent], None] = lambda event: None
+        self._construct_lock = Lock()
+        self._shut_down = False
+
+    @property
+    def dead(self) -> bool:
+        return self._shut_down or (self._engine is not None and self._engine.dead)
+
+    def set_event_handler(self, handler: Callable[[EngineEvent], None]):
+        self._handler = handler
+        if self._engine is not None:
+            self._engine.set_event_handler(handler)
+
+    def shutdown(self):
+        self._shut_down = True
+        if self._engine is not None:
+            self._engine.shutdown()
+
+    def _real(self) -> MpvEngine:
+        if self._shut_down:
+            raise PlaybackUnavailable("The internal playback engine has shut down.")
+        with self._construct_lock:
+            if self._engine is None:
+                engine = MpvEngine(**self._options)
+                engine.set_event_handler(self._handler)
+                self._engine = engine
+        return self._engine
+
+    def __getattr__(self, name):
+        # Any real playback call (load, play, seek, volume…) builds the core.
+        return getattr(self._real(), name)

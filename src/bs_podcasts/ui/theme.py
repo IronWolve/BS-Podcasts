@@ -297,6 +297,23 @@ def app_font(size_px: int | None = None, weight: int = QFont.Weight.Normal) -> Q
     return font
 
 
+def apply_app_stylesheet(app) -> bool:
+    """Set the app-wide stylesheet only when it actually changed.
+
+    A full-application setStyleSheet repolishes every widget (~150 ms), and
+    startup used to pay for it three times: defaults, saved theme, saved
+    typography. Comparing the resolved text collapses identical applies.
+    """
+    from .icons import resolve_stylesheet
+
+    qss = resolve_stylesheet(stylesheet())
+    if app.property("_bs_applied_qss") == qss:
+        return False
+    app.setProperty("_bs_applied_qss", qss)
+    app.setStyleSheet(qss)
+    return True
+
+
 def stylesheet() -> str:
     c = COLORS
     r = RADIUS

@@ -249,6 +249,13 @@ class LibraryRepository:
             ).fetchall()
         return {row["id"]: self._episode(row) for row in rows}
 
+    def new_episode_count(self) -> int:
+        """Library-wide unseen-episode total for badges; cheap during batches."""
+        with self.database.connect() as connection:
+            return connection.execute(
+                "SELECT COUNT(*) FROM episodes WHERE is_new=1"
+            ).fetchone()[0]
+
     def artwork_paths(self) -> set[str]:
         with self.database.connect() as connection:
             rows = connection.execute(

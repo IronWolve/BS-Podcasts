@@ -5,8 +5,6 @@ from pathlib import Path
 from threading import Lock
 import os
 
-import requests
-
 from ..net import make_session
 
 
@@ -20,9 +18,20 @@ class ArtworkError(RuntimeError):
 class ArtworkCache:
     def __init__(self, directory: str | Path, session=None):
         self.directory = Path(directory)
-        self.session = session or make_session()
+        self._session = session
         self._url_locks: dict[str, Lock] = {}
         self._locks_guard = Lock()
+
+    @property
+    def session(self):
+        # Created on first fetch so constructing the cache stays network-free.
+        if self._session is None:
+            self._session = make_session()
+        return self._session
+
+    @session.setter
+    def session(self, value):
+        self._session = value
 
     def files(self):
         if not self.directory.is_dir():
@@ -91,6 +100,8 @@ class ArtworkCache:
                 del self._url_locks[url]
 
     def _fetch_locked(self, url: str, target: Path) -> Path:
+        import requests
+
         self.directory.mkdir(parents=True, exist_ok=True)
         partial = target.with_suffix(".part")
         response = None
