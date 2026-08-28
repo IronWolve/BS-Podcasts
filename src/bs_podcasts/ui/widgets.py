@@ -1517,6 +1517,7 @@ class ContextPanel(QFrame):
         self.show_link.hide()
         self.health = QLabel("")
         self.health.setObjectName("meta")
+        self.health.setWordWrap(True)
         self.links = QWidget()
         links_layout = QHBoxLayout(self.links)
         links_layout.setContentsMargins(0, 0, 0, 0)
@@ -1861,7 +1862,7 @@ class ContextPanel(QFrame):
         self.art.set_artwork(episode.artwork_path, initials(episode.show), episode.accent)
         self.title.setText(episode.title)
         self.meta.setText(f"{episode.published}  ·  {episode.duration}")
-        self.show_link.setText(episode.show)
+        set_button_text_elided(self.show_link, episode.show, scaled_px(230))
         self.show_link.setVisible(bool(episode.show_id))
         self.health.setVisible(False)
         self.latest_card.setVisible(False)
@@ -2054,6 +2055,16 @@ def _duration_seconds(text: str) -> int:
             unit = parts[index + 1]
             total += int(part) * (3600 if unit.startswith("h") else 60 if unit.startswith("m") else 1)
     return total
+
+
+def set_button_text_elided(button: QPushButton, text: str, cap_px: int):
+    """Buttons size to their full label, so a long dynamic name (a show
+    title) forces every ancestor wider than its pane and the content clips
+    at the window edge. Elide to a hard cap; the full name moves to the
+    tooltip."""
+    elided = button.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, cap_px)
+    button.setText(elided)
+    button.setToolTip(text if elided != text else "")
 
 
 class ElidedValueLabel(QLabel):
@@ -2258,7 +2269,7 @@ class NowPlayingView(QFrame):
         self._show_id = snapshot.show_id or 0
         self.art.set_artwork(snapshot.artwork_path, initials(snapshot.show_title or snapshot.title), accent)
         self.title.setText(snapshot.title)
-        self.show_link.setText(snapshot.show_title)
+        set_button_text_elided(self.show_link, snapshot.show_title, scaled_px(230))
         self.show_link.setVisible(bool(snapshot.show_title))
         self._fit_artwork()
         self.notes.setHtml(safe_feed_html(description or "No show notes provided for this episode."))
