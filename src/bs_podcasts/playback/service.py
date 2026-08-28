@@ -106,6 +106,12 @@ class PlaybackService:
                 message="Couldn’t open the stream (timed out). Check the connection or download the episode.",
                 buffering=None,
             )
+            # If the stream opens after all, it must arrive paused — never as
+            # surprise audio under an error banner.
+            try:
+                self.engine.pause()
+            except Exception:
+                pass
         self._emit()
 
     def load_episode(self, episode_id: int, autoplay: bool = True):
@@ -442,8 +448,9 @@ class PlaybackService:
                 self._last_metric_time = time.monotonic()
                 self._last_metric_position = self.snapshot.position
                 self.snapshot = replace(self.snapshot, buffering=None)
-                if self.snapshot.state == PlaybackState.LOADING:
-                    self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED)
+                if self.snapshot.state in {PlaybackState.LOADING, PlaybackState.ERROR}:
+                    # A load that beat the watchdog after all is ready, paused.
+                    self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED, message="")
             elif event.kind == "buffering":
                 self.snapshot = replace(self.snapshot, buffering=event.value)
             elif event.kind == "loading":

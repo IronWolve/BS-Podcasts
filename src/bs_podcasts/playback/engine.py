@@ -66,6 +66,9 @@ class MpvEngine:
         # among them); nothing may reach the app before the first load, or a
         # background warm-up reads as "playing" with no file.
         self._activated = False
+        # While a load is in flight, property ticks may still belong to the
+        # outgoing file; applying them would corrupt the new episode's state.
+        self._loading = False
         self._pending_position = 0.0
         self._pending_autoplay = False
 
@@ -100,6 +103,7 @@ class MpvEngine:
     def load(self, source: str, start_position: float = 0.0, autoplay: bool = True):
         self._guard()
         self._activated = True
+        self._loading = True
         self._pending_position = max(0.0, float(start_position))
         self._pending_autoplay = bool(autoplay)
         self._last_error = ""
@@ -108,10 +112,14 @@ class MpvEngine:
 
     def play(self):
         self._guard()
+        # Last intent wins: a play/pause while the file is still opening must
+        # be what the file-loaded handler applies, not the original autoplay.
+        self._pending_autoplay = True
         self._player.pause = False
 
     def pause(self):
         self._guard()
+        self._pending_autoplay = False
         self._player.pause = True
 
     def seek_absolute(self, seconds: float):
@@ -174,15 +182,15 @@ class MpvEngine:
             self._handler(EngineEvent(kind, value))
 
     def _position_changed(self, _name, value):
-        if value is not None:
+        if value is not None and not self._loading:
             self._emit("position", float(value))
 
     def _duration_changed(self, _name, value):
-        if value is not None:
+        if value is not None and not self._loading:
             self._emit("duration", float(value))
 
     def _pause_changed(self, _name, value):
-        if value is not None:
+        if value is not None and not self._loading:
             self._emit("paused", bool(value))
 
     def _cache_paused(self, _name, value):
@@ -201,12 +209,14 @@ class MpvEngine:
     def _mpv_event(self, event):
         event_id = event.event_id.value
         if event_id == mpv.MpvEventID.FILE_LOADED:
+            self._loading = False
             if self._pending_position:
                 self.seek_absolute(self._pending_position)
             self._player.pause = not self._pending_autoplay
             self._emit("file_loaded")
             self._emit("paused", not self._pending_autoplay)
         elif event_id == mpv.MpvEventID.END_FILE:
+            self._loading = False
             reason = getattr(event.data, "reason", None)
             error_reason = getattr(event.data, "ERROR", 4)
             if reason == error_reason:

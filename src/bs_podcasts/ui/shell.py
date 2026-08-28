@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
         self._last_mode = None
         self._pending_jobs = set()
         self._refresh_batch = [0, 0, 0]  # total, done, new episodes
+        self._refresh_generation = 0
         self._refresh_failed = []
         self._refresh_waiting = []
         self._refresh_in_flight = set()
@@ -687,6 +688,9 @@ class MainWindow(QMainWindow):
     def _refresh_shows(self, shows, quiet: bool = False):
         if quiet and self._background_paused():
             return
+        # A new batch invalidates completions still in flight from the old
+        # one, so they cannot count toward (or prematurely end) this batch.
+        self._refresh_generation += 1
         self._refresh_batch = [len(shows), 0, 0]
         self._refresh_failed = []
         self._refresh_waiting = [show.id for show in shows]
@@ -3038,6 +3042,7 @@ class MainWindow(QMainWindow):
     def _submit_refresh(self, show_id: int, batch: bool = False):
         if self.jobs is None or self.refresh is None:
             return
+        generation = self._refresh_generation
         future = self.refresh_jobs.submit(self.refresh.refresh, show_id)
         self._pending_jobs.add(future)
 
@@ -3047,7 +3052,7 @@ class MainWindow(QMainWindow):
                 result = completed.result()
             except Exception as exc:
                 result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._emit_completed(("refresh", (show_id, batch), result))
+            self._emit_completed(("refresh", (show_id, batch, generation), result))
 
         future.add_done_callback(finished)
 
@@ -3260,9 +3265,14 @@ class MainWindow(QMainWindow):
                 self._notify(result.message or "Download failed", "error", "Retry", lambda: self._download_episode(identifier))
                 self._native_notify(APP_NAME, result.message or "Download failed", lambda: self.navigation.select(PAGE_DOWNLOADS))
             return
-        identifier, batch_refresh = identifier if isinstance(identifier, tuple) else (identifier, False)
+        identifier, batch_refresh, generation = identifier if isinstance(identifier, tuple) else (identifier, False, 0)
         if batch_refresh:
             self._refresh_in_flight.discard(identifier)
+            if generation != self._refresh_generation:
+                # A completion from a superseded batch: keep the views fresh
+                # but leave the current batch's counters alone.
+                self._update_new_badge()
+                return
         else:
             self._request_reload()
         if result.status == JobStatus.OK and getattr(result.value, "imported", 0):
