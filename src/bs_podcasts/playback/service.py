@@ -217,14 +217,18 @@ class PlaybackService:
         self._emit()
         return self.snapshot.episode_id is not None
 
-    def _materialize(self) -> bool:
-        """Open the deferred episode in the engine if it is not loaded yet."""
+    def _materialize(self, autoplay: bool = False) -> bool:
+        """Open the deferred episode in the engine if it is not loaded yet.
+
+        `autoplay` must reflect the user's intent: a bare engine.play() after
+        an autoplay=False load loses to the later file-loaded event, which
+        re-applies the stored pause once the stream actually opens."""
         deferred = getattr(self, "_deferred_episode_id", None)
         if deferred is None:
             return False
         self._deferred_episode_id = None
         position = self.snapshot.position
-        self.load_episode(deferred, autoplay=False)
+        self.load_episode(deferred, autoplay=autoplay)
         if position:
             try:
                 self.engine.seek_absolute(position)
@@ -235,8 +239,7 @@ class PlaybackService:
     def play_pause(self):
         with self._lock:
             self._guard()
-            if self._materialize():
-                self.engine.play()
+            if self._materialize(autoplay=True):
                 return
             if self.snapshot.state == PlaybackState.PLAYING:
                 self.engine.pause()
@@ -246,7 +249,8 @@ class PlaybackService:
     def play(self):
         with self._lock:
             self._guard()
-            self._materialize()
+            if self._materialize(autoplay=True):
+                return
             if self.snapshot.source:
                 self.engine.play()
 
