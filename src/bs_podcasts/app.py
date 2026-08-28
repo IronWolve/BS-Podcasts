@@ -97,10 +97,47 @@ def _install_stall_monitor(app, threshold_ms: int = 150):
     threading.Thread(target=watch, name="bs-stall-monitor", daemon=True).start()
 
 
+def _install_window_tracer(app):
+    """Log top-level windows shown during startup (chasing launch flashes)."""
+    import time
+
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtWidgets import QWidget
+
+    logger = logging.getLogger("bs_podcasts")
+
+    class Tracer(QObject):
+        def __init__(self, parent):
+            super().__init__(parent)
+            self._t0 = time.monotonic()
+            self._logged = 0
+
+        def eventFilter(self, obj, event):
+            if (
+                event.type() == QEvent.Type.Show
+                and self._logged < 25
+                and isinstance(obj, QWidget)
+                and obj.isWindow()
+            ):
+                elapsed = time.monotonic() - self._t0
+                if elapsed < 15:
+                    self._logged += 1
+                    logger.info(
+                        "window shown +%.2fs: %s title=%r flags=%s size=%dx%d visible=%s",
+                        elapsed, type(obj).__name__, obj.windowTitle(),
+                        hex(int(obj.windowFlags().value)), obj.width(), obj.height(),
+                        obj.isVisible(),
+                    )
+            return False
+
+    app.installEventFilter(Tracer(app))
+
+
 def create_application(argv=None) -> QApplication:
     configure_logging()
     _install_excepthook()
     app = QApplication(argv if argv is not None else sys.argv)
+    _install_window_tracer(app)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
     app.setOrganizationName("BS Podcasts")
