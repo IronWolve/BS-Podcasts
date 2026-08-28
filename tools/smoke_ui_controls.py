@@ -144,6 +144,16 @@ def main() -> int:
             window.settings_page.library_path.text().endswith("library.db"),
             "Settings storage path is missing",
         )
+        # No settings dropdown may elide any of its options ("200 results · dire…").
+        from PySide6.QtWidgets import QComboBox
+        for combo in window.settings_page.findChildren(QComboBox):
+            metrics = combo.fontMetrics()
+            for option in range(combo.count()):
+                text = combo.itemText(option)
+                require(
+                    metrics.horizontalAdvance(text) + 44 <= combo.minimumWidth(),
+                    f"settings dropdown option elides: '{text}'",
+                )
         try:
             window.shortcuts.rebind("bookmark", "Ctrl+Space")
         except ValueError:
