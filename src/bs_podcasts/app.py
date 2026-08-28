@@ -7,7 +7,7 @@ import threading
 import sqlite3
 import traceback
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 import getpass
 from PySide6.QtGui import QIcon
@@ -235,6 +235,11 @@ def main() -> int:
         build_window()
 
     build_window()
+    # Warm the playback core off-thread once startup has settled, so the
+    # first press of Play pays only for opening the stream.
+    warm = getattr(engine, "warm", None)
+    if warm is not None:
+        QTimer.singleShot(2000, lambda: jobs.submit(warm))
 
     def raise_existing():
         socket = server.nextPendingConnection()

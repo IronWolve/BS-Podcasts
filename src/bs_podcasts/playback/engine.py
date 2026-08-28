@@ -257,6 +257,16 @@ class LazyMpvEngine:
         if self._engine is not None:
             self._engine.shutdown()
 
+    def warm(self):
+        """Construct the mpv core ahead of the first play (safe off-thread).
+
+        Startup stays engine-free; a background warm-up a moment later means
+        the first press of Play only pays for opening the stream."""
+        try:
+            self._real()
+        except Exception:
+            pass  # the first real playback call surfaces the error properly
+
     def _real(self) -> MpvEngine:
         if self._shut_down:
             raise PlaybackUnavailable("The internal playback engine has shut down.")
