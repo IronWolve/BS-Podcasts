@@ -539,6 +539,15 @@ class MainWindow(QMainWindow):
         for page in (self.podcast_page, self.discover_page):
             page.set_density(compact)
 
+    def _context_split_sizes(self) -> list:
+        """Splitter sizes that always fit the window: the pane yields width
+        before it can push itself past the right edge (the old fixed
+        pages-minimum made the splitter wider than a narrow window,
+        clipping the pane's content)."""
+        total = max(0, self.width() - self.navigation.width())
+        pane = max(scaled_px(300), min(self._pane_width(), total - scaled_px(380)))
+        return [max(scaled_px(380), total - pane), pane]
+
     def _pane_width(self) -> int:
         return scaled_px(360)
 
@@ -563,7 +572,7 @@ class MainWindow(QMainWindow):
                 page.apply_metrics()
         pane = self._pane_width()
         if self.context.isVisible():
-            self.splitter.setSizes([max(scaled_px(480), self.width() - self.navigation.width() - pane), pane])
+            self.splitter.setSizes(self._context_split_sizes())
         compact = self.library is not None and self.library.setting("ui.density", "comfortable") == "compact"
         self._apply_density(compact)
 
@@ -3613,7 +3622,7 @@ class MainWindow(QMainWindow):
             return
         self._context_forced = True
         self.context.show()
-        self.splitter.setSizes([max(480, self.width() - self.navigation.width() - self._pane_width()), self._pane_width()])
+        self.splitter.setSizes(self._context_split_sizes())
         self._sync_context_dismissible()
         self.player.set_queue_open(self.context.mode() == 1)
 
@@ -4077,7 +4086,8 @@ class MainWindow(QMainWindow):
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
-            return value[:16]
+            # Some feeds ship literal template junk (Sun, DD MMMM YYY).
+            return "Unknown date"
         now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
         days = (now.date() - parsed.date()).days
         if days == 0:
@@ -4096,7 +4106,8 @@ class MainWindow(QMainWindow):
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
             return f"{parsed:%b} {parsed.day}, {parsed:%Y}"
         except ValueError:
-            return value[:16]
+            # Some feeds ship literal template junk (Sun, DD MMMM YYY).
+            return "Unknown date"
 
     @staticmethod
     def _display_duration(seconds: int) -> str:
@@ -4118,7 +4129,7 @@ class MainWindow(QMainWindow):
         self._context_forced = True
         self.context.show()
         self.context.set_dismissible(True)
-        self.splitter.setSizes([max(480, self.width() - self.navigation.width() - self._pane_width()), self._pane_width()])
+        self.splitter.setSizes(self._context_split_sizes())
         self.player.set_queue_open(True)
 
     def _hide_context(self):
@@ -4138,12 +4149,18 @@ class MainWindow(QMainWindow):
             # Medium layouts need the compact rail to preserve useful widths
             # for both the collection and the persistent context pane. The
             # user's expand/compact preference applies when there is room.
-            compact = mode != "wide" or self._rail_user_compact is True
+            if self._rail_user_compact is not None:
+                preferred = self._rail_user_compact
+            else:
+                # No explicit choice: keep whatever the rail currently
+                # shows instead of auto-expanding on a wide window.
+                preferred = self.navigation._compact
+            compact = mode != "wide" or preferred
             self.navigation.set_compact(compact)
             self.player.set_compact(mode == "narrow")
             if mode in {"wide", "medium"} and self.pages.currentIndex() != PAGE_SETTINGS:
                 self.context.show()
-                self.splitter.setSizes([max(520, width - self.navigation.width() - self._pane_width()), self._pane_width()])
+                self.splitter.setSizes(self._context_split_sizes())
             elif not self._context_forced:
                 self.context.hide()
             self._last_mode = mode
