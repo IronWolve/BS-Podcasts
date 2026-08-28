@@ -721,7 +721,7 @@ class Toast(QFrame):
         self.action.setCursor(Qt.CursorShape.PointingHandCursor)
         self.action.clicked.connect(self._action)
         self.close = icon_button("close", "Dismiss", size=14)
-        self.close.clicked.connect(self.dismiss)
+        self.close.clicked.connect(self._user_close)
         layout.addWidget(self.icon)
         layout.addWidget(self.text)
         layout.addWidget(self.action)
@@ -735,6 +735,7 @@ class Toast(QFrame):
         self._timer.timeout.connect(self.dismiss)
         self._queue = []
         self._callback = None
+        self._on_close = None
         self._closing = False
         self._animation.finished.connect(self._animation_finished)
         self.hide()
@@ -747,12 +748,15 @@ class Toast(QFrame):
 
     MAX_QUEUE = 3
 
-    def show_message(self, message: str, tone: str = "info", action: str = "", callback=None, duration_ms: int = 3200):
+    def show_message(self, message: str, tone: str = "info", action: str = "", callback=None, duration_ms: int = 3200, on_close=None):
+        """duration_ms=0 keeps the toast up until dismissed; on_close runs
+        only when the person clicks the X, never on programmatic dismissal
+        — a sticky progress toast uses it as its cancel affordance."""
         if self.isVisible():
             # Never let a burst stack up: drop duplicates, keep only the newest few.
             if any(queued[0] == message for queued in self._queue) or self.text.text() == message:
                 return
-            self._queue.append((message, tone, action, callback, duration_ms))
+            self._queue.append((message, tone, action, callback, duration_ms, on_close))
             del self._queue[:-self.MAX_QUEUE]
             return
         glyph = {"success": "check", "error": "warning", "info": "info", "loading": "refresh"}.get(tone, "info")
@@ -767,6 +771,7 @@ class Toast(QFrame):
         self.action.setText(action)
         self.action.setVisible(bool(action))
         self._callback = callback
+        self._on_close = on_close
         self._closing = False
         self.adjustSize()
         self.reposition()
@@ -778,7 +783,19 @@ class Toast(QFrame):
         self._animation.setStartValue(0.0)
         self._animation.setEndValue(1.0)
         self._animation.start()
-        self._timer.start(duration_ms)
+        if duration_ms > 0:
+            self._timer.start(duration_ms)
+        else:
+            self._timer.stop()
+
+    def update_message(self, message: str):
+        """Refresh a visible toast's text in place (progress ticks)."""
+        if not self.isVisible() or self._closing:
+            return
+        self.text.setText(message)
+        self.setAccessibleName(message)
+        self.adjustSize()
+        self.reposition()
 
     def reposition(self):
         parent = self.parentWidget()
@@ -789,7 +806,15 @@ class Toast(QFrame):
         self.adjustSize()
         self.move((parent.width() - self.width()) // 2, bottom - self.height() - SPACE["md"])
 
+    def _user_close(self):
+        callback = self._on_close
+        self._on_close = None
+        self.dismiss()
+        if callback:
+            callback()
+
     def dismiss(self):
+        self._on_close = None
         self._timer.stop()
         if not self.isVisible() or self._closing:
             return

@@ -110,6 +110,8 @@ class MainWindow(QMainWindow):
         self._discover_newest_updates = {}
         self._discover_newest_total = 0
         self._discover_newest_summary = ""
+        self._discover_scan_toast = False
+        self._discover_scan_cancelled = False
         self._preview_episodes_url = ""
         self._pending_episodes_url = ""
         self._back_stack = []
@@ -2964,6 +2966,12 @@ class MainWindow(QMainWindow):
         self._discover_newest_updates.clear()
         self._discover_newest_total = 0
         self._discover_newest_summary = ""
+        self._discover_scan_cancelled = False
+        if self._discover_scan_toast:
+            # A new directory view abandons the scan; don't leave a sticky
+            # progress toast orphaned at the bottom.
+            self._discover_scan_toast = False
+            self.toast.dismiss()
         self._discover_operation = operation
         self._discover_value = value
         # Search paints a fast first page, then auto-continues to the full
@@ -3358,6 +3366,7 @@ class MainWindow(QMainWindow):
                     self.episode_page.banner.show_state("error", f"Couldn’t fetch this podcast’s episodes: {message}")
             if newest_scan:
                 self._discover_newest_pending.discard(identifier)
+                self._update_newest_scan_toast()
                 self._pump_discover_newest_scan()
                 if not self._discover_newest_pending:
                     self._finish_discover_newest_scan()
@@ -3859,7 +3868,31 @@ class MainWindow(QMainWindow):
         self.discover_page.set_discover_summary(
             f"Checking newest episode dates for {self._discover_newest_total} podcasts… Cards will update together."
         )
+        self._update_newest_scan_toast()
         self._pump_discover_newest_scan()
+
+    def _update_newest_scan_toast(self):
+        """Sticky bottom toast mirroring the scan; its X cancels the scan
+        (useful on slow connections) and keeps the dates found so far."""
+        total = self._discover_newest_total
+        if not total:
+            return
+        done = total - len(self._discover_newest_pending)
+        message = f"Scanning podcast release dates… {done} of {total}"
+        if self._discover_scan_toast and self.toast.isVisible():
+            self.toast.update_message(message)
+            return
+        self._discover_scan_toast = True
+        self.toast.show_message(
+            message, "loading", duration_ms=0, on_close=self._cancel_discover_newest_scan
+        )
+
+    def _cancel_discover_newest_scan(self):
+        if not self._discover_newest_total:
+            return
+        self._discover_scan_toast = False  # the user already closed the toast
+        self._discover_scan_cancelled = True
+        self._finish_discover_newest_scan()
 
     def _pump_discover_newest_scan(self):
         while self._discover_newest_waiting and len(self._discover_newest_active) < 4:
@@ -3869,6 +3902,12 @@ class MainWindow(QMainWindow):
 
     def _finish_discover_newest_scan(self):
         """Merge and sort all scanned dates with one model update."""
+        scanned = self._discover_newest_total
+        cancelled = self._discover_scan_cancelled
+        self._discover_scan_cancelled = False
+        if self._discover_scan_toast:
+            self._discover_scan_toast = False
+            self.toast.dismiss()
         self._discover_newest_pending.clear()
         self._discover_newest_waiting.clear()
         self._discover_newest_active.clear()
@@ -3889,6 +3928,11 @@ class MainWindow(QMainWindow):
         if newest:
             QTimer.singleShot(0, self.discover_page.view.scrollToTop)
         self._trim_preview_cache()
+        if scanned:
+            if cancelled:
+                self._notify("Scan stopped — sorted with the dates found so far", "info")
+            else:
+                self._notify(f"Release-date scan finished for {scanned} podcasts", "success")
 
     def _store_preview(self, feed_url: str, feed):
         self._previews.pop(feed_url, None)
