@@ -81,6 +81,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(scaled_px(760), scaled_px(600))
         self._context_forced = False
+        # The pane's open/closed state is the user's choice, like the rail's
+        # compact state: closing it means no path (mode change, selection,
+        # playback follow) may auto-reopen it until the user opens it again.
+        self._context_user_closed = False
         self._pane_user_width = 0
         self._rail_user_compact = None
         self._last_mode = None
@@ -508,10 +512,8 @@ class MainWindow(QMainWindow):
             self.resize(1440, 900)
             self.navigation.select(0)
             return
-        geometry = self.library.setting("ui.geometry", "")
-        restored = bool(geometry) and self.restoreGeometry(QByteArray.fromHex(geometry.encode("ascii")))
-        if not restored:
-            self.resize(1440, 900)
+        # Preferences first: restoreGeometry/resize below fire the first
+        # responsive-mode pass, which must already see the user's choices.
         rail = self.library.setting("ui.rail_compact", "")
         if rail in {"0", "1"}:
             self._rail_user_compact = rail == "1"
@@ -519,6 +521,11 @@ class MainWindow(QMainWindow):
             self._pane_user_width = max(0, int(self.library.setting("ui.pane_width", "0")))
         except ValueError:
             self._pane_user_width = 0
+        self._context_user_closed = self.library.setting("ui.context_closed", "0") == "1"
+        geometry = self.library.setting("ui.geometry", "")
+        restored = bool(geometry) and self.restoreGeometry(QByteArray.fromHex(geometry.encode("ascii")))
+        if not restored:
+            self.resize(1440, 900)
         try:
             page = int(self.library.setting("ui.page", "0"))
         except ValueError:
@@ -536,6 +543,7 @@ class MainWindow(QMainWindow):
             self.library.set_setting("ui.rail_compact", "1" if self._rail_user_compact else "0")
         if self._pane_user_width:
             self.library.set_setting("ui.pane_width", str(self._pane_user_width))
+        self.library.set_setting("ui.context_closed", "1" if self._context_user_closed else "0")
 
     def _rail_toggled(self, compact: bool):
         self._rail_user_compact = compact
@@ -2471,7 +2479,7 @@ class MainWindow(QMainWindow):
                         self.context.show_episode(self._ui_episode(episode))
                         self.context.set_playing(episode_id, state == "playing", state == "loading")
                         self._load_listening_details(episode_id)
-                        if self._last_mode in {"wide", "medium"}:
+                        if self._last_mode in {"wide", "medium"} and not self._context_user_closed:
                             self._reveal_context()
             else:
                 self.player._streaming = bool(source)
@@ -2550,7 +2558,7 @@ class MainWindow(QMainWindow):
             self._playing_state == "loading",
         )
         self._load_listening_details(self._playing_episode_id)
-        if self._last_mode in {"wide", "medium"}:
+        if self._last_mode in {"wide", "medium"} and not self._context_user_closed:
             self._reveal_context()
         self.player.set_queue_open(False)
 
@@ -3571,7 +3579,9 @@ class MainWindow(QMainWindow):
             self._show_item(selected)
         elif self.context.mode() == 0:
             self.context.show_empty()
-        if self._last_mode in {"wide", "medium"} or self._context_forced:
+        if (
+            self._last_mode in {"wide", "medium"} and not self._context_user_closed
+        ) or self._context_forced:
             self.context.show()
         else:
             self.context.hide()
@@ -3654,9 +3664,11 @@ class MainWindow(QMainWindow):
             self._hide_context()
             return
         self._context_forced = True
+        self._context_user_closed = False
         self._reveal_context()
         self._sync_context_dismissible()
         self.player.set_queue_open(self.context.mode() == 1)
+        self._layout_save_timer.start()
 
     def _place_edge_handles(self):
         middle = (self.pages.height() - self.context_toggle.height()) // 2
@@ -3748,7 +3760,11 @@ class MainWindow(QMainWindow):
                     self._ensure_episode_artwork(stored)
         else:
             return
-        if self._last_mode in {"wide", "medium"} and self.pages.currentIndex() != PAGE_SETTINGS:
+        if (
+            self._last_mode in {"wide", "medium"}
+            and self.pages.currentIndex() != PAGE_SETTINGS
+            and not self._context_user_closed
+        ):
             self._reveal_context()
         self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)
 
@@ -4159,15 +4175,21 @@ class MainWindow(QMainWindow):
     def _show_queue(self):
         self.context.set_mode(1)
         self._context_forced = True
+        self._context_user_closed = False
         self._reveal_context()
         self.context.set_dismissible(True)
         self.player.set_queue_open(True)
 
     def _hide_context(self):
+        # Every caller is a user gesture (X, Escape, edge handle, queue
+        # toggle); space-driven auto-hides bypass this and call hide()
+        # directly so they don't overwrite the user's choice.
         self._context_forced = False
+        self._context_user_closed = True
         self.context.hide()
         self.player.set_queue_open(False)
         self._sync_context_dismissible()
+        self._layout_save_timer.start()
 
     def _sync_context_dismissible(self):
         mode = self._last_mode or "wide"
@@ -4192,12 +4214,17 @@ class MainWindow(QMainWindow):
         compact = mode != "wide" or bool(preferred)
         self.navigation.set_compact(compact)
         self.player.set_compact(mode == "narrow")
-        if mode in {"wide", "medium"} and self.pages.currentIndex() != PAGE_SETTINGS:
+        if (
+            mode in {"wide", "medium"}
+            and self.pages.currentIndex() != PAGE_SETTINGS
+            and not self._context_user_closed
+        ):
             self._reveal_context()
         else:
             # Narrow closes the pane even when the user opened it by hand,
             # mirroring how the rail force-compacts; growing back into
-            # medium/wide reopens it above.
+            # medium/wide reopens it above unless the user closed it, in
+            # which case it stays closed until they open it again.
             self._context_forced = False
             self.context.hide()
         self._last_mode = mode
