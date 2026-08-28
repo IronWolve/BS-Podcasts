@@ -1493,7 +1493,12 @@ class ContextPanel(QFrame):
         # --- Selected item page -------------------------------------------
         selected = QWidget()
         selected_layout = QVBoxLayout(selected)
-        selected_layout.setContentsMargins(0, 0, 0, 0)
+        # Breathing room between the content column and the scrollbar; the
+        # panel's own margin only lives outside the scroll area, so without
+        # this the buttons sit flush against the scrollbar on the right
+        # while the left edge gets the full margin.
+        selected_layout.setContentsMargins(0, 0, SPACE["sm"], SPACE["sm"])
+        self._selected_layout = selected_layout
         selected_layout.setSpacing(SPACE["md"])
         self.art = Artwork(240, 16)
         self.art.setAccessibleName("Artwork")
@@ -1645,7 +1650,8 @@ class ContextPanel(QFrame):
         # --- Up Next page --------------------------------------------------
         queue_page = QWidget()
         queue_layout = QVBoxLayout(queue_page)
-        queue_layout.setContentsMargins(0, 0, 0, 0)
+        queue_layout.setContentsMargins(0, 0, SPACE["sm"], SPACE["sm"])
+        self._queue_layout = queue_layout
         queue_layout.setSpacing(SPACE["sm"])
         self.queue_summary = QLabel("Your queue is empty")
         self.queue_summary.setObjectName("meta")
@@ -1922,6 +1928,8 @@ class ContextPanel(QFrame):
         self.setMaximumWidth(scaled_px(440))
         self.layout().setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
         self.layout().setSpacing(SPACE["md"])
+        self._selected_layout.setContentsMargins(0, 0, SPACE["sm"], SPACE["sm"])
+        self._queue_layout.setContentsMargins(0, 0, SPACE["sm"], SPACE["sm"])
         self.art.set_bounds(scaled_px(120), scaled_px(240))
         self.art.set_side(min(self.art.width() or scaled_px(240), scaled_px(240)))
         self.tabs.setMinimumHeight(scaled_px(150))
