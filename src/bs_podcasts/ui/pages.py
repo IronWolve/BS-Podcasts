@@ -1570,6 +1570,19 @@ class SettingsPage(BasePage):
         self.ui_font.setCurrentIndex(index if index >= 0 else 0)
         self.ui_font.blockSignals(False)
 
+    def _fit_field(self, field, floor: int):
+        """Uniform field width, but never narrower than the widest option —
+        an elided dropdown entry ("200 results · dire…") is a bad look."""
+        width = floor
+        if isinstance(field, QComboBox):
+            metrics = field.fontMetrics()
+            widest = max(
+                (metrics.horizontalAdvance(field.itemText(i)) for i in range(field.count())),
+                default=0,
+            )
+            width = max(floor, widest + scaled_px(52))  # arrow + frame + padding
+        field.setFixedWidth(width)
+
     def apply_metrics(self):
         super().apply_metrics()
         width = scaled_px(self.FIELD_WIDTH)
@@ -1578,8 +1591,8 @@ class SettingsPage(BasePage):
             self.auto_download_limit, self.theme, self.density, self.text_size,
             self.episode_lines, self.search_depth,
         ):
-            field.setFixedWidth(width)
-        self.ui_font.setFixedWidth(scaled_px(220))
+            self._fit_field(field, width)
+        self._fit_field(self.ui_font, scaled_px(220))
         for editor in self._shortcut_editors.values():
             editor.setFixedWidth(width)
             row = editor.parentWidget()
