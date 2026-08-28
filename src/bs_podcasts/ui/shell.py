@@ -410,6 +410,12 @@ class MainWindow(QMainWindow):
         self.settings_page.load_text_size(self.library.setting("ui.text_size", "comfortable"))
         self.settings_page.load_font(self.library.setting("ui.font", "Inter"))
         self._apply_density(self.library.setting("ui.density", "comfortable") == "compact")
+        try:
+            episode_lines = int(self.library.setting("ui.episode_lines", "2"))
+        except ValueError:
+            episode_lines = 2
+        self.settings_page.load_episode_lines(episode_lines)
+        self._apply_episode_lines(episode_lines)
         self._apply_typography()
         self.settings_page.clear_artwork_requested.connect(self._clear_artwork_cache)
         QTimer.singleShot(4000, self._prune_artwork_cache)
@@ -549,6 +555,19 @@ class MainWindow(QMainWindow):
         self._rail_user_compact = compact
 
     # ------------------------------------------------------------------ helpers
+    def _apply_episode_lines(self, value):
+        try:
+            lines = max(1, min(20, int(value)))
+        except (TypeError, ValueError):
+            lines = 2
+        EpisodeDelegate.SNIPPET_LINES = lines
+        # Row heights changed: every episode list must re-lay its items out.
+        for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.history_page, self.bookmark_page):
+            view = getattr(page, "view", None)
+            if view is not None:
+                view.doItemsLayout()
+                view.viewport().update()
+
     def _apply_density(self, compact: bool):
         for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.history_page, self.bookmark_page):
             page.set_density(compact)
@@ -1105,6 +1124,8 @@ class MainWindow(QMainWindow):
                 self._notify("Background work paused" if value == "1" else "Background work resumed", "info")
             elif key == "ui.density":
                 self._apply_density(value == "compact")
+            elif key == "ui.episode_lines":
+                self._apply_episode_lines(value)
             elif key == "ui.item_tooltips":
                 set_item_tooltips(value == "1")
             elif key in {"ui.text_size", "ui.font"}:

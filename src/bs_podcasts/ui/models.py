@@ -5,7 +5,7 @@ import html
 import re
 
 from PySide6.QtCore import QAbstractListModel, QEvent, QMimeData, QModelIndex, QRect, QSize, Signal, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextLayout
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QToolTip
 
 from . import icons
@@ -437,6 +437,11 @@ class EpisodeDelegate(QStyledItemDelegate):
     ROW_HEIGHT = 88
     COMPACT_HEIGHT = 64
     PLAY_ZONE = 48
+    SNIPPET_LINE = 17
+    # How many wrapped description lines full-size rows show. A class
+    # attribute (mutated from Settings, like theme COLORS) so every list
+    # shares the value; views need doItemsLayout() after a change.
+    SNIPPET_LINES = 2
 
     def __init__(self, parent=None, compact: bool = False, reorder: bool = False):
         super().__init__(parent)
@@ -453,7 +458,10 @@ class EpisodeDelegate(QStyledItemDelegate):
         self.playing_active = active
 
     def sizeHint(self, option, index):
-        return QSize(1, scaled_px(self.COMPACT_HEIGHT if self.compact else self.ROW_HEIGHT))
+        if self.compact:
+            return QSize(1, scaled_px(self.COMPACT_HEIGHT))
+        extra = self.SNIPPET_LINE * (max(1, self.SNIPPET_LINES) - 1)
+        return QSize(1, scaled_px(self.ROW_HEIGHT + extra))
 
     def helpEvent(self, event, view, option, index):
         """Keep the episode tooltip anchored to the row that owns it."""
@@ -536,9 +544,11 @@ class EpisodeDelegate(QStyledItemDelegate):
             meta_rect = QRect(text_left, row.y() + scaled_px(33), text_width, scaled_px(16))
             snippet_rect = None
         else:
+            lines = max(1, self.SNIPPET_LINES)
+            snippet_height = scaled_px(self.SNIPPET_LINE) * lines
             title_rect = QRect(text_left, row.y() + scaled_px(11), text_width, scaled_px(20))
-            snippet_rect = QRect(text_left, row.y() + scaled_px(32), text_width, scaled_px(17))
-            meta_rect = QRect(text_left, row.y() + scaled_px(52), text_width, scaled_px(16))
+            snippet_rect = QRect(text_left, row.y() + scaled_px(32), text_width, snippet_height)
+            meta_rect = QRect(text_left, snippet_rect.bottom() + scaled_px(3), text_width, scaled_px(16))
         if item.state == "New":
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["accent"]))
@@ -558,7 +568,7 @@ class EpisodeDelegate(QStyledItemDelegate):
             if snippet:
                 painter.setFont(app_font(12))
                 painter.setPen(QColor(COLORS["muted"]))
-                painter.drawText(snippet_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(snippet, Qt.TextElideMode.ElideRight, text_width))
+                self._draw_snippet(painter, snippet_rect, snippet, max(1, self.SNIPPET_LINES))
 
         painter.setFont(app_font(12))
         painter.setPen(QColor(COLORS["subtle"]))
@@ -596,11 +606,42 @@ class EpisodeDelegate(QStyledItemDelegate):
             _draw_focus(painter, row, radius)
         painter.restore()
 
+    def _draw_snippet(self, painter: QPainter, rect: QRect, text: str, max_lines: int):
+        """Wrap the description to at most max_lines, eliding the last line."""
+        if max_lines == 1:
+            painter.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, rect.width()))
+            return
+        metrics = painter.fontMetrics()
+        line_height = scaled_px(self.SNIPPET_LINE)
+        layout = QTextLayout(text.replace("\n", " "), painter.font())
+        layout.beginLayout()
+        spans = []
+        while len(spans) < max_lines:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(rect.width())
+            spans.append((line.textStart(), line.textLength()))
+        more = layout.createLine().isValid()
+        layout.endLayout()
+        for row, (start, length) in enumerate(spans):
+            piece = text[start:start + length].strip()
+            last = row == len(spans) - 1
+            if last and more:
+                piece = metrics.elidedText(piece + "…", Qt.TextElideMode.ElideRight, rect.width())
+            line_rect = QRect(rect.x(), rect.y() + row * line_height, rect.width(), line_height)
+            painter.drawText(line_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, piece)
+
     def _snippet(self, item) -> str:
-        key = (item.episode_id or id(item), item.description)
+        # Enough plain text to fill the configured line count; the limit is
+        # part of the cache key so a settings change doesn't serve stale
+        # short snippets.
+        limit = max(240, self.SNIPPET_LINES * 130)
+        key = (item.episode_id or id(item), limit, item.description)
         cached = self._snippets.get(key)
         if cached is None:
-            cached = plain_snippet(item.description)
+            cached = plain_snippet(item.description, limit)
             if item.episode_id:
                 self._snippets[key] = cached
                 if len(self._snippets) > 5000:

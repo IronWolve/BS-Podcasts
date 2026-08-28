@@ -1201,6 +1201,11 @@ class SettingsPage(BasePage):
             self.ui_font.addItem(label, key)
         self.ui_font.setFixedWidth(scaled_px(220))
         appearance_form.addRow("Font", self.ui_font)
+        self.episode_lines = QSpinBox()
+        self.episode_lines.setRange(1, 20)
+        self.episode_lines.setSuffix(" lines")
+        self.episode_lines.setFixedWidth(self.FIELD_WIDTH)
+        appearance_form.addRow("Description lines", self.episode_lines)
         self.hover_previews = QCheckBox("Show preview pop-ups when hovering podcasts and episodes")
         appearance_form.addRow("Hover previews", self.hover_previews)
         self.settings_content.addWidget(appearance_card)
@@ -1209,6 +1214,7 @@ class SettingsPage(BasePage):
         self.text_size.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.text_size", self.text_size.itemData(index)))
         self.ui_font.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.font", self.ui_font.itemData(index)))
         self.hover_previews.toggled.connect(lambda value: self.setting_changed.emit("ui.item_tooltips", "1" if value else "0"))
+        self.episode_lines.valueChanged.connect(lambda value: self.setting_changed.emit("ui.episode_lines", str(value)))
 
         # Desktop --------------------------------------------------------------
         desktop_card, desktop_form = self._card("Desktop", "Small, optional desktop conveniences.")
@@ -1519,6 +1525,11 @@ class SettingsPage(BasePage):
         self.density.setCurrentIndex(max(0, self.density.findData(value)))
         self.density.blockSignals(False)
 
+    def load_episode_lines(self, value: int):
+        self.episode_lines.blockSignals(True)
+        self.episode_lines.setValue(max(1, min(20, value)))
+        self.episode_lines.blockSignals(False)
+
     def load_hover_previews(self, enabled: bool):
         self.hover_previews.blockSignals(True)
         self.hover_previews.setChecked(enabled)
@@ -1547,6 +1558,7 @@ class SettingsPage(BasePage):
         for field in (
             self.speed, self.skip_back, self.skip_forward, self.refresh_interval,
             self.auto_download_limit, self.theme, self.density, self.text_size,
+            self.episode_lines,
         ):
             field.setFixedWidth(width)
         self.ui_font.setFixedWidth(scaled_px(220))
