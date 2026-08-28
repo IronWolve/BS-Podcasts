@@ -309,12 +309,24 @@ class NavigationRail(QFrame):
         footer = QHBoxLayout()
         self.version = QLabel(self._version_text())
         self.version.setObjectName("eyebrow")
-        self.toggle = icon_button("chevron-left", "Collapse navigation", "railToggle", 16)
-        self.toggle.clicked.connect(lambda: self.set_compact(not self._compact, user=True))
         self.version.hide()
         footer.addWidget(self.version, 1)
-        footer.addWidget(self.toggle)
         layout.addLayout(footer)
+        # Collapse control floats at the vertical middle of the rail's outer
+        # edge (not in the footer), styled as a slim panel-collapse handle.
+        self.toggle = icon_button("collapse-left", "Collapse navigation", "edgeToggle", 16)
+        self.toggle.setParent(self)
+        self.toggle.setFixedSize(scaled_px(22), scaled_px(52))
+        self.toggle.clicked.connect(lambda: self.set_compact(not self._compact, user=True))
+        self.toggle.raise_()
+
+    def _place_toggle(self):
+        self.toggle.move(self.width() - self.toggle.width() - 2, (self.height() - self.toggle.height()) // 2)
+        self.toggle.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_toggle()
 
     def set_background_paused(self, paused: bool):
         self._background_paused = bool(paused)
@@ -424,8 +436,9 @@ class NavigationRail(QFrame):
         self.brand_text.setVisible(not compact)
         self.version.setVisible(False)
         self.background_status.setVisible(self._background_paused and not compact)
-        self.toggle.setIcon(icons.icon("chevron-right" if compact else "chevron-left", COLORS["muted"], scaled_px(16)))
+        self.toggle.setIcon(icons.icon("collapse-right" if compact else "collapse-left", COLORS["muted"], scaled_px(16)))
         self.toggle.setToolTip("Expand navigation" if compact else "Collapse navigation")
+        self._place_toggle()
         for index, (button, _glyph, label) in enumerate(self._buttons):
             button.setText("" if compact else label)
             button.setToolTip(f"{label}  ·  Ctrl+{index + 1}")
@@ -1436,7 +1449,13 @@ class ContextPanel(QFrame):
         top.addWidget(self.info_button)
         self.close_button = icon_button("close", "Close details")
         self.close_button.clicked.connect(self.closed)
-        top.addWidget(self.close_button)
+        self.close_button.hide()
+        # Collapse handle floats at the vertical middle of the pane's outer
+        # (left) edge instead of an X in the header.
+        self.collapse = icon_button("collapse-right", "Hide details panel", "edgeToggle", 16)
+        self.collapse.setParent(self)
+        self.collapse.setFixedSize(scaled_px(22), scaled_px(52))
+        self.collapse.clicked.connect(self.closed)
         layout.addLayout(top)
 
         self.stack = QStackedWidget()
@@ -1863,7 +1882,12 @@ class ContextPanel(QFrame):
         self.download.hide()
 
     def set_dismissible(self, dismissible: bool):
-        self.close_button.setVisible(bool(dismissible))
+        # The edge collapse handle is always available; kept for call sites.
+        del dismissible
+
+    def _place_collapse(self):
+        self.collapse.move(2, (self.height() - self.collapse.height()) // 2)
+        self.collapse.raise_()
 
     def apply_metrics(self):
         self.setMinimumWidth(scaled_px(320))
@@ -1933,6 +1957,7 @@ class ContextPanel(QFrame):
         # Keep the artwork proportional to the space that remains for text and tabs.
         reserved = 520 if self.latest_card.isVisible() else 440
         self.art.set_side(min(self.width() - 2 * SPACE["lg"] - 12, self.height() - reserved))
+        self._place_collapse()
 
     def set_playing(self, episode_id: int, active: bool, loading: bool = False):
         """Make the primary button a Pause/Resume toggle when this episode is playing."""
@@ -2104,8 +2129,10 @@ class NowPlayingView(QFrame):
         self.tabs.setObjectName("nowPlayingTabWidget")
         self.tabs.setDocumentMode(True)
         self.tabs.tabBar().setExpanding(False)
-        self.tabs.tabBar().setUsesScrollButtons(False)
-        self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
+        # Scroll buttons beat eliding every tab to two letters when the panel
+        # is narrow or the text size is large.
+        self.tabs.tabBar().setUsesScrollButtons(True)
+        self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
         self.notes = QTextBrowser()
         self.notes.setReadOnly(True)
         self.notes.setOpenExternalLinks(False)
@@ -2139,7 +2166,6 @@ class NowPlayingView(QFrame):
         self.layout().setContentsMargins(SPACE["xxl"], SPACE["xl"], SPACE["xxl"], SPACE["xl"])
         self.layout().setSpacing(SPACE["xxl"])
         self.art.set_bounds(scaled_px(160), scaled_px(420))
-        self.art.set_side(min(self.art.width() or scaled_px(320), scaled_px(320)))
         self._bound_left_column()
 
     def _bound_left_column(self):
@@ -2147,6 +2173,25 @@ class NowPlayingView(QFrame):
         # of the view so tab titles stay readable at every width.
         share = int(self.width() * 0.42)
         self.left_wrap.setMaximumWidth(max(scaled_px(280), min(scaled_px(460), share)))
+        self._fit_artwork()
+
+    def _fit_artwork(self):
+        """Give the artwork only the height the text stack leaves over.
+
+        At large text sizes the title/meta/info card grow; with a fixed art
+        side they overflowed onto the artwork and pushed the card off-view."""
+        column = max(120, self.left_wrap.maximumWidth() - SPACE["md"])
+        used = SPACE["xl"] * 2  # view margins
+        used += max(self.info_button.sizeHint().height(), scaled_px(24))  # top row
+        used += self.title.heightForWidth(column) if self.title.text() else 0
+        used += self.show_link.sizeHint().height() if self.show_link.isVisible() else 0
+        used += self.meta.sizeHint().height()
+        if self.stats.isVisible():
+            used += self.stats.sizeHint().height()
+        used += SPACE["md"] * 6  # column spacing between rows
+        available = self.height() - used - scaled_px(16)
+        side = max(scaled_px(160), min(scaled_px(420), column, available))
+        self.art.set_side(side)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2180,6 +2225,7 @@ class NowPlayingView(QFrame):
             self._stats_grid.addWidget(key, index, 0)
             self._stats_grid.addWidget(text, index, 1)
         self.stats.setVisible(bool(rows))
+        self._fit_artwork()
 
     def set_episode(self, snapshot, description: str, chapters, segments, bookmarks, accent: str):
         self._episode_id = snapshot.episode_id or 0
@@ -2188,6 +2234,7 @@ class NowPlayingView(QFrame):
         self.title.setText(snapshot.title)
         self.show_link.setText(snapshot.show_title)
         self.show_link.setVisible(bool(snapshot.show_title))
+        self._fit_artwork()
         self.notes.setHtml(safe_feed_html(description or "No show notes provided for this episode."))
         self._chapters = list(chapters)
         self._chapter_starts = [chapter.start_seconds for chapter in self._chapters]

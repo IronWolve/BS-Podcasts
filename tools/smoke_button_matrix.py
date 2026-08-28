@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import os
+import time
 import sys
 
 WORKSPACE = Path(__file__).resolve().parents[2]
@@ -551,7 +552,12 @@ def main() -> int:
         print("toast")
         window.toast._queue.clear()
         window.toast.dismiss()
-        process(app)
+        # The dismiss fade runs ~160ms; a message shown while the toast is
+        # still closing is queued instead of displayed.
+        deadline = time.monotonic() + 2.0
+        while (window.toast.isVisible() or window.toast._closing) and time.monotonic() < deadline:
+            process(app)
+            time.sleep(0.02)
         window._notify("test", "info", "Do it", lambda: opened_urls.append("toast-action"))
         process(app)
         window.toast.action.click()
