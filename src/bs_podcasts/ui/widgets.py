@@ -515,8 +515,14 @@ class PageHeader(QFrame):
         text.setSpacing(0)
         self.title_label = QLabel(title)
         self.title_label.setObjectName("pageTitle")
+        # A long title must clip inside its own stretch slot instead of
+        # forcing its full text width as a layout minimum — that minimum is
+        # what shoved the search field underneath the action button when the
+        # header got tight.
+        self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.subtitle_label = QLabel(subtitle)
         self.subtitle_label.setObjectName("pageSubtitle")
+        self.subtitle_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         text.addWidget(self.title_label)
         text.addWidget(self.subtitle_label)
         layout.addLayout(text, 1)
@@ -531,6 +537,7 @@ class PageHeader(QFrame):
         self.search.setMaximumWidth(scaled_px(240))
         self.search.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.search)
+        self._show_search = show_search
         self.search.setVisible(show_search)
 
         self.action = None
@@ -543,6 +550,13 @@ class PageHeader(QFrame):
     def set_subtitle(self, text: str):
         self.subtitle_label.setText(text)
         self.subtitle_label.setVisible(bool(text))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # In a tight header the inline filter is the least important control:
+        # hide it before the title and the action button start clipping.
+        if self._show_search:
+            self.search.setVisible(event.size().width() >= scaled_px(430))
 
     def apply_metrics(self):
         self.layout().setSpacing(SPACE["md"])
@@ -1011,7 +1025,7 @@ class HeroCard(QFrame):
             return
         if self.width() <= 0:
             return
-        compact = self.width() < 760
+        compact = self.width() < scaled_px(760)
         side = scaled_px(34)
         for button, label in (
             (self.refresh, "Refresh"),
@@ -1577,9 +1591,11 @@ class ContextPanel(QFrame):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("contextTabs")
         self.tabs.setDocumentMode(True)
-        self.tabs.tabBar().setExpanding(True)
-        self.tabs.tabBar().setUsesScrollButtons(False)
-        self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
+        # Full labels always: a narrow pane scrolls the tab strip instead of
+        # eliding names ("Bookma…") or clipping the last tab.
+        self.tabs.tabBar().setExpanding(False)
+        self.tabs.tabBar().setUsesScrollButtons(True)
+        self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
         self.tabs.setMinimumHeight(scaled_px(150))
         self.body = QTextBrowser()
         self.body.setObjectName("contextBody")

@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(scaled_px(760), scaled_px(600))
         self._context_forced = False
+        self._pane_user_width = 0
         self._rail_user_compact = None
         self._last_mode = None
         self._pending_jobs = set()
@@ -210,6 +211,7 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
         self.splitter.setSizes([820, scaled_px(360)])
+        self.splitter.splitterMoved.connect(self._splitter_dragged)
         body.addWidget(self.splitter, 1)
         body_wrap = QWidget()
         body_wrap.setLayout(body)
@@ -514,6 +516,10 @@ class MainWindow(QMainWindow):
         if rail in {"0", "1"}:
             self._rail_user_compact = rail == "1"
         try:
+            self._pane_user_width = max(0, int(self.library.setting("ui.pane_width", "0")))
+        except ValueError:
+            self._pane_user_width = 0
+        try:
             page = int(self.library.setting("ui.page", "0"))
         except ValueError:
             page = 0
@@ -528,6 +534,8 @@ class MainWindow(QMainWindow):
         self.library.set_setting("ui.page", str(self.pages.currentIndex()))
         if self._rail_user_compact is not None:
             self.library.set_setting("ui.rail_compact", "1" if self._rail_user_compact else "0")
+        if self._pane_user_width:
+            self.library.set_setting("ui.pane_width", str(self._pane_user_width))
 
     def _rail_toggled(self, compact: bool):
         self._rail_user_compact = compact
@@ -543,13 +551,35 @@ class MainWindow(QMainWindow):
         """Splitter sizes that always fit the window: the pane yields width
         before it can push itself past the right edge (the old fixed
         pages-minimum made the splitter wider than a narrow window,
-        clipping the pane's content)."""
-        total = max(0, self.width() - self.navigation.width())
+        clipping the pane's content). The rail's minimumWidth is its fixed
+        width and is already updated when set_compact ran this event, while
+        navigation.width() can still report the pre-toggle geometry."""
+        total = max(
+            0,
+            self.width() - self.navigation.minimumWidth() - self.splitter.handleWidth(),
+        )
         pane = max(scaled_px(300), min(self._pane_width(), total - scaled_px(380)))
         return [max(scaled_px(380), total - pane), pane]
 
     def _pane_width(self) -> int:
+        if self._pane_user_width:
+            return max(scaled_px(300), min(self._pane_user_width, scaled_px(440)))
         return scaled_px(360)
+
+    def _splitter_dragged(self, _pos: int, _index: int):
+        # Remember where the user drags the pane divider so later refits
+        # (mode changes, reveals) don't snap the pane back to the default.
+        if self.context.isVisible():
+            width = self.splitter.sizes()[1]
+            if width >= scaled_px(240):
+                self._pane_user_width = width
+                self._layout_save_timer.start()
+
+    def _reveal_context(self):
+        """Every path that shows the details pane must also fit it, or it
+        reappears with whatever sizes the splitter last had."""
+        self.context.show()
+        self.splitter.setSizes(self._context_split_sizes())
 
     def _apply_typography(self):
         size = self.library.setting("ui.text_size", "comfortable") if self.library else "comfortable"
@@ -570,7 +600,10 @@ class MainWindow(QMainWindow):
             page = self.pages.widget(index)
             if hasattr(page, "apply_metrics"):
                 page.apply_metrics()
-        pane = self._pane_width()
+        # The breakpoints scale with the type size, so the current window
+        # width may land in a different layout mode after a font change.
+        self._last_mode = None
+        self._apply_layout_mode(self.width())
         if self.context.isVisible():
             self.splitter.setSizes(self._context_split_sizes())
         compact = self.library is not None and self.library.setting("ui.density", "comfortable") == "compact"
@@ -2439,7 +2472,7 @@ class MainWindow(QMainWindow):
                         self.context.set_playing(episode_id, state == "playing", state == "loading")
                         self._load_listening_details(episode_id)
                         if self._last_mode in {"wide", "medium"}:
-                            self.context.show()
+                            self._reveal_context()
             else:
                 self.player._streaming = bool(source)
                 self._apply_skip_settings()
@@ -2518,7 +2551,7 @@ class MainWindow(QMainWindow):
         )
         self._load_listening_details(self._playing_episode_id)
         if self._last_mode in {"wide", "medium"}:
-            self.context.show()
+            self._reveal_context()
         self.player.set_queue_open(False)
 
     def _populate_now_playing(self):
@@ -3621,8 +3654,7 @@ class MainWindow(QMainWindow):
             self._hide_context()
             return
         self._context_forced = True
-        self.context.show()
-        self.splitter.setSizes(self._context_split_sizes())
+        self._reveal_context()
         self._sync_context_dismissible()
         self.player.set_queue_open(self.context.mode() == 1)
 
@@ -3717,7 +3749,7 @@ class MainWindow(QMainWindow):
         else:
             return
         if self._last_mode in {"wide", "medium"} and self.pages.currentIndex() != PAGE_SETTINGS:
-            self.context.show()
+            self._reveal_context()
         self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)
 
     # ------------------------------------------------------------ feed preview
@@ -4127,9 +4159,8 @@ class MainWindow(QMainWindow):
     def _show_queue(self):
         self.context.set_mode(1)
         self._context_forced = True
-        self.context.show()
+        self._reveal_context()
         self.context.set_dismissible(True)
-        self.splitter.setSizes(self._context_split_sizes())
         self.player.set_queue_open(True)
 
     def _hide_context(self):
@@ -4142,25 +4173,39 @@ class MainWindow(QMainWindow):
         mode = self._last_mode or "wide"
         self.context.set_dismissible(mode == "narrow" or self._context_forced)
 
+    def _apply_layout_mode(self, width: int):
+        # Breakpoints scale with the type size like every other dimension;
+        # raw-pixel thresholds meant a large-font window could never reach
+        # "narrow", so the pane stayed open and crushed the center content
+        # instead of auto-closing.
+        mode = (
+            "wide"
+            if width >= scaled_px(1200)
+            else "medium" if width >= scaled_px(960) else "narrow"
+        )
+        if mode == self._last_mode:
+            return
+        # Medium layouts need the compact rail to preserve useful widths
+        # for both the collection and the persistent context pane. The
+        # user's expand/compact preference applies when there is room.
+        preferred = self._rail_user_compact
+        compact = mode != "wide" or bool(preferred)
+        self.navigation.set_compact(compact)
+        self.player.set_compact(mode == "narrow")
+        if mode in {"wide", "medium"} and self.pages.currentIndex() != PAGE_SETTINGS:
+            self._reveal_context()
+        else:
+            # Narrow closes the pane even when the user opened it by hand,
+            # mirroring how the rail force-compacts; growing back into
+            # medium/wide reopens it above.
+            self._context_forced = False
+            self.context.hide()
+        self._last_mode = mode
+        self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)
+        self._sync_context_dismissible()
+
     def resizeEvent(self, event):
-        width = event.size().width()
-        mode = "wide" if width >= 1200 else "medium" if width >= 960 else "narrow"
-        if mode != self._last_mode:
-            # Medium layouts need the compact rail to preserve useful widths
-            # for both the collection and the persistent context pane. The
-            # user's expand/compact preference applies when there is room.
-            preferred = self._rail_user_compact
-            compact = mode != "wide" or bool(preferred)
-            self.navigation.set_compact(compact)
-            self.player.set_compact(mode == "narrow")
-            if mode in {"wide", "medium"} and self.pages.currentIndex() != PAGE_SETTINGS:
-                self.context.show()
-                self.splitter.setSizes(self._context_split_sizes())
-            elif not self._context_forced:
-                self.context.hide()
-            self._last_mode = mode
-            self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)
-            self._sync_context_dismissible()
+        self._apply_layout_mode(event.size().width())
         self.toast.reposition()
         self._place_edge_handles()
         super().resizeEvent(event)
