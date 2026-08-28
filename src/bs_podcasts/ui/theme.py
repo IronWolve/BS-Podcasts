@@ -627,15 +627,8 @@ def stylesheet() -> str:
     QLabel#playerShow {{ color: {c['muted']}; font-size: {small}px; }}
     QLabel#playerNext {{ color: {c['subtle']}; font-size: {small}px; }}
     QLabel#timeLabel {{ color: {c['muted']}; font-size: {small}px; min-width: {sp(44)}px; }}
-    QSlider#seekSlider::groove:horizontal {{ height: 6px; background: {c['border']}; border-radius: 3px; }}
-    QSlider#seekSlider::sub-page:horizontal {{ background: {c['accent']}; border-radius: 3px; }}
-    QSlider#seekSlider::handle:horizontal {{
-        background: {c['accent']}; width: 14px; height: 14px; margin: -4px 0; border-radius: 7px;
-    }}
-    QSlider#seekSlider::handle:horizontal:hover {{ background: {c['accent_hover']}; }}
-    QSlider#seekSlider:focus::handle:horizontal {{ border: 2px solid {c['text_strong']}; margin: -6px 0; width: 14px; height: 14px; border-radius: 9px; }}
-    QSlider#seekSlider:disabled::sub-page:horizontal {{ background: {c['border']}; }}
-    QSlider#seekSlider:disabled::handle:horizontal {{ background: {c['border']}; }}
+    /* seekSlider paints its own track and handle (SeekSlider.paintEvent). */
+    QSlider#seekSlider {{ background: transparent; }}
     QSlider#volumeSlider::groove:horizontal {{ height: 4px; background: {c['border']}; border-radius: 2px; }}
     QSlider#volumeSlider::sub-page:horizontal {{ background: {c['text']}; border-radius: 2px; }}
     QSlider#volumeSlider::handle:horizontal {{

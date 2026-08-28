@@ -1091,12 +1091,17 @@ class SeekSlider(QSlider):
 
     hover_time = Signal(float)
 
+    TRACK_HEIGHT = 6
+    HANDLE = 14
+
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
         self.setObjectName("seekSlider")
         self.setMouseTracking(True)
-        # The whole widget is the click target; keep it taller than the groove
-        # so seeking doesn't require pixel-perfect aim.
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        # The whole widget is the click target; the slim track and handle are
+        # painted entirely by paintEvent (QSS/native slider painting kept
+        # drawing the unfilled side at full widget height).
         self.setMinimumHeight(scaled_px(22))
         self._markers = ()
         self._formatter = None
@@ -1121,14 +1126,25 @@ class SeekSlider(QSlider):
         self._duration = seconds
         self._formatter = formatter
 
+    def _track_rect(self) -> QRect:
+        inset = self.HANDLE // 2
+        return QRect(
+            inset,
+            self.height() // 2 - self.TRACK_HEIGHT // 2,
+            max(1, self.width() - 2 * inset),
+            self.TRACK_HEIGHT,
+        )
+
+    def _handle_x(self) -> int:
+        track = self._track_rect()
+        span = max(1, self.maximum() - self.minimum())
+        fraction = (self.value() - self.minimum()) / span
+        return track.x() + int(track.width() * fraction)
+
     def _value_at(self, x: int) -> int:
-        option = QStyleOptionSlider()
-        self.initStyleOption(option)
-        groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderGroove, self)
-        handle = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderHandle, self)
-        available = max(1, groove.width() - handle.width())
-        position = min(max(0, x - groove.x() - handle.width() // 2), available)
-        return QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), position, available)
+        track = self._track_rect()
+        position = min(max(0, x - track.x()), track.width())
+        return QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), position, track.width())
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
@@ -1154,37 +1170,66 @@ class SeekSlider(QSlider):
             return
         super().mouseReleaseEvent(event)
 
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if not self.isEnabled() or (not self._markers and self._ab == (None, None)):
-            return
-        option = QStyleOptionSlider()
-        self.initStyleOption(option)
-        groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderGroove, self)
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, _event):
+        # Painted entirely by hand: with QSS or native styling, the unfilled
+        # side of the track rendered at full widget height once the widget was
+        # made taller for a comfortable click target.
+        track = self._track_rect()
+        centre = track.center().y()
+        handle_x = self._handle_x()
+        enabled = self.isEnabled()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        centre = groove.center().y()
-        painter.setPen(QPen(QColor(COLORS["nav"]), 2))
-        for fraction in self._markers:
-            x = groove.x() + int(groove.width() * fraction)
-            painter.drawLine(x, centre - 3, x, centre + 3)
-        start, end = self._ab
-        if start is not None:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(COLORS["teal"]))
-            x1 = groove.x() + int(groove.width() * start)
-            x2 = groove.x() + int(groove.width() * end) if end is not None else x1
-            if end is not None:
-                fill = QColor(COLORS["teal"])
-                fill.setAlpha(70)
-                painter.fillRect(QRect(x1, centre - 4, max(2, x2 - x1), 8), fill)
-            for x, label in ((x1, "A"), (x2, "B")) if end is not None else ((x1, "A"),):
-                painter.setBrush(QColor(COLORS["teal"]))
-                painter.drawRoundedRect(QRect(x - 6, centre - 12, 12, 10), 3, 3)
-                painter.setPen(QColor(COLORS["canvas"]))
-                painter.setFont(app_font(8, QFont.Weight.Bold))
-                painter.drawText(QRect(x - 6, centre - 12, 12, 10), Qt.AlignmentFlag.AlignCenter, label)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(COLORS["border"]))
+        painter.drawRoundedRect(track, 3, 3)
+        if enabled and handle_x - track.x() > 0:
+            painter.setBrush(QColor(COLORS["accent"]))
+            painter.drawRoundedRect(QRect(track.x(), track.y(), handle_x - track.x(), track.height()), 3, 3)
+        if enabled:
+            painter.setPen(QPen(QColor(COLORS["nav"]), 2))
+            for fraction in self._markers:
+                x = track.x() + int(track.width() * fraction)
+                painter.drawLine(x, centre - 3, x, centre + 3)
+            start, end = self._ab
+            if start is not None:
                 painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(COLORS["teal"]))
+                x1 = track.x() + int(track.width() * start)
+                x2 = track.x() + int(track.width() * end) if end is not None else x1
+                if end is not None:
+                    fill = QColor(COLORS["teal"])
+                    fill.setAlpha(70)
+                    painter.fillRect(QRect(x1, centre - 4, max(2, x2 - x1), 8), fill)
+                for x, label in ((x1, "A"), (x2, "B")) if end is not None else ((x1, "A"),):
+                    painter.setBrush(QColor(COLORS["teal"]))
+                    painter.drawRoundedRect(QRect(x - 6, centre - 12, 12, 10), 3, 3)
+                    painter.setPen(QColor(COLORS["canvas"]))
+                    painter.setFont(app_font(8, QFont.Weight.Bold))
+                    painter.drawText(QRect(x - 6, centre - 12, 12, 10), Qt.AlignmentFlag.AlignCenter, label)
+                    painter.setPen(Qt.PenStyle.NoPen)
+        size = self.HANDLE
+        handle = QRect(handle_x - size // 2, centre - size // 2, size, size)
+        painter.setPen(Qt.PenStyle.NoPen)
+        if not enabled:
+            painter.setBrush(QColor(COLORS["border"]))
+        elif self.isSliderDown() or self.underMouse():
+            painter.setBrush(QColor(COLORS["accent_hover"]))
+        else:
+            painter.setBrush(QColor(COLORS["accent"]))
+        painter.drawEllipse(handle)
+        if self.hasFocus():
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(COLORS["text_strong"]), 2))
+            painter.drawEllipse(handle.adjusted(-2, -2, 2, 2))
 
 
 class Popover(QFrame):
@@ -1947,6 +1992,28 @@ def _duration_seconds(text: str) -> int:
     return total
 
 
+class ElidedValueLabel(QLabel):
+    """Middle-elided, selectable label that never forces its layout wider."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._full = text
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._refresh()
+
+    def set_full_text(self, text: str):
+        self._full = text
+        self._refresh()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh()
+
+    def _refresh(self):
+        QLabel.setText(self, self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideMiddle, max(40, self.width())))
+
+
 class NowPlayingView(QFrame):
     """Full-size now-playing surface overlaid on the page area."""
 
@@ -2058,7 +2125,17 @@ class NowPlayingView(QFrame):
         self.layout().setSpacing(SPACE["xxl"])
         self.art.set_bounds(scaled_px(160), scaled_px(420))
         self.art.set_side(min(self.art.width() or scaled_px(320), scaled_px(320)))
-        self.left_wrap.setMaximumWidth(scaled_px(460))
+        self._bound_left_column()
+
+    def _bound_left_column(self):
+        # The artwork column may not starve the tabs panel: cap it to a share
+        # of the view so tab titles stay readable at every width.
+        share = int(self.width() * 0.42)
+        self.left_wrap.setMaximumWidth(max(scaled_px(280), min(scaled_px(460), share)))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._bound_left_column()
 
     def _create_context_menu(self):
         menu = QMenu(self)
@@ -2083,11 +2160,8 @@ class NowPlayingView(QFrame):
             key = QLabel(label)
             key.setObjectName("statKey")
             key.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
-            text = QLabel()
+            text = ElidedValueLabel(value)
             text.setObjectName("statValue")
-            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            metrics = text.fontMetrics()
-            text.setText(metrics.elidedText(value, Qt.TextElideMode.ElideMiddle, scaled_px(300)))
             self._stats_grid.addWidget(key, index, 0)
             self._stats_grid.addWidget(text, index, 1)
         self.stats.setVisible(bool(rows))

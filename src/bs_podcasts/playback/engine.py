@@ -48,7 +48,18 @@ class MpvEngine:
         }
         defaults.update(options)
         self._last_error = ""
-        self._player = mpv.MPV(log_handler=self._log, loglevel="error", **defaults)
+        while True:
+            try:
+                self._player = mpv.MPV(log_handler=self._log, loglevel="error", **defaults)
+                break
+            except AttributeError as exc:
+                # Leaner libmpv builds lack optional options (the LGPL build
+                # has no scripting layer, so `ytdl` does not exist). Drop the
+                # missing option and retry instead of failing playback.
+                option = self._missing_option(exc)
+                if option is None or option not in defaults:
+                    raise
+                del defaults[option]
         self._handler: Callable[[EngineEvent], None] = lambda event: None
         self._dead = False
         self._pending_position = 0.0
@@ -62,6 +73,18 @@ class MpvEngine:
         self._event_callback = self._player.event_callback(
             "file-loaded", "end-file", "shutdown"
         )(self._mpv_event)
+
+    @staticmethod
+    def _missing_option(exc) -> str | None:
+        """python-mpv raises AttributeError('mpv option does not exist', code,
+        (handle, b'<option>', b'<value>')) for unknown construction options."""
+        args = getattr(exc, "args", ())
+        if not args or args[0] != "mpv option does not exist":
+            return None
+        try:
+            return args[2][1].decode("utf-8").replace("-", "_")
+        except (IndexError, TypeError, AttributeError, UnicodeDecodeError):
+            return None
 
     @property
     def dead(self) -> bool:
