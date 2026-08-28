@@ -118,7 +118,7 @@ def main() -> int:
     candidates = directory.search("bench")
     require(len(candidates) == 1, "directory fallback did not return a result")
 
-    with TemporaryDirectory(prefix="m2-smoke-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="m2-smoke-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         repository = LibraryRepository(Database(Path(temporary) / "library.db"))
         library = LibraryService(repository)
         show = library.add_subscription("https://samples.invalid/workshop.xml", "Workshop Radio")

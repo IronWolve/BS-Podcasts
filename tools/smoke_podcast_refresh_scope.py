@@ -49,7 +49,7 @@ def settle(app, window, condition=lambda: True, seconds: float = 5.0):
 def main() -> int:
     LOCAL_TMP.mkdir(parents=True, exist_ok=True)
     content = SAMPLE.read_bytes()
-    with TemporaryDirectory(prefix="podcast-refresh-scope-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="podcast-refresh-scope-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         repository = LibraryRepository(Database(Path(temporary) / "library.db"))
         first = repository.add_show("https://samples.invalid/first.xml", "First")
         second = repository.add_show("https://samples.invalid/second.xml", "Second")

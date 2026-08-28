@@ -51,7 +51,7 @@ def pump(app, seconds):
 def main() -> int:
     shows = int(sys.argv[1]) if len(sys.argv) > 1 else 300
     per_show = int(sys.argv[2]) if len(sys.argv) > 2 else 600
-    with TemporaryDirectory(prefix="bench-", dir=WORKSPACE / "tmp") as temporary:
+    with TemporaryDirectory(prefix="bench-", dir=WORKSPACE / "tmp", ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
         database = Database(root / "library.db")
         repository = LibraryRepository(database)

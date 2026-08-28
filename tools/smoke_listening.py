@@ -73,7 +73,7 @@ class AdvancedEngine:
 
 def main() -> int:
     LOCAL_TMP.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix="m5-smoke-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="m5-smoke-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         path = Path(temporary) / "library.db"
         database = Database(path)
         library = LibraryRepository(database)

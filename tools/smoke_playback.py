@@ -117,7 +117,7 @@ def main() -> int:
     media = LOCAL_TMP / "m3-silent.wav"
     make_silent_media(media)
 
-    with TemporaryDirectory(prefix="m3-smoke-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="m3-smoke-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         path = Path(temporary) / "library.db"
         repository = LibraryRepository(Database(path))
         show = repository.add_show("https://samples.invalid/playback.xml", "Playback Sample")

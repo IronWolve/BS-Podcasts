@@ -4149,13 +4149,8 @@ class MainWindow(QMainWindow):
             # Medium layouts need the compact rail to preserve useful widths
             # for both the collection and the persistent context pane. The
             # user's expand/compact preference applies when there is room.
-            if self._rail_user_compact is not None:
-                preferred = self._rail_user_compact
-            else:
-                # No explicit choice: keep whatever the rail currently
-                # shows instead of auto-expanding on a wide window.
-                preferred = self.navigation._compact
-            compact = mode != "wide" or preferred
+            preferred = self._rail_user_compact
+            compact = mode != "wide" or bool(preferred)
             self.navigation.set_compact(compact)
             self.player.set_compact(mode == "narrow")
             if mode in {"wide", "medium"} and self.pages.currentIndex() != PAGE_SETTINGS:

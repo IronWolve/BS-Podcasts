@@ -66,7 +66,7 @@ def main() -> int:
     require(busy == 1 and time.monotonic() - started < 2, f"join did not bound: busy={busy}")
     release.set()
 
-    with TemporaryDirectory(prefix="threads-", dir=WORKSPACE / "tmp") as temporary:
+    with TemporaryDirectory(prefix="threads-", dir=WORKSPACE / "tmp", ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
         # Per-URL artwork lock: concurrent fetches of one URL hit the network once.
         slow = SlowImageSession()

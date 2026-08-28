@@ -49,7 +49,7 @@ def main() -> int:
         broken_url: (SAMPLES / "m1-malformed.xml").read_bytes(),
     }
 
-    with TemporaryDirectory(prefix="m1-smoke-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="m1-smoke-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         path = Path(temporary) / "library.db"
         repository = LibraryRepository(Database(path))
         library = LibraryService(repository)

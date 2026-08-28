@@ -27,7 +27,7 @@ class _Session:
 
 
 def main():
-    with TemporaryDirectory(prefix="bs-simple-features-") as temporary:
+    with TemporaryDirectory(prefix="bs-simple-features-", ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
         database = Database(root / "library.db")
         library = LibraryRepository(database)

@@ -19,7 +19,7 @@ from bs_podcasts.ui.shell import MainWindow, PAGE_HOME, PAGE_PODCASTS
 
 def main() -> int:
     LOCAL_TMP.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix="overlay-navigation-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="overlay-navigation-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         library = LibraryService(LibraryRepository(Database(Path(temporary) / "library.db")))
         library.set_setting("refresh.interval_minutes", "0")
         app = create_application(["bs-podcasts-overlay-navigation"])

@@ -185,7 +185,7 @@ def main() -> int:
 
     dialogs_module.StyledDialog.exec = fake_dialog_exec
 
-    with TemporaryDirectory(prefix="button-matrix-", dir=WORKSPACE / "tmp") as temporary:
+    with TemporaryDirectory(prefix="button-matrix-", dir=WORKSPACE / "tmp", ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
         database = Database(root / "library.db")
         repository = LibraryRepository(database)

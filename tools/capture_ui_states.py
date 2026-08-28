@@ -48,7 +48,7 @@ def grab(window, name):
 
 def main() -> int:
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix="ui-states-", dir=WORKSPACE / "tmp") as temporary:
+    with TemporaryDirectory(prefix="ui-states-", dir=WORKSPACE / "tmp", ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
         database = Database(root / "library.db")
         repository = LibraryRepository(database)
