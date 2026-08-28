@@ -24,7 +24,7 @@ def require(condition: bool, message: str):
 def main() -> int:
     LOCAL_TMP.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    with TemporaryDirectory(prefix="large-smoke-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="large-smoke-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         repository = LibraryRepository(Database(Path(temporary) / "library.db"))
         for show_number in range(50):
             show = repository.add_show(

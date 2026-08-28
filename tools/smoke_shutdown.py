@@ -17,7 +17,7 @@ from bs_podcasts.playback import MpvEngine, PlaybackService
 
 
 def main() -> int:
-    with TemporaryDirectory(prefix="shutdown-", dir=WORKSPACE / "tmp") as temporary:
+    with TemporaryDirectory(prefix="shutdown-", dir=WORKSPACE / "tmp", ignore_cleanup_errors=True) as temporary:
         database = Database(Path(temporary) / "library.db")
         repository = LibraryRepository(database)
         show = repository.add_show("https://samples.invalid/shutdown.xml", "Shutdown")

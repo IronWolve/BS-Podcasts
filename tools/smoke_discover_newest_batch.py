@@ -64,7 +64,7 @@ def main() -> int:
         urls[2]: feed("Mike", "Sun, 01 Feb 2026 12:00:00 +0000"),
     }
     fetcher = ControlledFetcher(responses)
-    with TemporaryDirectory(prefix="discover-newest-batch-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="discover-newest-batch-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         repository = LibraryRepository(Database(Path(temporary) / "library.db"))
         library = LibraryService(repository)
         library.set_setting("refresh.interval_minutes", "0")

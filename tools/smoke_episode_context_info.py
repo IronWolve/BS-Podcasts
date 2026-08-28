@@ -78,7 +78,7 @@ def main() -> int:
     assert atom_episode.episode_type == "full" and atom_episode.explicit is False
     assert atom_episode.enclosure_bytes == 7654321
 
-    with TemporaryDirectory(prefix="episode-context-info-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="episode-context-info-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         repository = LibraryRepository(Database(Path(temporary) / "library.db"))
         show = repository.add_show("https://example.test/feed.xml", "Metadata Show")
         repository.import_feed(show.id, parse_feed(RSS))

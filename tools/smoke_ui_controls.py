@@ -93,7 +93,7 @@ class MouseNavigationEvent:
 
 def main() -> int:
     LOCAL_TMP.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix="ui-controls-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="ui-controls-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
         database = Database(root / "library.db")
         repository = LibraryRepository(database)

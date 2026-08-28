@@ -20,7 +20,7 @@ def main() -> int:
     from tempfile import TemporaryDirectory
 
     LOCAL_TMP.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix="flash-smoke-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="flash-smoke-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         os.environ["BS_PODCASTS_DATA_DIR"] = temporary
         records = []
 

@@ -94,7 +94,7 @@ def main() -> int:
     make_silent_media(source)
     media = source.read_bytes()
 
-    with TemporaryDirectory(prefix="m4-smoke-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="m4-smoke-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
         database = Database(root / "library.db")
         library = LibraryRepository(database)

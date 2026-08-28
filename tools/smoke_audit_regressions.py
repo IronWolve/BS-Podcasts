@@ -63,7 +63,7 @@ def main() -> int:
     assert "style=" not in clean and "img" not in clean and "script" not in clean
     assert 'href="https://example.test/x"' in clean and "file:///" not in clean
 
-    with TemporaryDirectory(prefix="audit-regressions-", dir=LOCAL_TMP) as temporary:
+    with TemporaryDirectory(prefix="audit-regressions-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
         old_path = root / "old.db"
         make_old_database(old_path)
