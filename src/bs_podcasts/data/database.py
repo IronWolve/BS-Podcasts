@@ -56,6 +56,10 @@ class _SharedExclusiveLock:
 
     @contextmanager
     def exclusive(self):
+        if getattr(self._held, "depth", 0):
+            # Waiting on exclusive while holding shared would deadlock this
+            # thread AND (via writer preference) freeze every other one.
+            raise RuntimeError("exclusive() requested while holding a shared database lock")
         with self._cond:
             self._exclusive_waiting += 1
             try:
@@ -86,6 +90,11 @@ class Database:
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=10000")
         return connection
+
+    @property
+    def maintenance_active(self) -> bool:
+        """True while exclusive maintenance holds (or waits for) the lock."""
+        return bool(self._lock._exclusive or self._lock._exclusive_waiting)
 
     def check_integrity(self) -> str:
         """Run SQLite's quick_check; raise with the report when the file is damaged."""
@@ -205,6 +214,9 @@ class Database:
                 script = "\n".join(source.iterdump())
                 destination.executescript(script)
                 destination.commit()
+                # The rebuilt file must stay in WAL mode: the shared lock lets
+                # readers run alongside a writer on exactly that premise.
+                destination.execute("PRAGMA journal_mode=WAL")
                 report = destination.execute("PRAGMA quick_check").fetchone()[0]
                 if report != "ok":
                     raise DatabaseIntegrityError(report)

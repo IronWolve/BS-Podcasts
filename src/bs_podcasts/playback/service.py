@@ -55,6 +55,8 @@ class PlaybackService:
         self._last_saved_position = -10.0
         self._sleep_timer: Timer | None = None
         self._load_watchdog: Timer | None = None
+        self._load_token = 0
+        self._engine_loaded = False
         self._deferred_episode_id = None
         self._dead = False
         self._last_metric_time = None
@@ -82,22 +84,27 @@ class PlaybackService:
 
     def _arm_load_watchdog(self, episode_id: int | None, source: str):
         self._cancel_load_watchdog()
-        timer = Timer(self.LOAD_TIMEOUT, self._load_timed_out, args=(episode_id, source))
+        # The token — not episode/source equality — identifies the load:
+        # Timer.cancel() is a no-op once the callback has started, and a
+        # retried load of the SAME episode+source would otherwise be killed
+        # instantly by the previous attempt's already-running watchdog.
+        self._load_token += 1
+        timer = Timer(self.LOAD_TIMEOUT, self._load_timed_out, args=(self._load_token,))
         timer.daemon = True
         timer.start()
         self._load_watchdog = timer
 
     def _cancel_load_watchdog(self):
+        self._load_token += 1
         if self._load_watchdog is not None:
             self._load_watchdog.cancel()
             self._load_watchdog = None
 
-    def _load_timed_out(self, episode_id: int | None, source: str):
+    def _load_timed_out(self, token: int):
         with self._lock:
             if (
                 self._dead
-                or self.snapshot.episode_id != episode_id
-                or self.snapshot.source != source
+                or token != self._load_token
                 or self.snapshot.state != PlaybackState.LOADING
             ):
                 return
@@ -134,9 +141,9 @@ class PlaybackService:
             if not self._volume_applied:
                 try:
                     self.engine.set_volume(self.snapshot.volume)
+                    self._volume_applied = True
                 except Exception:
-                    pass
-                self._volume_applied = True
+                    pass  # retried on the next load so saved volume still lands
             self.snapshot = PlaybackSnapshot(
                 state=PlaybackState.LOADING,
                 episode_id=episode.id,
@@ -185,9 +192,9 @@ class PlaybackService:
             if not self._volume_applied:
                 try:
                     self.engine.set_volume(self.snapshot.volume)
+                    self._volume_applied = True
                 except Exception:
-                    pass
-                self._volume_applied = True
+                    pass  # retried on the next load so saved volume still lands
             self.snapshot = PlaybackSnapshot(
                 state=PlaybackState.LOADING,
                 title=title or "Podcast episode",
@@ -212,6 +219,11 @@ class PlaybackService:
         The source is opened on the first play/seek/skip, so an offline launch
         never produces a stream error and startup does no media I/O.
         """
+        if self._engine_loaded or self.snapshot.state in {PlaybackState.PLAYING, PlaybackState.LOADING}:
+            # A live session (e.g. the theme-change window rebuild re-wiring
+            # playback) must not be overwritten with stale durable state.
+            self._emit()
+            return self.snapshot.episode_id is not None
         episode_id, _state = self.repository.current_playback()
         if episode_id is None:
             return False
@@ -247,7 +259,14 @@ class PlaybackService:
             self._guard()
             if self._materialize(autoplay=True):
                 return
-            if self.snapshot.state == PlaybackState.PLAYING:
+            if self.snapshot.state == PlaybackState.LOADING:
+                # Toggle the in-flight load's intent; forcing play() here made
+                # it impossible to cancel an autoplay load while it opened.
+                if getattr(self.engine, "autoplay_pending", True):
+                    self.engine.pause()
+                else:
+                    self.engine.play()
+            elif self.snapshot.state == PlaybackState.PLAYING:
                 self.engine.pause()
             elif self.snapshot.source:
                 self.engine.play()
@@ -269,6 +288,7 @@ class PlaybackService:
     def stop(self):
         """Unload the current episode: pause, persist position, go idle."""
         with self._lock:
+            self._deferred_episode_id = None
             if not self.snapshot.source:
                 return
             episode_id = self.snapshot.episode_id
@@ -444,6 +464,7 @@ class PlaybackService:
                 if self.snapshot.episode_id is not None:
                     self.repository.set_current_playback(self.snapshot.episode_id, state.value)
             elif event.kind == "file_loaded":
+                self._engine_loaded = True
                 self._cancel_load_watchdog()
                 self._last_metric_time = time.monotonic()
                 self._last_metric_position = self.snapshot.position
@@ -456,11 +477,13 @@ class PlaybackService:
             elif event.kind == "loading":
                 pass
             elif event.kind == "eof":
+                self._engine_loaded = False
                 self._finish_and_advance()
                 return
             elif event.kind == "external":
                 self.snapshot = replace(self.snapshot, state=PlaybackState.EXTERNAL)
             elif event.kind in {"stopped", "shutdown"}:
+                self._engine_loaded = False
                 self._persist_position(force=True)
             elif event.kind == "error":
                 self._cancel_load_watchdog()
@@ -539,6 +562,8 @@ class PlaybackService:
                 return
             try:
                 self.engine.pause()
+            except Exception:
+                pass  # nothing loaded, or the engine is gone — sleep just ends
             finally:
                 self.snapshot = replace(self.snapshot, sleep_deadline=None)
                 self._emit()

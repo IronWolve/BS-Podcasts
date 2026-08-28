@@ -10,6 +10,15 @@ from ..database import Database
 
 MAX_REFRESH_FAILURES = 3
 
+# Feed-synced episode columns: drives the change-detection SELECT and both
+# comparison tuples in import_feed so the three can never drift apart.
+_EPISODE_SYNC_COLUMNS = (
+    "title", "description", "media_url", "mime_type", "published_at",
+    "duration_seconds", "transcript_url", "transcript_type", "chapters_url",
+    "artwork_url", "website_url", "author", "season_number", "episode_number",
+    "episode_type", "explicit", "enclosure_bytes",
+)
+
 
 class LibraryRepository:
     def __init__(self, database: Database):
@@ -146,37 +155,31 @@ class LibraryRepository:
             )
             # Most refreshes carry the same episodes again; comparing against the
             # stored rows keeps the transaction (and the write lock SQLite takes
-            # for it) proportional to what actually changed.
-            existing = {
-                row["external_id"]: (
-                    row["title"], row["description"], row["media_url"], row["mime_type"],
-                    row["published_at"], row["duration_seconds"], row["transcript_url"],
-                    row["transcript_type"], row["chapters_url"], row["artwork_url"],
-                    row["website_url"], row["author"], row["season_number"],
-                    row["episode_number"], row["episode_type"], row["explicit"],
-                    row["enclosure_bytes"],
-                )
+            # for it) proportional to what actually changed. Only the rows the
+            # feed still carries are fetched — a 3,000-episode back catalog
+            # must not be materialized (descriptions included) per refresh.
+            initial_import = connection.execute(
+                "SELECT 1 FROM episodes WHERE show_id=? LIMIT 1", (show_id,)
+            ).fetchone() is None
+            incoming_ids = [episode.external_id for episode in feed.episodes]
+            select = (
+                "SELECT external_id, " + ", ".join(_EPISODE_SYNC_COLUMNS)
+                + " FROM episodes WHERE show_id=? AND external_id IN ({})"
+            )
+            existing = {}
+            for start in range(0, len(incoming_ids), 500):
+                chunk = incoming_ids[start:start + 500]
                 for row in connection.execute(
-                    """SELECT external_id, title, description, media_url, mime_type,
-                       published_at, duration_seconds, transcript_url, transcript_type,
-                       chapters_url, artwork_url, website_url, author, season_number,
-                       episode_number, episode_type, explicit, enclosure_bytes
-                       FROM episodes WHERE show_id=?""",
-                    (show_id,),
-                ).fetchall()
-            }
-            initial_import = not existing
+                    select.format(",".join("?" * len(chunk))), [show_id, *chunk]
+                ).fetchall():
+                    existing[row["external_id"]] = tuple(row[column] for column in _EPISODE_SYNC_COLUMNS)
             imported = sum(episode.external_id not in existing for episode in feed.episodes)
             new_flag = 0 if initial_import else 1
             for episode in feed.episodes:
-                incoming = (
-                    episode.title, episode.description, episode.media_url, episode.mime_type,
-                    episode.published_at, episode.duration_seconds, episode.transcript_url,
-                    episode.transcript_type, episode.chapters_url, episode.artwork_url,
-                    episode.website_url, episode.author, episode.season_number,
-                    episode.episode_number, episode.episode_type,
-                    None if episode.explicit is None else int(episode.explicit),
-                    episode.enclosure_bytes,
+                incoming = tuple(
+                    (None if episode.explicit is None else int(episode.explicit))
+                    if column == "explicit" else getattr(episode, column)
+                    for column in _EPISODE_SYNC_COLUMNS
                 )
                 if existing.get(episode.external_id) == incoming:
                     continue
@@ -386,6 +389,11 @@ class LibraryRepository:
             if self._settings_cache is not None:
                 self._settings_cache[key] = value
 
+    def invalidate_settings_cache(self):
+        """Drop the cache after anything replaces the database file (repair)."""
+        with self._settings_lock:
+            self._settings_cache = None
+
     def get_setting(self, key: str, default: str = "") -> str:
         # Settings are read on hot paths (startup wiring, every scheduler tick);
         # one read of the tiny table replaces a connection round-trip per call.
@@ -439,6 +447,11 @@ class LibraryRepository:
                 )
 
     def update_position(self, episode_id: int, seconds: float):
+        # Position ticks come from the playback event thread while it holds
+        # the playback lock; blocking here for a whole VACUUM would freeze
+        # every playback control. Skipping a 5-second save is harmless.
+        if self.database.maintenance_active:
+            return
         # Starting an episode is what makes it "not new" everywhere in the UI.
         with self.database.connect() as connection:
             connection.execute(
@@ -511,6 +524,8 @@ class LibraryRepository:
                 )
 
     def set_current_playback(self, episode_id: int | None, state: str):
+        if self.database.maintenance_active:
+            return  # written again on the next state change
         with self.database.connect() as connection:
             connection.execute(
                 """UPDATE playback_state SET episode_id=?, state=?, updated_at=?
@@ -600,7 +615,10 @@ class LibraryRepository:
             "FROM shows s LEFT JOIN ("
             "SELECT show_id, COUNT(*) AS episode_count, "
             "COALESCE(SUM(CASE WHEN is_new=1 THEN 1 ELSE 0 END), 0) AS new_count, "
-            "MAX(published_at || printf('~%012d', id)) AS latest_key, "
+            # An empty published_at must sort BELOW every real date ('~' alone
+            # would outrank digit-leading ISO strings and pin an undated
+            # episode as the show's 'latest' forever).
+            "MAX(COALESCE(NULLIF(published_at, ''), '0') || printf('~%012d', id)) AS latest_key, "
             "title AS latest_episode_title, "
             "published_at AS latest_episode_published_at "
             "FROM episodes GROUP BY show_id"

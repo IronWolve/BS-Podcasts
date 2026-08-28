@@ -238,19 +238,31 @@ def _rebuild_space():
         SPACE[key] = max(2, round(value * _type_scale))
 
 
+# Family resolution enumerates the entire system font database — far too
+# expensive for app_font(), which the list delegates call several times per
+# row per paint. The answer only changes when the font setting does.
+_resolved_families: dict[str, str] = {}
+
+
 def resolve_font_family(key: str) -> str:
     from PySide6.QtWidgets import QApplication
 
     if QApplication.instance() is None:
         return "Inter"
+    cached = _resolved_families.get(key)
+    if cached is not None:
+        return cached
     families = set(QFontDatabase.families())
+    resolved = ""
     if key == "system":
-        family = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
-        if family:
-            return family
-    if key in families:
-        return key
-    return next((name for name in FONT_STACK if name in families), "")
+        resolved = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
+    if not resolved:
+        if key in families:
+            resolved = key
+        else:
+            resolved = next((name for name in FONT_STACK if name in families), "")
+    _resolved_families[key] = resolved
+    return resolved
 
 
 def css_font_family() -> str:
@@ -279,6 +291,7 @@ def apply_typography(size_key: str = "comfortable", font_key: str = "Inter"):
     global _type_scale, _font_key, FONT_FAMILY
     _type_scale = _TEXT_SIZE_SCALE.get(size_key, 1.0)
     _font_key = font_key or "Inter"
+    _resolved_families.clear()
     _rebuild_type()
     _rebuild_space()
     FONT_FAMILY = css_font_family()
@@ -563,12 +576,8 @@ def stylesheet() -> str:
 
     /* ---------- Context panel ---------- */
     QFrame#contextPanel {{ background: {c['surface']}; border-left: 1px solid {c['hairline']}; }}
-    QFrame#contextOverlay {{
-        background: {c['surface']}; border-left: 1px solid {c['border']};
-    }}
     QLabel#contextTitle {{ font-size: {TYPE['h1'][0]}px; font-weight: 600; color: {c['text_strong']}; }}
     QLabel#contextBody {{ color: {c['muted']}; }}
-    QFrame#contextDivider {{ background: {c['hairline']}; max-height: 1px; }}
     QTabWidget#contextTabs::pane {{ border: 0; background: transparent; }}
     QTabWidget#contextTabs QTabBar {{ qproperty-drawBase: 0; }}
     QTabWidget#nowPlayingTabWidget::pane {{ border: 0; background: transparent; }}
@@ -619,11 +628,9 @@ def stylesheet() -> str:
         border-radius: {r['sm']}px;
     }}
     QLabel#latestTitle {{ font-weight: 600; }}
-    QFrame#queueCard {{ background: transparent; }}
 
     /* ---------- Player bar ---------- */
     QFrame#playerBar {{ background: {c['nav']}; border-top: 1px solid {c['hairline']}; }}
-    QLabel#playerTitle {{ font-weight: 600; color: {c['text_strong']}; }}
     QLabel#playerShow {{ color: {c['muted']}; font-size: {small}px; }}
     QLabel#playerNext {{ color: {c['subtle']}; font-size: {small}px; }}
     QLabel#timeLabel {{ color: {c['muted']}; font-size: {small}px; min-width: {sp(44)}px; }}
@@ -714,7 +721,6 @@ def stylesheet() -> str:
     QPushButton#contextMode:checked {{
         background: {c['surface_soft']}; color: {c['text_strong']}; font-weight: 600;
     }}
-    QDialog#styledDialog {{ background: {c['surface']}; border: 1px solid {c['border']}; border-radius: {r['lg']}px; }}
     QFrame#dialogCard {{ background: {c['surface']}; border: 1px solid {c['border']}; border-radius: {r['lg']}px; }}
     QWidget#scrim {{ background: {c['scrim']}; }}
     QFrame#searchOverlay {{ background: {c['scrim']}; }}

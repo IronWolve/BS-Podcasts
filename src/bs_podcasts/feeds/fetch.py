@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
-from ..net import USER_AGENT, make_session
+from ..net import USER_AGENT, SessionSlot
 
 
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024
@@ -44,22 +44,12 @@ class _FeedLinkParser(HTMLParser):
 
 
 class FeedFetcher:
+    session = SessionSlot(max_redirects=5)
+
     def __init__(self, session=None):
-        self._session = session
+        self.session = session
         if session is not None:
             session.max_redirects = 5
-
-    @property
-    def session(self):
-        # Created on first fetch so constructing the fetcher stays network-free.
-        if self._session is None:
-            self._session = make_session()
-            self._session.max_redirects = 5
-        return self._session
-
-    @session.setter
-    def session(self, value):
-        self._session = value
 
     def fetch(self, url: str, etag: str = "", last_modified: str = "") -> FeedResponse:
         return self._fetch(url, etag, last_modified, allow_discovery=True)

@@ -122,12 +122,27 @@ class MpvEngine:
         self._pending_autoplay = False
         self._player.pause = True
 
+    @property
+    def autoplay_pending(self) -> bool:
+        """The intent the in-flight load will apply once the file opens."""
+        return self._pending_autoplay
+
     def seek_absolute(self, seconds: float):
         self._guard()
+        if self._loading:
+            # mpv has no file yet; fold the seek into the pending start so the
+            # file-loaded handler applies it instead of the stale load target.
+            self._pending_position = max(0.0, float(seconds))
+            self._emit("position", self._pending_position)
+            return
         self._player.seek(max(0.0, float(seconds)), "absolute", "exact")
 
     def skip(self, seconds: float):
         self._guard()
+        if self._loading:
+            self._pending_position = max(0.0, self._pending_position + float(seconds))
+            self._emit("position", self._pending_position)
+            return
         self._player.seek(float(seconds), "relative", "exact")
 
     def set_speed(self, speed: float):
@@ -194,11 +209,11 @@ class MpvEngine:
             self._emit("paused", bool(value))
 
     def _cache_paused(self, _name, value):
-        if value is not None:
+        if value is not None and not self._loading:
             self._emit("buffering", 0 if value else None)
 
     def _cache_state(self, _name, value):
-        if value is not None:
+        if value is not None and not self._loading:
             percent = int(value)
             self._emit("buffering", percent if percent < 100 else None)
 
@@ -208,18 +223,32 @@ class MpvEngine:
 
     def _mpv_event(self, event):
         event_id = event.event_id.value
+        # This callback runs on mpv's event thread; shutdown() can null the
+        # player at any point, so grab a reference and bail when it is gone.
+        player = self._player
+        if player is None or self._dead:
+            return
         if event_id == mpv.MpvEventID.FILE_LOADED:
             self._loading = False
-            if self._pending_position:
-                self.seek_absolute(self._pending_position)
-            self._player.pause = not self._pending_autoplay
+            try:
+                if self._pending_position:
+                    player.seek(self._pending_position, "absolute", "exact")
+                player.pause = not self._pending_autoplay
+            except Exception:
+                return  # torn down mid-load; the shutdown event follows
             self._emit("file_loaded")
             self._emit("paused", not self._pending_autoplay)
         elif event_id == mpv.MpvEventID.END_FILE:
-            self._loading = False
             reason = getattr(event.data, "reason", None)
             error_reason = getattr(event.data, "ERROR", 4)
+            if self._loading and reason != error_reason:
+                # `loadfile replace` first ends the OUTGOING file; that exit
+                # must neither reopen the stale-event gate nor be reported as
+                # this load's eof/stop (an eof here would advance the queue
+                # past the episode that is still opening).
+                return
             if reason == error_reason:
+                self._loading = False
                 code = getattr(event.data, "error", 0)
                 message = self._last_error
                 if not message:
@@ -244,8 +273,6 @@ class LazyMpvEngine:
     the first play, so on a normal launch nothing constructs the core at all.
     """
 
-    capabilities = MpvEngine.capabilities
-
     def __init__(self, **options):
         global mpv
         if mpv is None:
@@ -253,10 +280,16 @@ class LazyMpvEngine:
 
             mpv = mpv_module
         self._options = options
-        self._engine: MpvEngine | None = None
+        self._engine = None
         self._handler: Callable[[EngineEvent], None] = lambda event: None
         self._construct_lock = Lock()
         self._shut_down = False
+
+    @property
+    def capabilities(self):
+        # Until construction, advertise the internal engine; if construction
+        # fell back to the external player, its narrower capabilities apply.
+        return self._engine.capabilities if self._engine is not None else MpvEngine.capabilities
 
     @property
     def dead(self) -> bool:
@@ -267,10 +300,23 @@ class LazyMpvEngine:
         if self._engine is not None:
             self._engine.set_event_handler(handler)
 
-    def shutdown(self):
-        self._shut_down = True
+    def play(self):
+        # Nothing was ever loaded: there is nothing to start, and building the
+        # whole core (from a tray click or a stray toggle) would be pure waste.
         if self._engine is not None:
-            self._engine.shutdown()
+            self._engine.play()
+
+    def pause(self):
+        if self._engine is not None:
+            self._engine.pause()
+
+    def shutdown(self):
+        # Serialized with _real() so a concurrent warm-up cannot finish
+        # constructing a core after shutdown decided there was none to stop.
+        with self._construct_lock:
+            self._shut_down = True
+            if self._engine is not None:
+                self._engine.shutdown()
 
     def warm(self):
         """Construct the mpv core ahead of the first play (safe off-thread).
@@ -280,18 +326,31 @@ class LazyMpvEngine:
         try:
             self._real()
         except Exception:
-            pass  # the first real playback call surfaces the error properly
+            pass  # _real already downgraded to the external player
 
-    def _real(self) -> MpvEngine:
-        if self._shut_down:
-            raise PlaybackUnavailable("The internal playback engine has shut down.")
+    def _real(self):
         with self._construct_lock:
+            if self._shut_down:
+                raise PlaybackUnavailable("The internal playback engine has shut down.")
             if self._engine is None:
-                engine = MpvEngine(**self._options)
+                try:
+                    engine = MpvEngine(**self._options)
+                except Exception as exc:
+                    # Same fallback the old eager construction had: a machine
+                    # where the core cannot initialize still gets playback via
+                    # the system player instead of an error on every Play.
+                    import logging
+
+                    from .external import ExternalPlayerEngine
+
+                    logging.getLogger("bs_podcasts").warning(
+                        "Internal playback unavailable; using external player: %s", exc
+                    )
+                    engine = ExternalPlayerEngine()
                 engine.set_event_handler(self._handler)
                 self._engine = engine
         return self._engine
 
     def __getattr__(self, name):
-        # Any real playback call (load, play, seek, volume…) builds the core.
+        # Any real playback call (load, seek, volume…) builds the core.
         return getattr(self._real(), name)

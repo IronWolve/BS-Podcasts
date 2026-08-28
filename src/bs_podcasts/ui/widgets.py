@@ -1,5 +1,7 @@
 """Reusable shell components."""
 
+from bisect import bisect_right
+from functools import lru_cache
 from html import escape as html_escape, unescape as html_unescape
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
@@ -38,7 +40,6 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStackedWidget,
     QStyle,
-    QStyleOptionSlider,
     QTabWidget,
     QTextBrowser,
     QTextEdit,
@@ -1086,6 +1087,12 @@ class SelectionBar(QFrame):
         self.setVisible(count >= 2)
 
 
+@lru_cache(maxsize=64)
+def cached_color(value: str) -> QColor:
+    """Immutable-by-convention QColor cache for per-frame painting paths."""
+    return QColor(value)
+
+
 class SeekSlider(QSlider):
     """Click-to-seek slider with hover time tooltip and chapter markers."""
 
@@ -1189,13 +1196,13 @@ class SeekSlider(QSlider):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(COLORS["border"]))
+        painter.setBrush(cached_color(COLORS["border"]))
         painter.drawRoundedRect(track, 3, 3)
         if enabled and handle_x - track.x() > 0:
-            painter.setBrush(QColor(COLORS["accent"]))
+            painter.setBrush(cached_color(COLORS["accent"]))
             painter.drawRoundedRect(QRect(track.x(), track.y(), handle_x - track.x(), track.height()), 3, 3)
         if enabled:
-            painter.setPen(QPen(QColor(COLORS["nav"]), 2))
+            painter.setPen(QPen(cached_color(COLORS["nav"]), 2))
             for fraction in self._markers:
                 x = track.x() + int(track.width() * fraction)
                 painter.drawLine(x, centre - 3, x, centre + 3)
@@ -1220,11 +1227,11 @@ class SeekSlider(QSlider):
         handle = QRect(handle_x - size // 2, centre - size // 2, size, size)
         painter.setPen(Qt.PenStyle.NoPen)
         if not enabled:
-            painter.setBrush(QColor(COLORS["border"]))
+            painter.setBrush(cached_color(COLORS["border"]))
         elif self.isSliderDown() or self.underMouse():
-            painter.setBrush(QColor(COLORS["accent_hover"]))
+            painter.setBrush(cached_color(COLORS["accent_hover"]))
         else:
-            painter.setBrush(QColor(COLORS["accent"]))
+            painter.setBrush(cached_color(COLORS["accent"]))
         painter.drawEllipse(handle)
         if self.hasFocus():
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -2033,6 +2040,8 @@ class NowPlayingView(QFrame):
         self._show_id = 0
         self._chapters = []
         self._segments = []
+        self._chapter_starts = []
+        self._segment_starts = []
         self._current_chapter = -1
         self._current_segment = -1
         layout = QHBoxLayout(self)
@@ -2175,6 +2184,7 @@ class NowPlayingView(QFrame):
         self.show_link.setVisible(bool(snapshot.show_title))
         self.notes.setHtml(safe_feed_html(description or "No show notes provided for this episode."))
         self._chapters = list(chapters)
+        self._chapter_starts = [chapter.start_seconds for chapter in self._chapters]
         self.chapter_list.clear()
         for chapter in self._chapters:
             item = QListWidgetItem(f"{PlayerBar._time(chapter.start_seconds)}   {chapter.title or 'Untitled chapter'}")
@@ -2186,6 +2196,7 @@ class NowPlayingView(QFrame):
             self.chapter_list.addItem(placeholder)
         self.tabs.setTabText(1, f"Chapters ({len(self._chapters)})" if self._chapters else "Chapters")
         self._segments = list(segments)
+        self._segment_starts = [(segment.start_seconds or 0) for segment in self._segments]
         self.transcript.clear()
         cursor = self.transcript.textCursor()
         for index, segment in enumerate(self._segments):
@@ -2220,17 +2231,11 @@ class NowPlayingView(QFrame):
 
     def set_position(self, position: float, duration: float):
         self.meta.setText(f"{PlayerBar._time(position)}  ·  {PlayerBar._time(max(0.0, duration - position))} left" if duration else "")
-        chapter_index = -1
-        for index, chapter in enumerate(self._chapters):
-            if chapter.start_seconds <= position:
-                chapter_index = index
+        chapter_index = bisect_right(self._chapter_starts, position) - 1
         if chapter_index != self._current_chapter and self._chapters:
             self._current_chapter = chapter_index
             self.chapter_list.setCurrentRow(chapter_index)
-        segment_index = -1
-        for index, segment in enumerate(self._segments):
-            if (segment.start_seconds or 0) <= position:
-                segment_index = index
+        segment_index = bisect_right(self._segment_starts, position) - 1
         if segment_index != self._current_segment and self._segments:
             self._current_segment = segment_index
             document = self.transcript.document()
@@ -2527,6 +2532,7 @@ class PlayerBar(QFrame):
         self.slider.setRange(0, 1000)
         self.slider.setAccessibleName("Playback position")
         self.slider.setValue(0)
+        self.slider.sliderPressed.connect(self._capture_drag_duration)
         self.slider.sliderReleased.connect(self._seek_from_slider)
         self.remaining = QLabel("−0:00")
         self.remaining.setObjectName("timeLabel")
@@ -2724,6 +2730,25 @@ class PlayerBar(QFrame):
 
     # -- state -------------------------------------------------------------
     def set_snapshot(self, snapshot):
+        # Position ticks arrive several times a second; re-applying icons,
+        # tooltips and popover state on every tick churns the Qt thread for
+        # nothing. When only position moved, update the timeline and leave.
+        chrome_key = (
+            snapshot.state, snapshot.episode_id, snapshot.title, snapshot.show_title,
+            snapshot.source, snapshot.speed, snapshot.volume, snapshot.ab_start,
+            snapshot.ab_end, snapshot.trim_level, snapshot.sleep_deadline,
+            snapshot.artwork_path, snapshot.message, snapshot.buffering, snapshot.duration,
+        )
+        if chrome_key == getattr(self, "_chrome_key", None):
+            position = max(0.0, float(snapshot.position))
+            if not self.slider.isSliderDown():
+                self.slider.blockSignals(True)
+                self.slider.setValue(int(1000 * position / self._duration) if self._duration else 0)
+                self.slider.blockSignals(False)
+            self.elapsed.setText(self._time(position))
+            self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
+            return
+        self._chrome_key = chrome_key
         # Directory previews are valid URL-only streams without a durable
         # episode ID. Transport controls should still treat them as a track.
         self._has_episode = bool(snapshot.source)
@@ -2801,9 +2826,16 @@ class PlayerBar(QFrame):
             return True
         return super().eventFilter(watched, event)
 
+    def _capture_drag_duration(self):
+        # If auto-advance swaps tracks mid-drag, the release must seek within
+        # the track the user was dragging, not near the end of the new one.
+        self._drag_duration = self._duration
+
     def _seek_from_slider(self):
-        if self._duration:
-            self.seek_requested.emit(self._duration * self.slider.value() / 1000)
+        duration = getattr(self, "_drag_duration", 0.0) or self._duration
+        self._drag_duration = 0.0
+        if duration:
+            self.seek_requested.emit(duration * self.slider.value() / 1000)
 
     def _show_speed(self):
         self.speed_popover.set_current(self._speed)
