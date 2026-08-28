@@ -645,10 +645,13 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             self.sort_button.setAccessibleName("Sort episodes")
             self.sort_button.clicked.connect(self._show_sort_menu)
             self.chips.add_trailing(self.sort_button)
-            self.chips.setVisible(True)
         self.hero = HeroCard()
         self.root.addWidget(self.hero)
         self.root.addWidget(self.chips)
+        if self.sort_button is not None:
+            # Parent first, then show: a parentless setVisible(True) maps the
+            # chip row as its own top-level window (a flash at startup).
+            self.chips.setVisible(True)
         self.selection_bar = SelectionBar()
         self.selection_bar.queue_requested.connect(lambda: self.queue_selected_requested.emit(self.selected_items()))
         self.selection_bar.download_requested.connect(lambda: self.download_selected_requested.emit(self.selected_items()))
