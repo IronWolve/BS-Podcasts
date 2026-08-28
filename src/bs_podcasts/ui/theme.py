@@ -180,7 +180,7 @@ TYPE_BASE = {
 TYPE = {key: value for key, value in TYPE_BASE.items()}
 
 FONT_STACK = ("Inter", "Noto Sans", "DejaVu Sans")
-FONT_FAMILY = '"Inter", "Inter Display", "Noto Sans", "DejaVu Sans", sans-serif'
+FONT_FAMILY = '"Inter", sans-serif'
 
 TEXT_SIZES = (
     ("small", "Small", 0.88),
@@ -266,8 +266,15 @@ def resolve_font_family(key: str) -> str:
 
 
 def css_font_family() -> str:
+    from PySide6.QtWidgets import QApplication
+
     primary = resolve_font_family(_font_key)
-    extras = [name for name in FONT_STACK if name and name != primary]
+    # Only name families that actually exist: a missing family in the QSS
+    # stack makes Qt populate font aliases for it (a ~250 ms scan plus a
+    # warning on macOS). Inter is bundled, so the fallbacks are dead weight
+    # anywhere they aren't installed.
+    installed = set(QFontDatabase.families()) if QApplication.instance() is not None else set(FONT_STACK)
+    extras = [name for name in FONT_STACK if name and name != primary and name in installed]
     names = [primary, *extras] if primary else extras
     quoted = ", ".join(f'"{name}"' for name in names if name)
     return f"{quoted}, sans-serif" if quoted else "sans-serif"
