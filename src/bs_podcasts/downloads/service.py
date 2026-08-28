@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import os
 import shutil
 
-from ..net import make_session
+from ..net import SessionSlot
 
 from ..data.repositories import DownloadRepository, LibraryRepository
 from ..domain import DownloadState
@@ -31,6 +31,8 @@ class DownloadProgress:
 
 
 class DownloadService:
+    session = SessionSlot(read_retries=False)
+
     def __init__(
         self,
         library: LibraryRepository,
@@ -41,21 +43,10 @@ class DownloadService:
         self.library = library
         self.downloads = downloads
         self.directory = Path(directory)
-        self._session = session
+        self.session = session
         self._cancellations: dict[int, Event] = {}
         self._listeners = []
         self._lock = Lock()
-
-    @property
-    def session(self):
-        # Created on first download so constructing the service stays network-free.
-        if self._session is None:
-            self._session = make_session(read_retries=False)
-        return self._session
-
-    @session.setter
-    def session(self, value):
-        self._session = value
 
     def subscribe(self, listener):
         self._listeners.append(listener)
@@ -190,6 +181,11 @@ class DownloadService:
                         last_report = done
             if total and done < total:
                 raise _TruncatedDownload("Download ended before the expected size.")
+            if cancellation.is_set():
+                # A delete raced the last chunk: completing now would resurrect
+                # the record (and re-write downloaded_path) the user removed.
+                partial.unlink(missing_ok=True)
+                return self.downloads.get(episode_id)
             os.replace(partial, target)
             size = target.stat().st_size
             self.downloads.complete(episode_id, str(target), size)

@@ -69,15 +69,18 @@ class DownloadRepository:
 
     def complete(self, episode_id: int, path: str, size: int):
         with self.database.connect() as connection:
-            connection.execute(
+            changed = connection.execute(
                 """UPDATE downloads SET state='complete', target_path=?,
                    bytes_done=?, bytes_total=?, error_message='', updated_at=?
                    WHERE episode_id=?""",
                 (path, size, size, time.time(), episode_id),
-            )
-            connection.execute(
-                "UPDATE episodes SET downloaded_path=? WHERE id=?", (path, episode_id)
-            )
+            ).rowcount
+            if changed:
+                # No downloads row means the record was deleted mid-transfer;
+                # writing downloaded_path then would point at an unlinked file.
+                connection.execute(
+                    "UPDATE episodes SET downloaded_path=? WHERE id=?", (path, episode_id)
+                )
 
     def remove(self, episode_id: int):
         """Forget a download record and clear the episode's local path."""

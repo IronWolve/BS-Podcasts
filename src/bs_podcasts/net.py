@@ -11,7 +11,34 @@ USER_AGENT = (
 )
 
 
-def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_retries: bool = True):
+class SessionSlot:
+    """Class attribute providing the shared lazy-Session contract.
+
+    The Session is created on first use (constructors stay network-free);
+    assigning to the attribute — a constructor's `session=` injection or a
+    test double — replaces it. Construction kwargs are per-consumer policy.
+    """
+
+    def __init__(self, **session_kwargs):
+        self._kwargs = session_kwargs
+
+    def __set_name__(self, owner, name):
+        self._attr = "_" + name
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        current = getattr(instance, self._attr, None)
+        if current is None:
+            current = make_session(**self._kwargs)
+            setattr(instance, self._attr, current)
+        return current
+
+    def __set__(self, instance, value):
+        setattr(instance, self._attr, value)
+
+
+def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_retries: bool = True, max_redirects: int = 8):
     """A Session safe to share across the job pool.
 
     `retries` covers connection errors and 429/5xx responses with backoff;
@@ -38,5 +65,5 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
     adapter = HTTPAdapter(pool_connections=pool, pool_maxsize=pool, max_retries=retry)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    session.max_redirects = 8
+    session.max_redirects = max_redirects
     return session

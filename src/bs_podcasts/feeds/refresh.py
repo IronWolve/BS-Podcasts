@@ -73,3 +73,12 @@ class RefreshService:
         except (FeedFetchError, FeedParseError) as exc:
             health = self.repository.record_refresh_failure(show_id)
             return RefreshReport(show_id, health, message=str(exc))
+        except Exception as exc:
+            # Any other failure (a busy database, an unexpected parser edge)
+            # must still clear the LOADING health it set above, or the show
+            # spins forever — across restarts — with no failure bookkeeping.
+            try:
+                health = self.repository.record_refresh_failure(show_id)
+            except Exception:
+                health = Health.ERROR
+            return RefreshReport(show_id, health, message=str(exc))

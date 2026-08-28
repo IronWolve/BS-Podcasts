@@ -3,7 +3,7 @@
 from datetime import datetime
 import time
 
-from PySide6.QtCore import QEvent, QSize, QTimer, Signal, Qt
+from PySide6.QtCore import QEvent, QTimer, Signal, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,

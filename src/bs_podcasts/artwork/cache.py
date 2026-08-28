@@ -5,7 +5,7 @@ from pathlib import Path
 from threading import Lock
 import os
 
-from ..net import make_session
+from ..net import SessionSlot
 
 
 MAX_ARTWORK_BYTES = 8 * 1024 * 1024
@@ -16,22 +16,13 @@ class ArtworkError(RuntimeError):
 
 
 class ArtworkCache:
+    session = SessionSlot()
+
     def __init__(self, directory: str | Path, session=None):
         self.directory = Path(directory)
-        self._session = session
+        self.session = session
         self._url_locks: dict[str, Lock] = {}
         self._locks_guard = Lock()
-
-    @property
-    def session(self):
-        # Created on first fetch so constructing the cache stays network-free.
-        if self._session is None:
-            self._session = make_session()
-        return self._session
-
-    @session.setter
-    def session(self, value):
-        self._session = value
 
     def files(self):
         if not self.directory.is_dir():

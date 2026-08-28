@@ -47,7 +47,7 @@ from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast
 from .pixmaps import dominant_color, missing_accents, sample_accents
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
 from .shortcuts import ShortcutManager
-from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px, stylesheet
+from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
 from .widgets import ContextPanel, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast
 
 
@@ -2240,6 +2240,8 @@ class MainWindow(QMainWindow):
         if self.playback is None:
             self._notify("Playback is not available", "error")
             return
+        # A different playback intent supersedes any queued play-on-download.
+        self._play_after_download = 0
         if not item.media_url:
             self._notify("This preview has no playable media URL", "error")
             return
@@ -2262,6 +2264,8 @@ class MainWindow(QMainWindow):
     def _play_bookmark(self, item):
         if self.playback is None or not item.episode_id:
             return
+        # A different playback intent supersedes any queued play-on-download.
+        self._play_after_download = 0
         try:
             self.playback.load_episode(item.episode_id, autoplay=True)
             if item.bookmark_position:
@@ -2271,6 +2275,7 @@ class MainWindow(QMainWindow):
 
     def _play_next(self):
         if self.playback is not None:
+            self._play_after_download = 0
             self.playback.next()
 
     def _queue_episode(self, episode_id: int, quiet: bool = False):
@@ -2569,6 +2574,8 @@ class MainWindow(QMainWindow):
             self._notify("Download started", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
 
     def _pause_download(self, episode_id: int):
+        if self._play_after_download == episode_id:
+            self._play_after_download = 0
         if self.downloads is not None and self.downloads.cancel(episode_id):
             self._notify("Download paused — resume any time from its menu")
 
@@ -3019,9 +3026,11 @@ class MainWindow(QMainWindow):
         if self._hero_show_id:
             if self.jobs is None or getattr(self.refresh, "refresh", None) is None:
                 return
-            self.episode_page.banner.show_state("loading", "Refreshing this podcast…")
-            self._set_episode_refresh_enabled(False)
-            self._submit_refresh(self._hero_show_id)
+            if self._submit_refresh(self._hero_show_id):
+                self.episode_page.banner.show_state("loading", "Refreshing this podcast…")
+                self._set_episode_refresh_enabled(False)
+            else:
+                self.episode_page.banner.show_state("loading", "This podcast is already refreshing…")
             return
         if self._preview_episodes_url:
             feed_url = self._preview_episodes_url
@@ -3039,9 +3048,14 @@ class MainWindow(QMainWindow):
             return
         self._refresh_shows(shows, quiet=False)
 
-    def _submit_refresh(self, show_id: int, batch: bool = False):
+    def _submit_refresh(self, show_id: int, batch: bool = False) -> bool:
         if self.jobs is None or self.refresh is None:
-            return
+            return False
+        if not batch and (show_id in self._refresh_in_flight or show_id in self._refresh_waiting):
+            # A batch already covers this show; a concurrent second refresh
+            # of the same feed would double fail_count on one outage and
+            # interleave two import transactions.
+            return False
         generation = self._refresh_generation
         future = self.refresh_jobs.submit(self.refresh.refresh, show_id)
         self._pending_jobs.add(future)
@@ -3113,6 +3127,7 @@ class MainWindow(QMainWindow):
             return
         if kind == "database-repair":
             if result.status == JobStatus.OK:
+                self.library.repository.invalidate_settings_cache()
                 self.settings_page.set_database_status(
                     f"Repair complete · damaged original saved at {result.value}"
                 )
@@ -3266,17 +3281,21 @@ class MainWindow(QMainWindow):
                 self._native_notify(APP_NAME, result.message or "Download failed", lambda: self.navigation.select(PAGE_DOWNLOADS))
             return
         identifier, batch_refresh, generation = identifier if isinstance(identifier, tuple) else (identifier, False, 0)
+        if result.status == JobStatus.OK and getattr(result.value, "imported", 0):
+            # Before any stale-generation exit: episodes imported by a
+            # superseded batch would otherwise never auto-download (later
+            # refreshes report imported=0 for them, so there is no retry).
+            self._auto_download(identifier)
         if batch_refresh:
-            self._refresh_in_flight.discard(identifier)
             if generation != self._refresh_generation:
-                # A completion from a superseded batch: keep the views fresh
-                # but leave the current batch's counters alone.
+                # Superseded batch: it must not touch the new batch's
+                # bookkeeping — discarding the shared show id would free a
+                # phantom in-flight slot and over-fill the refresh pool.
                 self._update_new_badge()
                 return
+            self._refresh_in_flight.discard(identifier)
         else:
             self._request_reload()
-        if result.status == JobStatus.OK and getattr(result.value, "imported", 0):
-            self._auto_download(identifier)
         total, done, new_episodes = self._refresh_batch
         if batch_refresh and not total:
             # The batch record was reset mid-flight; keep the views consistent.
@@ -3289,9 +3308,10 @@ class MainWindow(QMainWindow):
             quiet = getattr(self, "_refresh_quiet", False)
             if done < total:
                 self._pump_refresh_queue()
-                # Counters only while the batch runs; the single full reload at
-                # the end keeps large model resets from repeating per feed.
-                self._update_new_badge()
+                # Counters only while the batch runs (arithmetic, no DB read);
+                # the single full reload at the end corrects any drift.
+                if getattr(report, "imported", 0):
+                    self._apply_new_badge(self._new_episode_total + report.imported)
                 if not quiet:
                     self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
                 elif self.podcast_page.banner.state == "loading":
