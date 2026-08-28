@@ -1146,6 +1146,19 @@ class SettingsPage(BasePage):
         self.refresh_interval.setSpecialValueText("Manual only")
         self.refresh_interval.setFixedWidth(self.FIELD_WIDTH)
         library_form.addRow("Refresh every", self.refresh_interval)
+        self.search_depth = QComboBox()
+        for label, value in (
+            ("50 results", "50"),
+            ("100 results", "100"),
+            ("150 results", "150"),
+            ("200 results · directory max", "200"),
+        ):
+            self.search_depth.addItem(label, value)
+        self.search_depth.setFixedWidth(self.FIELD_WIDTH)
+        library_form.addRow("Search depth", self.search_depth)
+        self.search_depth.currentIndexChanged.connect(
+            lambda index: self.setting_changed.emit("discover.search_limit", self.search_depth.itemData(index))
+        )
         self.background_paused = QCheckBox("Pause background work")
         self.background_status = QLabel("Background refresh, artwork, transcripts and automatic downloads are running.")
         self.background_status.setObjectName("settingHint")
@@ -1525,6 +1538,11 @@ class SettingsPage(BasePage):
         self.density.setCurrentIndex(max(0, self.density.findData(value)))
         self.density.blockSignals(False)
 
+    def load_search_depth(self, value: str):
+        self.search_depth.blockSignals(True)
+        self.search_depth.setCurrentIndex(max(0, self.search_depth.findData(value)))
+        self.search_depth.blockSignals(False)
+
     def load_episode_lines(self, value: int):
         self.episode_lines.blockSignals(True)
         self.episode_lines.setValue(max(1, min(20, value)))
@@ -1558,7 +1576,7 @@ class SettingsPage(BasePage):
         for field in (
             self.speed, self.skip_back, self.skip_forward, self.refresh_interval,
             self.auto_download_limit, self.theme, self.density, self.text_size,
-            self.episode_lines,
+            self.episode_lines, self.search_depth,
         ):
             field.setFixedWidth(width)
         self.ui_font.setFixedWidth(scaled_px(220))

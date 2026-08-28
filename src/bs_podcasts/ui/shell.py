@@ -97,6 +97,7 @@ class MainWindow(QMainWindow):
         self._discover_operation = ""
         self._discover_value = ""
         self._discover_limit = 30
+        self._discover_initial_limit = 30
         self._discover_loading = False
         self._discover_exhausted = False
         self._discover_result_count = 0
@@ -416,6 +417,7 @@ class MainWindow(QMainWindow):
             episode_lines = 2
         self.settings_page.load_episode_lines(episode_lines)
         self._apply_episode_lines(episode_lines)
+        self.settings_page.load_search_depth(self.library.setting("discover.search_limit", "200"))
         self._apply_typography()
         self.settings_page.clear_artwork_requested.connect(self._clear_artwork_cache)
         QTimer.singleShot(4000, self._prune_artwork_cache)
@@ -2964,7 +2966,11 @@ class MainWindow(QMainWindow):
         self._discover_newest_summary = ""
         self._discover_operation = operation
         self._discover_value = value
-        self._discover_limit = 30
+        # Search paints a fast first page, then auto-continues to the full
+        # directory cap in the background (see the result apply); the limit
+        # is per request, so laddering 30→60→90 just re-downloaded the list.
+        self._discover_limit = min(50, self._search_depth()) if operation == "search" else 30
+        self._discover_initial_limit = self._discover_limit
         self._discover_exhausted = False
         self._discover_result_count = 0
         self.discover_page.set_items([])
@@ -2972,13 +2978,25 @@ class MainWindow(QMainWindow):
         self.discover_page.set_load_more_state(False, loading=True)
         self._submit_directory(operation, value, self._discover_limit)
 
+    def _search_depth(self) -> int:
+        raw = self.library.setting("discover.search_limit", "200") if self.library is not None else "200"
+        try:
+            return max(50, min(200, int(raw)))
+        except ValueError:
+            return 200
+
     def _discover_maximum(self) -> int:
-        return 100 if self._discover_operation == "chart" else 200 if self._discover_operation in {"search", "topic"} else 500
+        if self._discover_operation == "search":
+            return self._search_depth()
+        return 100 if self._discover_operation == "chart" else 200 if self._discover_operation == "topic" else 500
 
     def _load_more_discover(self):
         if self._discover_loading or self._discover_exhausted or not self._discover_operation or self._discover_limit >= self._discover_maximum():
             return
-        self._discover_limit = min(self._discover_maximum(), self._discover_limit + 30)
+        # One request returns up to the directory cap, so a search finishes
+        # in a single follow-up pull instead of five.
+        step = 150 if self._discover_operation == "search" else 30
+        self._discover_limit = min(self._discover_maximum(), self._discover_limit + step)
         label = self._discover_value[1] if isinstance(self._discover_value, tuple) else self._discover_value or "For You"
         self.discover_page.banner.show_state("loading", f"Loading more {label}…")
         self.discover_page.set_discover_summary(f"Loading more {label}…")
@@ -3530,7 +3548,16 @@ class MainWindow(QMainWindow):
         self._discover_exhausted = requested_limit >= self._discover_maximum() or result_count <= self._discover_result_count
         self._discover_result_count = result_count
         self.discover_page.set_load_more_state(not self._discover_exhausted, loading=False)
-        self.discover_page.set_items(podcasts, preserve_scroll=requested_limit > 30)
+        self.discover_page.set_items(
+            podcasts,
+            preserve_scroll=requested_limit > getattr(self, "_discover_initial_limit", 30),
+        )
+        if operation == "search" and not self._discover_exhausted:
+            # A search shouldn't stop at its first page: pull the rest of
+            # the directory's results in the background while the user
+            # reads the first ones. Artwork for rows already shown comes
+            # from the cache, so the follow-up only pays for new rows.
+            QTimer.singleShot(0, self._load_more_discover)
         if podcasts:
             self.discover_page.banner.clear()
             if operation == "recommend":
