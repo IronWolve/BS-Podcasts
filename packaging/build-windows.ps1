@@ -48,13 +48,24 @@ if (-not (Test-Path -LiteralPath $sourceExe)) {
 }
 
 # The application is a onedir folder; replace the previous copy wholesale so
-# removed DLLs do not linger.
+# removed DLLs do not linger. Renaming first fails fast and harmlessly while
+# the app is running (locked files), instead of half-deleting the old copy.
 New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 $copiedDir = Join-Path $Destination "BS Podcasts"
+$retiredDir = Join-Path $Destination "BS Podcasts.old"
+if (Test-Path -LiteralPath $retiredDir) {
+    Remove-Item -LiteralPath $retiredDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 if (Test-Path -LiteralPath $copiedDir) {
-    Remove-Item -LiteralPath $copiedDir -Recurse -Force
+    try {
+        Rename-Item -LiteralPath $copiedDir -NewName "BS Podcasts.old" -ErrorAction Stop
+    }
+    catch {
+        throw "The previous copy at $copiedDir is in use (is BS Podcasts running?). Close it and re-run; nothing was changed."
+    }
 }
 Copy-Item -LiteralPath $sourceDir -Destination $copiedDir -Recurse -Force
+Remove-Item -LiteralPath $retiredDir -Recurse -Force -ErrorAction SilentlyContinue
 
 # Surface the third-party notices at the folder root where users can find them.
 $notices = Join-Path $copiedDir "_internal\THIRD-PARTY-NOTICES.txt"
