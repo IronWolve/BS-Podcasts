@@ -483,18 +483,21 @@ class PageHeader(QFrame):
         self.title_label.setObjectName("pageTitle")
         self.subtitle_label = QLabel(subtitle)
         self.subtitle_label.setObjectName("pageSubtitle")
-        self.subtitle_label.setVisible(bool(subtitle))
         text.addWidget(self.title_label)
         text.addWidget(self.subtitle_label)
         layout.addLayout(text, 1)
+        # Visibility only after parenting (which happens at addLayout — an
+        # orphan sub-layout parents nothing): setVisible(True) on a parentless
+        # widget maps it as its own top-level window (a flash at startup).
+        self.subtitle_label.setVisible(bool(subtitle))
 
         self.search = SearchField("Filter")
         self.search.setAccessibleName(f"Filter {title}")
         self.search.setMinimumWidth(scaled_px(150))
         self.search.setMaximumWidth(scaled_px(240))
         self.search.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self.search.setVisible(show_search)
         layout.addWidget(self.search)
+        self.search.setVisible(show_search)
 
         self.action = None
         if action:
@@ -538,7 +541,10 @@ class ChipRow(QWidget):
             layout.addWidget(button)
         layout.addStretch(1)
         self._compact = False
-        self.setVisible(bool(labels))
+        if not labels:
+            # Only ever hide here: ChipRow is constructed parentless, and
+            # setVisible(True) before parenting would flash it as a window.
+            self.setVisible(False)
 
     def select(self, label: str):
         for button in self._buttons:
@@ -796,9 +802,9 @@ class EmptyState(QWidget):
         self.button.setObjectName("primaryButton")
         self.button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.button.clicked.connect(self.action_requested)
-        self.button.setVisible(bool(action))
         layout.addSpacing(SPACE["sm"])
         layout.addWidget(self.button, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.button.setVisible(bool(action))
 
     def apply_metrics(self):
         self.layout().setContentsMargins(SPACE["xl"], SPACE["xxl"], SPACE["xl"], SPACE["xxl"])
