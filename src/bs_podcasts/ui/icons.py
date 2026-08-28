@@ -50,6 +50,8 @@ GLYPHS = {
     "close": "M6 6l12 12M18 6L6 18",
     "chevron-left": "M15 5l-7 7 7 7",
     "chevron-right": "M9 5l7 7-7 7",
+    "collapse-left": "M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM8.5 4v16M15.5 9l-3 3 3 3",
+    "collapse-right": "M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM15.5 4v16M8.5 9l3 3-3 3",
     "chevron-down": "M5 9l7 7 7-7",
     "chevron-up": "M5 15l7-7 7 7",
     "download": "M12 4v11M7 10l5 5 5-5M5 19h14",

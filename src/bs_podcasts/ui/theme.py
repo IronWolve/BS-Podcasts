@@ -641,6 +641,12 @@ def stylesheet() -> str:
     QSlider#volumeSlider::handle:horizontal {{
         background: {c['text_strong']}; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px;
     }}
+    QPushButton#edgeToggle {{
+        background: {c['surface_raised']}; border: 1px solid {c['hairline']};
+        border-radius: 10px; padding: 0;
+    }}
+    QPushButton#edgeToggle:hover {{ background: {c['surface_soft']}; border-color: {c['border']}; }}
+    QPushButton#edgeToggle:focus {{ border: {focus_ring}; }}
     QFrame#popover {{
         background: {c['surface_raised']}; border: 1px solid {c['border']};
         border-radius: {r['md']}px;
