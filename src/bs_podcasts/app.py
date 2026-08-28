@@ -190,10 +190,22 @@ def _claim_single_instance(app):
 
 
 def main() -> int:
+    import time as _time
+
+    # Startup phase marks, logged once the window is up. When a platform
+    # stalls at launch (the Mac build took 11 s to show), one run of the app
+    # names the guilty phase instead of a remote guessing game.
+    _marks = [("start", _time.monotonic())]
+
+    def _mark(name: str):
+        _marks.append((name, _time.monotonic()))
+
     app = create_application()
+    _mark("qt-app")
     server = _claim_single_instance(app)
     if server is None:
         return 0
+    _mark("single-instance")
     root = application_data_dir()
     try:
         database = Database(root / "library.db")
@@ -205,12 +217,14 @@ def main() -> int:
         )
         dialog.exec()
         return 1
+    _mark("database")
     repository = LibraryRepository(database)
     library = LibraryService(repository)
     apply_theme(resolve_theme(library.setting("ui.theme", "system")))
     apply_typography(library.setting("ui.text_size", "comfortable"), library.setting("ui.font", "Inter"))
     app.setFont(app_font())
     apply_app_stylesheet(app)
+    _mark("theme")
     jobs = JobRunner(max_workers=4)
     download_jobs = JobRunner(max_workers=2)
     # Feed refreshes get their own small pool so a batch can never occupy the
@@ -236,6 +250,7 @@ def main() -> int:
         DownloadRepository(database),
         library.setting("downloads.directory", "") or default_downloads_dir(),
     )
+    _mark("services")
     state = {"window": None}
 
     def build_window():
@@ -250,11 +265,15 @@ def main() -> int:
             download_jobs=download_jobs,
             refresh_jobs=refresh_jobs,
         )
+        _mark("main-window")
         window.tray = TrayController(window, playback)
+        _mark("tray")
         window.mpris = MprisController(window, playback)
+        _mark("mpris")
         window.relaunch_requested.connect(lambda: rebuild_window())
         state["window"] = window
         window.show()
+        _mark("show")
         return window
 
     def rebuild_window():
@@ -272,6 +291,14 @@ def main() -> int:
         build_window()
 
     build_window()
+    logger.info(
+        "startup phases: %s (total %.2fs)",
+        "  ".join(
+            f"{name}={later - earlier:.2f}s"
+            for (_prev, earlier), (name, later) in zip(_marks, _marks[1:])
+        ),
+        _marks[-1][1] - _marks[0][1],
+    )
     # Warm the playback core off-thread once startup has settled, so the
     # first press of Play pays only for opening the stream.
     warm = getattr(engine, "warm", None)
