@@ -62,6 +62,10 @@ class MpvEngine:
                 del defaults[option]
         self._handler: Callable[[EngineEvent], None] = lambda event: None
         self._dead = False
+        # A fresh core spams its observers with initial values (pause=False
+        # among them); nothing may reach the app before the first load, or a
+        # background warm-up reads as "playing" with no file.
+        self._activated = False
         self._pending_position = 0.0
         self._pending_autoplay = False
 
@@ -95,6 +99,7 @@ class MpvEngine:
 
     def load(self, source: str, start_position: float = 0.0, autoplay: bool = True):
         self._guard()
+        self._activated = True
         self._pending_position = max(0.0, float(start_position))
         self._pending_autoplay = bool(autoplay)
         self._last_error = ""
@@ -165,7 +170,7 @@ class MpvEngine:
             raise PlaybackUnavailable("The internal playback engine has shut down.")
 
     def _emit(self, kind: str, value=None):
-        if not self._dead:
+        if not self._dead and self._activated:
             self._handler(EngineEvent(kind, value))
 
     def _position_changed(self, _name, value):
