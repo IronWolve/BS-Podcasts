@@ -205,6 +205,8 @@ class MainWindow(QMainWindow):
         self.context_toggle.setParent(self.pages)
         self.context_toggle.clicked.connect(self._toggle_context_pane)
         self.context.installEventFilter(self)
+        # A newly shown page stacks above its siblings; keep the handles on top.
+        self.pages.currentChanged.connect(lambda _index: self._place_edge_handles())
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
         self.splitter.setSizes([820, scaled_px(360)])
@@ -3630,6 +3632,10 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, watched, event):
         if watched is self.context and event.type() in {QEvent.Type.Show, QEvent.Type.Hide}:
+            self._place_edge_handles()
+        elif watched is self.pages and event.type() == QEvent.Type.Resize:
+            # The centre area resizes without a window resize when the rail
+            # compacts or the splitter is dragged; the handles must follow.
             self._place_edge_handles()
         if (
             event.type() == QEvent.Type.KeyPress
