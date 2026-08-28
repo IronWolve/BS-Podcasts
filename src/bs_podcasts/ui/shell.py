@@ -48,7 +48,7 @@ from .pixmaps import dominant_color, missing_accents, sample_accents
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
 from .shortcuts import ShortcutManager
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
-from .widgets import ContextPanel, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, icon_button
+from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast
 
 
 PAGE_HOME, PAGE_PODCASTS, PAGE_EPISODES, PAGE_QUEUE, PAGE_DOWNLOADS, PAGE_DISCOVER, PAGE_BOOKMARKS, PAGE_HISTORY, PAGE_SETTINGS = range(9)
@@ -196,15 +196,14 @@ class MainWindow(QMainWindow):
         self.context.queue_view.viewport().installEventFilter(self)
         self.splitter.addWidget(self.pages)
         self.splitter.addWidget(self.context)
-        # Expand handle at the vertical middle of the right edge, shown only
-        # while the details pane is collapsed.
-        self.context_expand = icon_button("collapse-left", "Show details panel", "edgeToggle", 16)
-        # Parented to the page stack (like the overlays): a child of the
-        # QSplitter itself would be adopted as a splitter pane.
-        self.context_expand.setParent(self.pages)
-        self.context_expand.setFixedSize(scaled_px(22), scaled_px(52))
-        self.context_expand.clicked.connect(self._show_context_pane)
-        self.context_expand.hide()
+        # Both collapse handles live inside the centre area, hugging its
+        # edges at the vertical middle, dimmed until hovered. (Parented to the
+        # page stack like the overlays: a child of the QSplitter itself would
+        # be adopted as a splitter pane.)
+        self.navigation.toggle.setParent(self.pages)
+        self.context_toggle = EdgeHandle("collapse-right", "Hide details panel")
+        self.context_toggle.setParent(self.pages)
+        self.context_toggle.clicked.connect(self._toggle_context_pane)
         self.context.installEventFilter(self)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
@@ -3606,22 +3605,32 @@ class MainWindow(QMainWindow):
             page = self.pages.widget(index)
             page.header.back.setVisible(index == self.pages.currentIndex() and bool(self._back_stack))
 
-    def _show_context_pane(self):
+    def _toggle_context_pane(self):
+        if self.context.isVisible():
+            self._hide_context()
+            return
         self._context_forced = True
         self.context.show()
         self.splitter.setSizes([max(480, self.width() - self.navigation.width() - self._pane_width()), self._pane_width()])
         self._sync_context_dismissible()
         self.player.set_queue_open(self.context.mode() == 1)
 
-    def _place_context_expand(self):
-        button = self.context_expand
-        button.move(self.pages.width() - button.width() - 2, (self.pages.height() - button.height()) // 2)
-        button.raise_()
+    def _place_edge_handles(self):
+        middle = (self.pages.height() - self.context_toggle.height()) // 2
+        rail = self.navigation.toggle
+        rail.move(2, middle)
+        rail.raise_()
+        self.context_toggle.move(self.pages.width() - self.context_toggle.width() - 2, middle)
+        self.context_toggle.raise_()
+        visible = self.context.isVisible()
+        self.context_toggle.set_glyph(
+            "collapse-right" if visible else "collapse-left",
+            "Hide details panel" if visible else "Show details panel",
+        )
 
     def eventFilter(self, watched, event):
         if watched is self.context and event.type() in {QEvent.Type.Show, QEvent.Type.Hide}:
-            self.context_expand.setVisible(event.type() == QEvent.Type.Hide)
-            self._place_context_expand()
+            self._place_edge_handles()
         if (
             event.type() == QEvent.Type.KeyPress
             and event.key() == Qt.Key.Key_Space
@@ -4135,7 +4144,7 @@ class MainWindow(QMainWindow):
             self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)
             self._sync_context_dismissible()
         self.toast.reposition()
-        self._place_context_expand()
+        self._place_edge_handles()
         super().resizeEvent(event)
         self._layout_save_timer.start()
 

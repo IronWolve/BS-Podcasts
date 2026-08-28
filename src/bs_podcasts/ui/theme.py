@@ -642,7 +642,7 @@ def stylesheet() -> str:
         background: {c['text_strong']}; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px;
     }}
     QPushButton#edgeToggle {{
-        background: {c['surface_raised']}; border: 1px solid {c['hairline']};
+        background: transparent; border: 1px solid transparent;
         border-radius: 10px; padding: 0;
     }}
     QPushButton#edgeToggle:hover {{ background: {c['surface_soft']}; border-color: {c['border']}; }}

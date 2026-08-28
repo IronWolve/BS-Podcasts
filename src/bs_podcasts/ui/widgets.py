@@ -150,6 +150,38 @@ def icon_button(name: str, tooltip: str, object_name: str = "iconButton", size: 
     return button
 
 
+class EdgeHandle(QPushButton):
+    """Slim panel-collapse handle: dimmed until hovered so it never grabs
+    attention, full strength under the pointer."""
+
+    DIM = 0.35
+
+    def __init__(self, name: str, tooltip: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("edgeToggle")
+        self.setFixedSize(scaled_px(22), scaled_px(52))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self._effect = QGraphicsOpacityEffect(self)
+        self._effect.setOpacity(self.DIM)
+        self.setGraphicsEffect(self._effect)
+        self.set_glyph(name, tooltip)
+
+    def set_glyph(self, name: str, tooltip: str):
+        self.setIcon(icons.icon(name, COLORS["text"], 16, disabled=COLORS["border"]))
+        self.setIconSize(QSize(16, 16))
+        self.setToolTip(tooltip)
+        self.setAccessibleName(tooltip)
+
+    def enterEvent(self, event):
+        self._effect.setOpacity(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._effect.setOpacity(self.DIM)
+        super().leaveEvent(event)
+
+
 class Artwork(QWidget):
     """Rounded, centre-cropped artwork with an initials placeholder."""
 
@@ -312,21 +344,9 @@ class NavigationRail(QFrame):
         self.version.hide()
         footer.addWidget(self.version, 1)
         layout.addLayout(footer)
-        # Collapse control floats at the vertical middle of the rail's outer
-        # edge (not in the footer), styled as a slim panel-collapse handle.
-        self.toggle = icon_button("collapse-left", "Collapse navigation", "edgeToggle", 16)
-        self.toggle.setParent(self)
-        self.toggle.setFixedSize(scaled_px(22), scaled_px(52))
+        # Collapse handle; the shell adopts it into the centre area's edge.
+        self.toggle = EdgeHandle("collapse-left", "Collapse navigation")
         self.toggle.clicked.connect(lambda: self.set_compact(not self._compact, user=True))
-        self.toggle.raise_()
-
-    def _place_toggle(self):
-        self.toggle.move(self.width() - self.toggle.width() - 2, (self.height() - self.toggle.height()) // 2)
-        self.toggle.raise_()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._place_toggle()
 
     def set_background_paused(self, paused: bool):
         self._background_paused = bool(paused)
@@ -436,9 +456,10 @@ class NavigationRail(QFrame):
         self.brand_text.setVisible(not compact)
         self.version.setVisible(False)
         self.background_status.setVisible(self._background_paused and not compact)
-        self.toggle.setIcon(icons.icon("collapse-right" if compact else "collapse-left", COLORS["muted"], scaled_px(16)))
-        self.toggle.setToolTip("Expand navigation" if compact else "Collapse navigation")
-        self._place_toggle()
+        self.toggle.set_glyph(
+            "collapse-right" if compact else "collapse-left",
+            "Expand navigation" if compact else "Collapse navigation",
+        )
         for index, (button, _glyph, label) in enumerate(self._buttons):
             button.setText("" if compact else label)
             button.setToolTip(f"{label}  ·  Ctrl+{index + 1}")
@@ -1450,12 +1471,6 @@ class ContextPanel(QFrame):
         self.close_button = icon_button("close", "Close details")
         self.close_button.clicked.connect(self.closed)
         self.close_button.hide()
-        # Collapse handle floats at the vertical middle of the pane's outer
-        # (left) edge instead of an X in the header.
-        self.collapse = icon_button("collapse-right", "Hide details panel", "edgeToggle", 16)
-        self.collapse.setParent(self)
-        self.collapse.setFixedSize(scaled_px(22), scaled_px(52))
-        self.collapse.clicked.connect(self.closed)
         layout.addLayout(top)
 
         self.stack = QStackedWidget()
@@ -1885,10 +1900,6 @@ class ContextPanel(QFrame):
         # The edge collapse handle is always available; kept for call sites.
         del dismissible
 
-    def _place_collapse(self):
-        self.collapse.move(2, (self.height() - self.collapse.height()) // 2)
-        self.collapse.raise_()
-
     def apply_metrics(self):
         self.setMinimumWidth(scaled_px(320))
         self.setMaximumWidth(scaled_px(440))
@@ -1957,7 +1968,6 @@ class ContextPanel(QFrame):
         # Keep the artwork proportional to the space that remains for text and tabs.
         reserved = 520 if self.latest_card.isVisible() else 440
         self.art.set_side(min(self.width() - 2 * SPACE["lg"] - 12, self.height() - reserved))
-        self._place_collapse()
 
     def set_playing(self, episode_id: int, active: bool, loading: bool = False):
         """Make the primary button a Pause/Resume toggle when this episode is playing."""
