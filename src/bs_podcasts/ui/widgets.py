@@ -2616,9 +2616,11 @@ class PlayerBar(QFrame):
         now_wrap = QWidget()
         now_wrap.setLayout(now)
         now_wrap.setMinimumWidth(scaled_px(180))
-        now_wrap.setMaximumWidth(scaled_px(280))
         self.now_wrap = now_wrap
-        layout.addWidget(now_wrap)
+        # The title column shares the bar's free space with the transport
+        # (equal stretch) instead of being caged at a fixed width — a title
+        # only elides when the window genuinely can't fit it.
+        layout.addWidget(now_wrap, 1)
 
         transport = QVBoxLayout()
         transport.setSpacing(2)
@@ -2760,7 +2762,6 @@ class PlayerBar(QFrame):
         self.art.set_bounds(scaled_px(40), scaled_px(72))
         self.art.set_side(art)
         self.now_wrap.setMinimumWidth(scaled_px(180))
-        self.now_wrap.setMaximumWidth(scaled_px(280))
         self.speed.setFixedWidth(scaled_px(52))
         skip = scaled_px(20)
         self.back.setIconSize(QSize(skip, skip))
