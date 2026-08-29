@@ -607,6 +607,11 @@ class ChipRow(QWidget):
     def add_trailing(self, widget: QWidget):
         self.layout().addWidget(widget)
 
+    def add_inline(self, widget: QWidget):
+        """Place a control immediately after the chips (before the stretch),
+        so it reads as part of the filter row rather than drifting right."""
+        self.layout().insertWidget(len(self._buttons), widget)
+
     def set_compact(self, compact: bool):
         self._compact = bool(compact)
         self.layout().setSpacing(SPACE["xs"] if self._compact else SPACE["sm"])

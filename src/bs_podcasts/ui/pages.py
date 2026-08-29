@@ -212,6 +212,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
     open_requested = Signal(object)
     card_action_requested = Signal(object)
     remove_problems_requested = Signal()
+    sort_changed = Signal(str)
     menu_requested = Signal(object, object)
     near_end = Signal()
     load_more_requested = Signal()
@@ -338,6 +339,16 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.header.search.setPlaceholderText("Filter podcasts")
             if self.header.action:
                 self.header.action.setIcon(icons.icon("add", COLORS["on_accent"], 16))
+            self.LIBRARY_SORTS = (("name", "Name A–Z"), ("date", "Newest episode"))
+            self._sort = "name"
+            self.sort_button = QPushButton("Name A–Z")
+            self.sort_button.setObjectName("textButton")
+            self.sort_button.setIcon(icons.icon("sort", COLORS["muted"], 16))
+            self.sort_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.sort_button.setToolTip("Sort podcasts")
+            self.sort_button.setAccessibleName("Sort podcasts")
+            self.sort_button.clicked.connect(self._show_sort_menu)
+            self.chips.add_inline(self.sort_button)
             self.remove_problems = QPushButton("Remove unreachable…")
             self.remove_problems.setObjectName("dangerButton")
             self.remove_problems.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -425,6 +436,10 @@ class PodcastGridPage(BasePage, _ListPageMixin):
                 ("No problems", "Every subscribed feed refreshed successfully.", "") if chip == "Problems"
                 else ("Your library is empty", "Add a podcast by feed URL, import an OPML file, or browse Discover.", "Add podcast")
             )
+        if not self.discover and getattr(self, "_sort", "name") == "date":
+            items.sort(key=lambda item: item.latest_sort_key or "", reverse=True)
+        elif not self.discover:
+            items.sort(key=lambda item: item.title.lower())
         if self.discover and self._discover_sort == "title":
             items.sort(key=lambda item: item.title.lower())
         elif self.discover and self._discover_sort == "newest":
@@ -436,6 +451,25 @@ class PodcastGridPage(BasePage, _ListPageMixin):
 
     DISCOVER_SORTS = (("rank", "Chart order"), ("newest", "Newest episode"), ("title", "Title A–Z"))
     discover_sort_changed = Signal(str)
+
+    def _show_sort_menu(self):
+        menu = QMenu(self)
+        for key, label in self.LIBRARY_SORTS:
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key == self._sort)
+            action.triggered.connect(
+                lambda _checked=False, k=key: (self.set_sort(k), self.sort_changed.emit(k))
+            )
+        menu.exec(self.sort_button.mapToGlobal(self.sort_button.rect().bottomLeft()))
+
+    def set_sort(self, key: str):
+        labels = dict(getattr(self, "LIBRARY_SORTS", ()))
+        if key not in labels or getattr(self, "sort_button", None) is None:
+            return
+        self._sort = key
+        self.sort_button.setText(labels[key])
+        self._apply_filters()
 
     def _show_discover_sort_menu(self):
         menu = self._create_discover_sort_menu()
