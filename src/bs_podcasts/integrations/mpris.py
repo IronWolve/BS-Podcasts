@@ -38,7 +38,8 @@ class _RootAdaptor(QDBusAbstractAdaptor):
 
     @Slot()
     def Quit(self):
-        self.host.window.close()
+        window = self.host.window
+        getattr(window, "_request_quit", window.close)()
 
 
 @ClassInfo({"D-Bus Interface": "org.mpris.MediaPlayer2.Player"})

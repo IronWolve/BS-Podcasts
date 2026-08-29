@@ -1452,6 +1452,7 @@ class ContextPanel(QFrame):
 
     subscribe_requested = Signal(str)
     play_episode_requested = Signal(int)
+    play_preview_requested = Signal(object)
     queue_episode_requested = Signal(int)
     dequeue_requested = Signal(int)
     download_episode_requested = Signal(int)
@@ -2045,6 +2046,9 @@ class ContextPanel(QFrame):
             self.subscribe_requested.emit(self._feed_url)
         elif self._episode_id:
             self.play_episode_requested.emit(self._episode_id)
+        elif getattr(self._current_item, "media_url", ""):
+            # An unsubscribed preview has no episode id; stream it directly.
+            self.play_preview_requested.emit(self._current_item)
         elif self._show_id:
             self.play_latest_requested.emit(self._show_id)
 
@@ -2923,8 +2927,11 @@ class PlayerBar(QFrame):
         self.set_enabled(self._has_episode and str(snapshot.state) != "shutdown")
         self.bookmark.setEnabled(self._has_episode and durable_episode)
         if loading:
-            self.play.setEnabled(False)
-            self.play.setCursor(Qt.CursorShape.ArrowCursor)
+            # Keep the button live: the service toggles the in-flight load's
+            # autoplay intent (last intent wins), so a click here cancels an
+            # opening stream instead of leaving the main control frozen for
+            # the whole watchdog window.
+            self.play.setToolTip("Opening… click to pause when ready  ·  Ctrl+Space")
         self._refresh_chrome()
 
     def _create_context_menu(self):
