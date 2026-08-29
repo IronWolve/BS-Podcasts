@@ -54,7 +54,10 @@ class LibraryService:
     def new_episode_count(self) -> int:
         return self.repository.new_episode_count()
 
-    def episodes(self, show_id: int | None = None, limit: int = 500):
+    def episodes(self, show_id: int | None = None, limit: int | None = 500):
+        # limit=None loads the complete catalogue (used when opening one
+        # podcast off-thread); the old always-500 default silently hid large
+        # back catalogues.
         return self.repository.list_episodes(show_id, limit)
 
     def history(self, limit: int = 200):
