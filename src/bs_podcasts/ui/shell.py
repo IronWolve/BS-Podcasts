@@ -49,7 +49,7 @@ from .pixmaps import dominant_color, missing_accents, sample_accents
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
 from .shortcuts import ShortcutManager
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
-from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast
+from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe
 
 
 PAGE_HOME, PAGE_PODCASTS, PAGE_EPISODES, PAGE_QUEUE, PAGE_DOWNLOADS, PAGE_DISCOVER, PAGE_BOOKMARKS, PAGE_HISTORY, PAGE_SETTINGS = range(9)
@@ -1908,10 +1908,10 @@ class MainWindow(QMainWindow):
                 lambda: self._set_favorites([value], not value.favorite),
             )
             if value.show_id:
-                menu.addAction(icons.icon("podcasts", COLORS["text"], 16), f"Go to {value.show}", lambda: (self.search_overlay.hide(), self._open_show_id(value.show_id)))
+                menu.addAction(icons.icon("podcasts", COLORS["text"], 16), mnemonic_safe(f"Go to {value.show}"), lambda: (self.search_overlay.hide(), self._open_show_id(value.show_id)))
             menu.addAction("Copy episode title", lambda: QApplication.clipboard().setText(value.title))
         else:
-            menu.addAction(icons.icon("discover", COLORS["text"], 16), f"Search the podcast directory for “{value}”", lambda: self._directory_search_from_overlay(value))
+            menu.addAction(icons.icon("discover", COLORS["text"], 16), mnemonic_safe(f"Search the podcast directory for “{value}”"), lambda: self._directory_search_from_overlay(value))
         return menu
 
     def _add_episode_copy_menu(self, menu, episode, show):
@@ -2080,7 +2080,7 @@ class MainWindow(QMainWindow):
             menu.addAction("Mark as unplayed", lambda: self._mark_played_many(targets, False))
         if not many and episode.show_id:
             menu.addSeparator()
-            menu.addAction(icons.icon("podcasts", COLORS["text"], 16), f"Go to {episode.show}", lambda: self._open_show_id(episode.show_id))
+            menu.addAction(icons.icon("podcasts", COLORS["text"], 16), mnemonic_safe(f"Go to {episode.show}"), lambda: self._open_show_id(episode.show_id))
         return menu
 
     def _remove_from_queue(self, episode_id: int):
