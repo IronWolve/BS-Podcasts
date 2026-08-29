@@ -110,6 +110,7 @@ class MainWindow(QMainWindow):
         self._discover_newest_active = set()
         self._discover_newest_updates = {}
         self._discover_newest_total = 0
+        self._discover_newest_done = 0
         self._discover_newest_summary = ""
         self._discover_scan_toast = False
         self._discover_scan_cancelled = False
@@ -3006,6 +3007,7 @@ class MainWindow(QMainWindow):
         self._discover_newest_active.clear()
         self._discover_newest_updates.clear()
         self._discover_newest_total = 0
+        self._discover_newest_done = 0
         self._discover_newest_summary = ""
         self._discover_scan_cancelled = False
         if self._discover_scan_toast:
@@ -3455,6 +3457,7 @@ class MainWindow(QMainWindow):
                     self.episode_page.banner.show_state("error", f"Couldn’t fetch this podcast’s episodes: {message}")
             if newest_scan:
                 self._discover_newest_pending.discard(identifier)
+                self._discover_newest_done += 1
                 self._update_newest_scan_toast()
                 self._pump_discover_newest_scan()
                 if not self._discover_newest_pending:
@@ -3968,7 +3971,9 @@ class MainWindow(QMainWindow):
             for feed_url in missing
             if feed_url not in self._preview_pending and feed_url not in queued
         )
-        self._discover_newest_total = len(self._discover_newest_pending)
+        # Cumulative: rows added mid-scan grow the total instead of
+        # resetting the "N of M" count back to 1.
+        self._discover_newest_total = self._discover_newest_done + len(self._discover_newest_pending)
         self.discover_page.set_discover_summary(
             f"Checking newest episode dates for {self._discover_newest_total} podcasts… Cards will update together."
         )
@@ -3981,7 +3986,7 @@ class MainWindow(QMainWindow):
         total = self._discover_newest_total
         if not total:
             return
-        done = total - len(self._discover_newest_pending)
+        done = self._discover_newest_done
         message = f"Scanning podcast release dates… {done} of {total}"
         if self._discover_scan_toast and self.toast.isVisible():
             self.toast.update_message(message)
@@ -4016,6 +4021,7 @@ class MainWindow(QMainWindow):
         self._discover_newest_waiting.clear()
         self._discover_newest_active.clear()
         self._discover_newest_total = 0
+        self._discover_newest_done = 0
         if self._discover_newest_summary:
             self.discover_page.set_discover_summary(self._discover_newest_summary)
         self._discover_newest_summary = ""
