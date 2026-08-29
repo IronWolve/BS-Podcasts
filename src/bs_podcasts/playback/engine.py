@@ -107,6 +107,13 @@ class MpvEngine:
         self._pending_position = max(0.0, float(start_position))
         self._pending_autoplay = bool(autoplay)
         self._last_error = ""
+        # A-B loop points are wall-clock times of the OUTGOING file; left in
+        # place they silently loop the next episode at the same clock times.
+        try:
+            self._player.ab_loop_a = "no"
+            self._player.ab_loop_b = "no"
+        except Exception:
+            pass
         self._emit("loading", source)
         self._player.loadfile(source, "replace")
 

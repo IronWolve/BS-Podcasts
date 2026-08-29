@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from PySide6.QtCore import QByteArray, QEvent, QObject, QTimer, QUrl, Signal, Qt
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QAbstractSpinBox,
     QApplication,
     QComboBox,
@@ -2683,9 +2684,12 @@ class MainWindow(QMainWindow):
         target = Path(chosen)
         try:
             target.mkdir(parents=True, exist_ok=True)
-            probe = target / ".bs-podcasts-write-test"
-            probe.write_bytes(b"")
-            probe.unlink()
+            # An exclusive unique file: a fixed probe name could destroy a
+            # user's real file of that name just by selecting the folder.
+            import tempfile
+            handle, probe_path = tempfile.mkstemp(prefix=".bs-podcasts-write-", dir=target)
+            os.close(handle)
+            Path(probe_path).unlink()
         except OSError as exc:
             self._notify(f"Can’t use that folder: {exc}", "error")
             return
@@ -3289,8 +3293,18 @@ class MainWindow(QMainWindow):
             return
         if kind == "read":
             key, token, apply = identifier
-            if self._read_tokens.get(key) == token and result.status == JobStatus.OK and not self._closed:
+            if self._read_tokens.get(key) != token or self._closed:
+                return
+            if result.status == JobStatus.OK:
                 apply(result.value)
+            else:
+                # The banner said "Opening…"; without this it never resolves.
+                message = result.message or "The library could not be read."
+                page = self.pages.currentWidget()
+                banner = getattr(page, "banner", None)
+                if banner is not None:
+                    banner.show_state("error", message)
+                self._notify(message, "error")
             return
         if kind == "library":
             self._reload_in_flight = False
@@ -3332,6 +3346,10 @@ class MainWindow(QMainWindow):
             return
         if kind == "details":
             outcome = result.value if result.status == JobStatus.OK else None
+            if result.status != JobStatus.OK or (outcome and outcome.get("error")):
+                # A transient failure must not blank chapters/transcript for
+                # the whole session: let the next selection retry.
+                self._details_fetched.discard(identifier)
             if outcome and (outcome.get("chapters") or outcome.get("transcript")):
                 if self.context._episode_id == identifier:
                     self._load_listening_details(identifier)
@@ -3346,6 +3364,8 @@ class MainWindow(QMainWindow):
                 logging.getLogger("bs_podcasts").info("Listening details unavailable for episode %s: %s", identifier, outcome["error"])
             return
         if kind == "artwork":
+            if result.status != JobStatus.OK:
+                self._artwork_fetched.discard(identifier)
             if result.status == JobStatus.OK:
                 self._request_reload()
                 if self.context._episode_id == identifier:
@@ -3762,7 +3782,7 @@ class MainWindow(QMainWindow):
             and not event.modifiers()
             and isinstance(watched, QWidget)
             and (watched is self or self.isAncestorOf(watched))
-            and not isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QKeySequenceEdit, QAbstractSpinBox, QComboBox))
+            and not isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QKeySequenceEdit, QAbstractSpinBox, QComboBox, QAbstractButton))
         ):
             if self._playing_episode_id:
                 self._play_pause()

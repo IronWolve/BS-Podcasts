@@ -48,6 +48,8 @@ class DirectoryCharts:
         except DirectoryError:
             pass
 
+        import requests  # session use above has already imported it; needed for the except below
+
         params = {}
         genre_id = CATEGORY_IDS.get(chart_category)
         if genre_id:

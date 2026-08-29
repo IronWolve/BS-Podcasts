@@ -1570,6 +1570,24 @@ class SettingsPage(BasePage):
         self.ui_font.setCurrentIndex(index if index >= 0 else 0)
         self.ui_font.blockSignals(False)
 
+    @staticmethod
+    def combo_chrome_px(combo) -> int:
+        """Pixels a combo's QSS chrome (padding + arrow subcontrol) takes from
+        its width. Measured from the style, not guessed: a hardcoded allowance
+        under-measured and the widest option still clipped under the arrow."""
+        from PySide6.QtCore import QRect
+        from PySide6.QtWidgets import QStyle, QStyleOptionComboBox
+
+        probe_width = scaled_px(400)
+        option = QStyleOptionComboBox()
+        combo.initStyleOption(option)
+        option.rect = QRect(0, 0, probe_width, max(1, combo.sizeHint().height()))
+        field = combo.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxEditField, combo
+        )
+        chrome = probe_width - field.width()
+        return chrome if 0 < chrome < probe_width else scaled_px(66)
+
     def _fit_field(self, field, floor: int):
         """Uniform field width, but never narrower than the widest option —
         an elided dropdown entry ("200 results · dire…") is a bad look."""
@@ -1580,7 +1598,7 @@ class SettingsPage(BasePage):
                 (metrics.horizontalAdvance(field.itemText(i)) for i in range(field.count())),
                 default=0,
             )
-            width = max(floor, widest + scaled_px(52))  # arrow + frame + padding
+            width = max(floor, widest + self.combo_chrome_px(field) + scaled_px(8))
         field.setFixedWidth(width)
 
     def apply_metrics(self):

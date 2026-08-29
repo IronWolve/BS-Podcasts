@@ -145,13 +145,16 @@ def main() -> int:
             "Settings storage path is missing",
         )
         # No settings dropdown may elide any of its options ("200 results · dire…").
+        # Chrome is measured from the style — a guessed allowance previously
+        # passed while the widest option still clipped under the arrow.
         from PySide6.QtWidgets import QComboBox
         for combo in window.settings_page.findChildren(QComboBox):
             metrics = combo.fontMetrics()
+            chrome = type(window.settings_page).combo_chrome_px(combo)
             for option in range(combo.count()):
                 text = combo.itemText(option)
                 require(
-                    metrics.horizontalAdvance(text) + 44 <= combo.minimumWidth(),
+                    metrics.horizontalAdvance(text) + chrome <= combo.minimumWidth(),
                     f"settings dropdown option elides: '{text}'",
                 )
         try:
