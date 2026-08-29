@@ -51,6 +51,9 @@ class LibraryService:
     def shows(self):
         return self.repository.list_shows()
 
+    def episode_count(self) -> int:
+        return self.repository.episode_count()
+
     def new_episode_count(self) -> int:
         return self.repository.new_episode_count()
 

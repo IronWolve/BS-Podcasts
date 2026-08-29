@@ -354,6 +354,7 @@ class MainWindow(QMainWindow):
         self.episode_page.hero.refresh_requested.connect(self._refresh_episode_view)
         self.episode_page.hero.subscribe_requested.connect(lambda: self._subscribe_url(self._preview_episodes_url))
         self.episode_page.hero.website_requested.connect(lambda: self._open_url(self._hero_website))
+        self.podcast_page.sort_changed.connect(lambda key: self._save_setting("ui.podcast_sort", key))
         self.home_page.resume_all_requested.connect(self._show_in_progress)
         self.home_page.resume_remove_requested.connect(self._remove_from_continue_listening)
         self.episode_page.hero.settings_requested.connect(self._podcast_settings)
@@ -414,6 +415,7 @@ class MainWindow(QMainWindow):
         )
         self._apply_skip_settings()
         self.settings_page.load_theme(self.library.setting("ui.theme", "system"))
+        self.podcast_page.set_sort(self.library.setting("ui.podcast_sort", "name"))
         self.settings_page.load_density(self.library.setting("ui.density", "comfortable"))
         set_item_tooltips(self.library.setting("ui.item_tooltips", "0") == "1")
         self.settings_page.load_hover_previews(self.library.setting("ui.item_tooltips", "0") == "1")
@@ -1296,6 +1298,7 @@ class MainWindow(QMainWindow):
         """All queries and UI conversion for a reload. Artwork tints are cache
         lookups (compute=False); sampling runs in `_prime_accents` on a worker."""
         stored_shows = self.library.shows()
+        episode_total = self.library.episode_count()
         stored_episodes = self.library.episodes(limit=5000)
         episode_ids = {episode.id for episode in stored_episodes}
         stored_episodes.extend(
@@ -1306,6 +1309,7 @@ class MainWindow(QMainWindow):
             episodes = self._ui_episodes(stored_episodes, records)
         return {
             "stored_shows": stored_shows,
+            "episode_total": episode_total,
             "shows": [self._ui_podcast(show) for show in stored_shows],
             "episodes": episodes,
             "in_progress": [self._ui_episode(episode) for episode in stored_episodes if episode.position_seconds > 0 and not episode.played],
@@ -1463,6 +1467,7 @@ class MainWindow(QMainWindow):
             return
         data = data or self._read_library()
         stored_shows = data["stored_shows"]
+        episode_total = data.get("episode_total", 0)
         shows = data["shows"]
         episodes = data["episodes"]
         self._all_episode_items = episodes
@@ -1507,7 +1512,7 @@ class MainWindow(QMainWindow):
             if show_count else "Library"
         )
         self.podcast_page.header.set_subtitle(
-            f"{show_count} podcast{'s' if show_count != 1 else ''}  ·  {len(episodes)} episode{'s' if len(episodes) != 1 else ''}" if show_count else ""
+            f"{show_count} podcast{'s' if show_count != 1 else ''}  ·  {episode_total} episode{'s' if episode_total != 1 else ''}" if show_count else ""
         )
         if not shows and not episodes:
             self.context.show_empty()
@@ -4344,6 +4349,7 @@ class MainWindow(QMainWindow):
             description=show.description,
             latest_episode_title=show.latest_episode_title,
             latest_episode_date=MainWindow._display_full_date(show.latest_episode_published_at),
+            latest_sort_key=show.latest_episode_published_at,
             website_url=show.website_url,
             last_refresh_text=MainWindow._relative_time(show.last_refresh),
         )
