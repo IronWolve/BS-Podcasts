@@ -305,7 +305,8 @@ def _badge(painter: QPainter, right: int, top: int, text: str, color: str, fille
 class PodcastDelegate(QStyledItemDelegate):
     MIN_CARD_WIDTH = 140
     CARD_PAD = 10
-    TEXT_BLOCK = 74
+    # Room for two title lines, the episode count, and the latest-episode date.
+    TEXT_BLOCK = 96
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -381,6 +382,19 @@ class PodcastDelegate(QStyledItemDelegate):
             meta = f"Latest {item.latest_episode_date}"
         painter.setPen(QColor(meta_color))
         painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, meta_rect.width()))
+
+        # Freshness line: when a card already leads with its latest date
+        # (directory results) or is an episode card, there is nothing to add.
+        date = item.latest_episode_date
+        if not item.is_episode and date and date != "Unknown date" and not meta.startswith("Latest "):
+            painter.setFont(app_font(11))
+            painter.setPen(QColor(COLORS["subtle"]))
+            date_rect = QRect(meta_rect.x(), meta_rect.bottom() + scaled_px(1), meta_rect.width(), scaled_px(14))
+            painter.drawText(
+                date_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                painter.fontMetrics().elidedText(f"Latest {date}", Qt.TextElideMode.ElideRight, date_rect.width()),
+            )
 
         if item.rank:
             painter.setFont(app_font(11, QFont.Weight.DemiBold))
@@ -468,8 +482,14 @@ class EpisodeDelegate(QStyledItemDelegate):
         if event.type() == QEvent.Type.ToolTip and index.isValid():
             tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
             if tooltip:
-                QToolTip.showText(event.globalPos(), tooltip, view.viewport(), option.rect, 5000)
+                from .widgets import show_hover_bubble
+
+                point = event.globalPos()
+                show_hover_bubble(tooltip, point.x(), point.y() - 6)
                 return True
+        from .widgets import hide_hover_bubble
+
+        hide_hover_bubble()
         QToolTip.hideText()
         return False
 
