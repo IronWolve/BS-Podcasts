@@ -3060,9 +3060,18 @@ class MainWindow(QMainWindow):
             return 200
 
     def _discover_maximum_for(self, operation: str) -> int:
-        # The configured result depth governs every discover view; charts
-        # are capped by what the chart API can return.
-        return 100 if operation == "chart" else self._search_depth()
+        # True ceilings: charts and search/topic are capped by the APIs;
+        # browse/recommend can page much deeper on demand.
+        if operation == "chart":
+            return 100
+        if operation in {"search", "topic"}:
+            return max(200, self._search_depth())
+        return 500
+
+    def _discover_autoload_target(self, operation: str) -> int:
+        # How much loads by itself; the Result depth setting (default 200).
+        # Scroll or Load more continues past it up to the true ceiling.
+        return min(self._discover_maximum_for(operation), self._search_depth())
 
     def _discover_maximum(self) -> int:
         return self._discover_maximum_for(self._discover_operation)
@@ -3070,9 +3079,11 @@ class MainWindow(QMainWindow):
     def _load_more_discover(self):
         if self._discover_loading or self._discover_exhausted or not self._discover_operation or self._discover_limit >= self._discover_maximum():
             return
-        # One request returns up to the cap, so any view completes in a
-        # single follow-up pull instead of a 30-row ladder.
-        self._discover_limit = self._discover_maximum()
+        # One request returns up to the cap, so each stage completes in a
+        # single pull: first to the automatic depth, then (manual scroll /
+        # Load more) to the true ceiling.
+        target = self._discover_autoload_target(self._discover_operation)
+        self._discover_limit = target if self._discover_limit < target else self._discover_maximum()
         if isinstance(self._discover_value, tuple):
             # topic=(category, topic) wants the topic; chart=(type, category)
             # falls back to a readable chart name.
@@ -3676,10 +3687,11 @@ class MainWindow(QMainWindow):
             self._discover_cache[cache_key] = (time.time(), requested_limit, candidates)
             while len(self._discover_cache) > 24:
                 self._discover_cache.pop(next(iter(self._discover_cache)))
-        if not self._discover_exhausted:
-            # No view stops at its first page: pull the rest in the
-            # background while the user reads the first rows. Artwork for
-            # rows already shown is a disk-cache hit.
+        if not self._discover_exhausted and requested_limit < self._discover_autoload_target(operation):
+            # No view stops at its first page: pull up to the configured
+            # depth in the background while the user reads the first rows.
+            # Beyond the depth, scrolling or Load more continues to the
+            # ceiling. Artwork for rows already shown is a disk-cache hit.
             QTimer.singleShot(0, self._load_more_discover)
         if podcasts:
             self.discover_page.banner.clear()
