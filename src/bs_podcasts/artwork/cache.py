@@ -64,10 +64,11 @@ class ArtworkCache:
 
     def _lock_for(self, url: str) -> Lock:
         with self._locks_guard:
-            lock = self._url_locks.get(url)
-            if lock is None:
-                lock = self._url_locks[url] = Lock()
-            return lock
+            entry = self._url_locks.get(url)
+            if entry is None:
+                entry = self._url_locks[url] = [Lock(), 0]
+            entry[1] += 1
+            return entry[0]
 
     def fetch(self, url: str) -> Path:
         if not url:
@@ -75,20 +76,26 @@ class ArtworkCache:
         target = self.path_for(url)
         if target.is_file() and target.stat().st_size > 0:
             return target
-        # Two workers asking for the same image must not race on the .part file.
+        # Two workers asking for the same image must not race on the .part
+        # file. The map entry is refcounted: dropping it while a waiter still
+        # held the lock let a third thread mint a NEW lock for the same URL
+        # and write the same .part concurrently.
         lock = self._lock_for(url)
-        with lock:
-            try:
+        try:
+            with lock:
                 if target.is_file() and target.stat().st_size > 0:
                     return target
                 return self._fetch_locked(url, target)
-            finally:
-                self._release_lock(url, lock)
+        finally:
+            self._release_lock(url, lock)
 
     def _release_lock(self, url: str, lock: Lock):
         with self._locks_guard:
-            if self._url_locks.get(url) is lock:
-                del self._url_locks[url]
+            entry = self._url_locks.get(url)
+            if entry is not None and entry[0] is lock:
+                entry[1] -= 1
+                if entry[1] <= 0:
+                    del self._url_locks[url]
 
     def _fetch_locked(self, url: str, target: Path) -> Path:
         import requests

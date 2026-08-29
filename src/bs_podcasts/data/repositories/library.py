@@ -287,14 +287,25 @@ class LibraryRepository:
             bookmarks = connection.execute(
                 "SELECT COUNT(*) FROM bookmarks b JOIN episodes e ON e.id=b.episode_id WHERE e.show_id=?", (show_id,)
             ).fetchone()[0]
+        with self.database.connect() as connection:
+            artwork_rows = connection.execute(
+                "SELECT DISTINCT episode_artwork_path FROM episodes WHERE show_id=? AND episode_artwork_path != ''",
+                (show_id,),
+            ).fetchall()
         files = []
+        artwork = []
         for row in rows:
             for candidate in (row["target_path"], row["partial_path"]):
                 path = Path(candidate) if candidate else None
                 if path is not None and path.is_file() and str(path) not in {f[0] for f in files}:
                     files.append((str(path), path.stat().st_size))
-        if show.artwork_path and Path(show.artwork_path).is_file():
-            files.append((show.artwork_path, Path(show.artwork_path).stat().st_size))
+        # Artwork is cache-shared by URL: tracked separately so removal can
+        # keep any file another show still references.
+        for candidate in [show.artwork_path] + [row[0] for row in artwork_rows]:
+            path = Path(candidate) if candidate else None
+            if path is not None and path.is_file() and str(path) not in {f[0] for f in artwork}:
+                artwork.append((str(path), path.stat().st_size))
+        files.extend(entry for entry in artwork if entry not in files)
         return {
             "show": show,
             "episodes": episode_count,
@@ -312,9 +323,15 @@ class LibraryRepository:
         # Database first: if this fails nothing on disk has been touched.
         with self.database.connect() as connection:
             connection.execute("DELETE FROM shows WHERE id=?", (show_id,))
+            connection.execute("DELETE FROM settings WHERE key=?", (f"retention.confirmed.{show_id}",))
         removed_files = []
         if delete_files:
+            # Artwork the REMAINING library still references must survive:
+            # the cache is keyed by URL, so two shows can share one file.
+            still_referenced = self.artwork_paths()
             for path, _size in preview["files"]:
+                if path in still_referenced:
+                    continue
                 try:
                     Path(path).unlink()
                     removed_files.append(path)

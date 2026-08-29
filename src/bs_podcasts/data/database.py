@@ -204,7 +204,21 @@ class Database:
             directory.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             damaged = directory / f"library-damaged-{stamp}.db"
-            shutil.copy2(self.path, damaged)
+            # backup() folds the WAL into the snapshot; a raw file copy of a
+            # live WAL database can silently miss recently committed pages,
+            # making the advertised "recoverable original" unrecoverable.
+            try:
+                snapshot_source = sqlite3.connect(self.path)
+                snapshot_target = sqlite3.connect(damaged)
+                try:
+                    snapshot_source.backup(snapshot_target)
+                finally:
+                    snapshot_target.close()
+                    snapshot_source.close()
+            except sqlite3.Error:
+                # The file may be too damaged for the backup API; a raw copy
+                # is then still better than nothing.
+                shutil.copy2(self.path, damaged)
             temporary = self.path.with_suffix(self.path.suffix + ".repair.tmp")
             temporary.unlink(missing_ok=True)
             source = sqlite3.connect(self.path)
@@ -226,7 +240,9 @@ class Database:
                 source.close()
                 if not succeeded:
                     temporary.unlink(missing_ok=True)
+            # Replace first, sidecars after: unlinking the WAL before a failed
+            # replace would damage the live library too.
+            os.replace(temporary, self.path)
             for sidecar in ("-wal", "-shm"):
                 Path(str(self.path) + sidecar).unlink(missing_ok=True)
-            os.replace(temporary, self.path)
             return damaged
