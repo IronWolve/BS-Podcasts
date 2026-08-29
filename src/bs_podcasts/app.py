@@ -142,6 +142,10 @@ def create_application(argv=None) -> QApplication:
     app.setApplicationDisplayName(APP_NAME)
     app.setOrganizationName("BS Podcasts")
     app.setOrganizationDomain(APP_ID)
+    if sys.platform.startswith("linux"):
+        # Matches packaging/bs-podcasts.desktop so the taskbar pairs the
+        # installed icon with the running window.
+        app.setDesktopFileName("bs-podcasts")
     app.setStyle("Fusion")
     app.setWindowIcon(QIcon(str(icon_path(256))))
     load_fonts()

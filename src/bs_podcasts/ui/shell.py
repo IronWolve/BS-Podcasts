@@ -1469,6 +1469,7 @@ class MainWindow(QMainWindow):
         self.navigation.set_badge(PAGE_QUEUE, len(queued))
         self.navigation.set_badge(PAGE_DOWNLOADS, active_downloads)
         show_count = len(stored_shows)
+        self.home_page.set_empty_context(bool(stored_shows))
         self.navigation.set_summary(
             f"{show_count} podcast{'s' if show_count != 1 else ''}" + (f"  ·  {new_total} new" if new_total else "")
             if show_count else "Library"
@@ -3120,7 +3121,14 @@ class MainWindow(QMainWindow):
             try:
                 result = completed.result()
             except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
+                import requests
+
+                offline = isinstance(exc, requests.exceptions.ConnectionError)
+                result = JobResult(
+                    JobStatus.ERROR,
+                    message=str(exc),
+                    value="offline" if offline else None,
+                )
             self._emit_completed(("directory", (operation, value, limit), result))
 
         future.add_done_callback(finished)
@@ -3569,7 +3577,12 @@ class MainWindow(QMainWindow):
         operation, value, requested_limit = request
         if result.status != JobStatus.OK:
             self.discover_page.set_load_more_state(False, loading=False)
-            self.discover_page.banner.show_state("error", result.message or "Directory search failed.", retry=True)
+            if result.value == "offline":
+                self.discover_page.banner.show_state(
+                    "offline", "You appear to be offline. Check the connection and retry.", retry=True
+                )
+            else:
+                self.discover_page.banner.show_state("error", result.message or "Directory search failed.", retry=True)
             return
         candidates = result.value or []
         podcasts = []

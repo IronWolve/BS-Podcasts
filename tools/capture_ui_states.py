@@ -3,6 +3,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import os
+import time
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 OUTPUT = WORKSPACE / "tmp/ui-audit"
@@ -108,6 +109,7 @@ def main() -> int:
 
         class FakeResponse:
             content = SAMPLE.read_bytes()
+            final_url = "https://samples.invalid/preview.xml"
 
         class FakeFetcher:
             def fetch(self, url, etag="", last_modified=""):
@@ -123,29 +125,33 @@ def main() -> int:
         candidate = UiPodcast("Workshop Radio (directory)", "Sample Directory", 0, 0, "#7CA8FF", feed_url="https://samples.invalid/preview.xml", directory_result=True, display_meta="Sample Directory · Technology")
         trending = UiPodcast("Measure twice", "Workshop Radio", 0, 0, "#58D6C2", feed_url="https://samples.invalid/trending.xml", directory_result=True, display_meta="Technology", rank=3, is_episode=True)
         window.discover_page.set_items([candidate, trending])
+        # The earlier _hide_context recorded a user close; the design keeps
+        # the pane closed after that, so reopen before asserting on it.
+        if not window.context.isVisible():
+            window._toggle_context_pane()
         window._show_item(candidate)
-        deadline = 200
-        while "Loading feed details" in window.context.body.toPlainText() and deadline:
+        settle_deadline = time.time() + 5.0
+        while "Loading feed details" in window.context.body.toPlainText() and time.time() < settle_deadline:
             QApplication.processEvents()
-            deadline -= 1
+            time.sleep(0.01)
         assert "episode" in window.context.meta.text(), window.context.meta.text()
         assert window.context.latest_card.isVisible(), "preview did not fill latest episode"
         grab(window, "discover-preview")
         assert window.context.episodes_link.isVisible(), "details pane lacks Episodes link"
         # Trending card resolves to the matching episode in the feed.
         window._show_item(trending)
-        deadline = 200
-        while "Loading feed details" in window.context.body.toPlainText() and deadline:
+        settle_deadline = time.time() + 5.0
+        while "Loading feed details" in window.context.body.toPlainText() and time.time() < settle_deadline:
             QApplication.processEvents()
-            deadline -= 1
+            time.sleep(0.01)
         assert window.context.meta.text().startswith("Episode of Workshop Radio"), window.context.meta.text()
         assert window.context.primary.text() == "Subscribe to show"
         grab(window, "discover-trending")
         window._show_item(candidate)
-        deadline = 200
-        while "Loading feed details" in window.context.body.toPlainText() and deadline:
+        settle_deadline = time.time() + 5.0
+        while "Loading feed details" in window.context.body.toPlainText() and time.time() < settle_deadline:
             QApplication.processEvents()
-            deadline -= 1
+            time.sleep(0.01)
         # Newest-episode sort picks up the fetched freshness on the card.
         window.discover_page.set_discover_sort("newest")
         card = window.discover_page.model.index(0, 0).data(257)
@@ -196,7 +202,9 @@ def main() -> int:
         window._playback_changed(loading)
         QApplication.processEvents()
         assert window.player.next_label.text().startswith("Opening"), window.player.next_label.text()
-        assert not window.player.play.isEnabled(), "play should be busy while opening"
+        # Play stays LIVE while opening: last-intent-wins lets a click
+        # cancel the in-flight autoplay instead of freezing the control.
+        assert window.player.play.isEnabled(), "play must stay clickable while opening"
         assert window.context.title.text() == first.title, "side pane did not follow the playing episode"
         grab(window, "player-opening")
         buffering = PlaybackSnapshot(state=PlaybackState.PLAYING, episode_id=first.id, show_id=show.id, title=first.title, show_title="Workshop Radio", source=source, position=5.0, duration=2520.0, buffering=42)
@@ -220,7 +228,9 @@ def main() -> int:
         QApplication.processEvents()
         assert window.now_playing.isVisible(), "now playing overlay did not open"
         assert window.now_playing.title.text() == first.title
-        assert window.windowTitle().startswith("▶ "), window.windowTitle()
+        # The shell titles the window "{episode} — {show}" while playing
+        # (the "▶" glyph belongs to the tray tooltip, not the title bar).
+        assert window.windowTitle() == f"{first.title} — {show.title}", window.windowTitle()
         grab(window, "now-playing")
         window._escape()
         assert not window.now_playing.isVisible(), "Esc did not close now playing"
