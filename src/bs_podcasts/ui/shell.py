@@ -3060,13 +3060,13 @@ class MainWindow(QMainWindow):
             return 200
 
     def _discover_maximum_for(self, operation: str) -> int:
-        # True ceilings: charts and search/topic are capped by the APIs;
-        # browse/recommend can page much deeper on demand.
-        if operation == "chart":
-            return 100
-        if operation in {"search", "topic"}:
-            return max(200, self._search_depth())
-        return 500
+        # Only the sources' real ceilings: the chart API serves at most 200
+        # (measured; 250 → HTTP 400) and one catalog query caps at 200.
+        # Browse and For You merge several queries, so they carry no app cap
+        # — natural exhaustion (a pull returning nothing new) ends them.
+        if operation in {"chart", "search", "topic"}:
+            return 200
+        return 100000
 
     def _discover_autoload_target(self, operation: str) -> int:
         # How much loads by itself; the Result depth setting (default 200).
@@ -3079,11 +3079,14 @@ class MainWindow(QMainWindow):
     def _load_more_discover(self):
         if self._discover_loading or self._discover_exhausted or not self._discover_operation or self._discover_limit >= self._discover_maximum():
             return
-        # One request returns up to the cap, so each stage completes in a
-        # single pull: first to the automatic depth, then (manual scroll /
-        # Load more) to the true ceiling.
+        # First pull completes the automatic depth in one request; each
+        # manual continuation (scroll / Load more) then asks for a further
+        # 300 until the source has nothing new.
         target = self._discover_autoload_target(self._discover_operation)
-        self._discover_limit = target if self._discover_limit < target else self._discover_maximum()
+        if self._discover_limit < target:
+            self._discover_limit = target
+        else:
+            self._discover_limit = min(self._discover_maximum(), self._discover_limit + 300)
         if isinstance(self._discover_value, tuple):
             # topic=(category, topic) wants the topic; chart=(type, category)
             # falls back to a readable chart name.
