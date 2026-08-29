@@ -51,7 +51,7 @@ from PySide6.QtWidgets import (
 from ..assets import icon_path
 from . import icons
 from .pixmaps import cover, initials
-from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, scaled_px, theme_name
+from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, play_button_size, scaled_px, theme_name
 
 
 NAV_ITEMS = (
@@ -2681,7 +2681,11 @@ class PlayerBar(QFrame):
         layout.addWidget(left)
 
         transport = QVBoxLayout()
-        transport.setSpacing(2)
+        # No implicit margins: wrapping this layout in a widget gave it Qt's
+        # default 9 px frame, which stole the room the play circle needs and
+        # squeezed the controls row until the circle overlapped the seek bar.
+        transport.setContentsMargins(0, 0, 0, 0)
+        transport.setSpacing(SPACE["xs"])
         controls = QHBoxLayout()
         controls.setSpacing(SPACE["sm"])
         controls.addStretch(1)
@@ -2706,6 +2710,7 @@ class PlayerBar(QFrame):
         self.play.setAccessibleName("Play or pause")
         self.play.setCursor(Qt.CursorShape.PointingHandCursor)
         self.play.clicked.connect(self.play_pause_requested)
+        self.play.setFixedSize(play_button_size(), play_button_size())
         self.forward = QPushButton("30")
         self.forward.setObjectName("textButton")
         self.forward.setIcon(icons.icon("skip-forward", COLORS["text"], 20, disabled=COLORS["border"]))
@@ -2775,6 +2780,7 @@ class PlayerBar(QFrame):
         tools.addStretch(1)
         for widget in (self.speed, self.bookmark, self.ab, self.trim, self.sleep, self.queue, self.volume):
             tools.addWidget(widget)
+        tools.setContentsMargins(0, 0, 0, 0)
         tools_wrap = QWidget()
         tools_wrap.setLayout(tools)
         self.tools_wrap = tools_wrap
@@ -2810,6 +2816,33 @@ class PlayerBar(QFrame):
         self.title.setMinimumHeight(self.title.fontMetrics().height() + 8)
 
     SIDE_SHARE = 0.30
+
+    def _required_height(self) -> int:
+        """Height that actually fits both transport rows.
+
+        The play circle is a fixed-size QSS element taller than the other
+        controls; when the bar was a magic 88 px the controls row was squeezed
+        below that size and the circle spilled over the seek bar underneath
+        it. Sizing from content keeps them apart at every type scale."""
+        transport = self.center_wrap.layout() if hasattr(self, "center_wrap") else None
+        spacing = transport.spacing() if transport is not None else SPACE["xs"]
+        margins = self.layout().contentsMargins()
+        # +4: the QSS play circle carries a 2 px border on each side. The
+        # live/hinted heights are included too: if the stylesheet in force was
+        # built at another type scale, the circle is whatever QSS says, and
+        # under-measuring it puts the circle back on top of the seek bar.
+        controls = max(
+            play_button_size() + 4,
+            self.play.sizeHint().height(),
+            self.play.height(),
+            self.back.sizeHint().height(),
+        )
+        timeline = max(self.slider.minimumHeight(), self.elapsed.sizeHint().height())
+        # A couple of spare pixels: if the rows are even 1 px short, Qt
+        # squeezes the controls row and the fixed-size play circle spills
+        # over the seek bar below it.
+        needed = margins.top() + margins.bottom() + controls + spacing + timeline + scaled_px(4)
+        return max(scaled_px(80 if self._compact else 88), needed)
 
     def _balance_zones(self):
         """Give the two side zones an identical width so the transport is
@@ -2882,9 +2915,15 @@ class PlayerBar(QFrame):
 
     def apply_metrics(self):
         self._title_metrics()
+        # Fix the play circle's size in code as well as QSS: a layout row can
+        # only be shorter than its tallest child when that child's size hint
+        # is not yet authoritative (stylesheet polish timing), and a squeezed
+        # row is exactly how the circle ended up drawn over the seek bar.
+        circle = play_button_size()
+        self.play.setFixedSize(circle, circle)
         self._balance_zones()
         self._elide_now_labels()
-        self.setFixedHeight(scaled_px(80 if self._compact else 88))
+        self.setFixedHeight(self._required_height())
         self.layout().setContentsMargins(SPACE["lg"], SPACE["sm"], SPACE["lg"], SPACE["sm"])
         self.layout().setSpacing(SPACE["md"])
         art = scaled_px(56)

@@ -226,6 +226,16 @@ def scaled_px(size_px: int) -> int:
     return max(8, round(int(size_px) * _type_scale))
 
 
+# The play circle is fixed-size in QSS; layouts that must leave room for it
+# read the size from here rather than guessing or waiting for a polished
+# size hint (an under-estimate lets the circle spill over the seek bar).
+PLAY_BUTTON_BASE = 44
+
+
+def play_button_size() -> int:
+    return scaled_px(PLAY_BUTTON_BASE)
+
+
 def _rebuild_type():
     TYPE.clear()
     for role, (size, line_height) in TYPE_BASE.items():
@@ -347,7 +357,7 @@ def stylesheet() -> str:
     family = css_font_family()
     sp = scaled_px
     icon_btn = sp(34)
-    play_btn = sp(44)
+    play_btn = play_button_size()
     return f"""
     * {{
         font-family: {family};
