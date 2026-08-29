@@ -1430,6 +1430,12 @@ class MainWindow(QMainWindow):
         # view (or an unsubscribed preview) with the global episode list.
         if not self._hero_show_id and not self._preview_episodes_url:
             self.episode_page.set_items(episodes)
+            # The global view is capped for responsiveness; say so instead of
+            # silently hiding the tail (each podcast page is complete).
+            self.episode_page.header.set_subtitle(
+                "Newest 5,000 episodes — open a podcast for its full catalogue"
+                if len(episodes) >= 5000 else ""
+            )
         resume_ids = {episode.episode_id for episode in in_progress[:3]}
         unplayed = [episode for episode in episodes if not episode.played and episode.state != "In progress" and episode.episode_id not in resume_ids]
         fresh = [episode for episode in unplayed if episode.is_new]
@@ -1441,6 +1447,7 @@ class MainWindow(QMainWindow):
         self.context.set_queue(queued)
         self.player.set_next(queued[0].title if queued and queued[0].episode_id != self._playing_episode_id else (queued[1].title if len(queued) > 1 else ""))
         self.history_page.set_items(history)
+        self.history_page.header.set_subtitle("Most recent 200 plays" if len(history) >= 200 else "")
         self._reload_downloads()
         active_downloads = sum(record.state.value in {"queued", "downloading", "paused"} for record in data["records"])
         new_total = sum(show.new_count for show in stored_shows)
@@ -1722,7 +1729,9 @@ class MainWindow(QMainWindow):
 
         def work():
             with self._convert_lock:
-                return self._ui_episodes(self.library.episodes(show_id=podcast.show_id))
+                # The complete catalogue: a 500-row default here silently hid
+                # the back catalogue of large podcasts (and broke "oldest").
+                return self._ui_episodes(self.library.episodes(show_id=podcast.show_id, limit=None))
 
         self._run_read(work, lambda episodes: self._apply_open_podcast(podcast, episodes, select_episode_id), "episodes")
 

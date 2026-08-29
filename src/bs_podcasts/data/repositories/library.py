@@ -54,7 +54,7 @@ class LibraryRepository:
             ).fetchall()
         return [self._show(row) for row in rows]
 
-    def list_episodes(self, show_id: int | None = None, limit: int = 500) -> list[Episode]:
+    def list_episodes(self, show_id: int | None = None, limit: int | None = 500) -> list[Episode]:
         sql = (
             "SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM episodes e "
             "JOIN shows s ON s.id=e.show_id"
@@ -63,8 +63,10 @@ class LibraryRepository:
         if show_id is not None:
             sql += " WHERE e.show_id=?"
             params.append(show_id)
-        sql += " ORDER BY e.published_at DESC, e.id DESC LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY e.published_at DESC, e.id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
         with self.database.connect() as connection:
             rows = connection.execute(sql, params).fetchall()
         return [self._episode(row) for row in rows]

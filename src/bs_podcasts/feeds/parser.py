@@ -208,7 +208,7 @@ def _parse_rss(root) -> FeedData:
 
     episodes = []
     seen = set()
-    for item in _children(channel, "item")[:MAX_EPISODES]:
+    for item in _children(channel, "item"):
         title = _text(item, "title") or "Untitled episode"
         media_url, mime, enclosure_bytes = _rss_enclosure(item)
         if not media_url:
@@ -251,14 +251,30 @@ def _parse_rss(root) -> FeedData:
         website_url=_rss_link(channel),
         artwork_url=_artwork(channel),
         categories=_categories(channel),
-        episodes=tuple(episodes),
+        episodes=tuple(_cap_newest(episodes)),
     )
 
+
+
+def _cap_newest(episodes: list) -> list:
+    """Cap a mega-feed at MAX_EPISODES keeping the NEWEST by date.
+
+    The old document-order slice meant an oldest-first feed could never
+    persist its new episodes. Document order is preserved among the kept
+    entries so ordinary feeds are untouched."""
+    if len(episodes) <= MAX_EPISODES:
+        return episodes
+    ranked = sorted(
+        range(len(episodes)),
+        key=lambda index: (episodes[index].published_at or "", -index),
+        reverse=True,
+    )[:MAX_EPISODES]
+    return [episodes[index] for index in sorted(ranked)]
 
 def _parse_atom(root) -> FeedData:
     episodes = []
     seen = set()
-    for entry in _children(root, "entry")[:MAX_EPISODES]:
+    for entry in _children(root, "entry"):
         title = _text(entry, "title") or "Untitled episode"
         media_url, mime, enclosure_bytes = _atom_link(entry, "enclosure")
         if not media_url:
@@ -305,7 +321,7 @@ def _parse_atom(root) -> FeedData:
         website_url=website_url,
         artwork_url=_text(root, "logo", "icon"),
         categories=_categories(root),
-        episodes=tuple(episodes),
+        episodes=tuple(_cap_newest(episodes)),
     )
 
 

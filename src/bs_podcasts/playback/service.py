@@ -137,6 +137,11 @@ class PlaybackService:
                     source = str(downloaded)
             if not source:
                 raise PlaybackUnavailable("Episode has no playable media URL or local file.")
+            # A finished episode's saved position is its duration; resuming
+            # there plays nothing. Replay restarts from the top.
+            start = float(episode.position_seconds)
+            if episode.duration_seconds and start >= max(0.0, float(episode.duration_seconds) - 2.0):
+                start = 0.0
             speed = show.playback_speed if show else 1.0
             if not self._volume_applied:
                 try:
@@ -151,7 +156,7 @@ class PlaybackService:
                 title=episode.title,
                 show_title=episode.show_title,
                 source=source,
-                position=episode.position_seconds,
+                position=start,
                 duration=float(episode.duration_seconds),
                 speed=speed,
                 volume=self.snapshot.volume,
@@ -160,12 +165,12 @@ class PlaybackService:
                 artwork_path=episode.artwork_path,
             )
             self.repository.set_current_playback(episode.id, PlaybackState.LOADING.value)
-            self._last_saved_position = episode.position_seconds
+            self._last_saved_position = start
             if self.engine.capabilities.speed:
                 self.engine.set_speed(speed)
             if self.engine.capabilities.silence_trim:
                 self.engine.set_silence_trim(self.snapshot.trim_level)
-            self.engine.load(source, episode.position_seconds, autoplay)
+            self.engine.load(source, start, autoplay)
             self._arm_load_watchdog(episode.id, source)
             self._emit()
 
@@ -268,6 +273,10 @@ class PlaybackService:
                     self.engine.play()
             elif self.snapshot.state == PlaybackState.PLAYING:
                 self.engine.pause()
+            elif self.snapshot.state == PlaybackState.IDLE and self.snapshot.source:
+                # After EOF the engine has unloaded the file; a bare
+                # engine.play() does nothing. Reload the same source.
+                self._replay_current()
             elif self.snapshot.source:
                 self.engine.play()
 
@@ -276,8 +285,25 @@ class PlaybackService:
             self._guard()
             if self._materialize(autoplay=True):
                 return
-            if self.snapshot.source:
+            if self.snapshot.state == PlaybackState.IDLE and self.snapshot.source:
+                self._replay_current()
+            elif self.snapshot.source:
                 self.engine.play()
+
+    def _replay_current(self):
+        """Restart the finished item (library episode or transient stream).
+
+        Called with the lock held. load_episode restarts a completed
+        episode from zero via its position≈duration rule."""
+        if self.snapshot.episode_id is not None:
+            self.load_episode(self.snapshot.episode_id, autoplay=True)
+            return
+        self.snapshot = replace(
+            self.snapshot, state=PlaybackState.LOADING, position=0.0, buffering=None, message=""
+        )
+        self.engine.load(self.snapshot.source, 0.0, True)
+        self._arm_load_watchdog(None, self.snapshot.source)
+        self._emit()
 
     def pause(self):
         with self._lock:
