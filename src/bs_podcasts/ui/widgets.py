@@ -1172,8 +1172,33 @@ def cached_color(value: str) -> QColor:
     return QColor(value)
 
 
+class TimeBubble(QFrame):
+    """Hover-time readout for the seek bar, styled like the app's toasts and
+    popovers instead of the platform's plain tooltip box."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("seekBubble")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(SPACE["sm"] + 2, 3, SPACE["sm"] + 2, 3)
+        layout.setSpacing(0)
+        self.label = QLabel("")
+        self.label.setObjectName("seekBubbleText")
+        layout.addWidget(self.label)
+
+    def show_at(self, text: str, global_center_x: int, global_top: int):
+        self.label.setText(text)
+        self.adjustSize()
+        self.move(global_center_x - self.width() // 2, global_top - self.height() - 6)
+        if not self.isVisible():
+            self.show()
+        self.raise_()
+
+
 class SeekSlider(QSlider):
-    """Click-to-seek slider with hover time tooltip and chapter markers."""
+    """Click-to-seek slider with hover time readout and chapter markers."""
 
     hover_time = Signal(float)
 
@@ -1193,6 +1218,7 @@ class SeekSlider(QSlider):
         self._formatter = None
         self._duration = 0.0
         self._ab = (None, None)
+        self._bubble = None
 
     def set_markers(self, fractions):
         markers = tuple(fractions)
@@ -1246,7 +1272,15 @@ class SeekSlider(QSlider):
             event.accept()
         elif self.isEnabled() and self._duration and self._formatter:
             fraction = self._value_at(int(event.position().x())) / max(1, self.maximum())
-            QToolTip.showText(event.globalPosition().toPoint() - QPoint(0, 28), self._formatter(fraction * self._duration), self)
+            if self._bubble is None:
+                self._bubble = TimeBubble(self)
+            self._bubble.show_at(
+                self._formatter(fraction * self._duration),
+                int(event.globalPosition().x()),
+                self.mapToGlobal(QPoint(0, 0)).y(),
+            )
+        elif self._bubble is not None:
+            self._bubble.hide()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -1261,8 +1295,15 @@ class SeekSlider(QSlider):
         super().enterEvent(event)
 
     def leaveEvent(self, event):
+        if self._bubble is not None:
+            self._bubble.hide()
         self.update()
         super().leaveEvent(event)
+
+    def hideEvent(self, event):
+        if self._bubble is not None:
+            self._bubble.hide()
+        super().hideEvent(event)
 
     def paintEvent(self, _event):
         # Painted entirely by hand: with QSS or native styling, the unfilled
@@ -2595,14 +2636,23 @@ class PlayerBar(QFrame):
         self._compact = False
         self._now_title = "Nothing playing"
         self._now_show = "Choose an episode to begin"
+        # Three zones with SYMMETRIC sides, so the transport sits at the true
+        # centre of the bar: the side columns carry equal stretch and an equal
+        # minimum width. A long title lengthens inside its own column instead
+        # of shoving the play controls off-centre.
         layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE["lg"], SPACE["sm"], SPACE["lg"], SPACE["sm"])
         layout.setSpacing(SPACE["md"])
 
+        left = QWidget()
+        left_row = QHBoxLayout(left)
+        left_row.setContentsMargins(0, 0, 0, 0)
+        left_row.setSpacing(SPACE["md"])
+        self.left_wrap = left
         self.art = Artwork(56, 10)
         self.art.setAccessibleName("Now playing artwork")
         self.art.clicked.connect(self._open_now_playing)
-        layout.addWidget(self.art)
+        left_row.addWidget(self.art)
 
         now = QVBoxLayout()
         now.setSpacing(1)
@@ -2623,17 +2673,25 @@ class PlayerBar(QFrame):
         now_wrap = QWidget()
         now_wrap.setLayout(now)
         now_wrap.setMinimumWidth(scaled_px(180))
+        # Ignored width: the title fills its column but never demands more,
+        # which would widen the column and unbalance the sides.
+        now_wrap.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.now_wrap = now_wrap
-        # The title column shares the bar's free space with the transport
-        # (equal stretch) instead of being caged at a fixed width — a title
-        # only elides when the window genuinely can't fit it.
-        layout.addWidget(now_wrap, 1)
+        left_row.addWidget(now_wrap, 1)
+        layout.addWidget(left)
 
         transport = QVBoxLayout()
         transport.setSpacing(2)
         controls = QHBoxLayout()
         controls.setSpacing(SPACE["sm"])
         controls.addStretch(1)
+        # Pads that make the PLAY button — the visual anchor of the bar — sit
+        # on the centre line, not merely the button group's midpoint.
+        self._pad_left = QWidget()
+        self._pad_right = QWidget()
+        for pad in (self._pad_left, self._pad_right):
+            pad.setFixedWidth(0)
+        controls.addWidget(self._pad_left)
         self.back = QPushButton("15")
         self.back.setObjectName("textButton")
         self.back.setIcon(icons.icon("skip-back", COLORS["text"], 20, disabled=COLORS["border"]))
@@ -2660,6 +2718,7 @@ class PlayerBar(QFrame):
         controls.addWidget(self.play)
         controls.addWidget(self.forward)
         controls.addWidget(self.next)
+        controls.addWidget(self._pad_right)
         controls.addStretch(1)
         timeline = QHBoxLayout()
         timeline.setSpacing(SPACE["sm"])
@@ -2679,7 +2738,10 @@ class PlayerBar(QFrame):
         timeline.addWidget(self.remaining)
         transport.addLayout(controls)
         transport.addLayout(timeline)
-        layout.addLayout(transport, 1)
+        center = QWidget()
+        center.setLayout(transport)
+        self.center_wrap = center
+        layout.addWidget(center, 1)
         self.set_skip_values(15, 30)
 
         tools = QHBoxLayout()
@@ -2710,9 +2772,14 @@ class PlayerBar(QFrame):
         self.volume_popover.volume_changed.connect(self.volume_requested)
         self.volume.clicked.connect(self._show_volume)
         self.volume.installEventFilter(self)
+        tools.addStretch(1)
         for widget in (self.speed, self.bookmark, self.ab, self.trim, self.sleep, self.queue, self.volume):
             tools.addWidget(widget)
-        layout.addLayout(tools)
+        tools_wrap = QWidget()
+        tools_wrap.setLayout(tools)
+        self.tools_wrap = tools_wrap
+        layout.addWidget(tools_wrap)
+        self._balance_zones()
         self.set_enabled(False)
         self._refresh_chrome()
 
@@ -2726,6 +2793,11 @@ class PlayerBar(QFrame):
         self.back.setAccessibleName(f"Back {self._skip_back} seconds")
         self.forward.setToolTip(f"Forward {self._skip_forward} seconds  ·  Ctrl+Right")
         self.forward.setAccessibleName(f"Forward {self._skip_forward} seconds")
+        # Different label widths ("5" vs "120") change the transport's
+        # balance, so re-centre the play button once the new labels have been
+        # laid out (an inline call would measure the stale size hints).
+        if hasattr(self, "_pad_left"):
+            QTimer.singleShot(0, self._centre_play)
 
     def set_compact(self, compact: bool):
         self._compact = bool(compact)
@@ -2736,6 +2808,50 @@ class PlayerBar(QFrame):
         """The now-playing title must fit its full font height plus the 2px
         focus ring and padding, or descenders get shaved off."""
         self.title.setMinimumHeight(self.title.fontMetrics().height() + 8)
+
+    SIDE_SHARE = 0.30
+
+    def _balance_zones(self):
+        """Give the two side zones an identical width so the transport is
+        centred on the BAR, not merely on whatever space the title left over.
+        The side share is generous (about a quarter of the bar each), so long
+        titles have real room without ever displacing the controls."""
+        layout = self.layout()
+        if layout is None or not hasattr(self, "tools_wrap"):
+            return
+        margins = layout.contentsMargins()
+        available = self.width() - margins.left() - margins.right() - 2 * layout.spacing()
+        if available <= 0:
+            return
+        floor = max(self.tools_wrap.sizeHint().width(), self.art.width() + self.now_wrap.minimumWidth())
+        side = max(floor, int(available * self.SIDE_SHARE))
+        side = min(side, max(0, (available - self.center_wrap.minimumSizeHint().width()) // 2))
+        side = max(side, 0)
+        self.left_wrap.setFixedWidth(side)
+        self.tools_wrap.setFixedWidth(side)
+        self._centre_play()
+
+    def _centre_play(self):
+        """Balance the transport row around the play button: the controls are
+        asymmetric (two buttons plus Next to its right, one to its left), so
+        without a compensating pad the big play circle reads off-centre even
+        though the group is centred."""
+        spacing = SPACE["sm"]
+        # sizeHint only: live widths are the OUTPUT of this calculation, so
+        # feeding them back in oscillates (and is garbage before first
+        # layout). Hidden buttons (no episode loaded, compact bar) occupy no
+        # space, so they must not count toward the balance either.
+        def extent(buttons):
+            return sum(
+                button.sizeHint().width() + spacing
+                for button in buttons
+                if not button.isHidden()
+            )
+        before = extent((self.back,))
+        after = extent((self.forward, self.next))
+        delta = after - before
+        self._pad_left.setFixedWidth(max(0, delta))
+        self._pad_right.setFixedWidth(max(0, -delta))
 
     def _now_text_width(self) -> int:
         width = self.now_wrap.width()
@@ -2754,13 +2870,19 @@ class PlayerBar(QFrame):
         self.show_label.setText(show)
         self.show_label.setToolTip(self._now_show if show != self._now_show else "")
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._balance_zones()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._balance_zones()
         self._elide_now_labels()
         self._refresh_status()
 
     def apply_metrics(self):
         self._title_metrics()
+        self._balance_zones()
         self._elide_now_labels()
         self.setFixedHeight(scaled_px(80 if self._compact else 88))
         self.layout().setContentsMargins(SPACE["lg"], SPACE["sm"], SPACE["lg"], SPACE["sm"])
@@ -2878,6 +3000,10 @@ class PlayerBar(QFrame):
             self.now_playing_requested.emit()
 
     def _refresh_chrome(self):
+        # Transport buttons appear/disappear with playback state; re-balance
+        # once the new visibility has been applied.
+        if hasattr(self, "_pad_left"):
+            QTimer.singleShot(0, self._centre_play)
         has = self._has_episode
         compact = self._compact
         for widget in (self.back, self.forward, self.next, self.slider, self.elapsed, self.remaining, self.speed):
