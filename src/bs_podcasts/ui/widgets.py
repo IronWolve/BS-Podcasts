@@ -1172,9 +1172,9 @@ def cached_color(value: str) -> QColor:
     return QColor(value)
 
 
-class TimeBubble(QFrame):
-    """Hover-time readout for the seek bar, styled like the app's toasts and
-    popovers instead of the platform's plain tooltip box."""
+class HoverBubble(QFrame):
+    """Hover readout styled like the app's toasts and popovers instead of the
+    platform's plain tooltip box (square corners, OS colours)."""
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
@@ -1190,11 +1190,39 @@ class TimeBubble(QFrame):
 
     def show_at(self, text: str, global_center_x: int, global_top: int):
         self.label.setText(text)
+        self.label.setWordWrap("\n" in text or len(text) > 60)
+        self.setMaximumWidth(scaled_px(360))
         self.adjustSize()
-        self.move(global_center_x - self.width() // 2, global_top - self.height() - 6)
+        screen = self.screen() or QApplication.primaryScreen()
+        left = global_center_x - self.width() // 2
+        if screen is not None:
+            area = screen.availableGeometry()
+            left = max(area.left() + 4, min(left, area.right() - self.width() - 4))
+        self.move(left, global_top - self.height() - 6)
         if not self.isVisible():
             self.show()
         self.raise_()
+
+
+# One shared bubble for every hover readout (card actions, item previews):
+# separate instances would leave stale popups behind when the pointer moves
+# between surfaces.
+_shared_bubble = None
+
+
+def show_hover_bubble(text: str, global_center_x: int, global_top: int):
+    global _shared_bubble
+    if not text:
+        hide_hover_bubble()
+        return
+    if _shared_bubble is None:
+        _shared_bubble = HoverBubble()
+    _shared_bubble.show_at(text, global_center_x, global_top)
+
+
+def hide_hover_bubble():
+    if _shared_bubble is not None:
+        _shared_bubble.hide()
 
 
 class SeekSlider(QSlider):
@@ -1273,7 +1301,7 @@ class SeekSlider(QSlider):
         elif self.isEnabled() and self._duration and self._formatter:
             fraction = self._value_at(int(event.position().x())) / max(1, self.maximum())
             if self._bubble is None:
-                self._bubble = TimeBubble(self)
+                self._bubble = HoverBubble(self)
             self._bubble.show_at(
                 self._formatter(fraction * self._duration),
                 int(event.globalPosition().x()),

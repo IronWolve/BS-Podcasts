@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from . import icons
 from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
-from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner
+from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, hide_hover_bubble, show_hover_bubble
 from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, scaled_px
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 
@@ -118,6 +118,7 @@ class _ListPageMixin:
             target = (id(view), index.row() if index.isValid() else -1)
             if target != getattr(self, "_tooltip_target", None):
                 QToolTip.hideText()
+                hide_hover_bubble()
                 self._tooltip_target = target
         elif event_type in {
             QEvent.Type.Leave,
@@ -126,6 +127,7 @@ class _ListPageMixin:
             QEvent.Type.Hide,
         }:
             QToolTip.hideText()
+            hide_hover_bubble()
             self._tooltip_target = None
 
     def _selected(self, current, previous):
@@ -505,7 +507,10 @@ class PodcastGridPage(BasePage, _ListPageMixin):
                 item = index.data(ItemRoles.ITEM)
                 if item is not None:
                     tip = "Play latest" if item.show_id else ("Subscribed" if item.subscribed else "Subscribe")
-                    QToolTip.showText(event.globalPosition().toPoint(), tip, self.view.viewport())
+                    point = event.globalPosition().toPoint()
+                    show_hover_bubble(tip, point.x(), point.y() - 6)
+            else:
+                hide_hover_bubble()
         if (
             watched is self.view.viewport()
             and event.type() == QEvent.Type.MouseButtonRelease
