@@ -64,8 +64,9 @@ class ListeningRepository:
         sql = "SELECT * FROM transcript_segments WHERE episode_id=?"
         params: list[object] = [episode_id]
         if query.strip():
-            sql += " AND text LIKE ?"
-            params.append(f"%{query.strip()}%")
+            sql += " AND text LIKE ? ESCAPE '\\'"
+            escaped = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            params.append(f"%{escaped}%")
         sql += " ORDER BY segment_index"
         with self.database.connect() as connection:
             rows = connection.execute(sql, params).fetchall()

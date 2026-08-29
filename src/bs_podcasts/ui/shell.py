@@ -975,8 +975,9 @@ class MainWindow(QMainWindow):
             page.header.search.setFocus()
             page.header.search.selectAll()
         else:
-            self.navigation.select(PAGE_HOME)
-            self.home_page.header.search.setFocus()
+            # The inline filter hides in tight headers; jumping to Home lost
+            # the user's place. Global search covers the same need in place.
+            self._open_search()
 
     def _selected_episode_ids(self, page=None):
         page = page or self.pages.currentWidget()
@@ -3489,6 +3490,11 @@ class MainWindow(QMainWindow):
                     if self.episode_page.header.action:
                         self.episode_page.header.action.setEnabled(True)
                 self._request_reload()
+                # The global reload deliberately never replaces an open
+                # podcast page, so re-read just that show or its list stays
+                # stale until the user leaves and reopens it.
+                if self._hero_show_id and self.pages.currentIndex() == PAGE_EPISODES:
+                    self._reload_open_podcast_after_refresh(self._hero_show_id)
                 self._summarize_refresh(total, new_episodes, len(self._refresh_failed))
             # Batch: never one message per feed; problems are shown in place.
             return
@@ -4082,7 +4088,7 @@ class MainWindow(QMainWindow):
 
         def work():
             response = fetcher.fetch(feed_url)
-            return parse_feed(response.content)
+            return parse_feed(response.content, base_url=response.final_url)
 
         future = self.jobs.submit(work)
         self._pending_jobs.add(future)

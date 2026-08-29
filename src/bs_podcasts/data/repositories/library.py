@@ -427,10 +427,12 @@ class LibraryRepository:
 
     def enqueue(self, episode_id: int):
         with self.database.connect() as connection:
-            row = connection.execute("SELECT COALESCE(MAX(position), 0) + 1 AS next FROM queue").fetchone()
+            # Position computed inside the INSERT: a separate SELECT let two
+            # connections claim the same position.
             connection.execute(
-                "INSERT OR IGNORE INTO queue(episode_id, position, added_at) VALUES (?, ?, ?)",
-                (episode_id, row["next"], time.time()),
+                "INSERT OR IGNORE INTO queue(episode_id, position, added_at) "
+                "SELECT ?, COALESCE(MAX(position), 0) + 1, ? FROM queue",
+                (episode_id, time.time()),
             )
 
     def list_queue(self) -> list[Episode]:

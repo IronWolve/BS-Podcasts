@@ -52,7 +52,7 @@ class RefreshService:
                 )
                 return RefreshReport(show_id, health, not_modified=True)
 
-            feed = parse_feed(response.content)
+            feed = parse_feed(response.content, base_url=response.final_url)
             imported = self.repository.import_feed(show_id, feed)
             health = Health.OK if feed.episodes else Health.PARTIAL
             self.repository.record_refresh_success(

@@ -98,8 +98,12 @@ class FeedFetcher:
                     raise FeedFetchError("Feed response exceeds the size limit.")
             content_type = response.headers.get("Content-Type", "").lower()
             discovered = ""
-            if allow_discovery and (
-                "text/html" in content_type or bytes(body[:256]).lstrip().lower().startswith(b"<!doctype html")
+            head = bytes(body[:512]).lstrip().lower()
+            # Many hosts serve RSS with a text/html Content-Type; a body that
+            # is actually XML must parse as a feed, not fail HTML discovery.
+            looks_like_xml = head.startswith((b"<?xml", b"<rss", b"<feed", b"<rdf"))
+            if allow_discovery and not looks_like_xml and (
+                "text/html" in content_type or head.startswith(b"<!doctype html")
             ):
                 parser = _FeedLinkParser()
                 parser.feed(bytes(body).decode(response.encoding or "utf-8", "replace"))
