@@ -1599,6 +1599,13 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             self.discover_page.banner.show_state("error", str(exc))
             return
+        # Seed the new show with the directory card's already-cached artwork:
+        # until the first refresh fetches its own, every library-side render
+        # of this podcast would flash the initials placeholder ("a letter").
+        card = next((item for item in self.discover_page._all_items if item.feed_url == feed_url), None)
+        if card is not None and card.artwork_path and not show.artwork_path:
+            self.library.repository.set_artwork_path(show.id, card.artwork_path)
+            show = self.library.repository.get_show(show.id) or show
         self._request_reload()
         self._submit_refresh(show.id)
         if self.pages.currentWidget() is self.episode_page and self._preview_episodes_url == feed_url:
