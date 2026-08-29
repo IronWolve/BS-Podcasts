@@ -2094,13 +2094,20 @@ def _duration_seconds(text: str) -> int:
     return total
 
 
+def mnemonic_safe(text: str) -> str:
+    """Buttons, menu actions, and tabs treat '&' as a mnemonic marker and
+    swallow it ("Q&A" renders "QA"); feed-derived text keeps its ampersands
+    by doubling them. Labels are unaffected and must NOT be escaped."""
+    return (text or "").replace("&", "&&")
+
+
 def set_button_text_elided(button: QPushButton, text: str, cap_px: int):
     """Buttons size to their full label, so a long dynamic name (a show
     title) forces every ancestor wider than its pane and the content clips
     at the window edge. Elide to a hard cap; the full name moves to the
     tooltip."""
     elided = button.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, cap_px)
-    button.setText(elided)
+    button.setText(mnemonic_safe(elided))
     button.setToolTip(text if elided != text else "")
 
 
@@ -2741,7 +2748,7 @@ class PlayerBar(QFrame):
         title hard-clips mid-letter at the column edge."""
         avail = self._now_text_width()
         title = self.title.fontMetrics().elidedText(self._now_title, Qt.TextElideMode.ElideRight, avail)
-        self.title.setText(title)
+        self.title.setText(mnemonic_safe(title))
         self.title.setToolTip(self._now_title if title != self._now_title else "Show now playing")
         show = self.show_label.fontMetrics().elidedText(self._now_show, Qt.TextElideMode.ElideRight, avail)
         self.show_label.setText(show)
@@ -2886,7 +2893,7 @@ class PlayerBar(QFrame):
         # generic hint is replaced here.
         if not has:
             self.title.setToolTip("")
-        elif self.title.text() == self._now_title:
+        elif self.title.text() == mnemonic_safe(self._now_title):
             self.title.setToolTip("Show now playing")
 
     # -- state -------------------------------------------------------------
