@@ -822,9 +822,18 @@ class MainWindow(QMainWindow):
             self._notify("No unreachable podcasts")
             return
         names = "\n".join(f"• {show.title}" for show in problems[:8]) + ("\n…" if len(problems) > 8 else "")
+        # Destructive storage work shows exact targets and reclaimed size,
+        # like single unsubscribe and Reset library already do.
+        previews = [self.library.removal_preview(show.id) for show in problems]
+        file_count = sum(len(p.get("files", ())) for p in previews)
+        size = sum(p.get("bytes", 0) for p in previews)
+        file_note = (
+            f"\n\nDeletes {file_count} downloaded/artwork file{'s' if file_count != 1 else ''} ({self._format_bytes(size)})."
+            if file_count else "\n\nNo downloaded files are affected."
+        )
         dialog = ConfirmDialog(
             f"Remove {len(problems)} unreachable podcast{'s' if len(problems) != 1 else ''}?",
-            "Their feeds failed repeatedly. Subscriptions, listening progress and any downloads for them are deleted; you can re-add any of them later.\n\n" + names,
+            "Their feeds failed repeatedly. Subscriptions, listening progress and any downloads for them are deleted; you can re-add any of them later.\n\n" + names + file_note,
             "Remove all", destructive=True, parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -1083,7 +1092,7 @@ class MainWindow(QMainWindow):
 
             self._notify(f"Marked {len(ids)} episode{'s' if len(ids) != 1 else ''} as {'played' if played else 'unplayed'}", "success", "Undo", undo)
             if played and self.library.setting("downloads.delete_played", "0") == "1":
-                self._delete_played_quietly()
+                self._delete_played_quietly(ids)
 
     def _remove_from_continue_listening(self, items):
         if self.library is None:
@@ -1103,7 +1112,7 @@ class MainWindow(QMainWindow):
         label = "Removed from Continue listening" if len(ids) == 1 else f"Removed {len(ids)} from Continue listening"
         self._notify(label, "success", "Undo", undo)
         if self.library.setting("downloads.delete_played", "0") == "1":
-            self._delete_played_quietly()
+            self._delete_played_quietly(ids)
 
     def _set_favorites(self, items, favorite: bool):
         if self.library is None:
@@ -2138,8 +2147,18 @@ class MainWindow(QMainWindow):
 
         future.add_done_callback(finished)
 
-    def _delete_played_quietly(self):
-        previews = self.downloads.played_previews() if self.downloads else []
+    def _delete_played_quietly(self, episode_ids=None):
+        """Auto-delete downloads for episodes that JUST became played.
+
+        The setting reads per-episode; deleting every historical played
+        download without confirmation violated the destructive-storage rule.
+        Bulk cleanup stays behind the confirming dialog."""
+        if self.downloads is None:
+            return
+        previews = self.downloads.played_previews()
+        if episode_ids is not None:
+            wanted = set(episode_ids)
+            previews = [preview for preview in previews if preview.episode_id in wanted]
         if not previews:
             return
         freed = sum(self.downloads.delete(preview.episode_id) for preview in previews)
@@ -2521,7 +2540,7 @@ class MainWindow(QMainWindow):
                 self.player._streaming = bool(source)
                 self._apply_skip_settings()
             if self._previous_playing_id and self.library is not None and self.library.setting("downloads.delete_played", "0") == "1":
-                self._delete_played_quietly()
+                self._delete_played_quietly([self._previous_playing_id])
             self._previous_playing_id = episode_id
         if changed and episode_id and self.listening is not None:
             chapters = self.listening.chapters(episode_id)

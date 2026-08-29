@@ -5,6 +5,8 @@ from pathlib import Path
 from threading import Event, Lock
 from urllib.parse import urlparse
 import os
+from hashlib import sha256
+import re
 import shutil
 
 from ..net import SessionSlot
@@ -79,15 +81,23 @@ class DownloadService:
                 return self.downloads.get(episode_id)
             cancellation = Event()
             self._cancellations[episode_id] = cancellation
-        self.directory.mkdir(parents=True, exist_ok=True)
-        if shutil.disk_usage(self.directory).free < self.MIN_FREE_BYTES:
-            message = "Not enough free space in the downloads folder."
-            self.downloads.progress(episode_id, DownloadState.ERROR, 0, 0, message)
-            self._emit(episode_id, DownloadState.ERROR, 0, 0, message)
-            with self._lock:
-                self._cancellations.pop(episode_id, None)
-            raise DownloadError(message)
         try:
+            # Setup lives inside the guard: an unusable path (mkdir or
+            # disk_usage raising) previously leaked a permanently "active"
+            # episode until restart, with the record stuck at queued.
+            try:
+                self.directory.mkdir(parents=True, exist_ok=True)
+                free = shutil.disk_usage(self.directory).free
+            except OSError as exc:
+                message = f"Downloads folder is unusable: {exc}"
+                self.downloads.progress(episode_id, DownloadState.ERROR, 0, 0, message)
+                self._emit(episode_id, DownloadState.ERROR, 0, 0, message)
+                raise DownloadError(message) from exc
+            if free < self.MIN_FREE_BYTES:
+                message = "Not enough free space in the downloads folder."
+                self.downloads.progress(episode_id, DownloadState.ERROR, 0, 0, message)
+                self._emit(episode_id, DownloadState.ERROR, 0, 0, message)
+                raise DownloadError(message)
             last_error = None
             for delay in (0.0,) + self.RETRY_DELAYS:
                 if delay and cancellation.wait(delay):
@@ -124,8 +134,15 @@ class DownloadService:
         episode = self.library.get_episode(episode_id)
         if episode is None or not episode.media_url:
             raise DownloadError("Episode has no downloadable media URL.")
-        target = self._target(episode_id, episode.media_url)
-        partial = target.with_suffix(target.suffix + ".part")
+        record = self.downloads.get(episode_id)
+        if record is not None and record.target_path:
+            # Honor the paths the record was prepared with, so an in-flight
+            # partial from an older naming scheme still resumes.
+            target = Path(record.target_path)
+            partial = Path(record.partial_path) if record.partial_path else target.with_suffix(target.suffix + ".part")
+        else:
+            target = self._target(episode_id, episode.media_url)
+            partial = target.with_suffix(target.suffix + ".part")
         self.directory.mkdir(parents=True, exist_ok=True)
         existing = partial.stat().st_size if partial.is_file() else 0
 
@@ -142,9 +159,25 @@ class DownloadService:
             )
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
-            if content_type.startswith("text/html") or content_type in {"text/plain", "application/json"}:
-                raise DownloadError(f"Server returned {content_type or 'a non-media response'} instead of audio.")
+            # Accept audio/video plus ambiguous binary types; reject anything
+            # that is provably not media (images, documents, executables were
+            # previously saved and marked complete).
+            acceptable = (
+                not content_type
+                or content_type.startswith(("audio/", "video/"))
+                or content_type in {"application/octet-stream", "binary/octet-stream", "application/ogg"}
+            )
+            if not acceptable:
+                raise DownloadError(f"Server returned {content_type} instead of audio.")
             append = existing > 0 and response.status_code == 206
+            if append:
+                # A 206 whose Content-Range start doesn't match our partial
+                # would corrupt the file if appended blindly. A missing
+                # header is tolerated (the Range was echoed implicitly).
+                content_range = response.headers.get("Content-Range", "")
+                match = re.match(r"bytes (\d+)-", content_range)
+                if content_range and (not match or int(match.group(1)) != existing):
+                    raise DownloadError(f"Server resumed at the wrong offset ({content_range}).")
             if existing and not append:
                 existing = 0
             try:
@@ -252,28 +285,45 @@ class DownloadService:
         return previews
 
     def delete(self, episode_id: int) -> int:
-        """Cancel if active, unlink the files, forget the record. Returns bytes freed."""
+        """Cancel if active, unlink the files, forget the record. Returns bytes freed.
+
+        Bytes count only after a successful unlink, and a record whose file
+        survives is marked error instead of removed — removing it while the
+        file remained left an untracked orphan reported as reclaimed."""
         self.cancel(episode_id)
         record = self.downloads.get(episode_id)
         if record is None:
             return 0
         freed = 0
+        failed = ""
         for candidate in (record.target_path, record.partial_path):
             path = Path(candidate) if candidate else None
             if path is not None and path.is_file():
                 try:
-                    freed += path.stat().st_size
+                    size = path.stat().st_size
                     path.unlink()
-                except OSError:
-                    pass
-        self.downloads.remove(episode_id)
+                    freed += size
+                except OSError as exc:
+                    failed = str(exc)
+        if failed:
+            self.downloads.progress(
+                episode_id, DownloadState.ERROR, record.bytes_done, record.bytes_total,
+                f"File could not be deleted: {failed}",
+            )
+        else:
+            self.downloads.remove(episode_id)
         return freed
 
     def _target(self, episode_id: int, url: str) -> Path:
         suffix = Path(urlparse(url).path).suffix.lower()
         if not suffix or len(suffix) > 8:
             suffix = ".media"
-        return self.directory / f"episode-{episode_id}{suffix}"
+        # SQLite can reuse a deleted episode's rowid; a URL digest in the
+        # name keeps a NEW episode from ever colliding with a leftover file
+        # from the id's previous owner. Existing records keep their stored
+        # paths (see _download_once), so nothing on disk is renamed.
+        digest = sha256(url.encode("utf-8", "ignore")).hexdigest()[:10]
+        return self.directory / f"episode-{episode_id}-{digest}{suffix}"
 
     def _emit(
         self,
