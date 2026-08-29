@@ -180,7 +180,7 @@ TYPE_BASE = {
 TYPE = {key: value for key, value in TYPE_BASE.items()}
 
 FONT_STACK = ("Inter", "Noto Sans", "DejaVu Sans")
-FONT_FAMILY = '"Inter", sans-serif'
+FONT_FAMILY = '"Inter"'
 
 TEXT_SIZES = (
     ("small", "Small", 0.88),
@@ -277,7 +277,10 @@ def css_font_family() -> str:
     extras = [name for name in FONT_STACK if name and name != primary and name in installed]
     names = [primary, *extras] if primary else extras
     quoted = ", ".join(f'"{name}"' for name in names if name)
-    return f"{quoted}, sans-serif" if quoted else "sans-serif"
+    # No generic fallback when real families resolved: macOS treats the
+    # trailing "sans-serif" as a missing family and pays a ~230 ms alias
+    # scan for it at every launch.
+    return quoted if quoted else "sans-serif"
 
 
 def available_ui_fonts() -> list[tuple[str, str]]:

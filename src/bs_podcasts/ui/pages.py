@@ -966,6 +966,21 @@ class HomePage(BasePage, _ListPageMixin):
         self.resume_view.setVisible(visible)
         self.resume_view.setFixedHeight(min(count, self.RESUME_ROWS) * self._resume_row_height() + 4)
 
+    def set_empty_context(self, has_shows: bool):
+        """Empty library and quiet library are different states."""
+        if has_shows:
+            self.empty.set_text(
+                "Nothing new yet",
+                "New episodes from your podcasts land here after a refresh.",
+                "Discover podcasts",
+            )
+        else:
+            self.empty.set_text(
+                "Welcome to BS Podcasts",
+                "Your library is empty — add a podcast or explore the directory to get started.",
+                "Discover podcasts",
+            )
+
     def set_sections(self, in_progress, latest):
         key = self._current_key()
         in_progress = list(in_progress)

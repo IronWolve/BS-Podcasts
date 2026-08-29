@@ -10,4 +10,3 @@ Categories=AudioVideo;Audio;Player;
 Keywords=podcast;audio;player;rss;
 StartupNotify=true
 StartupWMClass=bs-podcasts
-MimeType=x-scheme-handler/podcast;

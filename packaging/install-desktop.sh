@@ -10,7 +10,10 @@ for size in 32 64 128 256 512; do
   mkdir -p "$ICONS/${size}x${size}/apps"
   cp "$BRANDING/bs-podcasts-icon-$size.png" "$ICONS/${size}x${size}/apps/bs-podcasts.png"
 done
-cp "$HERE/bs-podcasts.desktop" "$APPS/bs-podcasts.desktop"
+# The venv entry point is not on the desktop session's PATH; point Exec at
+# the workspace launcher so the menu entry actually starts the app.
+LAUNCHER="$(cd "$HERE/../../.." && pwd)/start.sh"
+sed "s|^Exec=.*|Exec=$LAUNCHER %U|" "$HERE/bs-podcasts.desktop" > "$APPS/bs-podcasts.desktop"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS" || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q "$ICONS" || true
 echo "Installed launcher to $APPS/bs-podcasts.desktop"
