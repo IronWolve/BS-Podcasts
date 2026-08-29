@@ -480,7 +480,10 @@ def main() -> int:
         while window._discover_loading:
             app.processEvents()
         process(app)
-        check(window.discover_page.model.rowCount() == 30, "Discover did not load For You")
+        deadline = time.time() + 10
+        while (window._discover_loading or not window._discover_exhausted) and time.time() < deadline:
+            app.processEvents()
+        check(window.discover_page.model.rowCount() == 75, "Discover did not load For You")
         window.discover_page.chart.setCurrentIndex(1)
         while window._discover_loading:
             app.processEvents()
@@ -497,10 +500,12 @@ def main() -> int:
         process(app)
         check(len(library.shows()) == before + 1, "Discover Subscribe did not add the show")
         check(window.pages.currentIndex() == 5, "Discover Subscribe navigated away")
-        window.discover_page.load_more.click()
-        while window._discover_loading:
+        # Auto-continue exhausts every view, so the manual Load more button
+        # hides itself once the full set is in.
+        deadline = time.time() + 10
+        while (window._discover_loading or not window._discover_exhausted) and time.time() < deadline:
             app.processEvents()
-        check(window.discover_page.model.rowCount() == 60, "Load more")
+        check(not window.discover_page.load_more.isVisible(), "Load more should hide when exhausted")
         window.discover_page.header.action.click()  # refresh
         while window._discover_loading:
             app.processEvents()

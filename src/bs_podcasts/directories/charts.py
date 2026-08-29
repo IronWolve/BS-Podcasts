@@ -153,7 +153,9 @@ class DirectoryCharts:
             if script_url.startswith("/"):
                 script_url = "https://podcasts.apple.com" + script_url
             javascript = self.session.get(script_url, timeout=(8, 20)).text
-            token = re.search(r'const al="(eyJ[^"]+)"', javascript)
+            # The minified variable name changes per deploy (al, rl, …);
+            # match the JWT shape itself — it is the only one in the bundle.
+            token = re.search(r'"(eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"', javascript)
             if not token:
                 raise DirectoryError("Directory web chart token was not present.")
             self._developer_token = token.group(1)

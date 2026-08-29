@@ -3,6 +3,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import os
+import time
 
 
 WORKSPACE = Path(__file__).resolve().parents[2]
@@ -229,10 +230,13 @@ def main() -> int:
 
         window.navigation.select(5)
         require(window.discover_page.header.search.placeholderText() == "Search", "Discover search label is too verbose")
-        require(window._discover_loading or window.discover_page.model.rowCount() == 30, "Discover did not auto-load For You")
-        while window._discover_loading:
+        require(window._discover_loading or window.discover_page.model.rowCount() > 0, "Discover did not auto-load For You")
+        # Every view now auto-continues to its full result set; the fixture
+        # directory caps at 75.
+        discover_deadline = time.time() + 10
+        while (window._discover_loading or not window._discover_exhausted) and time.time() < discover_deadline:
             app.processEvents()
-        require(window.discover_page.model.rowCount() == 30, "For You did not load")
+        require(window.discover_page.model.rowCount() == 75, "For You did not auto-continue to the full set")
         window.discover_page.category.blockSignals(True)
         window.discover_page.category.setCurrentIndex(1)
         window.discover_page.category.blockSignals(False)
@@ -271,40 +275,32 @@ def main() -> int:
             )
 
         window._start_directory_request("browse", "Technology")
-        while window._discover_loading:
+        discover_deadline = time.time() + 10
+        while (window._discover_loading or not window._discover_exhausted) and time.time() < discover_deadline:
             app.processEvents()
-        require(window.discover_page.model.rowCount() == 30, "initial Discover page differs")
+        require(window.discover_page.model.rowCount() == 75, "Discover browse did not auto-complete")
         require_stable_discover_geometry("category selection")
-        window.discover_page.view.verticalScrollBar().setValue(
-            window.discover_page.view.verticalScrollBar().maximum()
-        )
-        while window._discover_loading:
-            app.processEvents()
-        require(window.discover_page.model.rowCount() == 60, "Discover did not load more")
-        require_stable_discover_geometry("bottom-of-list loading")
         window._start_directory_request("topic", ("News", "Conservative News"))
-        while window._discover_loading:
+        discover_deadline = time.time() + 10
+        while (window._discover_loading or not window._discover_exhausted) and time.time() < discover_deadline:
             app.processEvents()
-        require(window.discover_page.model.rowCount() == 30, "Discover topic did not load")
+        require(window.discover_page.model.rowCount() == 75, "Discover topic did not load")
         require_stable_discover_geometry("topic selection")
         require(
             "Conservative News" in window.discover_page.result_summary.text(),
             "Discover topic summary is missing",
         )
         window.discover_page.chart.setCurrentIndex(1)
-        while window._discover_loading:
+        discover_deadline = time.time() + 10
+        while (window._discover_loading or not window._discover_exhausted) and time.time() < discover_deadline:
             app.processEvents()
-        require(window.discover_page.model.rowCount() == 30, "Top Shows chart differs")
+        require(window.discover_page.model.rowCount() == 75, "Top Shows chart did not auto-complete")
         require_stable_discover_geometry("chart mode selection")
         require(
             "Top Shows" in window.discover_page.result_summary.text(),
             "Top Shows chart summary is missing",
         )
-        require(window.discover_page.load_more.isVisible(), "Chart continuation is missing")
-        window._load_more_discover()
-        while window._discover_loading:
-            app.processEvents()
-        require(window.discover_page.model.rowCount() == 60, "Chart did not load more")
+        require(not window.discover_page.load_more.isVisible(), "Load more should hide once the chart is complete")
         require_stable_discover_geometry("chart continuation")
 
         # Episodes rail context menu: Show New, clear badges without changing
