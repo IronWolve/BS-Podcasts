@@ -750,6 +750,7 @@ class PodcastInfoDialog(StyledDialog):
         about.setFrameShape(QFrame.Shape.NoFrame)
         about.setOpenExternalLinks(False)
         about.anchorClicked.connect(open_web_url)
+        about.document().setDefaultStyleSheet(f"a {{ color: {COLORS['blue']}; text-decoration: underline; }}")
         about.setHtml(safe_feed_html(description or "No description provided by this feed."))
         about.setMinimumHeight(130)
         about.setMaximumHeight(220)
