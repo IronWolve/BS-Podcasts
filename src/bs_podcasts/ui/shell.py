@@ -827,26 +827,48 @@ class MainWindow(QMainWindow):
             self._notify("No unreachable podcasts")
             return
         names = "\n".join(f"• {show.title}" for show in problems[:8]) + ("\n…" if len(problems) > 8 else "")
-        # Destructive storage work shows exact targets and reclaimed size,
-        # like single unsubscribe and Reset library already do.
-        previews = [self.library.removal_preview(show.id) for show in problems]
-        file_count = sum(len(p.get("files", ())) for p in previews)
-        size = sum(p.get("bytes", 0) for p in previews)
+        # Every phase runs on a worker: counting the targets stats files and
+        # the removal deletes them, and doing either on the Qt thread froze
+        # the window mid-click.
+        show_ids = [show.id for show in problems]
+        library = self.library
+        self.podcast_page.banner.show_state("loading", "Checking what would be removed…")
+
+        def work():
+            previews = [library.removal_preview(show_id) for show_id in show_ids]
+            return {
+                "ids": show_ids,
+                "names": names,
+                "files": sum(len(preview.get("files", ())) for preview in previews),
+                "bytes": sum(preview.get("bytes", 0) for preview in previews),
+            }
+
+        self._run_task("remove-preview", work)
+
+    def _confirm_remove_shows(self, data):
+        """Second phase of an off-thread bulk removal: confirm exact targets,
+        then delete on a worker so the window never blocks."""
+        show_ids = data["ids"]
+        file_count = data["files"]
         file_note = (
-            f"\n\nDeletes {file_count} downloaded/artwork file{'s' if file_count != 1 else ''} ({self._format_bytes(size)})."
+            f"\n\nDeletes {file_count} downloaded/artwork file{'s' if file_count != 1 else ''} ({self._format_bytes(data['bytes'])})."
             if file_count else "\n\nNo downloaded files are affected."
         )
         dialog = ConfirmDialog(
-            f"Remove {len(problems)} unreachable podcast{'s' if len(problems) != 1 else ''}?",
-            "Their feeds failed repeatedly. Subscriptions, listening progress and any downloads for them are deleted; you can re-add any of them later.\n\n" + names + file_note,
+            f"Remove {len(show_ids)} unreachable podcast{'s' if len(show_ids) != 1 else ''}?",
+            "Their feeds failed repeatedly. Subscriptions, listening progress and any downloads for them are deleted; you can re-add any of them later.\n\n"
+            + data["names"] + file_note,
             "Remove all", destructive=True, parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        removed = sum(1 for show in problems if self.library.remove_subscription(show.id, delete_files=True))
-        self.podcast_page.chips.select("All")
-        self._request_reload(lambda: self.podcast_page._apply_filters())
-        self._notify(f"Removed {removed} unreachable podcast{'s' if removed != 1 else ''}", "success")
+        library = self.library
+        self.podcast_page.banner.show_state("loading", f"Removing {len(show_ids)} podcasts…")
+
+        def work():
+            return sum(1 for show_id in show_ids if library.remove_subscription(show_id, delete_files=True))
+
+        self._run_task("remove-shows", work)
 
     def _reset_library(self):
         """Remove every subscription (import → reset → import testing loop)."""
@@ -874,16 +896,21 @@ class MainWindow(QMainWindow):
                 self.playback.stop()
             except Exception:
                 pass
-        for show in shows:
-            self.library.remove_subscription(show.id, delete_files=True)
         self._previews.clear()
         self._ui_episode_cache.clear()
         self.podcast_page.set_items([])
         self.episode_page.set_items([])
-        self._request_reload()
-        self._refresh_storage_settings()
         self.context.show_empty()
-        self._notify(f"Library reset — removed {len(shows)} podcast{'s' if len(shows) != 1 else ''}", "success")
+        # Deleting every show's rows and files is far too slow for the Qt
+        # thread; the page shows progress while a worker does it.
+        library = self.library
+        show_ids = [show.id for show in shows]
+        self.podcast_page.banner.show_state("loading", f"Removing {len(show_ids)} podcasts…")
+
+        def work():
+            return sum(1 for show_id in show_ids if library.remove_subscription(show_id, delete_files=True))
+
+        self._run_task("reset-library", work)
 
     def _show_about(self):
         info = {}
@@ -3318,6 +3345,29 @@ class MainWindow(QMainWindow):
                 )
                 if identifier:
                     self._notify("BS Podcasts is up to date", "success")
+            return
+        if kind == "remove-preview":
+            self.podcast_page.banner.clear()
+            if result.status != JobStatus.OK:
+                self._notify(result.message or "Couldn't check those podcasts", "error")
+                return
+            self._confirm_remove_shows(result.value)
+            return
+        if kind in {"remove-shows", "reset-library"}:
+            self.podcast_page.banner.clear()
+            if result.status != JobStatus.OK:
+                self._notify(result.message or "Removal failed", "error")
+                self._request_reload()
+                return
+            removed = int(result.value or 0)
+            if kind == "reset-library":
+                self._refresh_storage_settings()
+                self._request_reload()
+                self._notify(f"Library reset — removed {removed} podcast{'s' if removed != 1 else ''}", "success")
+            else:
+                self.podcast_page.chips.select("All")
+                self._request_reload(lambda: self.podcast_page._apply_filters())
+                self._notify(f"Removed {removed} unreachable podcast{'s' if removed != 1 else ''}", "success")
             return
         if kind == "database-health":
             if result.status == JobStatus.OK and result.value == "ok":

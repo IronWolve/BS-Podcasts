@@ -692,6 +692,11 @@ def stylesheet() -> str:
     QFrame#toast[tone="error"] {{ border-color: {c['danger']}; }}
     QFrame#toast[tone="success"] {{ border-color: {c['success']}; }}
     QLabel#toastText {{ color: {c['text_strong']}; }}
+    QFrame#seekBubble {{
+        background: {c['surface_raised']}; border: 1px solid {c['border']};
+        border-radius: {r['md']}px;
+    }}
+    QLabel#seekBubbleText {{ color: {c['text_strong']}; font-weight: 600; font-size: {small}px; }}
     QLabel#emptyTitle {{ font-size: {TYPE['h2'][0]}px; font-weight: 600; color: {c['text_strong']}; }}
     QLabel#emptyBody {{ color: {c['muted']}; }}
     QFrame#emptyGlyph {{
