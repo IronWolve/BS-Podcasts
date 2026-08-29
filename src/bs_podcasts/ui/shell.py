@@ -1842,8 +1842,6 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
             menu.addAction(icons.icon("check", COLORS["text"], 16), "Mark all as played", lambda: self._mark_show_played(podcast.show_id, True))
             menu.addAction("Mark all as unplayed", lambda: self._mark_show_played(podcast.show_id, False))
-            if podcast.website_url:
-                menu.addAction(icons.icon("external", COLORS["text"], 16), "Open website", lambda: self._open_url(podcast.website_url))
             menu.addSeparator()
             menu.addAction(icons.icon("trash", COLORS["text"], 16), "Unsubscribe…", lambda: self._unsubscribe(podcast.show_id))
         elif podcast.feed_url:
@@ -1857,9 +1855,17 @@ class MainWindow(QMainWindow):
                 menu.addAction(icons.icon("external", COLORS["text"], 16), "Open website", lambda: self._open_url(website))
             if podcast.directory_url:
                 menu.addAction(icons.icon("external", COLORS["text"], 16), "Open directory page", lambda: self._open_url(podcast.directory_url))
-        if podcast.feed_url:
+        # Links live together at the bottom of every podcast menu.
+        website = podcast.website_url
+        if not website and podcast.feed_url:
+            preview = self._previews.get(podcast.feed_url)
+            website = preview.website_url if preview else ""
+        if website or podcast.feed_url:
             menu.addSeparator()
-            menu.addAction("Copy feed URL", lambda: QApplication.clipboard().setText(podcast.feed_url))
+        if website and podcast.show_id:
+            menu.addAction(icons.icon("external", COLORS["text"], 16), "Open website", lambda: self._open_url(website))
+        if podcast.feed_url:
+            menu.addAction(icons.icon("link", COLORS["text"], 16), "Copy feed URL", lambda: QApplication.clipboard().setText(podcast.feed_url))
         menu.exec(global_position)
 
     def _episode_menu(self, episode, global_position):

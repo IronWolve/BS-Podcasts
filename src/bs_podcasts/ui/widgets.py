@@ -4,6 +4,7 @@ from bisect import bisect_right
 from functools import lru_cache
 from html import escape as html_escape, unescape as html_unescape
 from html.parser import HTMLParser
+import re
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import (
@@ -122,15 +123,54 @@ class _SafeFeedHtml(HTMLParser):
             self.parts.append(f"</{tag}>")
 
     def handle_data(self, data):
-        if not self._blocked:
-            self.parts.append(html_escape(data))
+        if self._blocked:
+            return
+        # Never linkify inside an existing anchor — that would nest <a> tags.
+        inside_anchor = bool(self._anchors) and self._anchors[-1]
+        self.parts.append(html_escape(data) if inside_anchor else linkify(data))
+
+
+# Bare URLs in show notes: with a scheme, as www., or as host/path (which is
+# how feeds usually write "megaphone.fm/adchoices"). A bare "Node.js" or
+# "audio.mp3" has no path segment, so it is left alone.
+_URL_PATTERN = re.compile(
+    r"""(?P<url>
+        https?://[^\s<>"']+
+        | www\.[^\s<>"']+
+        | [A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9\-]+)+/[^\s<>"']*
+    )""",
+    re.VERBOSE,
+)
+_URL_TRAILING = ".,;:!?)]}>'\""
+
+
+def linkify(text: str) -> str:
+    """Escape text and turn bare URLs into HTTP(S) links."""
+    result = []
+    position = 0
+    for match in _URL_PATTERN.finditer(text or ""):
+        raw = match.group("url")
+        trimmed = raw.rstrip(_URL_TRAILING)
+        if not trimmed:
+            continue
+        href = trimmed if trimmed.lower().startswith(("http://", "https://")) else f"https://{trimmed}"
+        result.append(html_escape(text[position:match.start()]))
+        result.append(f'<a href="{html_escape(href, quote=True)}">{html_escape(trimmed)}</a>')
+        result.append(html_escape(raw[len(trimmed):]))
+        position = match.end()
+    result.append(html_escape(text[position:]))
+    return "".join(result)
+
+
+# Feed links must read as links inside the rich-text views.
+_LINK_STYLE = "a { color: %s; text-decoration: underline; }" % COLORS["blue"]
 
 
 def safe_feed_html(text: str) -> str:
     if not text:
         return ""
     if "<" not in text or ">" not in text:
-        return html_escape(html_unescape(text)).replace("\n", "<br>")
+        return linkify(html_unescape(text)).replace("\n", "<br>")
     parser = _SafeFeedHtml()
     parser.feed(text)
     parser.close()
@@ -1708,6 +1748,7 @@ class ContextPanel(QFrame):
         self.body.setReadOnly(True)
         self.body.setOpenExternalLinks(False)
         self.body.anchorClicked.connect(lambda url: self.open_url_requested.emit(url.toString()))
+        self.body.document().setDefaultStyleSheet(_LINK_STYLE)
         self.body.setFrameShape(QFrame.Shape.NoFrame)
         self.tabs.addTab(self.body, "Details")
         self.chapter_list = QListWidget()
@@ -2292,6 +2333,7 @@ class NowPlayingView(QFrame):
         self.notes.setReadOnly(True)
         self.notes.setOpenExternalLinks(False)
         self.notes.anchorClicked.connect(lambda url: self.open_url_requested.emit(url.toString()))
+        self.notes.document().setDefaultStyleSheet(_LINK_STYLE)
         self.notes.setFrameShape(QFrame.Shape.NoFrame)
         self.tabs.addTab(self.notes, "Show notes")
         self.chapter_list = QListWidget()

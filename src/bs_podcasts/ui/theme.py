@@ -490,16 +490,20 @@ def stylesheet() -> str:
     /* ---------- Menus & tooltips (level 2) ---------- */
     QMenu {{
         background: {c['surface_raised']}; color: {c['text']};
-        border: 1px solid {c['border']}; padding: {sp(6)}px;
+        border: 1px solid {c['border']}; border-radius: {r['md']}px;
+        padding: {sp(6)}px;
     }}
     QMenu::item {{
         background: transparent; color: {c['text']};
-        border-radius: 6px; margin: 1px 2px; padding: {sp(7)}px {sp(28)}px {sp(7)}px {sp(12)}px;
+        border-radius: {r['sm']}px; margin: 1px 3px;
+        padding: {sp(8)}px {sp(30)}px {sp(8)}px {sp(12)}px;
     }}
     QMenu::item:selected {{ background: {c['surface_soft']}; color: {c['text_strong']}; }}
     QMenu::item:disabled {{ color: {c['subtle']}; }}
-    QMenu::separator {{ background: {c['border']}; height: 1px; margin: 5px 8px; }}
-    QMenu::icon {{ padding-left: 8px; }}
+    QMenu::separator {{ background: {c['hairline']}; height: 1px; margin: {sp(5)}px {sp(10)}px; }}
+    QMenu::icon {{ padding-left: {sp(10)}px; }}
+    QMenu::indicator {{ width: {sp(16)}px; height: {sp(16)}px; margin-left: {sp(8)}px; }}
+    QMenu::right-arrow {{ margin-right: {sp(8)}px; }}
     QToolTip {{
         background: {c['surface_raised']}; color: {c['text']};
         border: 1px solid {c['border']}; padding: {sp(6)}px {sp(9)}px; font-size: {small}px;
