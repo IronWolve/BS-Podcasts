@@ -19,6 +19,9 @@ SAMPLE = WORKSPACE / "repo/tests/samples/m1-feed.xml"
 OUT_DIR = WORKSPACE / "ui-reference"
 os.environ.setdefault("TMPDIR", str(LOCAL_TMP))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# This tool shows dozens of popups on purpose; the startup window tracer
+# would try to log every one of them.
+os.environ.setdefault("BS_PODCASTS_NO_TRACER", "1")
 
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
@@ -32,7 +35,8 @@ from bs_podcasts.feeds import parse_feed
 from bs_podcasts.jobs import JobRunner
 from bs_podcasts.playback.service import PlaybackSnapshot, PlaybackState
 from bs_podcasts.services import LibraryService, ListeningService
-from bs_podcasts.ui import theme
+from bs_podcasts.ui import icons, theme
+from bs_podcasts.ui.theme import COLORS
 from bs_podcasts.ui.shell import MainWindow
 
 
@@ -161,6 +165,34 @@ def label_zones(pixmap: QPixmap, zones) -> QPixmap:
         painter.drawRoundedRect(plate, 6, 6)
         painter.setPen(QColor(BADGE_TEXT))
         painter.drawText(plate, Qt.AlignmentFlag.AlignCenter, name)
+    painter.end()
+    return canvas
+
+
+def compose(entries, columns: int = 3, cell: tuple[int, int] = (430, 210)) -> QPixmap:
+    """Lay captured surfaces out on one plate, each under its caption."""
+    cell_w, cell_h = cell
+    rows = (len(entries) + columns - 1) // columns
+    canvas = QPixmap(columns * cell_w, rows * cell_h)
+    canvas.fill(QColor("#0B0F18"))
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    caption_font = QFont(painter.font())
+    caption_font.setPixelSize(15)
+    caption_font.setBold(True)
+    for index, (caption, pixmap) in enumerate(entries):
+        column, row = index % columns, index // columns
+        origin_x, origin_y = column * cell_w, row * cell_h
+        painter.setFont(caption_font)
+        painter.setPen(QColor("#FFB45E"))
+        painter.drawText(QRect(origin_x + 12, origin_y + 8, cell_w - 24, 22),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, caption)
+        available = QRect(origin_x + 12, origin_y + 34, cell_w - 24, cell_h - 46)
+        shot = pixmap
+        if shot.width() > available.width() or shot.height() > available.height():
+            shot = shot.scaled(available.width(), available.height(),
+                               Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        painter.drawPixmap(available.x(), available.y(), shot)
     painter.end()
     return canvas
 
@@ -600,6 +632,119 @@ def main() -> int:
             "image_bytes": png_bytes(discover_shot, OUT_DIR / "07-discover.png"),
             "width": discover_shot.width(), "height": discover_shot.height(),
             "rows": [(str(c.number), c.where or "CENTRE", c.name, c.code, c.note) for c in discover_callouts],
+        })
+
+        # ------------------------------------------------- pop-ups & toasts
+        from PySide6.QtWidgets import QMenu
+        from bs_podcasts.ui.widgets import show_hover_bubble
+        import bs_podcasts.ui.widgets as widgets_module
+
+        window.navigation.select(1)
+        settle(app, window)
+
+        def toast_shot_of(*args, **kwargs):
+            # The toast fades in over ~160 ms; grabbing immediately captures a
+            # transparent frame, so finish the fade before the screenshot.
+            window.toast.show_message(*args, **kwargs)
+            settle(app, window)
+            window.toast._animation.stop()
+            window.toast._effect.setOpacity(1.0)
+            settle(app, window)
+            return window.toast.grab()
+
+        toast_shot = toast_shot_of("Subscribed to Deep Work Weekly — fetching episodes…", "success", "Open", lambda: None)
+        window.toast.dismiss()
+        window.toast._closing = False
+        window.toast.hide()
+        settle(app, window)
+        scan_toast_shot = toast_shot_of("Scanning podcast release dates… 12 of 30", "loading", duration_ms=0)
+        window.toast.dismiss()
+        settle(app, window)
+
+        show_hover_bubble("Play latest", 400, 400)
+        settle(app, window)
+        bubble_shot = widgets_module._shared_bubble.grab()
+        widgets_module.hide_hover_bubble()
+
+        window.player.speed_popover.show_above(window.player.speed)
+        settle(app, window)
+        speed_shot = window.player.speed_popover.grab()
+        window.player.speed_popover.hide()
+
+        window.player.sleep_popover.show_above(window.player.sleep)
+        settle(app, window)
+        sleep_shot = window.player.sleep_popover.grab()
+        window.player.sleep_popover.hide()
+
+        window.player.volume_popover.show_above(window.player.volume)
+        settle(app, window)
+        volume_shot = window.player.volume_popover.grab()
+        window.player.volume_popover.hide()
+
+        card = window.podcast_page.model.index(0, 0).data(257)
+        podcast_menu = QMenu(window)
+        for icon_name, label in (("episodes", "Open episodes"), ("play", "Play latest"), ("refresh", "Refresh now")):
+            podcast_menu.addAction(icons.icon(icon_name, COLORS["text"], 16), label)
+        podcast_menu.addSeparator()
+        podcast_menu.addAction(icons.icon("check", COLORS["text"], 16), "Mark all as played")
+        podcast_menu.addAction("Mark all as unplayed")
+        podcast_menu.addSeparator()
+        podcast_menu.addAction(icons.icon("trash", COLORS["text"], 16), "Unsubscribe…")
+        podcast_menu.addSeparator()
+        podcast_menu.addAction(icons.icon("external", COLORS["text"], 16), "Open website")
+        podcast_menu.addAction(icons.icon("rss", COLORS["text"], 16), "Copy feed URL")
+        podcast_menu.popup(window.mapToGlobal(QPoint(80, 80)))
+        settle(app, window)
+        menu_shot = podcast_menu.grab()
+        podcast_menu.hide()
+
+        banner_shot = None
+        window.podcast_page.banner.show_state("loading", "Refreshing 3 of 12 podcasts…")
+        settle(app, window)
+        banner_shot = window.podcast_page.banner.grab()
+        window.podcast_page.banner.clear()
+
+        popup_plate = compose([
+            ("Toast — success, with action", toast_shot),
+            ("Toast — sticky progress (X cancels)", scan_toast_shot),
+            ("Hover bubble", bubble_shot),
+            ("Speed popover", speed_shot),
+            ("Sleep popover", sleep_shot),
+            ("Volume popover", volume_shot),
+            ("Context menu", menu_shot),
+            ("Page banner (in-page, not a popup)", banner_shot),
+        ], columns=3, cell=(440, 250))
+        sections.append({
+            "title": "9 · Pop-ups, toasts and menus",
+            "blurb": "Every transient surface in the app, what raises it and how it goes away. "
+                     "Toasts appear centred just above the BOTTOM player bar; bubbles follow the "
+                     "pointer; popovers anchor above their button; menus open at the pointer.",
+            "image_bytes": png_bytes(popup_plate, OUT_DIR / "08-popups.png"),
+            "width": popup_plate.width(), "height": popup_plate.height(),
+            "rows": [
+                ("1", "Above BOTTOM bar, centred", "Toast", "MainWindow.toast (Toast)",
+                 "Short confirmation: Subscribed…, Marked N played, Removed N downloads. Tones: info, success, error, loading. Optional action button (e.g. Undo, Open) and an X. Auto-dismisses after ~3 s."),
+                ("2", "Above BOTTOM bar, centred", "Sticky toast", "Toast.show_message(duration_ms=0)",
+                 "Stays until finished or dismissed — used by the release-date scan (\u201cScanning podcast release dates… N of M\u201d), where the X cancels the scan and keeps what was found."),
+                ("3", "At the pointer", "Hover bubble", "HoverBubble / show_hover_bubble()",
+                 "Card hover actions (Play latest, Subscribe, Subscribed) and the optional item previews (Settings → Hover previews). Hides when the pointer leaves."),
+                ("4", "Above the seek bar", "Seek time bubble", "SeekSlider._bubble",
+                 "Time under the pointer while hovering the seek bar."),
+                ("5", "Above its button (BOTTOM right)", "Speed popover", "PlayerBar.speed_popover (SpeedPopover)",
+                 "Playback speed steps 0.75× – 3×."),
+                ("6", "Above its button (BOTTOM right)", "Sleep popover", "PlayerBar.sleep_popover (SleepPopover)",
+                 "Sleep-timer durations and end-of-episode."),
+                ("7", "Above its button (BOTTOM right)", "Volume popover", "PlayerBar.volume_popover (VolumePopover)",
+                 "Volume slider."),
+                ("8", "At the pointer", "Context menu", "QMenu (e.g. MainWindow._podcast_menu, _episode_menu)",
+                 "Right-click actions for podcasts, episodes, the Episodes rail item, Discover sort and search history. Links (Open website, Copy feed URL) sit in the bottom group."),
+                ("9", "TOP OF CENTRE, under the header", "Page banner", "page.banner (StateBanner)",
+                 "In-page status, not a popup: loading / empty / error / offline / partial, with an optional Retry."),
+                ("10", "Centre of the window", "Dialogs", "ConfirmDialog, AddPodcastDialog, RemovePodcastDialog, DeleteFilesDialog, PodcastSettingsDialog, EpisodeInfoDialog, PodcastInfoDialog, ShortcutsDialog, AboutDialog, StartupErrorDialog",
+                 "Modal surfaces. Destructive ones list exact targets and reclaimed bytes before acting."),
+                ("11", "Operating system", "Native notification", "TrayController.notify()",
+                 "New-episode and download notifications when enabled in Settings; clicking one opens the app."),
+            ],
         })
 
         document = OUT_DIR / "BS-Podcasts-UI-Reference.docx"

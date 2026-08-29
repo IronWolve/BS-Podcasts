@@ -98,7 +98,14 @@ def _install_stall_monitor(app, threshold_ms: int = 150):
 
 
 def _install_window_tracer(app):
-    """Log top-level windows shown during startup (chasing launch flashes)."""
+    """Log top-level windows shown during startup (chasing launch flashes).
+
+    Tools that raise many popups on purpose (the UI reference generator) set
+    BS_PODCASTS_NO_TRACER=1: the tracer sees every Show event, and thousands
+    of them recurse through the filter chain.
+    """
+    if os.environ.get("BS_PODCASTS_NO_TRACER"):
+        return
     import time
 
     from PySide6.QtCore import QEvent, QObject

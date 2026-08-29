@@ -1865,7 +1865,7 @@ class MainWindow(QMainWindow):
         if website and podcast.show_id:
             menu.addAction(icons.icon("external", COLORS["text"], 16), "Open website", lambda: self._open_url(website))
         if podcast.feed_url:
-            menu.addAction(icons.icon("link", COLORS["text"], 16), "Copy feed URL", lambda: QApplication.clipboard().setText(podcast.feed_url))
+            menu.addAction(icons.icon("rss", COLORS["text"], 16), "Copy feed URL", lambda: QApplication.clipboard().setText(podcast.feed_url))
         menu.exec(global_position)
 
     def _episode_menu(self, episode, global_position):
