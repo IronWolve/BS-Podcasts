@@ -190,6 +190,7 @@ class MainWindow(QMainWindow):
         self.context.closed.connect(self._hide_context)
         self.context.subscribe_requested.connect(self._subscribe_url)
         self.context.play_episode_requested.connect(self._play_or_toggle)
+        self.context.play_preview_requested.connect(self._play_preview_episode)
         self.context.queue_episode_requested.connect(self._queue_episode)
         self.context.dequeue_requested.connect(self._remove_from_queue)
         self.context.download_episode_requested.connect(self._download_episode)
@@ -375,7 +376,7 @@ class MainWindow(QMainWindow):
             ("ab_repeat", "Ctrl+Shift+A", self._cycle_ab),
             ("navigate_back", "Alt+Left", self.navigate_back),
             ("navigate_forward", "Alt+Right", self.navigate_forward),
-            ("quit", "Ctrl+Q", self.close),
+            ("quit", "Ctrl+Q", self._request_quit),
             ("help", "Ctrl+/", self._show_shortcuts),
         ):
             self.shortcuts.add(name, sequence, handler)
@@ -4362,6 +4363,12 @@ class MainWindow(QMainWindow):
     def moveEvent(self, event):
         super().moveEvent(event)
         self._layout_save_timer.start()
+
+    def _request_quit(self):
+        """Explicit Quit (shortcut, tray, MPRIS) exits even when window-close
+        is configured to hide to the tray."""
+        self._force_quit = True
+        self.close()
 
     def closeEvent(self, event):
         if (

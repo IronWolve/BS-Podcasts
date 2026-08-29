@@ -125,6 +125,9 @@ class PlaybackService:
         with self._lock:
             self._guard()
             self._flush_listening()
+            # Sleep is session-scoped: a new load's snapshot has no deadline,
+            # so a still-armed timer would pause the NEXT episode unannounced.
+            self.cancel_sleep_timer()
             self._deferred_episode_id = None
             episode = self.repository.get_episode(episode_id)
             if episode is None:
@@ -193,6 +196,15 @@ class PlaybackService:
             raise PlaybackUnavailable("Episode has no playable media URL.")
         with self._lock:
             self._guard()
+            # Retire the outgoing library episode: persist its position and
+            # clear the stored current-playback row so a relaunch resumes it
+            # deliberately, not on top of this transient stream. Listening
+            # buckets flush to the outgoing show before the snapshot changes.
+            self._flush_listening()
+            if self.snapshot.episode_id is not None:
+                self._persist_position(force=True)
+                self.repository.set_current_playback(None, PlaybackState.IDLE.value)
+            self.cancel_sleep_timer()
             self._deferred_episode_id = None
             if not self._volume_applied:
                 try:

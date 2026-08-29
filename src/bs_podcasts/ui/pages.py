@@ -162,7 +162,13 @@ class _ListPageMixin:
 
     @staticmethod
     def _key(item):
-        return ("episode", item.episode_id) if hasattr(item, "episode_id") else ("show", item.show_id, item.feed_url)
+        if hasattr(item, "episode_id"):
+            if item.episode_id:
+                return ("episode", item.episode_id)
+            # Unsubscribed previews all share episode_id 0; without a real
+            # key, selection snaps to row 0 after every filter/refresh.
+            return ("preview", item.media_url or item.external_id or item.title)
+        return ("show", item.show_id, item.feed_url)
 
     def _restore_selection(self, key, preserve_scroll: bool):
         scrollbar = self.view.verticalScrollBar()
@@ -733,6 +739,14 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             items = [item for item in items if item.favorite]
         elif self._filter == "Unplayed":
             items = [item for item in items if not item.played]
+        elif self._filter == "Played":
+            # Flags, not the badge string: a downloaded row's badge says
+            # "Downloaded" but it can still be played / in progress.
+            items = [item for item in items if item.played]
+        elif self._filter == "In progress":
+            items = [item for item in items if not item.played and 0 < item.progress < 1]
+        elif self._filter == "Downloaded":
+            items = [item for item in items if item.downloaded_path]
         elif self._filter != "All":
             items = [item for item in items if item.state.lower() == self._filter.lower()]
         if self.sort_button is not None and self._sort != "newest":
@@ -743,7 +757,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             elif self._sort == "longest":
                 items.sort(key=lambda item: -(item.duration_seconds or 0))
             elif self._sort == "unplayed":
-                items.sort(key=lambda item: item.state == "Played")
+                items.sort(key=lambda item: item.played)
         self.model.replace(items)
         self._restore_selection(restore_key, preserve_scroll)
         self._update_empty(query)
