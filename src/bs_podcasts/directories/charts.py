@@ -107,7 +107,7 @@ class DirectoryCharts:
             "chart": chart,
             "genre": CATEGORY_IDS.get(category, 26),
             "l": "en-US",
-            "limit": 100,
+            "limit": 200,  # the API's ceiling; 250 returns HTTP 400
             "types": media_type,
             "extend[podcasts]": "editorialArtwork,feedUrl",
             "include[podcast-episodes]": "podcast",
