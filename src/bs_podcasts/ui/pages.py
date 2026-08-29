@@ -345,9 +345,10 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.sort_button.setObjectName("textButton")
             self.sort_button.setIcon(icons.icon("sort", COLORS["muted"], 16))
             self.sort_button.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.sort_button.setToolTip("Sort podcasts")
             self.sort_button.setAccessibleName("Sort podcasts")
-            self.sort_button.clicked.connect(self._show_sort_menu)
+            self.sort_button.setToolTip("Sorted by name a–z — click to sort by newest episode")
+            # Two orders only: a toggle beats a menu for a binary choice.
+            self.sort_button.clicked.connect(self._toggle_sort)
             self.chips.add_inline(self.sort_button)
             self.remove_problems = QPushButton("Remove unreachable…")
             self.remove_problems.setObjectName("dangerButton")
@@ -452,23 +453,21 @@ class PodcastGridPage(BasePage, _ListPageMixin):
     DISCOVER_SORTS = (("rank", "Chart order"), ("newest", "Newest episode"), ("title", "Title A–Z"))
     discover_sort_changed = Signal(str)
 
-    def _show_sort_menu(self):
-        menu = QMenu(self)
-        for key, label in self.LIBRARY_SORTS:
-            action = menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(key == self._sort)
-            action.triggered.connect(
-                lambda _checked=False, k=key: (self.set_sort(k), self.sort_changed.emit(k))
-            )
-        menu.exec(self.sort_button.mapToGlobal(self.sort_button.rect().bottomLeft()))
+    def _toggle_sort(self):
+        keys = [key for key, _label in self.LIBRARY_SORTS]
+        following = keys[(keys.index(self._sort) + 1) % len(keys)] if self._sort in keys else keys[0]
+        self.set_sort(following)
+        self.sort_changed.emit(following)
 
     def set_sort(self, key: str):
         labels = dict(getattr(self, "LIBRARY_SORTS", ()))
         if key not in labels or getattr(self, "sort_button", None) is None:
             return
         self._sort = key
+        keys = list(labels)
+        following = labels[keys[(keys.index(key) + 1) % len(keys)]]
         self.sort_button.setText(labels[key])
+        self.sort_button.setToolTip(f"Sorted by {labels[key].lower()} — click to sort by {following.lower()}")
         self._apply_filters()
 
     def _show_discover_sort_menu(self):
