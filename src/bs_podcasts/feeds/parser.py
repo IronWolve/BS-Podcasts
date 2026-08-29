@@ -45,11 +45,24 @@ def _date(value: str) -> str:
     if not value:
         return ""
     try:
-        return parsedate_to_datetime(value).isoformat()
+        parsed = parsedate_to_datetime(value)
     except (TypeError, ValueError, OverflowError):
-        if "T" in value and len(value) >= 10:
+        parsed = None
+    if parsed is None and "T" in value and len(value) >= 10:
+        try:
+            from datetime import datetime
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
             return value
+    if parsed is None:
         return ""
+    # Stored text is compared lexically by SQLite; only a normalized UTC
+    # representation makes that ordering chronological across feeds that mix
+    # timezone offsets.
+    if parsed.tzinfo is not None:
+        from datetime import timezone
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed.isoformat()
 
 
 def _duration(value: str) -> int:
@@ -325,12 +338,51 @@ def _parse_atom(root) -> FeedData:
     )
 
 
-def parse_feed(content: bytes) -> FeedData:
+def resolve_feed_urls(feed: FeedData, base_url: str) -> FeedData:
+    """Resolve relative references against the feed's final URL.
+
+    Atom explicitly allows relative URIs and real-world RSS contains them;
+    unresolved values later fail playback, downloads, and the HTTP(S)-only
+    link guard."""
+    from dataclasses import replace as _replace
+    from urllib.parse import urljoin
+
+    if not base_url:
+        return feed
+
+    def fix(value: str) -> str:
+        value = (value or "").strip()
+        if not value or "://" in value.split("?", 1)[0][:12]:
+            return value
+        return urljoin(base_url, value)
+
+    episodes = tuple(
+        _replace(
+            episode,
+            media_url=fix(episode.media_url),
+            website_url=fix(episode.website_url),
+            transcript_url=fix(episode.transcript_url),
+            chapters_url=fix(episode.chapters_url),
+            artwork_url=fix(episode.artwork_url),
+        )
+        for episode in feed.episodes
+    )
+    return _replace(
+        feed,
+        website_url=fix(feed.website_url),
+        artwork_url=fix(feed.artwork_url),
+        episodes=episodes,
+    )
+
+
+def parse_feed(content: bytes, base_url: str = "") -> FeedData:
     if not content:
         raise FeedParseError("Feed response was empty.")
     if len(content) > MAX_FEED_BYTES:
         raise FeedParseError("Feed exceeds the size limit.")
-    upper = content[:4096].upper()
+    # The whole bounded input: 4 KiB of leading whitespace used to smuggle
+    # an entity declaration past the check.
+    upper = content.upper()
     if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
         raise FeedParseError("DTD and entity declarations are not allowed.")
     try:
@@ -340,7 +392,7 @@ def parse_feed(content: bytes) -> FeedData:
 
     kind = _local(root.tag)
     if kind in {"rss", "rdf", "channel"}:
-        return _parse_rss(root)
+        return resolve_feed_urls(_parse_rss(root), base_url)
     if kind == "feed":
-        return _parse_atom(root)
+        return resolve_feed_urls(_parse_atom(root), base_url)
     raise FeedParseError(f"Unsupported feed root: {kind or 'unknown'}.")

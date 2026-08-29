@@ -7,6 +7,20 @@ import re
 
 from PySide6.QtCore import QPoint, QTimer, QUrl, Qt, qVersion
 from PySide6.QtGui import QColor, QDesktopServices, QPixmap
+
+
+def open_web_url(url):
+    """HTTP(S)-only guard for URLs originating in feed data — the same rule
+    the shell's _open_url enforces; dialogs must not be the unguarded exit."""
+    value = url.toString() if isinstance(url, QUrl) else str(url or "")
+    parsed = QUrl(value)
+    if parsed.scheme().lower() not in {"http", "https"}:
+        import logging
+
+        logging.getLogger("bs_podcasts").warning("Refusing to open non-web URL from feed data: %s", value[:120])
+        return
+    QDesktopServices.openUrl(parsed)
+
 from PySide6.QtWidgets import (
     QDialog,
     QApplication,
@@ -710,7 +724,7 @@ class PodcastInfoDialog(StyledDialog):
         open_website.setIcon(icons.icon("external", COLORS["on_accent"], 16))
         open_website.setEnabled(bool(website_url))
         open_website.setToolTip(website_url or "This feed does not provide a website")
-        open_website.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(website_url)))
+        open_website.clicked.connect(lambda: open_web_url(website_url))
         copy_feed = QPushButton("Copy RSS feed")
         copy_feed.setObjectName("quietButton")
         copy_feed.setIcon(icons.icon("rss", COLORS["text"], 16))
@@ -735,7 +749,7 @@ class PodcastInfoDialog(StyledDialog):
         about.setObjectName("contextBody")
         about.setFrameShape(QFrame.Shape.NoFrame)
         about.setOpenExternalLinks(False)
-        about.anchorClicked.connect(QDesktopServices.openUrl)
+        about.anchorClicked.connect(open_web_url)
         about.setHtml(safe_feed_html(description or "No description provided by this feed."))
         about.setMinimumHeight(130)
         about.setMaximumHeight(220)

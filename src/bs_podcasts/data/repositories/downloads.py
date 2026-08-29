@@ -30,7 +30,7 @@ class DownloadRepository:
                    source_url=excluded.source_url,
                    target_path=excluded.target_path,
                    partial_path=excluded.partial_path,
-                   state='queued', error_message='', updated_at=excluded.updated_at""",
+                   state='queued', error_message='', bytes_done=0, bytes_total=0, updated_at=excluded.updated_at""",
                 (episode_id, source_url, str(target), str(partial), now, now),
             )
         return self.get(episode_id)

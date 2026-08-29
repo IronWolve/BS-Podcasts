@@ -161,12 +161,14 @@ def _probe_running_instance(name: str, timeout_ms: int = 300) -> bool:
         return False
     probe.write(b"raise")
     probe.waitForBytesWritten(300)
-    # A live instance answers; a hung one leaves the socket open but silent.
     if probe.waitForReadyRead(1500) and probe.readAll().data().startswith(b"ok"):
         probe.disconnectFromServer()
         return True
     probe.abort()
-    return False
+    # Connected but silent: something IS listening. Treating that as dead
+    # used to removeServer() a live-but-busy first instance's socket, after
+    # which BOTH processes listened and shared one library.
+    return True
 
 
 def _claim_single_instance(app):
@@ -186,6 +188,21 @@ def _claim_single_instance(app):
         # Lost the race: someone else claimed the name between probe and listen.
         if _probe_running_instance(name, timeout_ms=1500):
             return None
+    else:
+        # Serve the "ok" handshake IMMEDIATELY: heavy init (database,
+        # services, window) runs for seconds, and a second launch probing in
+        # that window used to read silence, assume a dead peer, and steal
+        # the socket. main() swaps this for the full raise handler later.
+        def _early_ok():
+            socket = server.nextPendingConnection()
+            if socket is not None:
+                socket.write(b"ok")
+                socket.flush()
+                socket.disconnectFromServer()
+                socket.deleteLater()
+
+        server._early_ok = _early_ok
+        server.newConnection.connect(_early_ok)
     return server
 
 
@@ -318,6 +335,12 @@ def main() -> int:
             window.raise_()
             window.activateWindow()
 
+    early = getattr(server, "_early_ok", None)
+    if early is not None:
+        try:
+            server.newConnection.disconnect(early)
+        except (RuntimeError, TypeError):
+            pass
     server.newConnection.connect(raise_existing)
     app.aboutToQuit.connect(lambda: state["window"]._save_layout() if state["window"] is not None else None)
     app.aboutToQuit.connect(lambda: state["window"].mpris.shutdown() if state["window"] is not None else None)
