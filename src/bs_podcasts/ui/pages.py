@@ -1184,7 +1184,7 @@ class SettingsPage(BasePage):
         ):
             self.search_depth.addItem(label, value)
         self.search_depth.setFixedWidth(self.FIELD_WIDTH)
-        library_form.addRow("Search depth", self.search_depth)
+        library_form.addRow("Result depth", self.search_depth)
         self.search_depth.currentIndexChanged.connect(
             lambda index: self.setting_changed.emit("discover.search_limit", self.search_depth.itemData(index))
         )

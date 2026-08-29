@@ -113,6 +113,10 @@ class MainWindow(QMainWindow):
         self._discover_newest_summary = ""
         self._discover_scan_toast = False
         self._discover_scan_cancelled = False
+        # Completed directory results by (operation, value): switching
+        # between For You / charts / categories re-applies instantly instead
+        # of re-fetching; the header Refresh button forces a rescan.
+        self._discover_cache = {}
         self._preview_episodes_url = ""
         self._pending_episodes_url = ""
         self._back_stack = []
@@ -2963,7 +2967,7 @@ class MainWindow(QMainWindow):
         self._set_explore_controls(True)
         self.discover_page.banner.show_state("loading", f"Searching for “{query}”…")
         self.discover_page.set_discover_summary(f"Searching the podcast directory for “{query}”…")
-        self._start_directory_request("search", query)
+        self._start_directory_request("search", query, force=True)
 
     def _browse_category(self, category: str):
         if self.directory is None or self.jobs is None:
@@ -2992,7 +2996,9 @@ class MainWindow(QMainWindow):
         self.discover_page.set_discover_summary(f"Loading {category} › {topic}…")
         self._start_directory_request("topic", (category, topic))
 
-    def _start_directory_request(self, operation: str, value):
+    DISCOVER_CACHE_SECONDS = 900
+
+    def _start_directory_request(self, operation: str, value, force: bool = False):
         # Results from a previous newest-date scan may still arrive, but they
         # no longer belong to the new directory view.
         self._discover_newest_pending.clear()
@@ -3012,10 +3018,26 @@ class MainWindow(QMainWindow):
         # Search paints a fast first page, then auto-continues to the full
         # directory cap in the background (see the result apply); the limit
         # is per request, so laddering 30→60→90 just re-downloaded the list.
-        self._discover_limit = min(50, self._search_depth()) if operation == "search" else 30
+        self._discover_limit = min(50, self._discover_maximum_for(operation)) if operation != "chart" else 30
         self._discover_initial_limit = self._discover_limit
         self._discover_exhausted = False
         self._discover_result_count = 0
+        key = (operation, repr(value))
+        if force:
+            self._discover_cache.pop(key, None)
+        cached = self._discover_cache.get(key)
+        if cached is not None and time.time() - cached[0] < self.DISCOVER_CACHE_SECONDS:
+            # Serve the completed result through the normal apply path: the
+            # subscribed/playing overlays are recomputed, artwork paths are
+            # already local, and no network or worker is touched.
+            cached_limit, cached_value = cached[1], cached[2]
+            self._discover_limit = cached_limit
+            self._discover_loading = True
+            self.discover_page.set_load_more_state(False, loading=True)
+            self._emit_completed(
+                ("directory", (operation, value, cached_limit), JobResult(JobStatus.OK, value=cached_value))
+            )
+            return
         self.discover_page.set_items([])
         self.discover_page.set_loading(True)
         self.discover_page.set_load_more_state(False, loading=True)
@@ -3028,25 +3050,32 @@ class MainWindow(QMainWindow):
         except ValueError:
             return 200
 
+    def _discover_maximum_for(self, operation: str) -> int:
+        # The configured result depth governs every discover view; charts
+        # are capped by what the chart API can return.
+        return 100 if operation == "chart" else self._search_depth()
+
     def _discover_maximum(self) -> int:
-        if self._discover_operation == "search":
-            return self._search_depth()
-        return 100 if self._discover_operation == "chart" else 200 if self._discover_operation == "topic" else 500
+        return self._discover_maximum_for(self._discover_operation)
 
     def _load_more_discover(self):
         if self._discover_loading or self._discover_exhausted or not self._discover_operation or self._discover_limit >= self._discover_maximum():
             return
-        # One request returns up to the directory cap, so a search finishes
-        # in a single follow-up pull instead of five.
-        step = 150 if self._discover_operation == "search" else 30
-        self._discover_limit = min(self._discover_maximum(), self._discover_limit + step)
-        label = self._discover_value[1] if isinstance(self._discover_value, tuple) else self._discover_value or "For You"
+        # One request returns up to the cap, so any view completes in a
+        # single follow-up pull instead of a 30-row ladder.
+        self._discover_limit = self._discover_maximum()
+        if isinstance(self._discover_value, tuple):
+            # topic=(category, topic) wants the topic; chart=(type, category)
+            # falls back to a readable chart name.
+            label = self._discover_value[1] or str(self._discover_value[0]).replace("_", " ").title()
+        else:
+            label = self._discover_value or "For You"
         self.discover_page.banner.show_state("loading", f"Loading more {label}…")
         self.discover_page.set_discover_summary(f"Loading more {label}…")
         self.discover_page.set_load_more_state(False, loading=True)
         self._submit_directory(self._discover_operation, self._discover_value, self._discover_limit)
 
-    def _show_for_you(self, _label: str = "For You"):
+    def _show_for_you(self, _label: str = "For You", force: bool = False):
         self.discover_page.chart.blockSignals(True)
         self.discover_page.chart.setCurrentIndex(0)
         self.discover_page.chart.blockSignals(False)
@@ -3060,20 +3089,22 @@ class MainWindow(QMainWindow):
         if shows:
             self.discover_page.banner.show_state("loading", "Finding podcasts from categories related to your library…")
             self.discover_page.set_discover_summary("Building recommendations from your subscribed podcast categories…")
-            self._start_directory_request("recommend", "")
+            self._start_directory_request("recommend", "", force=force)
         else:
             self._browse_category("")
 
     def _refresh_discover(self):
+        # The header Refresh action is the explicit rescan; view switches
+        # serve the cache.
         chart_type = self.discover_page.chart.currentData()
         if chart_type == "explore":
-            self._show_for_you()
+            self._show_for_you(force=True)
         else:
             category = (
                 "" if not self.discover_page.category.isEnabled() or self.discover_page.category.currentText() == "All Categories"
                 else self.discover_page.category.currentText()
             )
-            self._load_chart(chart_type, category)
+            self._load_chart(chart_type, category, force=True)
 
     def _discover_view_changed(self, _index: int):
         chart_type = self.discover_page.chart.currentData()
@@ -3100,7 +3131,7 @@ class MainWindow(QMainWindow):
             show_category=explore or category_enabled, show_topic=explore, scope_text="All Categories · Directory chart"
         )
 
-    def _load_chart(self, chart_type: str, category: str):
+    def _load_chart(self, chart_type: str, category: str, force: bool = False):
         labels = {
             "top_shows": "Top Shows", "trending": "Trending Episodes",
             "subscriber_shows": "Subscriber Shows", "top_series": "Top Series",
@@ -3109,7 +3140,7 @@ class MainWindow(QMainWindow):
         suffix = f" · {category}" if category else " · All Categories"
         self.discover_page.banner.show_state("loading", f"Loading {label}…")
         self.discover_page.set_discover_summary(f"Loading {label}{suffix}…")
-        self._start_directory_request("chart", (chart_type, category))
+        self._start_directory_request("chart", (chart_type, category), force=force)
 
     def _submit_directory(self, operation: str, value, limit: int = 30):
         self._discover_loading = True
@@ -3629,11 +3660,16 @@ class MainWindow(QMainWindow):
             podcasts,
             preserve_scroll=requested_limit > getattr(self, "_discover_initial_limit", 30),
         )
-        if operation == "search" and not self._discover_exhausted:
-            # A search shouldn't stop at its first page: pull the rest of
-            # the directory's results in the background while the user
-            # reads the first ones. Artwork for rows already shown comes
-            # from the cache, so the follow-up only pays for new rows.
+        cache_key = (operation, repr(value))
+        stored = self._discover_cache.get(cache_key)
+        if stored is None or requested_limit >= stored[1]:
+            self._discover_cache[cache_key] = (time.time(), requested_limit, candidates)
+            while len(self._discover_cache) > 24:
+                self._discover_cache.pop(next(iter(self._discover_cache)))
+        if not self._discover_exhausted:
+            # No view stops at its first page: pull the rest in the
+            # background while the user reads the first rows. Artwork for
+            # rows already shown is a disk-cache hit.
             QTimer.singleShot(0, self._load_more_discover)
         if podcasts:
             self.discover_page.banner.clear()
