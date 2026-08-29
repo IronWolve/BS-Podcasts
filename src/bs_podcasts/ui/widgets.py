@@ -2586,6 +2586,8 @@ class PlayerBar(QFrame):
         self._trim_active = False
         self._sleep_active = False
         self._compact = False
+        self._now_title = "Nothing playing"
+        self._now_show = "Choose an episode to begin"
         layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE["lg"], SPACE["sm"], SPACE["lg"], SPACE["sm"])
         layout.setSpacing(SPACE["md"])
@@ -2726,8 +2728,31 @@ class PlayerBar(QFrame):
         focus ring and padding, or descenders get shaved off."""
         self.title.setMinimumHeight(self.title.fontMetrics().height() + 8)
 
+    def _now_text_width(self) -> int:
+        width = self.now_wrap.width()
+        if width < 40:  # not laid out yet
+            width = self.now_wrap.minimumWidth() or scaled_px(180)
+        return max(60, width - scaled_px(6))
+
+    def _elide_now_labels(self):
+        """Title/show are a plain button and label: without eliding, a long
+        title hard-clips mid-letter at the column edge."""
+        avail = self._now_text_width()
+        title = self.title.fontMetrics().elidedText(self._now_title, Qt.TextElideMode.ElideRight, avail)
+        self.title.setText(title)
+        self.title.setToolTip(self._now_title if title != self._now_title else "Show now playing")
+        show = self.show_label.fontMetrics().elidedText(self._now_show, Qt.TextElideMode.ElideRight, avail)
+        self.show_label.setText(show)
+        self.show_label.setToolTip(self._now_show if show != self._now_show else "")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide_now_labels()
+        self._refresh_status()
+
     def apply_metrics(self):
         self._title_metrics()
+        self._elide_now_labels()
         self.setFixedHeight(scaled_px(80 if self._compact else 88))
         self.layout().setContentsMargins(SPACE["lg"], SPACE["sm"], SPACE["lg"], SPACE["sm"])
         self.layout().setSpacing(SPACE["md"])
@@ -2785,8 +2810,11 @@ class PlayerBar(QFrame):
             text = "Streaming"
         else:
             text = ""
-        if self.next_label.text() != text:
-            self.next_label.setText(text)
+        avail = self._now_text_width()
+        elided = self.next_label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, avail)
+        if self.next_label.text() != elided:
+            self.next_label.setText(elided)
+            self.next_label.setToolTip(text if elided != text else "")
 
     def set_tint(self, color: str):
         """Blend the playing show's colour into the bar background."""
@@ -2853,7 +2881,12 @@ class PlayerBar(QFrame):
         self.art.setCursor(hand)
         self.title.setCursor(hand)
         self.art.setToolTip("Show now playing" if has else "")
-        self.title.setToolTip("Show now playing" if has else "")
+        # The title's tooltip carries the FULL title when elided; only the
+        # generic hint is replaced here.
+        if not has:
+            self.title.setToolTip("")
+        elif self.title.text() == self._now_title:
+            self.title.setToolTip("Show now playing")
 
     # -- state -------------------------------------------------------------
     def set_snapshot(self, snapshot):
@@ -2881,8 +2914,9 @@ class PlayerBar(QFrame):
         self._has_episode = bool(snapshot.source)
         durable_episode = snapshot.episode_id is not None
         self._durable_episode = durable_episode
-        self.title.setText(snapshot.title if self._has_episode else "Nothing playing")
-        self.show_label.setText(snapshot.show_title or ("Choose an episode to begin" if not self._has_episode else ""))
+        self._now_title = snapshot.title if self._has_episode else "Nothing playing"
+        self._now_show = snapshot.show_title or ("Choose an episode to begin" if not self._has_episode else "")
+        self._elide_now_labels()
         self.art.set_artwork(snapshot.artwork_path, initials(snapshot.show_title or snapshot.title), "")
         self._duration = max(0.0, float(snapshot.duration))
         position = max(0.0, float(snapshot.position))
