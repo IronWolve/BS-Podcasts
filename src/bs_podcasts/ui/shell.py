@@ -1458,7 +1458,7 @@ class MainWindow(QMainWindow):
         fresh = [episode for episode in unplayed if episode.is_new]
         # The Home card counts is_new; the section shows the same set, or falls
         # back to the newest unplayed episodes when nothing is flagged new.
-        self.home_page.latest_title.title.setText("New episodes" if fresh else "Latest episodes")
+        self.home_page.set_latest_title("New episodes" if fresh else "Latest episodes")
         self.home_page.set_sections(in_progress, fresh or unplayed)
         self.playlist_page.set_items(queued)
         self.context.set_queue(queued)

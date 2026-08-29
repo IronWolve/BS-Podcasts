@@ -900,34 +900,15 @@ class HomePage(BasePage, _ListPageMixin):
             stats.addWidget(card)
         self.root.addLayout(stats)
 
-        # Section 1: continue listening (in-progress episodes, capped so the
-        # list below stays visible). Section 2: newest episodes.
-        self.section_title = SectionHeader("Continue listening")
-        self.section_title.see_all_requested.connect(self.resume_all_requested)
-        self.root.addWidget(self.section_title)
-        self.resume_view = QListView()
-        self.resume_view.setWrapping(False)
-        self.resume_view.setAccessibleName("Continue listening")
-        self.resume_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.resume_view.setMouseTracking(True)
-        self.resume_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.resume_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.resume_view.setUniformItemSizes(True)
-        self.resume_model = EpisodeModel(())
-        self.resume_view.setModel(self.resume_model)
-        self.resume_delegate = EpisodeDelegate(self.resume_view)
-        self.resume_view.setItemDelegate(self.resume_delegate)
-        self.resume_view.selectionModel().currentChanged.connect(self._selected)
-        self.resume_view.activated.connect(self._activated_once)
-        self.resume_view.doubleClicked.connect(self._activated_once)
-        self.resume_view.viewport().installEventFilter(self)
-        resume_delete = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.resume_view)
-        resume_delete.setContext(Qt.ShortcutContext.WidgetShortcut)
-        resume_delete.activated.connect(self._remove_resume_selected)
-        self.root.addWidget(self.resume_view)
+        # One scrolling list: in-progress episodes lead, new episodes follow.
+        # A second list with its own scroll area (the old fixed "Continue
+        # listening" strip) split Home in two and clipped rows whenever the
+        # description-lines setting made rows taller.
         self.latest_title = SectionHeader("New episodes")
-        self.latest_title.see_all_requested.connect(self.new_requested)
+        self.latest_title.see_all_requested.connect(self._see_all)
         self.root.addWidget(self.latest_title)
+        self._latest_text = "New episodes"
+        self._resume_lead = []
         view = QListView()
         view.setWrapping(False)
         view.setAccessibleName("New episodes")
@@ -938,12 +919,11 @@ class HomePage(BasePage, _ListPageMixin):
             EpisodeModel(()),
             EmptyState(*self._empty_text, glyph="episodes"),
         )
-        for drag_view in (self.view, self.resume_view):
+        for drag_view in (self.view,):
             drag_view.setDragEnabled(True)
             drag_view.setDragDropMode(QListView.DragDropMode.DragOnly)
         self.activate_requested.connect(self.play_requested)
         self.root.addWidget(self.stack, 1)
-        self._set_resume_rows(0)
         self._greeting_timer = QTimer(self)
         self._greeting_timer.timeout.connect(lambda: self.header.set_subtitle(self._greeting()))
         self._greeting_timer.start(60_000)
@@ -956,15 +936,18 @@ class HomePage(BasePage, _ListPageMixin):
 
     RESUME_ROWS = 3
 
-    def _resume_row_height(self) -> int:
-        compact = bool(getattr(self.delegate, "compact", False))
-        return scaled_px(EpisodeDelegate.COMPACT_HEIGHT if compact else EpisodeDelegate.ROW_HEIGHT)
+    def _see_all(self):
+        """The single header's link follows what it currently labels."""
+        if self._resume_lead:
+            self.resume_all_requested.emit()
+        else:
+            self.new_requested.emit()
 
-    def _set_resume_rows(self, count: int):
-        visible = count > 0
-        self.section_title.setVisible(visible)
-        self.resume_view.setVisible(visible)
-        self.resume_view.setFixedHeight(min(count, self.RESUME_ROWS) * self._resume_row_height() + 4)
+    def set_latest_title(self, text: str):
+        """Shell-supplied label for the new/latest episodes portion."""
+        self._latest_text = text
+        if not self._resume_lead:
+            self.latest_title.title.setText(text)
 
     def set_empty_context(self, has_shows: bool):
         """Empty library and quiet library are different states."""
@@ -985,11 +968,14 @@ class HomePage(BasePage, _ListPageMixin):
         key = self._current_key()
         in_progress = list(in_progress)
         latest = list(latest)
-        self.resume_model.replace(in_progress[: self.RESUME_ROWS])
-        self._set_resume_rows(self.resume_model.rowCount())
-        self.section_title.set_count(len(in_progress), show_link=len(in_progress) > self.RESUME_ROWS)
-        self.model.replace(latest[:30])
-        self.latest_title.set_count(len(latest))
+        self._resume_lead = in_progress[: self.RESUME_ROWS]
+        self.model.replace(self._resume_lead + latest[:30])
+        if self._resume_lead:
+            self.latest_title.title.setText("Continue listening")
+            self.latest_title.set_count(len(in_progress), show_link=True)
+        else:
+            self.latest_title.title.setText(self._latest_text)
+            self.latest_title.set_count(len(latest))
         self._restore_selection(key, True)
 
     def set_items(self, items, heading: str | None = None):  # compatibility
@@ -997,74 +983,54 @@ class HomePage(BasePage, _ListPageMixin):
 
     def set_playing(self, episode_id: int, active: bool, source: str = ""):
         self.delegate.set_playing(episode_id, active, source)
-        self.resume_delegate.set_playing(episode_id, active, source)
         self.view.viewport().update()
-        self.resume_view.viewport().update()
 
     def apply_metrics(self):
         super().apply_metrics()
         for button in self.summary_buttons:
             button.apply_metrics()
-        self._set_resume_rows(self.resume_model.rowCount())
-        for view in (self.view, self.resume_view):
-            view.doItemsLayout()
-            view.viewport().update()
+        self.view.doItemsLayout()
+        self.view.viewport().update()
 
     def set_density(self, compact: bool):
         self.delegate.compact = compact
-        self.resume_delegate.compact = compact
-        count = self.resume_model.rowCount()
-        self.resume_view.setFixedHeight(min(count, self.RESUME_ROWS) * self._resume_row_height() + 4)
-        for view in (self.view, self.resume_view):
-            view.doItemsLayout()
-            view.viewport().update()
+        self.view.doItemsLayout()
+        self.view.viewport().update()
 
     def set_counts(self, new_count: int, queue_count: int, download_count: int):
         for button, count in zip(self.summary_buttons, (new_count, queue_count, download_count)):
             button.set_count(count)
 
-    def _view_for(self, viewport):
-        # Events can arrive during construction, before both lists exist.
-        view = getattr(self, "view", None)
-        if view is not None and viewport is view.viewport():
-            return view, self.delegate
-        resume = getattr(self, "resume_view", None)
-        if resume is not None and viewport is resume.viewport():
-            return resume, self.resume_delegate
-        return None, None
-
-    def selected_items(self):
-        for view, _delegate in ((self.view, self.delegate), (self.resume_view, self.resume_delegate)):
-            rows = sorted({index.row() for index in view.selectionModel().selectedIndexes()})
-            if rows:
-                items = view.model()._items
-                return [items[row] for row in rows if 0 <= row < len(items)]
-        return []
-
     def resume_items(self):
-        return list(self.resume_model._items)
+        """The in-progress episodes leading the merged list."""
+        return list(self._resume_lead)
 
-    def _remove_resume_selected(self):
-        rows = sorted({index.row() for index in self.resume_view.selectionModel().selectedIndexes()})
-        items = [self.resume_model._items[row] for row in rows if 0 <= row < len(self.resume_model._items)]
+    def _remove_selected(self):
+        """Delete removes in-progress rows from Continue listening; other
+        rows have no removal semantics on Home."""
+        resume_ids = {item.episode_id for item in self._resume_lead}
+        items = [item for item in self.selected_items() if item.episode_id in resume_ids]
         if items:
             self.resume_remove_requested.emit(items)
 
     def eventFilter(self, watched, event):
-        view, delegate = self._view_for(watched)
-        if view is not None:
-            self._track_item_tooltip(view, event)
-        if view is not None and event.type() == QEvent.Type.MouseMove:
+        view = getattr(self, "view", None)
+        # Events can arrive during construction, before the list exists.
+        if view is None or watched is not view.viewport():
+            return super().eventFilter(watched, event)
+        delegate = self.delegate
+        self._track_item_tooltip(view, event)
+        if event.type() == QEvent.Type.MouseMove:
             index = view.indexAt(event.position().toPoint())
             over_play = index.isValid() and delegate.play_rect(view.visualRect(index)).contains(event.position().toPoint())
             view.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over_play else Qt.CursorShape.ArrowCursor)
-        if view is not None and event.type() == QEvent.Type.ContextMenu:
+        if event.type() == QEvent.Type.ContextMenu:
             index = view.indexAt(event.pos())
             if index.isValid():
                 view.setCurrentIndex(index)
                 self.menu_requested.emit(index.data(ItemRoles.ITEM), view.viewport().mapToGlobal(event.pos()))
             return True
-        if view is not None and event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
             position = event.position().toPoint()
             index = view.indexAt(position)
             if index.isValid() and delegate.play_rect(view.visualRect(index)).contains(position):
