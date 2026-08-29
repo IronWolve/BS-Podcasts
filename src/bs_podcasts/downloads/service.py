@@ -147,7 +147,11 @@ class DownloadService:
             append = existing > 0 and response.status_code == 206
             if existing and not append:
                 existing = 0
-            length = int(response.headers.get("Content-Length") or 0)
+            try:
+                length = max(0, int(response.headers.get("Content-Length") or 0))
+            except ValueError:
+                # A malformed header is an unknown size, not a dead queued row.
+                length = 0
             total = existing + length if length else 0
             if total:
                 free = shutil.disk_usage(self.directory).free

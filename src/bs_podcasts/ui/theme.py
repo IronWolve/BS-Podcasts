@@ -605,7 +605,7 @@ def stylesheet() -> str:
     QTabWidget#contextTabs QTabBar::tab {{
         background: transparent; color: {c['muted']}; border: 0;
         border-bottom: 2px solid transparent;
-        padding: {sp(7)}px 0; margin-right: 1px; font-weight: 500; font-size: {small}px;
+        padding: {sp(7)}px {sp(5)}px; margin-right: {sp(4)}px; font-weight: 500; font-size: {small}px;
     }}
     QTabWidget#contextTabs QTabBar::tab:hover {{ color: {c['text']}; }}
     QTabWidget#contextTabs QTabBar::tab:selected {{

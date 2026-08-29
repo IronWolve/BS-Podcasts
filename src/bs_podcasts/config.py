@@ -19,7 +19,7 @@ def app_version() -> str:
 
         return version("bs-podcasts")
     except Exception:
-        return "0.1.0"
+        return "0.9.5"  # keep in step with pyproject.toml for frozen/source runs without metadata
 
 
 # Per-platform locations, none created here.
