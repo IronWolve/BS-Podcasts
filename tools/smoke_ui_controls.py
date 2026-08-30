@@ -145,6 +145,18 @@ def main() -> int:
             window.settings_page.library_path.text().endswith("library.db"),
             "Settings storage path is missing",
         )
+        # Every icon name referenced in the source must exist: a missing glyph
+        # raises KeyError the moment its menu or button is built.
+        import re as _re
+        from bs_podcasts.ui.icons import GLYPHS
+        source_root = WORKSPACE / "repo"
+        unknown = set()
+        for source in list((source_root / "src").rglob("*.py")) + list((source_root / "tools").rglob("*.py")):
+            for name in _re.findall(r'icons?\.(?:icon|pixmap|paint)\(\s*"([a-z0-9\-]+)"', source.read_text()):
+                if name not in GLYPHS:
+                    unknown.add(f"{source.name}:{name}")
+        require(not unknown, f"unknown icon glyph(s): {sorted(unknown)}")
+
         # No settings dropdown may elide any of its options ("200 results · dire…").
         # Chrome is measured from the style — a guessed allowance previously
         # passed while the widest option still clipped under the arrow.
