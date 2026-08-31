@@ -1,6 +1,7 @@
 """Canonical feed refresh pipeline and crash-budget application."""
 
 from dataclasses import dataclass
+import threading
 
 from ..artwork import ArtworkCache, ArtworkError
 from ..data.repositories import LibraryRepository
@@ -28,8 +29,26 @@ class RefreshService:
         self.repository = repository
         self.fetcher = fetcher or FeedFetcher()
         self.artwork = artwork
+        # One lock per show: a manual "Refresh now" racing a batch or
+        # scheduled refresh of the same feed used to interleave two fetches,
+        # with etag/health bookkeeping last-write-wins. Serialized, the
+        # second refresh runs after the first and its conditional fetch is a
+        # cheap 304 — and its write is the newer one by construction.
+        self._show_locks: dict[int, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _lock_for(self, show_id: int) -> threading.Lock:
+        with self._locks_guard:
+            lock = self._show_locks.get(show_id)
+            if lock is None:
+                lock = self._show_locks[show_id] = threading.Lock()
+            return lock
 
     def refresh(self, show_id: int) -> RefreshReport:
+        with self._lock_for(show_id):
+            return self._refresh_locked(show_id)
+
+    def _refresh_locked(self, show_id: int) -> RefreshReport:
         show = self.repository.get_show(show_id)
         if show is None:
             return RefreshReport(show_id, Health.ERROR, message="Podcast was not found.")

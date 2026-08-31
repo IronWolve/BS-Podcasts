@@ -2031,10 +2031,7 @@ class ContextPanel(QFrame):
         has_latest = bool(podcast.latest_episode_title) and not self._feed_url
         self.latest_card.setVisible(has_latest)
         if has_latest:
-            title = podcast.latest_episode_title
-            if len(title) > 72:
-                title = title[:69].rstrip() + "…"
-            self.latest_episode.setText(f"{title}\n{podcast.latest_episode_date}")
+            self._set_latest_episode(podcast.latest_episode_title, podcast.latest_episode_date)
         self._preview_url = self._feed_url
         self._directory_url = podcast.directory_url
         self._website_url = podcast.website_url
@@ -2046,6 +2043,16 @@ class ContextPanel(QFrame):
         if self._feed_url and not description:
             description = "Loading feed details…"
         self._set_body(description or "No description provided by this feed.")
+
+    def _set_latest_episode(self, title: str, date: str):
+        """The label word-wraps, so it gets the whole title whenever it is
+        sane; only a pathological one is shortened at a word boundary, and
+        the full text then stays reachable via tooltip. It used to be a
+        blind 72-character slice with no tooltip — truncation while space
+        existed."""
+        shown = title if len(title) <= 200 else title[:199].rsplit(" ", 1)[0].rstrip() + "…"
+        self.latest_episode.setText(f"{shown}\n{date}" if date else shown)
+        self.latest_episode.setToolTip(title if shown != title else "")
 
     def preview_url(self) -> str:
         """Feed URL of the unsubscribed directory result currently shown, if any."""
@@ -2081,8 +2088,7 @@ class ContextPanel(QFrame):
         has_latest = bool(latest_title)
         self.latest_card.setVisible(has_latest)
         if has_latest:
-            title = latest_title if len(latest_title) <= 72 else latest_title[:69].rstrip() + "…"
-            self.latest_episode.setText(f"{title}\n{latest_date}")
+            self._set_latest_episode(latest_title, latest_date)
         body = description or "No description provided by this feed."
         if recent:
             items = "".join(f"<li>{_escape(title)} <span style='color:{COLORS['subtle']}'>· {_escape(date)}</span></li>" for title, date in recent)
@@ -2125,21 +2131,33 @@ class ContextPanel(QFrame):
         self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 18))
         self.primary.setEnabled(True)
         self.secondary.setEnabled(bool(self._episode_id))
-        if episode.state == "Downloaded":
+        self._apply_download_button(episode.state)
+
+    def _apply_download_button(self, state: str):
+        if state == "Downloaded":
             self.download.setText("Downloaded")
             self.download.setIcon(icons.icon("downloaded", COLORS["success"], 16, disabled=COLORS["success"]))
             self.download.setEnabled(True)
             self.download.setToolTip("Downloaded — open location or delete")
-        elif episode.state == "Downloading":
+        elif state == "Downloading":
             self.download.setText("Downloading…")
             self.download.setIcon(icons.icon("pause", COLORS["text"], 16, disabled=COLORS["border"]))
             self.download.setToolTip("Click to pause")
             self.download.setEnabled(True)
         else:
             self.download.setToolTip("")
-            self.download.setText("Retry download" if episode.state == "Error" else "Resume download" if episode.state == "Paused" else "Download")
+            self.download.setText("Retry download" if state == "Error" else "Resume download" if state == "Paused" else "Download")
             self.download.setIcon(icons.icon("download", COLORS["text"], 16, disabled=COLORS["border"]))
             self.download.setEnabled(bool(self._episode_id))
+
+    def update_download_state(self, episode_id: int, state: str):
+        """Live refresh from download events. Without this the button showed
+        whatever state the episode had when the panel opened — stuck at
+        "Downloading…" long after completion, pause or failure, and offering
+        a pause menu for a download that no longer exists."""
+        if not episode_id or episode_id != self._episode_id:
+            return
+        self._apply_download_button(state)
 
     def show_empty(self):
         self._set_current_item(None)
@@ -2345,7 +2363,11 @@ class ElidedValueLabel(QLabel):
         self._refresh()
 
     def _refresh(self):
-        QLabel.setText(self, self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideMiddle, max(40, self.width())))
+        shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideMiddle, max(40, self.width()))
+        QLabel.setText(self, shown)
+        # Elided text must keep its full value reachable (product rule:
+        # ellipsis + tooltip, never a dead end).
+        self.setToolTip(self._full if shown != self._full else "")
 
 
 class NowPlayingView(QFrame):

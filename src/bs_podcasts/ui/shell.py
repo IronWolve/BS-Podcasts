@@ -100,6 +100,10 @@ class MainWindow(QMainWindow):
         self._refresh_failed = []
         self._refresh_waiting = []
         self._refresh_in_flight = set()
+        # Manual "Refresh now" submissions, tracked separately from the batch
+        # bookkeeping so a double-click (or menu + header race) cannot submit
+        # the same show twice (UI-P2-7).
+        self._manual_refresh_in_flight = set()
         self._discover_operation = ""
         self._discover_value = ""
         self._discover_limit = 30
@@ -3007,6 +3011,14 @@ class MainWindow(QMainWindow):
             return
         self._run_read(self._read_download_items, self._apply_download_items, "downloads")
 
+    @staticmethod
+    def _record_ui_state(record) -> str:
+        if record.state.value == "complete":
+            return "Downloaded"
+        if record.state.value == "downloading":
+            return "Downloading"
+        return record.state.value.title()
+
     def _read_download_items(self):
         items = []
         records = self.downloads.records()
@@ -3019,12 +3031,7 @@ class MainWindow(QMainWindow):
                 if episode is None:
                     continue
                 item = self._ui_episode(episode)
-                if record.state.value == "complete":
-                    state = "Downloaded"
-                elif record.state.value == "downloading":
-                    state = "Downloading"
-                else:
-                    state = record.state.value.title()
+                state = self._record_ui_state(record)
                 detail = ""
                 if state == "Downloading" and record.bytes_total:
                     detail = f"{self._format_bytes(record.bytes_done)} of {self._format_bytes(record.bytes_total)}"
@@ -3052,6 +3059,15 @@ class MainWindow(QMainWindow):
     def _apply_download_items(self, payload):
         items, records, used, free, _total = payload
         self.download_page.set_items(items)
+        # The context panel snapshots download state when it opens; keep its
+        # button live so it never sticks at "Downloading…" (UI-P2-1). A
+        # vanished record means the download was removed: back to "Download".
+        context_id = self.context._episode_id
+        if context_id:
+            record = next((r for r in records if r.episode_id == context_id), None)
+            self.context.update_download_state(
+                context_id, self._record_ui_state(record) if record is not None else ""
+            )
         low = "  ·  low on space" if free < 1024 ** 3 else ""
         self.download_page.header.set_subtitle(f"{self._format_bytes(used)} on disk  ·  {self._format_bytes(free)} free{low}" if items or low else "")
         if self.download_page.header.action:
@@ -3466,11 +3482,19 @@ class MainWindow(QMainWindow):
     def _submit_refresh(self, show_id: int, batch: bool = False) -> bool:
         if self.jobs is None or self.refresh is None:
             return False
-        if not batch and (show_id in self._refresh_in_flight or show_id in self._refresh_waiting):
-            # A batch already covers this show; a concurrent second refresh
-            # of the same feed would double fail_count on one outage and
-            # interleave two import transactions.
+        if not batch and (
+            show_id in self._refresh_in_flight
+            or show_id in self._refresh_waiting
+            or show_id in self._manual_refresh_in_flight
+        ):
+            # A batch already covers this show, or a manual refresh of it is
+            # already running; a concurrent second refresh of the same feed
+            # would double fail_count on one outage. (RefreshService also
+            # serializes per show, so anything that slips past this guard is
+            # ordered rather than interleaved.)
             return False
+        if not batch:
+            self._manual_refresh_in_flight.add(show_id)
         generation = self._refresh_generation
         future = self.refresh_jobs.submit(self.refresh.refresh, show_id)
         self._pending_jobs.add(future)
@@ -3836,6 +3860,7 @@ class MainWindow(QMainWindow):
                 return
             self._refresh_in_flight.discard(identifier)
         else:
+            self._manual_refresh_in_flight.discard(identifier)
             self._request_reload()
         total, done, new_episodes = self._refresh_batch
         if batch_refresh and not total:
@@ -4214,7 +4239,11 @@ class MainWindow(QMainWindow):
             and (watched is self or self.isAncestorOf(watched))
             and not isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QKeySequenceEdit, QAbstractSpinBox, QComboBox, QAbstractButton))
         ):
-            if self._playing_episode_id:
+            if self._playing_episode_id or (
+                # A Discover preview stream plays with no episode id; bare
+                # Space must toggle it, not play whatever row is selected.
+                self._playing_source and self._playing_state in {"playing", "paused", "loading"}
+            ):
                 self._play_pause()
                 return True
             selected = self._selected_episode_ids()

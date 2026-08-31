@@ -4,12 +4,18 @@ from hashlib import sha256
 from pathlib import Path
 from threading import Lock
 import os
+import time
 
 from ..net import SessionSlot
 from ..urlguard import UnsafeUrl, ensure_fetchable
 
 
 MAX_ARTWORK_BYTES = 8 * 1024 * 1024
+# requests' timeout bounds connect time and the gap between chunks, not the
+# whole transfer: a server dripping one byte every 19 seconds holds a worker
+# from the shared pool indefinitely. An 8 MB image over a 60 s wall clock is
+# ~1 Mbit/s — generous for artwork, fatal for a slow-loris.
+MAX_TRANSFER_SECONDS = 60
 
 def _looks_textual(head: bytes) -> bool:
     """True for payloads that are plainly a document rather than an image.
@@ -136,8 +142,11 @@ class ArtworkCache:
                 raise ArtworkError("Artwork response is not an image.")
             size = 0
             head = b""
+            deadline = time.monotonic() + MAX_TRANSFER_SECONDS
             with partial.open("wb") as handle:
                 for chunk in response.iter_content(64 * 1024):
+                    if time.monotonic() > deadline:
+                        raise ArtworkError("Artwork transfer took too long.")
                     size += len(chunk)
                     if size > MAX_ARTWORK_BYTES:
                         raise ArtworkError("Artwork exceeds the size limit.")

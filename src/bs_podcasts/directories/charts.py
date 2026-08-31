@@ -87,10 +87,23 @@ class DirectoryCharts:
         results = [
             candidate
             for position, item in enumerate(shelf.get("items", []), start=1)
-            if (candidate := self._candidate(item, chart_type, position)) is not None
+            if (candidate := self._safe_candidate(self._candidate, item, chart_type, position)) is not None
         ]
         self._cache[key] = (time.time(), results)
         return results
+
+    @staticmethod
+    def _safe_candidate(builder, item, chart_type: str, rank: int):
+        """One malformed item costs that item, not the whole chart.
+
+        The builders chain .get() on assumed shapes, and the payload is
+        third-party JSON that changes per deploy — a list where a dict was
+        expected raised outside chart()'s try/except and killed the entire
+        result set."""
+        try:
+            return builder(item, chart_type, rank)
+        except (AttributeError, TypeError, ValueError, KeyError, IndexError):
+            return None
 
     def _full_chart(self, chart_type: str, category: str):
         import requests
@@ -132,7 +145,7 @@ class DirectoryCharts:
             candidate
             for rank, item in enumerate(data, start=1)
             if (
-                candidate := self._api_candidate(item, chart_type, rank)
+                candidate := self._safe_candidate(self._api_candidate, item, chart_type, rank)
             )
             is not None
         ]

@@ -581,14 +581,18 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         if watched is self.view.viewport() and event.type() == QEvent.Type.MouseMove:
             index = self.view.indexAt(event.position().toPoint())
             over_card = index.isValid()
-            over_action = over_card and self.delegate.action_rect(self.view.visualRect(index)).contains(event.position().toPoint())
+            item = index.data(ItemRoles.ITEM) if over_card else None
+            # Episode cards paint no hover button, so their corner is not an
+            # action zone: the hit test must match what paint() draws.
+            over_action = (
+                over_card and item is not None and not item.is_episode
+                and self.delegate.action_rect(self.view.visualRect(index)).contains(event.position().toPoint())
+            )
             self.view.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over_card else Qt.CursorShape.ArrowCursor)
             if over_action:
-                item = index.data(ItemRoles.ITEM)
-                if item is not None:
-                    tip = "Play latest" if item.show_id else ("Subscribed" if item.subscribed else "Subscribe")
-                    point = event.globalPosition().toPoint()
-                    show_hover_bubble(tip, point.x(), point.y() - 6)
+                tip = "Play latest" if item.show_id else ("Subscribed" if item.subscribed else "Subscribe")
+                point = event.globalPosition().toPoint()
+                show_hover_bubble(tip, point.x(), point.y() - 6)
             else:
                 hide_hover_bubble()
         if (
@@ -600,9 +604,11 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             index = self.view.indexAt(position)
             if index.isValid() and self.delegate.action_rect(self.view.visualRect(index)).contains(position):
                 item = index.data(ItemRoles.ITEM)
-                if item is not None:
+                if item is not None and not item.is_episode:
                     self.card_action_requested.emit(item)
-                return True
+                    return True
+                # Episode cards have no button there; fall through so the
+                # click opens the card instead of dying in a dead zone.
         if watched is self.view.viewport() and event.type() == QEvent.Type.Wheel:
             QTimer.singleShot(0, lambda: self._check_near_end(self.view.verticalScrollBar().value()))
         return super().eventFilter(watched, event)

@@ -121,11 +121,14 @@ def _categories(element) -> tuple[str, ...]:
         if value and value.casefold() not in {item.casefold() for item in values}:
             values.append(value)
 
-    def visit(node):
-        nested = _children(node, "category")
+    def visit(node, depth: int = 0):
+        # Real feeds nest one or two levels; a hostile feed nesting
+        # thousands must not raise RecursionError and take the whole parse
+        # down with it. Past the cap the node is treated as a leaf.
+        nested = _children(node, "category") if depth < 8 else ()
         if nested:
             for child in nested:
-                visit(child)
+                visit(child, depth + 1)
         else:
             add(
                 node.attrib.get("text", "")
