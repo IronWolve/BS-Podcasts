@@ -1,5 +1,10 @@
 #define MyAppName "BS Podcasts"
-#define MyAppVersion "0.9.5"
+#ifndef MyAppVersion
+  ; build-windows.ps1 passes /DMyAppVersion from pyproject.toml. The
+  ; fallback exists only so the script can be opened directly in the
+  ; Inno Setup IDE; a real build never uses it.
+  #define MyAppVersion "0.0.0-dev"
+#endif
 #ifndef SourceDir
   #error SourceDir must point to the built onedir application folder
 #endif

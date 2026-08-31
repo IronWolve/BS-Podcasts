@@ -90,7 +90,16 @@ if ($Installer) {
         throw "-Installer was requested, but Inno Setup 6 was not found. The application was still copied to $copiedDir"
     }
     $installerSpec = Join-Path $repo "packaging\bs-podcasts.iss"
-    & $iscc "/DSourceDir=$copiedDir" "/DOutputDir=$Destination" $installerSpec
+    # One source of truth for the version. The .iss used to carry its own
+    # literal, so the installer advertised a stale version the moment
+    # pyproject.toml was bumped without it.
+    $pyproject = Get-Content -LiteralPath (Join-Path $repo "pyproject.toml") -Raw
+    if ($pyproject -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+        throw "Could not read version from pyproject.toml"
+    }
+    $appVersion = $Matches[1]
+    Write-Output "Installer version: $appVersion"
+    & $iscc "/DSourceDir=$copiedDir" "/DOutputDir=$Destination" "/DMyAppVersion=$appVersion" $installerSpec
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup failed with exit code $LASTEXITCODE"
     }

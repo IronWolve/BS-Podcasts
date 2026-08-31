@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QApplication
 
 from bs_podcasts.ui.dialogs import PodcastSettingsDialog
 from bs_podcasts.ui.theme import apply_theme, scaled_px
-from bs_podcasts.ui.widgets import PageHeader
+from bs_podcasts.ui.widgets import PageHeader, PlayerBar
 
 FAILURES = []
 
@@ -121,6 +121,38 @@ def check_podcast_settings_combos_fit_their_options():
         dialog.deleteLater()
 
 
+def check_player_bar_elides_with_a_tooltip():
+    """The now-playing title is the other surface design.md names."""
+    from bs_podcasts.playback.service import PlaybackSnapshot, PlaybackState
+
+    bar = PlayerBar()
+    try:
+        bar.resize(scaled_px(900), scaled_px(96))
+        bar.show()
+        QApplication.processEvents()
+        bar.set_snapshot(PlaybackSnapshot(
+            state=PlaybackState.PLAYING, episode_id=1, show_id=1,
+            title=LONG_TITLE, show_title="A Show With A Rather Long Name As Well",
+            source="https://samples.invalid/a.mp3", duration=600.0, position=5.0,
+        ))
+        QApplication.processEvents()
+        for label, full, name in (
+            (bar.title, LONG_TITLE, "player title"),
+            (bar.show_label, "A Show With A Rather Long Name As Well", "player show"),
+        ):
+            shown = label.text().replace("&&", "&")  # Qt mnemonic escaping
+            metrics = label.fontMetrics()
+            check(
+                f"{name} fits its column",
+                metrics.horizontalAdvance(shown) <= label.width() + 1 or shown != full,
+            )
+            if shown != full:
+                check(f"{name} elides visibly", shown.endswith("…"))
+                check(f"{name} keeps a full-text tooltip", label.toolTip() == full)
+    finally:
+        bar.deleteLater()
+
+
 def main() -> int:
     app = QApplication.instance() or QApplication([])
     apply_theme("dark")
@@ -128,6 +160,7 @@ def main() -> int:
     check_header_elides_instead_of_clipping()
     check_header_keeps_an_applied_filter_visible()
     check_podcast_settings_combos_fit_their_options()
+    check_player_bar_elides_with_a_tooltip()
 
     app.processEvents()
     for failure in FAILURES:
