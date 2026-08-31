@@ -95,7 +95,11 @@ def plain_snippet(text: str, limit: int = 240) -> str:
     """One-line plain-text preview of possibly-HTML show notes."""
     if not text:
         return ""
+    # Strip, unescape, strip again: feeds double-escape markup often enough
+    # that unescaping reveals fresh tags ("&lt;b&gt;bold&lt;/b&gt;"), which a
+    # single pre-unescape strip left visible as literal angle brackets.
     stripped = html.unescape(_TAG.sub(" ", text))
+    stripped = _TAG.sub(" ", stripped)
     collapsed = _WS.sub(" ", stripped).strip()
     return collapsed[:limit]
 

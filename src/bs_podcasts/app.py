@@ -40,9 +40,12 @@ def _write_crash_file(text: str):
     try:
         path = os.path.join(
             tempfile.gettempdir(),
-            f"bs-podcasts-crash-{time.strftime('%Y%m%d-%H%M%S')}.log",
+            f"bs-podcasts-crash-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}.log",
         )
-        with open(path, "a", encoding="utf-8") as handle:
+        # "x": refuse a path that already exists. The name is predictable and
+        # the directory may be shared, so appending through a pre-planted
+        # symlink would write the crash text into an arbitrary user file.
+        with open(path, "x", encoding="utf-8") as handle:
             handle.write(f"BS Podcasts {app_version()}\n{text}\n")
     except OSError:
         pass
@@ -55,7 +58,10 @@ def _install_excepthook():
         text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
         logger.error("Unhandled exception:\n%s", text)
         _write_crash_file(text)
-        sys.__stderr__.write(text)
+        if sys.__stderr__ is not None:
+            # None on windowed Windows builds (no console): the log file and
+            # crash file above already have it, so nothing is lost.
+            sys.__stderr__.write(text)
 
     sys.excepthook = hook
 
@@ -329,8 +335,8 @@ def main() -> int:
         old = state["window"]
         apply_app_stylesheet(app)
         if old is not None:
-            if getattr(old, "tray", None) is not None and old.tray.tray is not None:
-                old.tray.tray.hide()
+            if getattr(old, "tray", None) is not None:
+                old.tray.shutdown()
             # Both may still be None: they are now built after first paint,
             # so a rebuild triggered immediately can arrive before they exist.
             if getattr(old, "mpris", None) is not None:

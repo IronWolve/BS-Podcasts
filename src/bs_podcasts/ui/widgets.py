@@ -178,8 +178,24 @@ def safe_feed_html(text: str) -> str:
     return "".join(parser.parts)
 
 
+class _CursorAwareButton(QPushButton):
+    """Hand cursor only while actually clickable.
+
+    The shared factory set PointingHandCursor unconditionally, so a disabled
+    icon button (the context pane's info button among fifteen call sites)
+    still advertised interactivity; the player bar had fixed this locally
+    but the factory had not."""
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.EnabledChange:
+            self.setCursor(
+                Qt.CursorShape.PointingHandCursor if self.isEnabled() else Qt.CursorShape.ArrowCursor
+            )
+
+
 def icon_button(name: str, tooltip: str, object_name: str = "iconButton", size: int = 20, checkable=False):
-    button = QPushButton()
+    button = _CursorAwareButton()
     button.setObjectName(object_name)
     button.setIcon(icons.icon(name, COLORS["text"], size, disabled=COLORS["border"]))
     button.setIconSize(QSize(size, size))
@@ -700,14 +716,93 @@ class PageHeader(QFrame):
         self.search.setMaximumWidth(scaled_px(240))
 
 
+class FlowLayout(QLayout):
+    """Left-to-right layout that wraps to the next line instead of clipping.
+
+    ChipRow used a plain QHBoxLayout: seven filters plus a sort button on one
+    line simply ran off the right edge of a narrow pane, and the clipped
+    chips were still clickable-but-invisible. Wrapping is the only outcome
+    the "text is never cut off" rule allows here."""
+
+    def __init__(self, parent=None, spacing=6):
+        super().__init__(parent)
+        self._items = []
+        self._spacing = spacing
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def insertWidget(self, index, widget):
+        self.addWidget(widget)
+        self._items.insert(index, self._items.pop())
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._arrange(QRect(0, 0, width, 0), measure=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._arrange(rect, measure=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+
+    def setSpacing(self, value):
+        self._spacing = value
+        self.invalidate()
+
+    def spacing(self):
+        return self._spacing
+
+    def _arrange(self, rect, measure: bool) -> int:
+        x, y = rect.x(), rect.y()
+        line_height = 0
+        for item in self._items:
+            widget = item.widget()
+            if widget is not None and widget.isHidden():
+                continue
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._spacing
+            if next_x - self._spacing > rect.right() + 1 and line_height > 0:
+                x = rect.x()
+                y += line_height + self._spacing
+                next_x = x + hint.width() + self._spacing
+                line_height = 0
+            if not measure:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y()
+
+
 class ChipRow(QWidget):
     selected = Signal(str)
 
     def __init__(self, labels, parent=None):
         super().__init__(parent)
-        layout = QHBoxLayout(self)
+        layout = FlowLayout(self, spacing=SPACE["sm"])
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(SPACE["sm"])
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         self._buttons = []
@@ -723,7 +818,6 @@ class ChipRow(QWidget):
             self.group.addButton(button)
             self._buttons.append(button)
             layout.addWidget(button)
-        layout.addStretch(1)
         self._compact = False
         if not labels:
             # Only ever hide here: ChipRow is constructed parentless, and
@@ -870,7 +964,8 @@ class Toast(QFrame):
         self._effect = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self._effect)
         self._animation = QPropertyAnimation(self._effect, b"opacity", self)
-        self._animation.setDuration(160)
+        from .theme import reduced_motion
+        self._animation.setDuration(0 if reduced_motion() else 160)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.dismiss)
@@ -2092,7 +2187,9 @@ class ContextPanel(QFrame):
             self._set_latest_episode(latest_title, latest_date)
         body = description or "No description provided by this feed."
         if recent:
-            items = "".join(f"<li>{_escape(title)} <span style='color:{COLORS['subtle']}'>· {_escape(date)}</span></li>" for title, date in recent)
+            # No inline span: safe_feed_html strips style attributes, so the
+            # colour never rendered — the markup was dead weight.
+            items = "".join(f"<li>{_escape(title)} · {_escape(date)}</li>" for title, date in recent)
             body = (body if "<" in body else f"<p>{_escape(body)}</p>") + f"<p><b>Recent episodes</b></p><ul>{items}</ul>"
         self._set_body(body)
         self.primary.setText("Subscribe")
@@ -2670,7 +2767,9 @@ class SearchOverlay(QFrame):
         self.results.itemClicked.connect(self._activate)
         self.results.setMinimumHeight(scaled_px(240))
         card_layout.addWidget(self.results, 1)
-        self.hint = QLabel("↑↓ to move  ·  Enter to open  ·  Esc to close")
+        # Say what Enter does per result kind: mixed lists made one bare
+        # "open" ambiguous between opening a podcast and playing an episode.
+        self.hint = QLabel("↑↓ to move  ·  Enter opens podcasts, plays episodes  ·  Esc to close")
         self.hint.setObjectName("settingHint")
         card_layout.addWidget(self.hint)
         outer.addWidget(self.card, 0, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)

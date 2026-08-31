@@ -179,8 +179,10 @@ def _cache_dir() -> Path:
             base = cache_dir() / "icons"
             base.mkdir(parents=True, exist_ok=True)
         except OSError:
-            base = Path(os.environ.get("TMPDIR") or tempfile.gettempdir()) / "bs-podcasts-icons"
-            base.mkdir(parents=True, exist_ok=True)
+            # A private, randomly-named directory: the old fixed name in a
+            # possibly-shared temp dir could be pre-planted as a symlink,
+            # sending every icon write wherever it pointed.
+            base = Path(tempfile.mkdtemp(prefix="bs-podcasts-icons-"))
         _file_dir = base
     return _file_dir
 

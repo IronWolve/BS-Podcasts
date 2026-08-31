@@ -4,7 +4,19 @@ Tokens are the single source of truth for colour, spacing, radius and type.
 Delegates read the same dictionaries so painted lists match styled widgets.
 """
 
+import os
+
 from PySide6.QtGui import QFont, QFontDatabase
+
+
+def reduced_motion() -> bool:
+    """Honour a reduce-motion request.
+
+    Qt exposes no cross-platform OS hint for this, so the app-level switch
+    is an environment variable; every animation in the app asks here rather
+    than deciding for itself.
+    """
+    return os.environ.get("BS_PODCASTS_REDUCE_MOTION", "") not in ("", "0", "false")
 
 
 def _rgba(hex_color: str, alpha: float) -> str:
@@ -741,9 +753,12 @@ def stylesheet() -> str:
         background: {c['surface']}; border: 1px solid {c['hairline']}; border-radius: {r['lg']}px;
     }}
 
-    QSplitter::handle {{ background: transparent; }}
+    /* A hairline, not an 8px slab: the margin shrinks the painted area to a
+       thin line while the full 8px stays grabbable. Fully transparent at
+       rest hid the affordance entirely. */
+    QSplitter::handle {{ background: {c['hairline']}; margin: 0 3px; }}
     QSplitter::handle:horizontal {{ width: 8px; }}
-    QSplitter::handle:hover {{ background: {c['border']}; }}
+    QSplitter::handle:hover {{ background: {c['border']}; margin: 0 2px; }}
     QFrame#contextModes {{
         background: {c['surface_raised']}; border: 1px solid {c['hairline']};
         border-radius: {r['md']}px; padding: 3px;
