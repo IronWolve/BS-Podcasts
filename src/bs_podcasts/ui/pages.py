@@ -232,7 +232,10 @@ class _ListPageMixin:
             # visibility directly was undone by the next resizeEvent.
             self.header.set_search_allowed(has_rows or bool(query))
         chips = getattr(self, "chips", None)
-        if chips is not None and not getattr(self, "reorder", False):
+        # parent() must be checked: Discover builds a ChipRow it never adds to
+        # a layout, so showing it fires a Show event on a top-level widget —
+        # a startup flash, which design.md holds as a release gate.
+        if chips is not None and chips.parent() is not None and not getattr(self, "reorder", False):
             # Filter chips for states nothing is in are noise on an empty
             # page; keep them while a filter is what emptied it.
             chips.setVisible(bool(getattr(self, "_all_items", ())) or bool(query))

@@ -2,11 +2,26 @@
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import logging
 import os
 import time
 
 
 WORKSPACE = Path(__file__).resolve().parents[2]
+
+# The startup tracer logs a Show event for every widget that becomes a
+# top-level window. Capturing them here lets this run — which drives Discover,
+# Settings and the filter fields — assert the parent-before-show rule over
+# paths a bare startup never reaches.
+_startup_records = []
+
+
+class _StartupCapture(logging.Handler):
+    def emit(self, record):
+        _startup_records.append(record)
+
+
+logging.getLogger("bs_podcasts").addHandler(_StartupCapture())
 LOCAL_TMP = WORKSPACE / "tmp"
 SAMPLE = WORKSPACE / "repo/tests/samples/m1-feed.xml"
 os.environ.setdefault("TMPDIR", str(LOCAL_TMP))
@@ -109,6 +124,9 @@ def main() -> int:
         listening = ListeningService(ListeningRepository(database))
         jobs = JobRunner(max_workers=1)
         app = create_application(["bs-podcasts-ui-controls"])
+        # After create_application: configure_logging() re-installs handlers,
+        # so attaching at import time would silently drop this one.
+        logging.getLogger("bs_podcasts").addHandler(_StartupCapture())
         window = MainWindow(
             library=library,
             jobs=jobs,
@@ -147,15 +165,55 @@ def main() -> int:
         )
         # Every icon name referenced in the source must exist: a missing glyph
         # raises KeyError the moment its menu or button is built.
-        import re as _re
+        # An AST walk, not a regex. The old pattern required the glyph literal
+        # to sit immediately after the opening paren, so it matched none of
+        # the icon_button("name", ...) call sites at all, and — because
+        # icons.paint() takes the QPainter first — it could never match ANY
+        # paint() call, literal or not.
+        import ast as _ast
         from bs_podcasts.ui.icons import GLYPHS
+
+        # function name -> index of the argument that names the glyph
+        GLYPH_ARG = {"icon": 0, "pixmap": 0, "paint": 1, "icon_button": 0}
         source_root = WORKSPACE / "repo"
         unknown = set()
+        dynamic = []
         for source in list((source_root / "src").rglob("*.py")) + list((source_root / "tools").rglob("*.py")):
-            for name in _re.findall(r'icons?\.(?:icon|pixmap|paint)\(\s*"([a-z0-9\-]+)"', source.read_text()):
-                if name not in GLYPHS:
-                    unknown.add(f"{source.name}:{name}")
+            try:
+                tree = _ast.parse(source.read_text())
+            except SyntaxError:
+                continue
+            for node in _ast.walk(tree):
+                if not isinstance(node, _ast.Call):
+                    continue
+                func = node.func
+                called = func.attr if isinstance(func, _ast.Attribute) else getattr(func, "id", "")
+                if called not in GLYPH_ARG:
+                    continue
+                if isinstance(func, _ast.Attribute) and called in {"icon", "pixmap", "paint"}:
+                    owner = getattr(func.value, "id", "")
+                    if owner not in {"icons", "icon"}:
+                        continue
+                position = GLYPH_ARG[called]
+                if len(node.args) <= position:
+                    continue
+                argument = node.args[position]
+                if isinstance(argument, _ast.Constant) and isinstance(argument.value, str):
+                    if argument.value not in GLYPHS:
+                        unknown.add(f"{source.name}:{argument.value}")
+                elif isinstance(argument, _ast.IfExp):
+                    # icons.paint(painter, "playing" if x else "pause", ...)
+                    for branch in (argument.body, argument.orelse):
+                        if isinstance(branch, _ast.Constant) and isinstance(branch.value, str):
+                            if branch.value not in GLYPHS:
+                                unknown.add(f"{source.name}:{branch.value}")
+                else:
+                    dynamic.append(f"{source.name}:{called}:{getattr(argument, 'id', type(argument).__name__)}")
         require(not unknown, f"unknown icon glyph(s): {sorted(unknown)}")
+
+        # Variable-named glyphs cannot be checked statically; report the count
+        # so a growing blind spot is visible rather than silent.
+        print(f"  glyph scan: {len(dynamic)} call site(s) name their glyph dynamically")
 
         # No settings dropdown may elide any of its options ("200 results · dire…").
         # Chrome is measured from the style — a guessed allowance previously
@@ -347,6 +405,19 @@ def main() -> int:
         window.close()
         jobs.shutdown(wait=True)
         app.quit()
+
+        # No widget other than the main window may become a top-level window.
+    # smoke_window_flash owns this rule but only exercises a bare startup;
+    # this run drives Discover, Settings and the filter fields, which is
+    # where a parentless ChipRow actually surfaced. A 0-height row never
+    # maps, so isVisible() cannot see it — the Show event the startup
+    # tracer records is the only reliable signal.
+    stray_windows = sorted({
+        record.getMessage().split(": ", 1)[1].split(" ", 1)[0]
+        for record in _startup_records
+        if "window shown" in record.getMessage()
+    } - {"MainWindow"})
+    require(not stray_windows, f"stray top-level window(s): {stray_windows}")
 
     print("BS Podcasts R1 GUI control smoke flow passed.")
     return 0
