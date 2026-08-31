@@ -16,7 +16,25 @@ from bs_podcasts.data.repositories import LibraryRepository, ListeningRepository
 from bs_podcasts.playback import MpvEngine, PlaybackService
 
 
+def _ensure_media():
+    """Generate the fixture rather than depending on smoke_playback.
+
+    Run standalone against a clean tmp/ this script used to fail on a
+    missing file that only another smoke created."""
+    if SILENT.is_file():
+        return
+    SILENT.parent.mkdir(parents=True, exist_ok=True)
+    import subprocess
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi",
+         "-i", "anullsrc=r=44100:cl=mono", "-t", "2", "-c:a", "pcm_s16le",
+         "-y", str(SILENT)],
+        check=True,
+    )
+
+
 def main() -> int:
+    _ensure_media()
     with TemporaryDirectory(prefix="shutdown-", dir=WORKSPACE / "tmp", ignore_cleanup_errors=True) as temporary:
         database = Database(Path(temporary) / "library.db")
         repository = LibraryRepository(database)
