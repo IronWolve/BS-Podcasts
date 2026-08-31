@@ -47,10 +47,15 @@ def make_silent_media(path: Path):
 
 
 class LocalResponse:
-    def __init__(self, content: bytes, status_code: int, interrupt: bool = False):
+    def __init__(self, content: bytes, status_code: int, interrupt: bool = False, content_range: str = ""):
         self.content = content
         self.status_code = status_code
         self.headers = {"Content-Length": str(len(content))}
+        if content_range:
+            # RFC 7233 requires Content-Range on a 206, and the service now
+            # relies on it to verify the resume offset instead of appending on
+            # faith. A stub without it models a non-conformant server.
+            self.headers["Content-Range"] = content_range
         self.interrupt = interrupt
         self.closed = False
 
@@ -83,7 +88,12 @@ class ResumeSession:
             return response
         require(range_header.startswith("bytes="), "retry did not request a byte range")
         start = int(range_header.removeprefix("bytes=").removesuffix("-"))
-        response = LocalResponse(self.content[start:], 206)
+        total = len(self.content)
+        response = LocalResponse(
+            self.content[start:],
+            206,
+            content_range=f"bytes {start}-{total - 1}/{total}",
+        )
         self.responses.append(response)
         return response
 

@@ -278,6 +278,10 @@ def main() -> int:
         DownloadRepository(database),
         library.setting("downloads.directory", "") or default_downloads_dir(),
     )
+    # Nothing resumes by itself, so a row left mid-transfer by the previous
+    # run describes a worker that no longer exists. Park it as paused now, or
+    # the UI offers a Pause that silently does nothing until the app restarts.
+    downloads.reconcile_interrupted()
     _mark("services")
     state = {"window": None}
 

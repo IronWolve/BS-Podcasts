@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 
 from ..config import APP_NAME, RELEASES_URL, app_version
 from ..logging_setup import log_path
-from ..domain import Health
+from ..domain import DownloadState, Health
 from ..feeds.parser import parse_feed
 from ..jobs import JobResult, JobStatus
 from ..services.updates import check_for_update
@@ -137,6 +137,7 @@ class MainWindow(QMainWindow):
         self._last_playback_error = ""
         self._last_sleep_deadline = None
         self._download_samples = {}
+        self._samples_lock = threading.Lock()
         self._new_episode_total = 0
         self._previous_playing_id = 0
         self._play_after_download = 0
@@ -1106,7 +1107,16 @@ class MainWindow(QMainWindow):
         )
 
     def _download_many(self, items):
-        ids = [item.episode_id for item in items if item.episode_id and item.state not in {"Downloaded", "Downloading"}]
+        # is_active() is the live truth; filtering on the row's state string
+        # let an already-running transfer be resubmitted from any page whose
+        # rows had not been given the download overlay.
+        ids = [
+            item.episode_id
+            for item in items
+            if item.episode_id
+            and item.state != "Downloaded"
+            and not (self.downloads is not None and self.downloads.is_active(item.episode_id))
+        ]
         for episode_id in ids:
             self._download_episode(episode_id, quiet=True)
         if ids:
@@ -1306,6 +1316,7 @@ class MainWindow(QMainWindow):
             episode for episode in self.library.favorites() if episode.id not in episode_ids
         )
         records = list(self.downloads.records()) if self.downloads else []
+        active = self._active_downloads(records)
         with self._convert_lock:
             episodes = self._ui_episodes(stored_episodes, records)
         return {
@@ -1313,10 +1324,10 @@ class MainWindow(QMainWindow):
             "episode_total": episode_total,
             "shows": [self._ui_podcast(show) for show in stored_shows],
             "episodes": episodes,
-            "in_progress": [self._ui_episode(episode) for episode in stored_episodes if episode.position_seconds > 0 and not episode.played],
-            "queued": [self._ui_episode(episode) for episode in self.library.queue()],
+            "in_progress": [self._ui_episode_live(episode, active) for episode in stored_episodes if episode.position_seconds > 0 and not episode.played],
+            "queued": [self._ui_episode_live(episode, active) for episode in self.library.queue()],
             "history": [
-                replace_item(self._ui_episode(episode), published=f"Played {self._relative_time(episode.last_played)}" if episode.last_played else self._display_date(episode.published_at))
+                replace_item(self._ui_episode_live(episode, active), published=f"Played {self._relative_time(episode.last_played)}" if episode.last_played else self._display_date(episode.published_at))
                 for episode in self.library.history()
             ],
             "records": records,
@@ -1543,7 +1554,8 @@ class MainWindow(QMainWindow):
         """Cheap refresh for queue-only changes: queue views, badges, counts."""
         if self.library is None:
             return
-        queued = [self._ui_episode(episode) for episode in self.library.queue()]
+        active = self._active_downloads()
+        queued = [self._ui_episode_live(episode, active) for episode in self.library.queue()]
         self.playlist_page.set_items(queued)
         self.context.set_queue(queued)
         self.player.set_next(next((e.title for e in queued if e.episode_id != self._playing_episode_id), ""))
@@ -2584,7 +2596,7 @@ class MainWindow(QMainWindow):
                     # The side pane follows what just started playing.
                     if self.pages.currentIndex() != PAGE_SETTINGS and not self.now_playing.isVisible():
                         self.context.set_mode(0)
-                        self.context.show_episode(self._ui_episode(episode))
+                        self.context.show_episode(self._ui_episode_live(episode))
                         self.context.set_playing(episode_id, state == "playing", state == "loading")
                         self._load_listening_details(episode_id)
                         if self._last_mode in {"wide", "medium"} and not self._context_user_closed:
@@ -2659,7 +2671,7 @@ class MainWindow(QMainWindow):
         if episode is None:
             return
         self.context.set_mode(0)
-        self.context.show_episode(self._ui_episode(episode))
+        self.context.show_episode(self._ui_episode_live(episode))
         self.context.set_playing(
             self._playing_episode_id,
             self._playing_state == "playing",
@@ -2824,12 +2836,16 @@ class MainWindow(QMainWindow):
         done = getattr(event, "bytes_done", None)
         if episode_id is not None and done is not None:
             now = time.time()
-            previous = self._download_samples.get(episode_id)
-            rate = None
-            if previous and now - previous[0] > 0.5 and done >= previous[1]:
-                rate = (done - previous[1]) / (now - previous[0])
-            if previous is None or rate is not None:
-                self._download_samples[episode_id] = (now, done, rate if rate is not None else (previous[2] if previous else None))
+            # Written here on the Qt thread and copied by _read_download_items
+            # on a worker: an unguarded dict resize during that copy raises
+            # "dictionary changed size during iteration" and loses a refresh.
+            with self._samples_lock:
+                previous = self._download_samples.get(episode_id)
+                rate = None
+                if previous and now - previous[0] > 0.5 and done >= previous[1]:
+                    rate = (done - previous[1]) / (now - previous[0])
+                if previous is None or rate is not None:
+                    self._download_samples[episode_id] = (now, done, rate if rate is not None else (previous[2] if previous else None))
 
     def _reload_downloads(self):
         if self.downloads is None or self.library is None:
@@ -2840,7 +2856,8 @@ class MainWindow(QMainWindow):
         items = []
         records = self.downloads.records()
         episodes = self.library.repository.episodes_by_ids(record.episode_id for record in records)
-        samples = dict(self._download_samples)
+        with self._samples_lock:
+            samples = dict(self._download_samples)
         with self._convert_lock:
             for record in records:
                 episode = episodes.get(record.episode_id)
@@ -3516,7 +3533,7 @@ class MainWindow(QMainWindow):
                 if self.context._episode_id == identifier:
                     episode = self.library.episode(identifier)
                     if episode is not None:
-                        self.context.show_episode(self._ui_episode(episode))
+                        self.context.show_episode(self._ui_episode_live(episode))
             return
         if kind == "preview":
             self._preview_pending.discard(identifier)
@@ -3550,16 +3567,25 @@ class MainWindow(QMainWindow):
             return
         if kind == "download":
             self._request_reload()
-            if result.status == JobStatus.OK and self._play_after_download == identifier:
+            # A finished job is not a finished download. download() also
+            # returns normally when it was absorbed as a duplicate of a live
+            # transfer, or when the user paused mid-retry; announcing those as
+            # "Downloaded" (with a Play action for a file that does not exist)
+            # was reachable on any ordinary double-click.
+            record = result.value if result.status == JobStatus.OK else None
+            complete = getattr(record, "state", None) == DownloadState.COMPLETE
+            if complete and self._play_after_download == identifier:
                 self._play_after_download = 0
                 self._play_episode(identifier)
                 return
-            if result.status == JobStatus.OK:
+            if complete:
                 episode = self.library.episode(identifier) if self.library else None
                 self._notify(f"Downloaded {episode.title if episode else 'episode'}", "success", "Play", lambda: self._play_episode(identifier))
                 self._native_notify(APP_NAME, f"Downloaded {episode.title if episode else 'episode'}", lambda: self._play_episode(identifier))
                 if episode is not None:
                     self._apply_retention(episode.show_id)
+            elif result.status == JobStatus.OK:
+                return  # paused or deduped: nothing transferred, say nothing
             else:
                 self._notify(result.message or "Download failed", "error", "Retry", lambda: self._download_episode(identifier))
                 self._native_notify(APP_NAME, result.message or "Download failed", lambda: self.navigation.select(PAGE_DOWNLOADS))
@@ -4314,6 +4340,27 @@ class MainWindow(QMainWindow):
             item, state=state, detail=detail,
             progress=(record.bytes_done / record.bytes_total) if record.bytes_total else item.progress,
         )
+
+    def _active_downloads(self, records=None) -> dict:
+        """In-flight download records by episode id, for row rendering.
+
+        `_ui_episodes` overlays these for the pages built through it; the
+        single-episode conversions below need the same map or their rows read
+        as idle while a transfer is running.
+        """
+        if records is None:
+            records = self.downloads.records() if self.downloads else ()
+        return {
+            record.episode_id: record
+            for record in records
+            if record.state.value != "complete"
+        }
+
+    def _ui_episode_live(self, episode, active=None) -> UiEpisode:
+        """One episode, carrying its download state like a list row would."""
+        if active is None:
+            active = self._active_downloads()
+        return self._with_download_state(self._ui_episode(episode), active.get(episode.id))
 
     def _with_preview(self, item: UiPodcast, feed) -> UiPodcast:
         """Merge fetched feed freshness into an unsubscribed directory card."""

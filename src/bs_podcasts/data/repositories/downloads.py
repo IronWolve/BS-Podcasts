@@ -20,6 +20,12 @@ class DownloadRepository:
         self.database = database
 
     def prepare(self, episode_id: int, source_url: str, target: Path, partial: Path):
+        """Queue a download, keeping the paths an existing record already has.
+
+        Overwriting them on every call made the "honor the prepared paths"
+        resume branch in DownloadService dead code, and orphaned the old
+        partial whenever a feed refresh changed the episode's media URL.
+        """
         now = time.time()
         with self.database.connect() as connection:
             connection.execute(
@@ -28,8 +34,6 @@ class DownloadRepository:
                    VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(episode_id) DO UPDATE SET
                    source_url=excluded.source_url,
-                   target_path=excluded.target_path,
-                   partial_path=excluded.partial_path,
                    state='queued', error_message='', bytes_done=0, bytes_total=0, updated_at=excluded.updated_at""",
                 (episode_id, source_url, str(target), str(partial), now, now),
             )
