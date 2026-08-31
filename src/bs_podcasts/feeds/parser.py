@@ -5,6 +5,7 @@ from hashlib import sha256
 import xml.etree.ElementTree as ET
 
 from ..domain import FeedData, FeedEpisodeData
+from .safety import contains_dtd
 
 
 MAX_FEED_BYTES = 20 * 1024 * 1024
@@ -380,10 +381,10 @@ def parse_feed(content: bytes, base_url: str = "") -> FeedData:
         raise FeedParseError("Feed response was empty.")
     if len(content) > MAX_FEED_BYTES:
         raise FeedParseError("Feed exceeds the size limit.")
-    # The whole bounded input: 4 KiB of leading whitespace used to smuggle
-    # an entity declaration past the check.
-    upper = content.upper()
-    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+    # The whole bounded input, in every encoding expat will auto-detect: a
+    # 4 KiB prefix scan missed declarations behind leading comments, and an
+    # ASCII-only search missed the UTF-16/32 forms entirely.
+    if contains_dtd(content):
         raise FeedParseError("DTD and entity declarations are not allowed.")
     try:
         root = ET.fromstring(content)

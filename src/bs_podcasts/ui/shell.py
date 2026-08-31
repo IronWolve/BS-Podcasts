@@ -42,6 +42,7 @@ from ..domain import Health
 from ..feeds.parser import parse_feed
 from ..jobs import JobResult, JobStatus
 from ..services.updates import check_for_update
+from ..urlguard import is_web_url
 from . import icons
 from .dialogs import AboutDialog, AddPodcastDialog, ConfirmDialog, DeleteFilesDialog, EpisodeInfoDialog, PodcastInfoDialog, PodcastSettingsDialog, RemovePodcastDialog, ShortcutsDialog, TextInputDialog, episode_information_text
 from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast as UiPodcast, plain_snippet, set_item_tooltips
@@ -4018,14 +4019,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ feed preview
     @staticmethod
     def _open_url(url: str):
-        """Only web URLs leave the app; feeds are untrusted input."""
+        """Only web URLs leave the app; feeds are untrusted input.
+
+        Shares `urlguard`'s rule with the dialogs' exit rather than repeating
+        the scheme test — this pair had already drifted apart once.
+        """
         if not url:
             return
-        parsed = QUrl(url)
-        if parsed.scheme().lower() not in {"http", "https"}:
+        if not is_web_url(url):
             logging.getLogger("bs_podcasts").warning("Refusing to open non-web URL from feed data: %s", url[:120])
             return
-        QDesktopServices.openUrl(parsed)
+        QDesktopServices.openUrl(QUrl(url))
 
     def _discover_sort_changed(self, key: str):
         if key != "newest":

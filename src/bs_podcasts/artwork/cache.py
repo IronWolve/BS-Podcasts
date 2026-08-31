@@ -6,9 +6,27 @@ from threading import Lock
 import os
 
 from ..net import SessionSlot
+from ..urlguard import UnsafeUrl, ensure_fetchable
 
 
 MAX_ARTWORK_BYTES = 8 * 1024 * 1024
+
+def _looks_textual(head: bytes) -> bool:
+    """True for payloads that are plainly a document rather than an image.
+
+    Deliberately not an image allow-list: the image format space keeps
+    growing, and rejecting an unusual-but-valid file Qt could decode would
+    cost more than it saves (`ui/pixmaps.py` already null-checks whatever
+    fails to decode). What must never reach the cache is what an SSRF probe of
+    an internal service actually returns — an HTML admin page or a JSON body.
+    """
+    sniff = head.lstrip()[:512]
+    lowered = sniff.lower()
+    if b"<svg" in lowered:  # SVG is markup and a legitimate image
+        return False
+    if lowered.startswith((b"<!doctype html", b"<html", b"<head", b"<body")):
+        return True
+    return sniff[:1] in (b"{", b"[")
 
 
 class ArtworkError(RuntimeError):
@@ -73,6 +91,13 @@ class ArtworkCache:
     def fetch(self, url: str) -> Path:
         if not url:
             raise ArtworkError("Artwork URL is empty.")
+        # artwork_url is feed- and directory-supplied, and this is the last
+        # thing standing between it and an outbound request; rejecting before
+        # the lock keeps a bad URL from serialising other work.
+        try:
+            ensure_fetchable(url, "Artwork URL")
+        except UnsafeUrl as exc:
+            raise ArtworkError(str(exc)) from exc
         target = self.path_for(url)
         if target.is_file() and target.stat().st_size > 0:
             return target
@@ -110,14 +135,24 @@ class ArtworkCache:
             if content_type and not content_type.startswith("image/"):
                 raise ArtworkError("Artwork response is not an image.")
             size = 0
+            head = b""
             with partial.open("wb") as handle:
                 for chunk in response.iter_content(64 * 1024):
                     size += len(chunk)
                     if size > MAX_ARTWORK_BYTES:
                         raise ArtworkError("Artwork exceeds the size limit.")
+                    if len(head) < 512:
+                        head += chunk[: 512 - len(head)]
+                        # A missing or lying Content-Type used to be enough to
+                        # get a response cached; let the bytes veto it, and do
+                        # it before the whole body lands on disk.
+                        if _looks_textual(head):
+                            raise ArtworkError("Artwork response is not an image.")
                     handle.write(chunk)
             if size == 0:
                 raise ArtworkError("Artwork response was empty.")
+            if _looks_textual(head):
+                raise ArtworkError("Artwork response is not an image.")
             os.replace(partial, target)
             return target
         except ArtworkError:

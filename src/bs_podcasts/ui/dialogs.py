@@ -8,18 +8,22 @@ import re
 from PySide6.QtCore import QPoint, QTimer, QUrl, Qt, qVersion
 from PySide6.QtGui import QColor, QDesktopServices, QPixmap
 
+from ..urlguard import is_web_url
+
 
 def open_web_url(url):
-    """HTTP(S)-only guard for URLs originating in feed data — the same rule
-    the shell's _open_url enforces; dialogs must not be the unguarded exit."""
+    """HTTP(S)-only exit for URLs originating in feed data.
+
+    The rule lives in `urlguard`; this is one of its call sites, not a second
+    copy of it — the duplicates used to drift.
+    """
     value = url.toString() if isinstance(url, QUrl) else str(url or "")
-    parsed = QUrl(value)
-    if parsed.scheme().lower() not in {"http", "https"}:
+    if not is_web_url(value):
         import logging
 
         logging.getLogger("bs_podcasts").warning("Refusing to open non-web URL from feed data: %s", value[:120])
         return
-    QDesktopServices.openUrl(parsed)
+    QDesktopServices.openUrl(QUrl(value))
 
 from PySide6.QtWidgets import (
     QDialog,

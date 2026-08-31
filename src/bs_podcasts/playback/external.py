@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 
+from ..urlguard import UnsafeUrl, ensure_media_source, is_web_url
 from .engine import EngineCapabilities, EngineEvent, PlaybackUnavailable
 
 
@@ -34,9 +35,24 @@ class ExternalPlayerEngine:
 
     def load(self, source: str, start_position: float = 0.0, autoplay: bool = True):
         self._guard()
-        target = source
-        if not source.startswith(("http://", "https://", "file://")):
-            target = Path(source).expanduser().resolve().as_uri()
+        # os.startfile and xdg-open resolve whatever they are handed, and
+        # os.startfile follows file:// UNC paths — enough for a feed to launch
+        # a remote executable through the shell's "open" verb. Only a web URL,
+        # or a path this app produced, may reach them; a file:// source is
+        # refused outright rather than passed through as it used to be.
+        # The service has already settled provenance; what must still be
+        # refused here is a remote UNC authority, which stays dangerous no
+        # matter which caller produced it.
+        try:
+            text = ensure_media_source(
+                source, "External player source", allow_file_url=True
+            )
+        except UnsafeUrl as exc:
+            raise PlaybackUnavailable(str(exc)) from exc
+        if is_web_url(text) or text[:5].lower() == "file:":
+            target = text
+        else:
+            target = Path(text).expanduser().resolve().as_uri()
         if os.name == "nt":
             os.startfile(target)  # type: ignore[attr-defined]
             self._handler(EngineEvent("external", target))

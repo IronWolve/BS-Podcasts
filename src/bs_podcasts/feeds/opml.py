@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 
+from .safety import contains_dtd
+
 
 MAX_OPML_BYTES = 2 * 1024 * 1024
 
@@ -22,8 +24,10 @@ class OpmlEntry:
 def import_opml(content: bytes) -> list[OpmlEntry]:
     if not content or len(content) > MAX_OPML_BYTES:
         raise OpmlError("OPML is empty or exceeds the size limit.")
-    upper = content[:4096].upper()
-    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+    # The whole bounded input, not a prefix: a comment longer than the old
+    # 4 KiB window was enough to smuggle an entity declaration past the check
+    # and reach expat's internal-entity expansion.
+    if contains_dtd(content):
         raise OpmlError("DTD and entity declarations are not allowed.")
     try:
         root = ET.fromstring(content)

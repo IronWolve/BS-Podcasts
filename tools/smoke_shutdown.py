@@ -20,7 +20,12 @@ def main() -> int:
     with TemporaryDirectory(prefix="shutdown-", dir=WORKSPACE / "tmp", ignore_cleanup_errors=True) as temporary:
         database = Database(Path(temporary) / "library.db")
         repository = LibraryRepository(database)
-        show = repository.add_show("https://samples.invalid/shutdown.xml", "Shutdown")
+        # source="local" because the episode below names a filesystem path.
+        # Only a locally-imported show may do that; on an "rss" show a local
+        # path is feed-supplied input, which urlguard now refuses.
+        show = repository.add_show(
+            "https://samples.invalid/shutdown.xml", "Shutdown", source="local"
+        )
         from bs_podcasts.domain import FeedData, FeedEpisodeData
         repository.import_feed(show.id, FeedData("Shutdown", episodes=(FeedEpisodeData("e1", "Silent", media_url=str(SILENT)),)))
         episode = repository.list_episodes(show.id)[0]

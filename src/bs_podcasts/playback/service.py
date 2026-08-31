@@ -7,6 +7,7 @@ from threading import RLock, Timer
 import time
 
 from ..data.repositories import LibraryRepository
+from ..urlguard import UnsafeUrl, ensure_media_source, ensure_web_url
 from .engine import EngineEvent, PlaybackUnavailable
 
 
@@ -134,12 +135,29 @@ class PlaybackService:
                 raise PlaybackUnavailable("Episode was not found.")
             show = self.repository.get_show(episode.show_id)
             source = episode.media_url
+            local = False
             if episode.downloaded_path:
                 downloaded = Path(episode.downloaded_path).expanduser()
                 if downloaded.is_file():
                     source = str(downloaded)
+                    local = True
             if not source:
                 raise PlaybackUnavailable("Episode has no playable media URL or local file.")
+            if not local:
+                # Provenance decides. A locally-imported show stores the file
+                # the user chose as a file:// URL, which is fine; a show that
+                # came from a feed may only name http(s), or a feed could pick
+                # a local file for the engine to open.
+                imported = bool(show is not None and show.source == "local")
+                try:
+                    if imported:
+                        source = ensure_media_source(
+                            source, "Local audio path", allow_file_url=True
+                        )
+                    else:
+                        source = ensure_web_url(source, "Episode media URL")
+                except UnsafeUrl as exc:
+                    raise PlaybackUnavailable(str(exc)) from exc
             # A finished episode's saved position is its duration; resuming
             # there plays nothing. Replay restarts from the top.
             start = float(episode.position_seconds)
@@ -194,6 +212,11 @@ class PlaybackService:
         source = (source or "").strip()
         if not source:
             raise PlaybackUnavailable("Episode has no playable media URL.")
+        # A Discover preview is untrusted directory/feed content end to end.
+        try:
+            source = ensure_web_url(source, "Stream URL")
+        except UnsafeUrl as exc:
+            raise PlaybackUnavailable(str(exc)) from exc
         with self._lock:
             self._guard()
             # Retire the outgoing library episode: persist its position and
