@@ -41,6 +41,10 @@ class PlaybackSnapshot:
     silence_saved: float = 0.0
     artwork_path: str = ""
     buffering: int | None = None
+    # Monotonic, stamped by _emit. Listeners reached through a queued Qt
+    # connection can be handed an older snapshot after a newer one arrived
+    # directly on the UI thread; comparing this lets them drop it.
+    revision: int = 0
 
 
 class PlaybackService:
@@ -50,6 +54,7 @@ class PlaybackService:
         self.listening = listening
         self.engine.set_event_handler(self._engine_event)
         self._volume_applied = False
+        self._revision = 0
         self.snapshot = PlaybackSnapshot()
         self._listeners = []
         self._lock = RLock()
@@ -285,13 +290,14 @@ class PlaybackService:
         if deferred is None:
             return False
         self._deferred_episode_id = None
-        position = self.snapshot.position
+        # No re-seek afterwards. load_episode() is the single authority on the
+        # start position and already restarts a finished episode from zero;
+        # re-applying the snapshot's own position here put a completed episode
+        # straight back at its duration, so the first Play after a restore
+        # re-hit EOF instantly and silently re-marked/dequeued it. The
+        # snapshot's position is the same durable value load_episode reads, so
+        # nothing is lost by trusting it.
         self.load_episode(deferred, autoplay=autoplay)
-        if position:
-            try:
-                self.engine.seek_absolute(position)
-            except Exception:
-                pass
         return True
 
     def play_pause(self):
@@ -561,6 +567,11 @@ class PlaybackService:
             return
         if self.snapshot.duration:
             self.repository.update_position(episode_id, self.snapshot.duration)
+        elif self.snapshot.position:
+            # Duration was never reported (a malformed or very short stream).
+            # Record how far playback actually reached so the row is not left
+            # marked played at position zero.
+            self.repository.update_position(episode_id, self.snapshot.position)
         self.repository.mark_played(episode_id, True)
         if self.listening and self.snapshot.show_id:
             self._flush_listening()
@@ -569,8 +580,17 @@ class PlaybackService:
         queue = self.repository.list_queue()
         show = self.repository.get_show(self.snapshot.show_id) if self.snapshot.show_id else None
         if queue and (show is None or show.auto_continue):
-            self.load_episode(queue[0].id, autoplay=True)
-            return
+            try:
+                self.load_episode(queue[0].id, autoplay=True)
+                return
+            except Exception:
+                # The next queued episode may have been deleted, or have no
+                # playable source. Falling through finalises the episode that
+                # just finished; aborting here left current_playback pointing
+                # at it in a non-idle state, which the next launch then tried
+                # to resume. This runs on the engine's event thread, where an
+                # escaping exception is only warned about, never surfaced.
+                pass
         self.snapshot = replace(self.snapshot, state=PlaybackState.IDLE)
         self.repository.set_current_playback(episode_id, PlaybackState.IDLE.value)
         self._emit()
@@ -630,6 +650,8 @@ class PlaybackService:
                 self._emit()
 
     def _emit(self):
+        self._revision += 1
+        self.snapshot = replace(self.snapshot, revision=self._revision)
         for listener in tuple(self._listeners):
             try:
                 listener(self.snapshot)
