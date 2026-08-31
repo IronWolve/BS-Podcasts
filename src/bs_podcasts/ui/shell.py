@@ -138,6 +138,7 @@ class MainWindow(QMainWindow):
         self._last_sleep_deadline = None
         self._download_samples = {}
         self._samples_lock = threading.Lock()
+        self._playback_revision = 0
         self._new_episode_total = 0
         self._previous_playing_id = 0
         self._play_after_download = 0
@@ -2547,6 +2548,14 @@ class MainWindow(QMainWindow):
             self._notify(str(exc), "error")
 
     def _playback_changed(self, snapshot):
+        # Emissions from the engine thread arrive through a queued connection
+        # while UI-driven ones are delivered directly, so an older snapshot
+        # can land after a newer one — flipping the Sleep control back off
+        # right after the user set it, and firing a false "Sleep timer ended".
+        revision = getattr(snapshot, "revision", 0)
+        if revision and revision < self._playback_revision:
+            return
+        self._playback_revision = revision
         self.player.set_snapshot(snapshot)
         state = str(snapshot.state)
         episode_id = snapshot.episode_id or 0

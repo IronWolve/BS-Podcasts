@@ -545,8 +545,17 @@ class LibraryRepository:
                     (time.time(), episode_id),
                 )
             else:
+                # A finished episode's saved position is its duration. Leaving
+                # that behind when marking it unplayed hands the next Play a
+                # position that immediately re-reaches EOF. Genuine partial
+                # progress is preserved — only an at-the-end position resets.
                 connection.execute(
-                    "UPDATE episodes SET played=0, is_new=0 WHERE id=?",
+                    """UPDATE episodes SET played=0, is_new=0,
+                       position_seconds = CASE
+                           WHEN duration_seconds > 0
+                                AND position_seconds >= duration_seconds - 2
+                           THEN 0 ELSE position_seconds END
+                       WHERE id=?""",
                     (episode_id,),
                 )
 

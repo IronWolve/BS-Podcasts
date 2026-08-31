@@ -800,6 +800,11 @@ class Toast(QFrame):
         if self.isVisible():
             # Never let a burst stack up: drop duplicates, keep only the newest few.
             if any(queued[0] == message for queued in self._queue) or self.text.text() == message:
+                # The text repeats but the action may not: several call sites
+                # use one fixed message for different episodes, so keeping the
+                # first toast's callback pointed its action at the wrong one.
+                if callback is not None and self.text.text() == message:
+                    self._callback = callback
                 return
             self._queue.append((message, tone, action, callback, duration_ms, on_close))
             del self._queue[:-self.MAX_QUEUE]
@@ -3157,6 +3162,9 @@ class PlayerBar(QFrame):
             self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
             return
         self._chrome_key = chrome_key
+        # Identifies the loaded track for the seek-drag guard. Source is part
+        # of it because a directory preview has no durable episode id.
+        self._track_key = (snapshot.episode_id, snapshot.source)
         # Directory previews are valid URL-only streams without a durable
         # episode ID. Transport controls should still treat them as a track.
         self._has_episode = bool(snapshot.source)
@@ -3242,10 +3250,19 @@ class PlayerBar(QFrame):
         # If auto-advance swaps tracks mid-drag, the release must seek within
         # the track the user was dragging, not near the end of the new one.
         self._drag_duration = self._duration
+        self._drag_track = getattr(self, "_track_key", None)
 
     def _seek_from_slider(self):
         duration = getattr(self, "_drag_duration", 0.0) or self._duration
+        started_on = getattr(self, "_drag_track", None)
         self._drag_duration = 0.0
+        self._drag_track = None
+        # Capturing the duration alone was not enough: seek() acts on whatever
+        # the engine currently holds, so finishing a scrub after EOF advanced
+        # to the next episode applied the old track's proportion to the new
+        # one. A drag that outlived its episode is simply dropped.
+        if started_on is not None and started_on != getattr(self, "_track_key", None):
+            return
         if duration:
             self.seek_requested.emit(duration * self.slider.value() / 1000)
 
