@@ -268,12 +268,15 @@ class DownloadService:
                 # A malformed header is an unknown size, not a dead queued row.
                 length = 0
             total = existing + length if length else 0
-            if not total and not existing and episode.enclosure_bytes:
+            if not total and episode.enclosure_bytes:
                 # No usable Content-Length disables truncation detection, so a
                 # body cut short would be renamed into place and marked
                 # complete. The feed's declared enclosure length is an
-                # independent expected size; use it rather than give up.
-                total = int(episode.enclosure_bytes)
+                # independent expected size; use it rather than give up —
+                # on resume legs too, where this used to be skipped.
+                declared = int(episode.enclosure_bytes)
+                if declared > existing:
+                    total = declared
             if total:
                 free = shutil.disk_usage(self.directory).free
                 remaining = max(0, total - existing)
