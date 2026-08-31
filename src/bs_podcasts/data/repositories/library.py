@@ -1,12 +1,16 @@
 """Library persistence with no Qt dependencies."""
 
 from pathlib import Path
+import json
+import logging
 import threading
 import time
 
 from ...domain import Episode, FeedData, Health, Show
 from ..database import Database
 
+
+_log = logging.getLogger("bs_podcasts")
 
 MAX_REFRESH_FAILURES = 3
 
@@ -41,8 +45,14 @@ class LibraryRepository:
 
     def get_show(self, show_id: int) -> Show | None:
         with self.database.connect() as connection:
+            # The show filter is pushed into the aggregate as well as the
+            # outer WHERE: an outer equality does not reliably reach inside a
+            # LEFT JOINed GROUP BY subquery, so fetching one show was
+            # aggregating every episode in the library — on a path reached
+            # from update_show_playback, i.e. every per-show settings change.
             row = connection.execute(
-                self._show_select() + " WHERE s.id=? GROUP BY s.id", (show_id,)
+                self._show_select("show_id=?") + " WHERE s.id=? GROUP BY s.id",
+                (show_id, show_id),
             ).fetchone()
         return self._show(row) if row else None
 
@@ -267,11 +277,23 @@ class LibraryRepository:
                 "SELECT COUNT(*) FROM episodes WHERE is_new=1"
             ).fetchone()[0]
 
-    def artwork_paths(self) -> set[str]:
+    def artwork_paths(self, exclude_show_id: int | None = None) -> set[str]:
+        """Every artwork file the library still references.
+
+        `exclude_show_id` ignores one show's own rows, so a removal can ask
+        what would remain referenced *once this show is gone* while the show
+        is still present — which is what lets files be unlinked before the
+        records naming them are dropped.
+        """
+        shows_clause = "" if exclude_show_id is None else " AND id != ?"
+        episodes_clause = "" if exclude_show_id is None else " AND show_id != ?"
+        params = () if exclude_show_id is None else (exclude_show_id, exclude_show_id)
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT artwork_path FROM shows WHERE artwork_path != '' "
-                "UNION SELECT episode_artwork_path FROM episodes WHERE episode_artwork_path != ''"
+                f"SELECT artwork_path FROM shows WHERE artwork_path != ''{shows_clause} "
+                f"UNION SELECT episode_artwork_path FROM episodes "
+                f"WHERE episode_artwork_path != ''{episodes_clause}",
+                params,
             ).fetchall()
         return {row[0] for row in rows}
 
@@ -321,29 +343,92 @@ class LibraryRepository:
             "bytes": sum(size for _path, size in files),
         }
 
+    ORPHAN_SETTING = "storage.orphans"
+    MAX_ORPHANS = 200
+
+    def orphaned_files(self) -> list[str]:
+        """Paths a previous removal could not unlink."""
+        try:
+            stored = json.loads(self.get_setting(self.ORPHAN_SETTING, "") or "[]")
+        except ValueError:
+            return []
+        if not isinstance(stored, list):
+            return []
+        return [path for path in stored if isinstance(path, str)]
+
+    def _remember_orphans(self, paths):
+        """Keep a file that survived deletion findable.
+
+        Once a show's rows are gone nothing else names its files, so a failed
+        unlink would otherwise become untracked disk usage no sweep could
+        ever reach.
+        """
+        merged = list(dict.fromkeys([*self.orphaned_files(), *paths]))
+        self.set_setting(self.ORPHAN_SETTING, json.dumps(merged[-self.MAX_ORPHANS :]))
+
+    def sweep_orphans(self) -> list[str]:
+        """Retry previously-stuck deletions; returns the paths cleared."""
+        remaining = []
+        cleared = []
+        for path in self.orphaned_files():
+            candidate = Path(path)
+            try:
+                if candidate.is_file():
+                    candidate.unlink()
+                cleared.append(path)
+            except OSError:
+                remaining.append(path)
+        if cleared:
+            self.set_setting(self.ORPHAN_SETTING, json.dumps(remaining))
+        return cleared
+
     def remove_show(self, show_id: int, delete_files: bool = True) -> dict:
-        """Delete a show, its episodes and dependent rows (cascade), and its files."""
+        """Delete a show, its episodes and dependent rows (cascade), and its files.
+
+        Files go first. Dropping the rows first — as this used to — meant a
+        file that could not be removed (locked by the player, an in-flight
+        download, a scanner; guaranteed on Windows) was left on disk with no
+        row anywhere still naming it, so nothing could find or retry it and
+        the reclaimed-bytes figure quietly under-reported. Whatever survives
+        the unlink is recorded as an orphan rather than forgotten.
+        """
         preview = self.removal_preview(show_id)
         if not preview:
             return {}
-        # Database first: if this fails nothing on disk has been touched.
-        with self.database.connect() as connection:
-            connection.execute("DELETE FROM shows WHERE id=?", (show_id,))
-            connection.execute("DELETE FROM settings WHERE key=?", (f"retention.confirmed.{show_id}",))
+        self.sweep_orphans()  # each removal retries what an earlier one left
         removed_files = []
+        failed_files = []
         if delete_files:
-            # Artwork the REMAINING library still references must survive:
-            # the cache is keyed by URL, so two shows can share one file.
-            still_referenced = self.artwork_paths()
+            # Artwork the REMAINING library still references must survive: the
+            # cache is keyed by URL, so two shows can share one file. Asking
+            # while this show still exists means excluding its own rows.
+            still_referenced = self.artwork_paths(exclude_show_id=show_id)
             for path, _size in preview["files"]:
                 if path in still_referenced:
                     continue
                 try:
                     Path(path).unlink()
+                except FileNotFoundError:
+                    removed_files.append(path)  # already gone; nothing to keep
+                except OSError as exc:
+                    failed_files.append(path)
+                    _log.warning("Could not remove %s while unsubscribing: %s", path, exc)
+                else:
                     removed_files.append(path)
-                except OSError:
-                    pass
+        retention_key = f"retention.confirmed.{show_id}"
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM shows WHERE id=?", (show_id,))
+            connection.execute("DELETE FROM settings WHERE key=?", (retention_key,))
+        # That raw DELETE bypasses the settings cache, and SQLite reuses a
+        # deleted show's rowid — a stale entry would be read back as the NEXT
+        # show's retention confirmation and skip its delete prompt entirely.
+        with self._settings_lock:
+            if self._settings_cache is not None:
+                self._settings_cache.pop(retention_key, None)
+        if failed_files:
+            self._remember_orphans(failed_files)
         preview["removed_files"] = removed_files
+        preview["failed_files"] = failed_files
         return preview
 
     def set_health(self, show_id: int, health: Health):
@@ -637,7 +722,7 @@ class LibraryRepository:
         )
 
     @staticmethod
-    def _show_select() -> str:
+    def _show_select(episode_filter: str = "") -> str:
         # One pass over episodes per query instead of an aggregate join plus two
         # correlated subqueries per show. With exactly one max() aggregate,
         # SQLite documents that the bare columns (title, published_at) come from
@@ -657,7 +742,9 @@ class LibraryRepository:
             "MAX(COALESCE(NULLIF(published_at, ''), '0') || printf('~%012d', id)) AS latest_key, "
             "title AS latest_episode_title, "
             "published_at AS latest_episode_published_at "
-            "FROM episodes GROUP BY show_id"
+            "FROM episodes"
+            + (f" WHERE {episode_filter}" if episode_filter else "")
+            + " GROUP BY show_id"
             ") agg ON agg.show_id=s.id"
         )
 

@@ -71,7 +71,10 @@ def main() -> int:
         assert old_path.with_suffix(".db.pre-migration.bak").is_file()
         with upgraded.connect() as connection:
             versions = [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")]
-        assert versions == list(range(1, 12))
+        # Gapless from 1 with no duplicates — the property that matters. A
+        # hardcoded upper bound only asserted "nobody added a migration".
+        assert versions == list(range(1, len(versions) + 1)), versions
+        assert versions, "an upgraded database recorded no migrations"
 
         repository = LibraryRepository(Database(root / "library.db"))
         show = repository.add_show("https://feed.invalid/show.xml", "Audit Show")
