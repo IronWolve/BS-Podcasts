@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import sys
+import time
 
 from bs_podcasts.config import cache_dir, data_dir, default_downloads_dir
 
@@ -30,7 +31,18 @@ def _stored_root(connection, sql: str):
     return Path(row[0]).parent if row and row[0] else None
 
 
-def migrate(source: Path, dry_run: bool = False) -> dict:
+def _copy_database(source: Path, destination: Path):
+    """Snapshot via SQLite so an open source cannot yield a torn file."""
+    origin = sqlite3.connect(source)
+    target = sqlite3.connect(destination)
+    try:
+        origin.backup(target)
+    finally:
+        target.close()
+        origin.close()
+
+
+def migrate(source: Path, dry_run: bool = False, force: bool = False) -> dict:
     source = source.expanduser().resolve()
     targets = {
         "library": data_dir() / "library.db",
@@ -45,13 +57,35 @@ def migrate(source: Path, dry_run: bool = False) -> dict:
     for path in (data_dir(), targets["artwork"], targets["downloads"]):
         path.mkdir(parents=True, exist_ok=True)
     if targets["library"].exists():
-        backup = targets["library"].with_suffix(".db.bak")
+        # Overwriting unconditionally meant a second run replaced an
+        # already-migrated destination — one that may have collected new
+        # subscriptions and progress since — with a stale copy of the source,
+        # and a third run overwrote the .bak too. Require an explicit
+        # --force, and refuse outright when the destination is newer.
+        destination_mtime = targets["library"].stat().st_mtime
+        source_mtime = (source / "library.db").stat().st_mtime
+        if not force:
+            raise SystemExit(
+                f"{targets['library']} already exists (modified "
+                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(destination_mtime))}).\n"
+                "Re-run with --force to replace it, or --dry-run to see the plan."
+            )
+        if destination_mtime > source_mtime:
+            raise SystemExit(
+                "Refusing to overwrite: the destination library is NEWER than the source.\n"
+                f"  destination {time.strftime('%Y-%m-%d %H:%M', time.localtime(destination_mtime))}\n"
+                f"  source      {time.strftime('%Y-%m-%d %H:%M', time.localtime(source_mtime))}\n"
+                "Copy it aside yourself if you really mean to go backwards."
+            )
+        backup = targets["library"].with_suffix(f".db.{int(destination_mtime)}.bak")
         shutil.copy2(targets["library"], backup)
         plan["backup"] = str(backup)
-    shutil.copy2(source / "library.db", targets["library"])
-    for sidecar in ("library.db-wal", "library.db-shm"):
-        if (source / sidecar).exists():
-            shutil.copy2(source / sidecar, targets["library"].parent / sidecar)
+    # Connection.backup(), not copy2: the source may be open elsewhere, and a
+    # WAL-less file copy can capture a torn snapshot. design.md requires this
+    # for repair snapshots; the same reasoning applies to a migration.
+    _copy_database(source / "library.db", targets["library"])
+    # No sidecar copy: Connection.backup() produces a self-contained file, and
+    # carrying a -wal from a different database would corrupt it.
     copied = {"artwork": 0, "downloads": 0}
     for key in ("artwork", "downloads"):
         folder = source / key
@@ -90,7 +124,8 @@ def main() -> int:
     if not args:
         print(__doc__)
         return 2
-    result = migrate(Path(args[0]), dry_run="--dry-run" in sys.argv)
+    result = migrate(Path(args[0]), dry_run="--dry-run" in sys.argv,
+                     force="--force" in sys.argv)
     for key, value in result.items():
         print(f"{key:16} {value}")
     return 0

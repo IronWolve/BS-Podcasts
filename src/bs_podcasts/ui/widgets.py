@@ -3033,10 +3033,29 @@ class PlayerBar(QFrame):
             return
         floor = max(self.tools_wrap.sizeHint().width(), self.art.width() + self.now_wrap.minimumWidth())
         side = max(floor, int(available * self.SIDE_SHARE))
-        side = min(side, max(0, (available - self.center_wrap.minimumSizeHint().width()) // 2))
+        # Clamp against the transport's PREFERRED width, not its minimum. Using
+        # the minimum let the side zones keep space the transport actually
+        # needed, so at a narrow window with wide skip labels ("120") the row
+        # was squeezed and the play circle drifted off the centre line. The
+        # side zones are what must yield: the rule is that the transport stays
+        # centred, and a long title has its own elision to fall back on.
+        wanted = max(
+            self.center_wrap.sizeHint().width(),
+            self.center_wrap.minimumSizeHint().width(),
+        )
+        side = min(side, max(0, (available - wanted) // 2))
         side = max(side, 0)
         self.left_wrap.setFixedWidth(side)
         self.tools_wrap.setFixedWidth(side)
+        # Settle the layout before measuring. The side widths just set are
+        # what determine the transport buttons' final widths, and _centre_play
+        # reads those — measuring first meant it used pre-resize sizes and left
+        # the play circle several pixels off after any width change. activate()
+        # does this synchronously; a deferred pass would fire after teardown.
+        row = self.center_wrap.layout()
+        if row is not None:
+            self.center_wrap.updateGeometry()
+            row.activate()
         self._centre_play()
 
     def _centre_play(self):
@@ -3045,13 +3064,16 @@ class PlayerBar(QFrame):
         without a compensating pad the big play circle reads off-centre even
         though the group is centred."""
         spacing = SPACE["sm"]
-        # sizeHint only: live widths are the OUTPUT of this calculation, so
-        # feeding them back in oscillates (and is garbage before first
-        # layout). Hidden buttons (no episode loaded, compact bar) occupy no
-        # space, so they must not count toward the balance either.
+        # Live width where the button has one, sizeHint only as the
+        # before-first-layout fallback. sizeHint alone was wrong whenever the
+        # layout gave a button something other than its hint — a wide skip
+        # label ("120") hints ~66px but lays out at ~43px, so the compensating
+        # pad over-corrected and pushed the play circle up to 8px off centre.
+        # The pads are separate spacer widgets and do not resize these
+        # buttons, so reading their widths cannot feed back into itself.
         def extent(buttons):
             return sum(
-                button.sizeHint().width() + spacing
+                (button.width() or button.sizeHint().width()) + spacing
                 for button in buttons
                 if not button.isHidden()
             )
