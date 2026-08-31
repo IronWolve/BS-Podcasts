@@ -80,6 +80,14 @@ class Database:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self._lock = _SharedExclusiveLock()
+        # One connection per thread instead of one per query. Reopening meant
+        # a fresh sqlite3.connect plus two PRAGMAs on every read, and settings
+        # alone are read dozens of times at startup. The generation counter is
+        # how a cached handle learns the file underneath it was replaced
+        # (repair does an os.replace): each thread notices and reopens its own,
+        # which is the only thread allowed to close it.
+        self._connections = threading.local()
+        self._generation = 0
         self._preexisting = self.path.is_file() and self.path.stat().st_size > 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
@@ -104,18 +112,45 @@ class Database:
             raise DatabaseIntegrityError(result)
         return result
 
+    def _thread_connection(self) -> sqlite3.Connection:
+        cached = getattr(self._connections, "connection", None)
+        if cached is not None:
+            if getattr(self._connections, "generation", -1) == self._generation:
+                return cached
+            try:
+                cached.close()
+            except sqlite3.Error:
+                pass
+        connection = self._new_connection()
+        self._connections.connection = connection
+        self._connections.generation = self._generation
+        return connection
+
+    def _drop_thread_connection(self):
+        cached = getattr(self._connections, "connection", None)
+        self._connections.connection = None
+        if cached is not None:
+            try:
+                cached.close()
+            except sqlite3.Error:
+                pass
+
     @contextmanager
     def connect(self):
         with self._lock.shared():
-            connection = self._new_connection()
+            connection = self._thread_connection()
             try:
                 yield connection
                 connection.commit()
             except Exception:
-                connection.rollback()
+                try:
+                    connection.rollback()
+                except sqlite3.Error:
+                    # The handle itself is unusable; drop it so the next call
+                    # on this thread opens a fresh one rather than reusing a
+                    # broken connection forever.
+                    self._drop_thread_connection()
                 raise
-            finally:
-                connection.close()
 
     def _initialize(self):
         with self.connect() as connection:
@@ -245,4 +280,9 @@ class Database:
             os.replace(temporary, self.path)
             for sidecar in ("-wal", "-shm"):
                 Path(str(self.path) + sidecar).unlink(missing_ok=True)
+            # Every cached per-thread handle now points at the replaced inode.
+            # Bumping the generation makes each thread reopen its own on next
+            # use; this thread drops its handle immediately.
+            self._generation += 1
+            self._drop_thread_connection()
             return damaged
