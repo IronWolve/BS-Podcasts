@@ -12,8 +12,13 @@ for size in 32 64 128 256 512; do
 done
 # The venv entry point is not on the desktop session's PATH; point Exec at
 # the workspace launcher so the menu entry actually starts the app.
+# No %U: nothing reads a URL argument (the single-instance channel carries
+# only raise/ok), so advertising URL handling would be a lie to the desktop.
 LAUNCHER="$(cd "$HERE/../../.." && pwd)/start.sh"
-sed "s|^Exec=.*|Exec=$LAUNCHER %U|" "$HERE/bs-podcasts.desktop" > "$APPS/bs-podcasts.desktop"
+# Escape sed-active characters; a workspace path containing & or \ would
+# otherwise silently corrupt the generated Exec line.
+ESCAPED=$(printf '%s' "$LAUNCHER" | sed 's/[&\\|]/\\&/g')
+sed "s|^Exec=.*|Exec=$ESCAPED|" "$HERE/bs-podcasts.desktop" > "$APPS/bs-podcasts.desktop"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS" || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q "$ICONS" || true
 echo "Installed launcher to $APPS/bs-podcasts.desktop"

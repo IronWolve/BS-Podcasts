@@ -112,7 +112,17 @@ def main() -> int:
         assert dialog.width() <= available.width() and dialog.height() <= available.height()
         assert dialog.width() >= min(700, available.width())
         assert dialog.height() >= min(600, available.height())
-        assert not dialog.findChildren(QScrollArea), "Episode information still has an outer scroll area"
+        # The two-column layout must FIT at default metrics — but overflow
+        # (a huge type scale, a tiny screen) scrolls instead of clipping, so
+        # a scroll area may exist as long as it has nothing to scroll here.
+        scrolls = dialog.findChildren(QScrollArea)
+        assert scrolls, "Episode information lost its overflow safety valve"
+        dialog.show()
+        app.processEvents()
+        assert all(
+            scroll.verticalScrollBar().maximum() == 0 for scroll in scrolls
+        ), "Episode information should not need to scroll at default metrics"
+        dialog.hide()
         assert dialog.value_labels and all(label.wordWrap() for label in dialog.value_labels)
         assert any("\u200b" in label.text() for label in dialog.value_labels), "long sources lack wrap opportunities"
         dialog.deleteLater()

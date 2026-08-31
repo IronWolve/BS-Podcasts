@@ -141,6 +141,11 @@ def _install_window_tracer(app):
                         hex(int(obj.windowFlags().value)), obj.width(), obj.height(),
                         obj.isVisible(),
                     )
+                    if self._logged == 25:
+                        # Say the cap was hit: a silent stop would read as
+                        # "no more windows appeared" while diagnosing the
+                        # exact bug class this tracer exists for.
+                        logger.info("window tracer: 25-event cap reached; further Show events are not logged")
             return False
 
     app.installEventFilter(Tracer(app))
