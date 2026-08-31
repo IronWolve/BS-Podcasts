@@ -185,12 +185,58 @@ def test_reconcile_parks_interrupted_rows():
         check("progress is preserved for the resume", record.bytes_done == 10)
 
 
+def test_prepare_failure_does_not_leak_the_guard():
+    """audit round 4, N-1: prepare() raising with the dedup entry registered
+    leaked it until restart, silently absorbing every later download."""
+    with scratch() as temporary:
+        library, repository, episode = build(temporary)
+        service = DownloadService(library, repository, Path(temporary) / "dl", session=StubSession([]))
+
+        original = repository.prepare
+
+        def broken_prepare(*args, **kwargs):
+            raise RuntimeError("database is locked")
+
+        repository.prepare = broken_prepare
+        try:
+            service.download(episode.id)
+            check("a failing prepare() surfaces, not vanishes", False)
+        except Exception:
+            pass
+        finally:
+            repository.prepare = original
+        check(
+            "the dedup guard is released after prepare() fails",
+            episode.id not in service._cancellations,
+        )
+
+
+def test_hostile_media_url_is_refused_first_hop():
+    """audit round 4, N-3: a feed-supplied enclosure pointing at loopback or
+    a metadata endpoint must be refused before any request is issued."""
+    with scratch() as temporary:
+        library, repository, episode = build(temporary, media_url="http://127.0.0.1:1/x.mp3")
+        service = DownloadService(library, repository, Path(temporary) / "dl", session=StubSession([]))
+        try:
+            service.download(episode.id)
+            check("loopback media URL is refused", False)
+        except DownloadError as exc:
+            check("refusal names the reason", "loopback" in str(exc))
+        record = repository.get(episode.id)
+        check(
+            "no bytes were transferred for the refused URL",
+            record is None or record.bytes_done == 0,
+        )
+
+
 def main() -> int:
     test_duplicate_call_is_not_a_completion()
     test_truncated_body_without_content_length()
     test_resume_across_a_changed_resource_restarts()
     test_prepare_keeps_existing_paths()
     test_reconcile_parks_interrupted_rows()
+    test_prepare_failure_does_not_leak_the_guard()
+    test_hostile_media_url_is_refused_first_hop()
 
     for failure in FAILURES:
         print(f"FAIL {failure}")

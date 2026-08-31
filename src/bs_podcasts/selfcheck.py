@@ -29,7 +29,13 @@ def main() -> int:
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             ]
-        checks["migrations 1-11"] = versions == list(range(1, 12))
+        # Gapless from 1 and matching what ships, never a pinned count: the
+        # hardcoded "1-11" broke the moment migration 012 landed, failing
+        # every healthy install — the same bug class the audit smoke had.
+        shipped = len(list((Path(__file__).parent / "data" / "migrations").glob("[0-9]*.sql")))
+        checks["migrations applied"] = bool(versions) and versions == list(
+            range(1, len(versions) + 1)
+        ) and len(versions) == shipped
 
     failed = [name for name, passed in checks.items() if not passed]
     if failed:

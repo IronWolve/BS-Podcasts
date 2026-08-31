@@ -61,6 +61,30 @@ def check_header_elides_instead_of_clipping():
         header.deleteLater()
 
 
+def check_header_title_survives_a_resize():
+    """The header re-renders its stored text on resize, so a title must be
+    set through set_title(). Writing title_label.setText() directly left the
+    stored text stale and the next 1px resize reverted every podcast-detail
+    header to "Episodes" — found by audit round 4 (N-4)."""
+    header = PageHeader("Episodes", "", show_search=True)
+    try:
+        header.resize(scaled_px(900), scaled_px(64))
+        header.show()
+        QApplication.processEvents()
+        header.set_title("My Podcast")
+        header.resize(scaled_px(901), scaled_px(64))
+        QApplication.processEvents()
+        check("a set_title() title survives a resize", header.title_label.text() == "My Podcast")
+        import ast
+        shell_source = (ROOT / "src" / "bs_podcasts" / "ui" / "shell.py").read_text()
+        check(
+            "no shell code writes header.title_label.setText directly",
+            "header.title_label.setText" not in shell_source,
+        )
+    finally:
+        header.deleteLater()
+
+
 def check_header_keeps_an_applied_filter_visible():
     header = PageHeader("Episodes", "", show_search=True)
     try:
@@ -158,6 +182,7 @@ def main() -> int:
     apply_theme("dark")
 
     check_header_elides_instead_of_clipping()
+    check_header_title_survives_a_resize()
     check_header_keeps_an_applied_filter_visible()
     check_podcast_settings_combos_fit_their_options()
     check_player_bar_elides_with_a_tooltip()
