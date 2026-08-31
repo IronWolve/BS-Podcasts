@@ -449,10 +449,37 @@ class PodcastDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+def _split_wide_token(metrics, word: str, width: int):
+    """Largest character prefix of `word` that fits `width`, plus the rest.
+
+    Binary search on the pixel width; always yields at least one character
+    so a pathologically narrow column cannot loop forever.
+    """
+    low, high = 1, len(word)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if metrics.horizontalAdvance(word[:middle]) <= width:
+            low = middle
+        else:
+            high = middle - 1
+    return word[:low], word[low:]
+
+
 def _wrap_two_lines(metrics, text: str, width: int):
     words = text.split()
     if not words:
         return [""]
+    if metrics.horizontalAdvance(words[0]) > width:
+        # A single token wider than the whole line: CJK/Thai titles carry no
+        # spaces, so split() hands the entire title over as one "word" and
+        # the word loop below would draw it unelided and hard-clipped —
+        # which design.md forbids. The second line exists; use it, breaking
+        # by characters instead of words.
+        head, tail = _split_wide_token(metrics, words[0], width)
+        remainder = " ".join([tail, *words[1:]]).strip()
+        if not remainder:
+            return [head]
+        return [head, metrics.elidedText(remainder, Qt.TextElideMode.ElideRight, width)]
     first, rest = "", words
     for index, word in enumerate(words):
         candidate = (first + " " + word).strip()

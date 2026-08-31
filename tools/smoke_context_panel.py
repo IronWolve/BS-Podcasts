@@ -125,6 +125,45 @@ def check_chart_skips_malformed_items():
           len(survivors) == 1 and survivors[0].title == "Show")
 
 
+def check_xml_base_resolution():
+    """P2-11: Atom xml:base is inherited and overridable per element."""
+    from bs_podcasts.feeds.parser import parse_feed
+
+    atom = (
+        b'<feed xmlns="http://www.w3.org/2005/Atom" xml:base="https://cdn.example/audio/">'
+        b"<title>T</title>"
+        b'<entry><title>E1</title><id>e1</id><link rel="enclosure" href="ep1.mp3" type="audio/mpeg"/></entry>'
+        b'<entry xml:base="https://other.example/s2/"><title>E2</title><id>e2</id>'
+        b'<link rel="enclosure" href="ep2.mp3" type="audio/mpeg"/></entry>'
+        b"</feed>"
+    )
+    feed = parse_feed(atom, base_url="https://feeds.example/f.xml")
+    urls = [episode.media_url for episode in feed.episodes]
+    check("feed-level xml:base is inherited", urls[0] == "https://cdn.example/audio/ep1.mp3")
+    check("entry-level xml:base overrides", urls[1] == "https://other.example/s2/ep2.mp3")
+    plain = parse_feed(
+        b"<rss><channel><title>T</title><item><title>E</title><enclosure url='ep.mp3'/></item></channel></rss>",
+        base_url="https://h.example/dir/f.xml",
+    )
+    check("document base still applies without xml:base",
+          plain.episodes[0].media_url == "https://h.example/dir/ep.mp3")
+
+
+def check_opml_entry_cap():
+    """P2-9: past the entry cap the file is refused loudly, never truncated."""
+    from bs_podcasts.feeds.opml import MAX_OPML_ENTRIES, OpmlError, import_opml
+
+    body = "".join(f"<outline xmlUrl='https://x.invalid/{i}.xml'/>" for i in range(MAX_OPML_ENTRIES + 1))
+    try:
+        import_opml(f"<opml><body>{body}</body></opml>".encode())
+        check("an oversized OPML is refused", False)
+    except OpmlError as exc:
+        check("the refusal explains itself", "split the file" in str(exc))
+    small = "".join(f"<outline xmlUrl='https://x.invalid/{i}.xml'/>" for i in range(5))
+    check("ordinary OPML imports unchanged",
+          len(import_opml(f"<opml><body>{small}</body></opml>".encode())) == 5)
+
+
 def check_refresh_serializes_per_show():
     from bs_podcasts.feeds.refresh import RefreshService
 
@@ -163,6 +202,8 @@ def main() -> int:
     check_elided_value_label_tooltip(app)
     check_parser_survives_deep_nesting()
     check_chart_skips_malformed_items()
+    check_xml_base_resolution()
+    check_opml_entry_cap()
     check_refresh_serializes_per_show()
 
     app.processEvents()

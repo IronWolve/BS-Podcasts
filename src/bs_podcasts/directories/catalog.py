@@ -158,6 +158,16 @@ class PublicDirectory:
     def chart(self, chart_type: str, category: str = "", limit: int = 30):
         return self.charts.chart(chart_type, category)[:limit]
 
+    def invalidate(self):
+        """Drop every directory-layer cache; the explicit Refresh action.
+
+        The browse cache never expired and the chart cache ran a 900 s TTL,
+        so Refresh cleared the UI cache, re-asked this layer, and got the
+        same stale list straight back — an explicit rescan that could not
+        actually rescan."""
+        self._browse_cache.clear()
+        self.charts.invalidate()
+
     def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:
         excluded = {show.feed_url for show in shows}
         categories = []

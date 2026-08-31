@@ -8,6 +8,11 @@ from .safety import contains_dtd
 
 
 MAX_OPML_BYTES = 2 * 1024 * 1024
+# The byte cap alone still admitted ~10,000 minimal outlines, each of which
+# becomes a subscription plus a queued refresh. Real collections run to a few
+# hundred; past this the file is refused loudly rather than truncated
+# silently (design.md forbids silent caps).
+MAX_OPML_ENTRIES = 1000
 
 
 class OpmlError(ValueError):
@@ -43,6 +48,10 @@ def import_opml(content: bytes) -> list[OpmlEntry]:
         if not feed_url or feed_url in seen:
             continue
         seen.add(feed_url)
+        if len(entries) >= MAX_OPML_ENTRIES:
+            raise OpmlError(
+                f"OPML has more than {MAX_OPML_ENTRIES} feeds; split the file to import it."
+            )
         entries.append(
             OpmlEntry(
                 title=(outline.attrib.get("title") or outline.attrib.get("text") or "").strip(),

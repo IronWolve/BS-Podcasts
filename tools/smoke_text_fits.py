@@ -145,6 +145,26 @@ def check_podcast_settings_combos_fit_their_options():
         dialog.deleteLater()
 
 
+def check_cjk_titles_wrap_instead_of_clipping():
+    """P2-22: split() hands a CJK/Thai title over as one giant token; the
+    two-line wrapper must break it by character and elide the tail, never
+    draw it unelided and hard-clipped."""
+    from PySide6.QtGui import QFontMetrics
+    from bs_podcasts.ui.models import _wrap_two_lines
+    from bs_podcasts.ui.theme import app_font
+
+    metrics = QFontMetrics(app_font(14))
+    cjk = "非常に長い日本語のポッドキャストエピソードタイトルがここにあります" * 3
+    width = 200
+    lines = _wrap_two_lines(metrics, cjk, width)
+    check("an unbroken CJK title uses both lines", len(lines) == 2)
+    check("CJK line 1 fits its column", metrics.horizontalAdvance(lines[0]) <= width)
+    check("CJK line 2 elides visibly", lines[1].endswith("…"))
+    check("CJK line 2 fits its column", metrics.horizontalAdvance(lines[1]) <= width)
+    short = "短いタイトル"
+    check("a short CJK title is untouched", _wrap_two_lines(metrics, short, 400) == [short])
+
+
 def check_player_bar_elides_with_a_tooltip():
     """The now-playing title is the other surface design.md names."""
     from bs_podcasts.playback.service import PlaybackSnapshot, PlaybackState
@@ -185,6 +205,7 @@ def main() -> int:
     check_header_title_survives_a_resize()
     check_header_keeps_an_applied_filter_visible()
     check_podcast_settings_combos_fit_their_options()
+    check_cjk_titles_wrap_instead_of_clipping()
     check_player_bar_elides_with_a_tooltip()
 
     app.processEvents()
