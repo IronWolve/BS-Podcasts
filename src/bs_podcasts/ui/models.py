@@ -324,8 +324,15 @@ class PodcastDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self.card_width = 184
 
+    # Artwork is cached per exact pixel size, and a live resize recomputes the
+    # column width on nearly every frame — so an unsnapped width produced a
+    # fresh, never-reused cache key per tick and re-rendered every visible
+    # card, defeating the cache during the one interaction it exists for.
+    CARD_WIDTH_STEP = 8
+
     def set_card_width(self, width: int):
-        self.card_width = max(self.MIN_CARD_WIDTH, int(width))
+        snapped = int(width) // self.CARD_WIDTH_STEP * self.CARD_WIDTH_STEP
+        self.card_width = max(self.MIN_CARD_WIDTH, snapped)
 
     def sizeHint(self, option, index):
         art = self.card_width - 2 * self.CARD_PAD
