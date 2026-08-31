@@ -3705,7 +3705,13 @@ class MainWindow(QMainWindow):
 
         def work():
             with self._convert_lock:
-                return self._ui_episodes(self.library.episodes(show_id=show_id))
+                # limit=None, matching _open_podcast. Taking the 500 default
+                # here meant a show opened complete and then silently lost
+                # everything past its newest 500 the moment its feed
+                # refreshed — from any refresh path, since they all land here.
+                return self._ui_episodes(
+                    self.library.episodes(show_id=show_id, limit=None)
+                )
 
         def apply(episodes):
             if self.pages.currentIndex() != PAGE_EPISODES or self._hero_show_id != show_id:
