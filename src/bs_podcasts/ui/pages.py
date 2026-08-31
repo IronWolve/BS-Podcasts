@@ -695,6 +695,7 @@ SORT_OPTIONS = (
 
 class EpisodeListPage(BasePage, _ListPageMixin):
     play_requested = Signal(object)
+    load_more_requested = Signal()
     order_changed = Signal(list)
     menu_requested = Signal(object, object)
     empty_action_requested = Signal()
@@ -769,7 +770,30 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             self.view.setDragDropMode(QListView.DragDropMode.DragOnly)
         self._all_items = list(items)
         self.root.addWidget(self.stack, 1)
+        # Paging footer for capped views (global Episodes, History). Hidden by
+        # default; the shell arms it only where the list is genuinely a window
+        # onto a larger set. Created hidden and parented by addWidget before it
+        # is ever shown, per the parent-before-show rule.
+        self._load_more_noun = "episodes"
+        self.load_more = QPushButton("Load more episodes")
+        self.load_more.setObjectName("quietButton")
+        self.load_more.setAccessibleName("Load more episodes")
+        self.load_more.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.load_more.setFixedHeight(scaled_px(38))
+        self.load_more.setVisible(False)
+        self.load_more.clicked.connect(self.load_more_requested)
+        self.root.addWidget(self.load_more, alignment=Qt.AlignmentFlag.AlignHCenter)
         self._update_empty()
+
+    def set_load_more_state(self, available: bool, loading: bool = False, noun: str | None = None):
+        """Mirror of PodcastGridPage.set_load_more_state, for capped lists."""
+        if noun:
+            self._load_more_noun = noun
+        label = f"Loading more {self._load_more_noun}…" if loading else f"Load more {self._load_more_noun}"
+        self.load_more.setText(label)
+        self.load_more.setAccessibleName(f"Load more {self._load_more_noun}")
+        self.load_more.setVisible(available or loading)
+        self.load_more.setEnabled(available and not loading)
 
     def _selection_changed(self, *_args):
         self.selection_bar.set_count(len(self.view.selectionModel().selectedIndexes()))

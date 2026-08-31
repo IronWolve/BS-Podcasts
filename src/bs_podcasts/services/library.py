@@ -57,14 +57,17 @@ class LibraryService:
     def new_episode_count(self) -> int:
         return self.repository.new_episode_count()
 
-    def episodes(self, show_id: int | None = None, limit: int | None = 500):
+    def episodes(self, show_id: int | None = None, limit: int | None = 500, offset: int = 0):
         # limit=None loads the complete catalogue (used when opening one
         # podcast off-thread); the old always-500 default silently hid large
-        # back catalogues.
-        return self.repository.list_episodes(show_id, limit)
+        # back catalogues. offset pages the capped global view.
+        return self.repository.list_episodes(show_id, limit, offset)
 
-    def history(self, limit: int = 200):
-        return self.repository.list_history(limit)
+    def history(self, limit: int = 200, offset: int = 0):
+        return self.repository.list_history(limit, offset)
+
+    def history_count(self) -> int:
+        return self.repository.history_count()
 
     def favorites(self):
         return self.repository.list_favorites()

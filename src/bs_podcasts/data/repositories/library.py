@@ -64,7 +64,9 @@ class LibraryRepository:
             ).fetchall()
         return [self._show(row) for row in rows]
 
-    def list_episodes(self, show_id: int | None = None, limit: int | None = 500) -> list[Episode]:
+    def list_episodes(
+        self, show_id: int | None = None, limit: int | None = 500, offset: int = 0
+    ) -> list[Episode]:
         sql = (
             "SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM episodes e "
             "JOIN shows s ON s.id=e.show_id"
@@ -77,6 +79,11 @@ class LibraryRepository:
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)
+            if offset:
+                # OFFSET is only meaningful under a LIMIT (limit=None already
+                # reads everything), and SQLite rejects a bare OFFSET anyway.
+                sql += " OFFSET ?"
+                params.append(offset)
         with self.database.connect() as connection:
             rows = connection.execute(sql, params).fetchall()
         return [self._episode(row) for row in rows]
@@ -90,16 +97,24 @@ class LibraryRepository:
             ).fetchone()
         return self._episode(row) if row else None
 
-    def list_history(self, limit: int = 200) -> list[Episode]:
+    def list_history(self, limit: int = 200, offset: int = 0) -> list[Episode]:
         with self.database.connect() as connection:
             rows = connection.execute(
                 """SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM episodes e
                    JOIN shows s ON s.id=e.show_id
                    WHERE e.last_played IS NOT NULL
-                   ORDER BY e.last_played DESC LIMIT ?""",
-                (limit,),
+                   ORDER BY e.last_played DESC LIMIT ? OFFSET ?""",
+                (limit, offset),
             ).fetchall()
         return [self._episode(row) for row in rows]
+
+    def history_count(self) -> int:
+        """Total played rows, so the History page can say how much it shows."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM episodes WHERE last_played IS NOT NULL"
+            ).fetchone()
+        return int(row[0])
 
     def list_favorites(self) -> list[Episode]:
         with self.database.connect() as connection:
