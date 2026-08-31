@@ -70,10 +70,13 @@ class FeedFetcher:
                 "text/xml;q=0.9, text/html;q=0.5, */*;q=0.2"
             ),
         }
+        # Both values were stored from an earlier response; scrub CR/LF so a
+        # hostile server cannot smuggle extra header lines into the next
+        # request through its own ETag/Last-Modified.
         if etag:
-            headers["If-None-Match"] = etag
+            headers["If-None-Match"] = etag.replace("\r", "").replace("\n", "").strip()
         if last_modified:
-            headers["If-Modified-Since"] = last_modified
+            headers["If-Modified-Since"] = last_modified.replace("\r", "").replace("\n", "").strip()
         response = None
         try:
             response = self.session.get(

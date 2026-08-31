@@ -159,16 +159,27 @@ class DirectoryCharts:
         if self._developer_token:
             return self._developer_token
         try:
-            page = self.session.get(self.endpoint, timeout=(8, 20)).text
+            response = self.session.get(self.endpoint, timeout=(8, 20))
+            response.raise_for_status()
             script = re.search(
-                r'<script[^>]+src="([^"]*index[^"]+\.js)', page
+                r'<script[^>]+src="([^"]*index[^"]+\.js)', response.text
             )
             if not script:
                 raise DirectoryError("Directory web script was not present.")
             script_url = script.group(1)
             if script_url.startswith("/"):
                 script_url = "https://podcasts.apple.com" + script_url
-            javascript = self.session.get(script_url, timeout=(8, 20)).text
+            # The script URL is scraped from page content; only the
+            # directory's own hosts may serve the bundle a bearer token is
+            # about to be read from.
+            from urllib.parse import urlsplit
+
+            host = (urlsplit(script_url).hostname or "").lower()
+            if not (host == "podcasts.apple.com" or host.endswith(".apple.com") or host.endswith(".mzstatic.com")):
+                raise DirectoryError(f"Directory script came from an unexpected host: {host}")
+            bundle = self.session.get(script_url, timeout=(8, 20))
+            bundle.raise_for_status()
+            javascript = bundle.text
             # The minified variable name changes per deploy (al, rl, …);
             # match the JWT shape itself — it is the only one in the bundle.
             token = re.search(r'"(eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"', javascript)

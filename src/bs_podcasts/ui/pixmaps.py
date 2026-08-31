@@ -129,11 +129,16 @@ def dominant_color(path: str, fallback: str = "", compute: bool = True) -> str:
     if not compute:
         return fallback
     result = _sample(path)
-    _dominant[path] = result
     try:
-        _dominant_mtime[path] = os.path.getmtime(path)
+        stamp = os.path.getmtime(path)
     except OSError:
-        _dominant_mtime[path] = 0.0
+        stamp = 0.0
+    # One atomic write for the colour/mtime pair: workers write these while
+    # the Qt thread reads, and a reader landing between the two assignments
+    # saw a colour whose freshness stamp belonged to the previous file.
+    with _disk_lock:
+        _dominant[path] = result
+        _dominant_mtime[path] = stamp
     return result or fallback
 
 

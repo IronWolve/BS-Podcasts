@@ -34,7 +34,7 @@ class DownloadRepository:
                    VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(episode_id) DO UPDATE SET
                    source_url=excluded.source_url,
-                   state='queued', error_message='', bytes_done=0, bytes_total=0, updated_at=excluded.updated_at""",
+                   state='queued', error_message='', updated_at=excluded.updated_at""",
                 (episode_id, source_url, str(target), str(partial), now, now),
             )
         return self.get(episode_id)
