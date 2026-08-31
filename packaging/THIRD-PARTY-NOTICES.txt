@@ -6,17 +6,6 @@ component's entry names a file under "licenses/", that text is included in the
 "licenses" folder next to this file (inside the application's _internal
 directory); component source code is available from the projects listed below.
 
-INCOMPLETE — MUST BE RESOLVED BEFORE RELEASE. Several components below are
-named with a license but ship no text for it: libass (ISC), HarfBuzz (Old
-MIT), FreeType (FTL), urllib3 (MIT), charset-normalizer (MIT), idna (BSD-3),
-and Python itself (PSF). MIT, BSD and ISC terms all require the licence text
-and copyright notice to be reproduced in redistributions, so a name plus a URL
-does not discharge the obligation. Each text must be copied verbatim from that
-project's own distribution — transcribing one from memory risks shipping the
-wrong copyright holder, which is worse than shipping nothing.
-`tools/check_licenses.py` lists exactly what is still missing and fails while
-any remain, so this cannot be forgotten at packaging time.
-
 Qt / PySide6 / Shiboken (The Qt Company)
   License: GNU Lesser General Public License v3.0 (licenses/LGPL-3.0.txt,
   which incorporates licenses/GPL-3.0.txt by reference)
@@ -41,15 +30,16 @@ libplacebo (statically linked into libmpv-2.dll)
   https://code.videolan.org/videolan/libplacebo
 
 libass (statically linked into libmpv-2.dll)
-  License: ISC
+  License: ISC (licenses/ISC-libass.txt)
   https://github.com/libass/libass
 
 HarfBuzz (statically linked into libmpv-2.dll)
-  License: MIT ("Old MIT")
+  License: MIT ("Old MIT") (licenses/MIT-HarfBuzz.txt)
   https://github.com/harfbuzz/harfbuzz
 
 FreeType (statically linked into libmpv-2.dll)
   License: FreeType License (BSD-style, with credit clause)
+  (licenses/FTL.txt)
   https://freetype.org
 
 Fribidi (statically linked into libmpv-2.dll)
@@ -62,16 +52,16 @@ python-mpv
   https://github.com/jaseg/python-mpv
 
 Python (python.org) and its standard library
-  License: Python Software Foundation License
+  License: Python Software Foundation License (licenses/PSF.txt)
   https://www.python.org
 
 requests — Apache License 2.0 (licenses/Apache-2.0.txt)
   https://github.com/psf/requests
-urllib3 — MIT License
+urllib3 — MIT License (licenses/MIT-urllib3.txt)
   https://github.com/urllib3/urllib3
-charset-normalizer — MIT License
+charset-normalizer — MIT License (licenses/MIT-charset-normalizer.txt)
   https://github.com/jawah/charset_normalizer
-idna — BSD 3-Clause License
+idna — BSD 3-Clause License (licenses/BSD-3-Clause-idna.txt)
   https://github.com/kjd/idna
 certifi — Mozilla Public License 2.0 (licenses/MPL-2.0.txt)
   https://github.com/certifi/python-certifi

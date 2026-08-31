@@ -55,6 +55,10 @@ from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPla
 
 PAGE_HOME, PAGE_PODCASTS, PAGE_EPISODES, PAGE_QUEUE, PAGE_DOWNLOADS, PAGE_DISCOVER, PAGE_BOOKMARKS, PAGE_HISTORY, PAGE_SETTINGS = range(9)
 ACCENTS = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
+# Page sizes for the two capped global views. Each "Load more" click widens the
+# window by one page; design.md forbids silently substituting a cap for "all".
+EPISODES_PAGE_SIZE = 5000
+HISTORY_PAGE_SIZE = 200
 
 
 class _JobBridge(QObject):
@@ -151,6 +155,14 @@ class MainWindow(QMainWindow):
         self._close_to_tray_notice_shown = False
         self._ui_episode_cache = {}
         self._all_episode_items = []
+        # Paged windows onto the capped global views (P2-39): each Load more
+        # widens the window by one page, and background reloads re-read at the
+        # widened size so the list never silently springs back to the cap.
+        self._episodes_limit = EPISODES_PAGE_SIZE
+        self._history_limit = HISTORY_PAGE_SIZE
+        self._episode_total = 0
+        self._history_total = 0
+        self._history_items_shown = []
         self._accents_priming = False
         self._reload_timer = QTimer(self)
         self._reload_timer.setSingleShot(True)
@@ -339,6 +351,8 @@ class MainWindow(QMainWindow):
         self.download_page.remove_requested.connect(self._delete_downloads)
         self.bookmark_page.remove_requested.connect(self._delete_bookmarks)
         self.history_page.remove_requested.connect(lambda items: [self._remove_history(item.episode_id) for item in items])
+        self.episode_page.load_more_requested.connect(self._load_more_episodes)
+        self.history_page.load_more_requested.connect(self._load_more_history)
         self.context.download_menu_requested.connect(self._download_menu)
         self.context.information_requested.connect(self._show_context_information)
         self.context.favorite_requested.connect(lambda item, favorite: self._set_favorites([item], favorite))
@@ -906,6 +920,7 @@ class MainWindow(QMainWindow):
         self._ui_episode_cache.clear()
         self.podcast_page.set_items([])
         self.episode_page.set_items([])
+        self.episode_page.set_load_more_state(False)
         self.context.show_empty()
         # Deleting every show's rows and files is far too slow for the Qt
         # thread; the page shows progress while a worker does it.
@@ -1336,7 +1351,7 @@ class MainWindow(QMainWindow):
         lookups (compute=False); sampling runs in `_prime_accents` on a worker."""
         stored_shows = self.library.shows()
         episode_total = self.library.episode_count()
-        stored_episodes = self.library.episodes(limit=5000)
+        stored_episodes = self.library.episodes(limit=self._episodes_limit)
         episode_ids = {episode.id for episode in stored_episodes}
         stored_episodes.extend(
             episode for episode in self.library.favorites() if episode.id not in episode_ids
@@ -1348,16 +1363,90 @@ class MainWindow(QMainWindow):
         return {
             "stored_shows": stored_shows,
             "episode_total": episode_total,
+            "history_total": self.library.history_count(),
             "shows": [self._ui_podcast(show) for show in stored_shows],
             "episodes": episodes,
             "in_progress": [self._ui_episode_live(episode, active) for episode in stored_episodes if episode.position_seconds > 0 and not episode.played],
             "queued": [self._ui_episode_live(episode, active) for episode in self.library.queue()],
-            "history": [
-                replace_item(self._ui_episode_live(episode, active), published=f"Played {self._relative_time(episode.last_played)}" if episode.last_played else self._display_date(episode.published_at))
-                for episode in self.library.history()
-            ],
+            "history": self._history_items(self.library.history(limit=self._history_limit), active),
             "records": records,
         }
+
+    def _history_items(self, episodes, active):
+        """UI rows for History; shared by the full reload and Load more."""
+        return [
+            replace_item(
+                self._ui_episode_live(episode, active),
+                published=f"Played {self._relative_time(episode.last_played)}" if episode.last_played else self._display_date(episode.published_at),
+            )
+            for episode in episodes
+        ]
+
+    def _set_global_episode_chrome(self, shown: int):
+        """Subtitle + Load more for the global Episodes view, from live counts."""
+        total = max(self._episode_total, shown)
+        self.episode_page.header.set_subtitle(
+            f"Newest {shown:,} of {total:,} episodes — open a podcast for its full catalogue"
+            if total > shown else ""
+        )
+        self.episode_page.set_load_more_state(total > shown, noun="episodes")
+
+    def _set_history_chrome(self, shown: int):
+        total = max(self._history_total, shown)
+        self.history_page.header.set_subtitle(
+            f"Most recent {shown:,} of {total:,} plays" if total > shown else ""
+        )
+        self.history_page.set_load_more_state(total > shown, noun="plays")
+
+    def _load_more_episodes(self):
+        """Widen the global Episodes window by one page (P2-39)."""
+        if self._hero_show_id or self._preview_episodes_url or self.library is None:
+            return
+        self.episode_page.set_load_more_state(True, loading=True)
+        offset = self._episodes_limit
+
+        def work():
+            episodes = self.library.episodes(limit=EPISODES_PAGE_SIZE, offset=offset)
+            with self._convert_lock:
+                return self._ui_episodes(episodes)
+
+        self._run_read(work, self._append_global_episodes, "episodes-more")
+
+    def _append_global_episodes(self, chunk):
+        # Widen the window only once the page actually arrived, so a failed
+        # read can be retried at the same offset.
+        self._episodes_limit += EPISODES_PAGE_SIZE
+        known = {item.episode_id for item in self._all_episode_items}
+        self._all_episode_items = self._all_episode_items + [
+            item for item in chunk if item.episode_id not in known
+        ]
+        if self._hero_show_id or self._preview_episodes_url:
+            # The user opened a podcast while the page loaded; keep the wider
+            # cache but leave the detail view alone.
+            return
+        self.episode_page.set_items(self._all_episode_items, preserve_scroll=True)
+        self._set_global_episode_chrome(len(self._all_episode_items))
+
+    def _load_more_history(self):
+        if self.library is None:
+            return
+        self.history_page.set_load_more_state(True, loading=True, noun="plays")
+        offset = self._history_limit
+
+        def work():
+            active = self._active_downloads(list(self.downloads.records()) if self.downloads else [])
+            return self._history_items(self.library.history(limit=HISTORY_PAGE_SIZE, offset=offset), active)
+
+        self._run_read(work, self._append_history, "history-more")
+
+    def _append_history(self, chunk):
+        self._history_limit += HISTORY_PAGE_SIZE
+        known = {item.episode_id for item in self._history_items_shown}
+        self._history_items_shown = self._history_items_shown + [
+            item for item in chunk if item.episode_id not in known
+        ]
+        self.history_page.set_items(self._history_items_shown, preserve_scroll=True)
+        self._set_history_chrome(len(self._history_items_shown))
 
     def reads_pending(self) -> bool:
         """True while any background read, coalescing timer or search debounce is outstanding."""
@@ -1549,14 +1638,15 @@ class MainWindow(QMainWindow):
         self.podcast_page.set_items(shows)
         # A library-wide background reload must not replace a podcast detail
         # view (or an unsubscribed preview) with the global episode list.
+        self._episode_total = data["episode_total"]
+        self._history_total = data.get("history_total", len(history))
+        self._history_items_shown = history
         if not self._hero_show_id and not self._preview_episodes_url:
             self.episode_page.set_items(episodes)
-            # The global view is capped for responsiveness; say so instead of
-            # silently hiding the tail (each podcast page is complete).
-            self.episode_page.header.set_subtitle(
-                "Newest 5,000 episodes — open a podcast for its full catalogue"
-                if len(episodes) >= 5000 else ""
-            )
+            # The global view is windowed for responsiveness; say how much is
+            # shown and offer the rest instead of silently hiding the tail
+            # (each podcast page is complete).
+            self._set_global_episode_chrome(len(episodes))
         resume_ids = {episode.episode_id for episode in in_progress[:3]}
         unplayed = [episode for episode in episodes if not episode.played and episode.state != "In progress" and episode.episode_id not in resume_ids]
         fresh = [episode for episode in unplayed if episode.is_new]
@@ -1568,7 +1658,7 @@ class MainWindow(QMainWindow):
         self.context.set_queue(queued)
         self.player.set_next(queued[0].title if queued and queued[0].episode_id != self._playing_episode_id else (queued[1].title if len(queued) > 1 else ""))
         self.history_page.set_items(history)
-        self.history_page.header.set_subtitle("Most recent 200 plays" if len(history) >= 200 else "")
+        self._set_history_chrome(len(history))
         self._reload_downloads()
         active_downloads = sum(record.state.value in {"queued", "downloading", "paused"} for record in data["records"])
         new_total = sum(show.new_count for show in stored_shows)
@@ -1879,6 +1969,9 @@ class MainWindow(QMainWindow):
     def _show_hero(self, podcast, episode_count: int):
         self.episode_page.header.title_label.setText(podcast.title)
         self.episode_page.header.set_subtitle("")
+        # A podcast detail view is always complete; paging chrome belongs
+        # only to the windowed global list.
+        self.episode_page.set_load_more_state(False)
         if self.episode_page.banner.state == "empty":
             self.episode_page.banner.clear()
         show = self.library.repository.get_show(podcast.show_id)
@@ -3481,6 +3574,15 @@ class MainWindow(QMainWindow):
                 return
             update = result.value
             self.library.set_setting("updates.last_check", str(time.time()))
+            if not update.available:
+                # No release has been published yet: say so calmly instead of
+                # rendering an HTTP error or offering a dead release page.
+                self.settings_page.set_update_status(
+                    f"Installed {update.installed} · No releases published yet"
+                )
+                if identifier:
+                    self._notify("No releases have been published yet", "info")
+                return
             if update.newer:
                 note = plain_snippet(update.notes, 180)
                 self.settings_page.set_update_status(
@@ -3590,6 +3692,12 @@ class MainWindow(QMainWindow):
                 if banner is not None:
                     banner.show_state("error", message)
                 self._notify(message, "error")
+                # A failed Load more must not leave its button stuck on
+                # "Loading…"; recompute availability so it can be retried.
+                if key == "episodes-more":
+                    self._set_global_episode_chrome(len(self._all_episode_items))
+                elif key == "history-more":
+                    self._set_history_chrome(len(self._history_items_shown))
             return
         if kind == "library":
             self._reload_in_flight = False
@@ -4017,13 +4125,13 @@ class MainWindow(QMainWindow):
 
         def work():
             with self._convert_lock:
-                return self._ui_episodes(self.library.episodes(limit=5000))
+                return self._ui_episodes(self.library.episodes(limit=self._episodes_limit))
 
         self._run_read(work, lambda episodes: self._apply_all_episodes(episodes, filter_value), "episodes")
 
     def _apply_all_episodes(self, episodes, filter_value: str = "All"):
         self.episode_page.header.title_label.setText("Episodes")
-        self.episode_page.header.set_subtitle("")
+        self._set_global_episode_chrome(len(episodes))
         self.episode_page.hero.hide()
         self._hero_show_id = 0
         self._preview_episodes_url = ""
@@ -4327,6 +4435,7 @@ class MainWindow(QMainWindow):
             )
             self.episode_page.set_filter("All")
             self.episode_page.set_items([], preserve_scroll=False)
+            self.episode_page.set_load_more_state(False)
             self.episode_page.banner.show_state("loading", f"Fetching episodes for {title}…")
             self._episode_navigation_prepared = True
             self.navigation.select(PAGE_EPISODES)
@@ -4371,6 +4480,7 @@ class MainWindow(QMainWindow):
         )
         self.episode_page.set_filter("All")
         self.episode_page.set_items(items, preserve_scroll=False)
+        self.episode_page.set_load_more_state(False)
         self.episode_page.banner.show_state("empty", "Stream any episode now, or subscribe to save progress, queue and download.")
         self._episode_navigation_prepared = True
         self.navigation.select(PAGE_EPISODES)

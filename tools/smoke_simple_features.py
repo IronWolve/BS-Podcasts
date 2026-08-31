@@ -10,6 +10,8 @@ from bs_podcasts.services.updates import check_for_update
 
 
 class _Response:
+    status_code = 200
+
     def raise_for_status(self):
         return None
 
@@ -21,9 +23,18 @@ class _Response:
         }
 
 
+class _NoReleases(_Response):
+    # GitHub's latest-release API 404s while no release is published; the
+    # checker must report "nothing to update to", not raise.
+    status_code = 404
+
+
 class _Session:
+    def __init__(self, response=None):
+        self._response = response or _Response()
+
     def get(self, *_args, **_kwargs):
-        return _Response()
+        return self._response
 
 
 def main():
@@ -86,6 +97,8 @@ def main():
 
         update = check_for_update("0.1.0", _Session())
         assert update.newer and update.available == "0.2.0"
+        none_yet = check_for_update("0.1.0", _Session(_NoReleases()))
+        assert none_yet.available == "" and not none_yet.newer and none_yet.url == ""
 
     print("simple features smoke: ok")
 
