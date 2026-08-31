@@ -1971,7 +1971,7 @@ class MainWindow(QMainWindow):
                 self.episode_page.view.scrollTo(index)
 
     def _show_hero(self, podcast, episode_count: int):
-        self.episode_page.header.title_label.setText(podcast.title)
+        self.episode_page.header.set_title(podcast.title)
         self.episode_page.header.set_subtitle("")
         # A podcast detail view is always complete; paging chrome belongs
         # only to the windowed global list.
@@ -4132,7 +4132,7 @@ class MainWindow(QMainWindow):
     def _show_all_episodes(self, filter_value: str = "All"):
         if self.library is None:
             return
-        self.episode_page.header.title_label.setText("Episodes")
+        self.episode_page.header.set_title("Episodes")
         self.episode_page.header.set_subtitle("")
         self.episode_page.hero.hide()
         self._hero_show_id = 0
@@ -4155,7 +4155,7 @@ class MainWindow(QMainWindow):
         self._run_read(work, lambda episodes: self._apply_all_episodes(episodes, filter_value), "episodes")
 
     def _apply_all_episodes(self, episodes, filter_value: str = "All"):
-        self.episode_page.header.title_label.setText("Episodes")
+        self.episode_page.header.set_title("Episodes")
         self._set_global_episode_chrome(len(episodes))
         self.episode_page.hero.hide()
         self._hero_show_id = 0
@@ -4453,7 +4453,7 @@ class MainWindow(QMainWindow):
             card = next((item for item in self.discover_page._all_items if item.feed_url == feed_url), None)
             title = card.title if card else "Podcast"
             author = card.author if card else ""
-            self.episode_page.header.title_label.setText(title)
+            self.episode_page.header.set_title(title)
             self.episode_page.header.set_subtitle("")
             self._hero_show_id = 0
             self._hero_website = card.website_url if card else ""
@@ -4497,7 +4497,7 @@ class MainWindow(QMainWindow):
             )
             for episode in episodes
         ]
-        self.episode_page.header.title_label.setText(feed.title)
+        self.episode_page.header.set_title(feed.title)
         self.episode_page.header.set_subtitle("")
         self._hero_show_id = 0
         self._hero_website = feed.website_url

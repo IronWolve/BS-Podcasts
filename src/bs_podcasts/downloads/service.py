@@ -11,6 +11,7 @@ import shutil
 import time
 
 from ..net import SessionSlot
+from ..urlguard import UnsafeUrl, ensure_fetchable
 
 from ..data.repositories import DownloadRepository, LibraryRepository
 from ..domain import DownloadState
@@ -84,12 +85,16 @@ class DownloadService:
                 return self.downloads.get(episode_id)
             cancellation = Event()
             self._cancellations[episode_id] = cancellation
-        # prepare() only after the guard: running it first meant a duplicate
-        # call reset a live transfer's counters to zero before returning.
-        target = self._target(episode_id, episode.media_url)
-        partial = target.with_suffix(target.suffix + ".part")
-        self.downloads.prepare(episode_id, episode.media_url, target, partial)
         try:
+            # prepare() only after the guard: running it first meant a
+            # duplicate call reset a live transfer's counters to zero before
+            # returning. It also lives inside this try — prepare() raising
+            # (a locked database, disk I/O) with the guard entry already
+            # registered leaked that entry until restart, silently absorbing
+            # every later download of this episode.
+            target = self._target(episode_id, episode.media_url)
+            partial = target.with_suffix(target.suffix + ".part")
+            self.downloads.prepare(episode_id, episode.media_url, target, partial)
             # Setup lives inside the guard: an unusable path (mkdir or
             # disk_usage raising) previously leaked a permanently "active"
             # episode until restart, with the record stuck at queued.
@@ -182,6 +187,14 @@ class DownloadService:
         episode = self.library.get_episode(episode_id)
         if episode is None or not episode.media_url:
             raise DownloadError("Episode has no downloadable media URL.")
+        try:
+            # media_url is feed-supplied. The shared session re-checks every
+            # redirect hop, but the FIRST hop went out unscreened — a hostile
+            # feed could point an enclosure straight at loopback or a cloud
+            # metadata endpoint and the body landed in a user-openable file.
+            ensure_fetchable(episode.media_url, "Episode media URL")
+        except UnsafeUrl as exc:
+            raise DownloadError(str(exc)) from exc
         record = self.downloads.get(episode_id)
         if record is not None and record.target_path:
             # Honor the paths the record was prepared with, so an in-flight

@@ -5,6 +5,7 @@ import json
 import re
 
 from ..net import USER_AGENT, make_session
+from ..urlguard import UnsafeUrl, ensure_fetchable
 
 
 MAX_BYTES = 4 * 1024 * 1024
@@ -31,6 +32,12 @@ class SegmentData:
 
 
 def _get(url: str, session=None) -> tuple[bytes, str]:
+    try:
+        # Chapter/transcript URLs are feed-supplied; screen the first hop the
+        # same way redirects and artwork already are.
+        ensure_fetchable(url, "Chapters/transcript URL")
+    except UnsafeUrl as exc:
+        raise ListeningFetchError(str(exc)) from exc
     client = session or make_session()
     with client.get(url, timeout=TIMEOUT, stream=True, headers={"User-Agent": USER_AGENT}) as response:
         response.raise_for_status()
