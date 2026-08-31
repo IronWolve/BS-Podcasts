@@ -138,6 +138,7 @@ class MainWindow(QMainWindow):
         self._last_sleep_deadline = None
         self._download_samples = {}
         self._samples_lock = threading.Lock()
+        self._unsubscribing = set()
         self._playback_revision = 0
         self._new_episode_total = 0
         self._previous_playing_id = 0
@@ -434,7 +435,7 @@ class MainWindow(QMainWindow):
         self.settings_page.load_search_depth(self.library.setting("discover.search_limit", "200"))
         self._apply_typography()
         self.settings_page.clear_artwork_requested.connect(self._clear_artwork_cache)
-        QTimer.singleShot(4000, self._prune_artwork_cache)
+        self._later(4000, self._prune_artwork_cache)
         self.settings_page.load_downloads(
             self.library.setting("downloads.auto", "0") == "1", int(self.library.setting("downloads.auto_limit", "3")),
             self.library.setting("downloads.delete_played", "0") == "1",
@@ -456,14 +457,14 @@ class MainWindow(QMainWindow):
         self.settings_page.database_optimize_requested.connect(lambda: self._database_maintenance("optimize"))
         self.settings_page.database_repair_requested.connect(self._database_repair)
         self._arm_refresh_timer()
-        QTimer.singleShot(1500, self._refresh_if_stale)
-        QTimer.singleShot(2500, self._check_database_if_due)
-        QTimer.singleShot(5000, lambda: self._check_for_updates(manual=False))
+        self._later(1500, self._refresh_if_stale)
+        self._later(2500, self._check_database_if_due)
+        self._later(5000, lambda: self._check_for_updates(manual=False))
         self.settings_page.set_shortcuts(self.shortcuts.bindings())
         # Paths are cheap and should be available immediately; byte totals can
         # touch many files, so populate those once the event loop is running.
         self._refresh_storage_settings(include_usage=False)
-        QTimer.singleShot(100, self._refresh_storage_settings)
+        self._later(100, self._refresh_storage_settings)
         self.home_page.new_requested.connect(self._show_new_episodes)
         self.home_page.queue_requested.connect(lambda: self.navigation.select(PAGE_QUEUE))
         self.home_page.downloads_requested.connect(lambda: self.navigation.select(PAGE_DOWNLOADS))
@@ -526,7 +527,7 @@ class MainWindow(QMainWindow):
 
     def _wire_listening(self):
         if self.listening is not None:
-            QTimer.singleShot(100, self._reload_bookmarks)
+            self._later(100, self._reload_bookmarks)
 
     # ------------------------------------------------------------- persistence
     def _restore_layout(self):
@@ -982,10 +983,27 @@ class MainWindow(QMainWindow):
         self._directory_search()
 
     def _unsubscribe(self, show_id: int):
+        """Phase one: count the targets on a worker, then confirm.
+
+        Both halves of this used to run in the click handler —
+        `removal_preview` stats every download and artwork file, and
+        `remove_show` unlinks them — so the window froze mid-click for the
+        duration. The bulk paths were rewritten onto workers for exactly this
+        reason; the single-podcast one, which is the common action, was not.
+        """
         if self.library is None or not show_id:
             return
-        preview = self.library.removal_preview(show_id)
-        if not preview:
+        # The preview is a round-trip now, so a second click before the dialog
+        # appears would raise a second one over it.
+        if show_id in self._unsubscribing:
+            return
+        self._unsubscribing.add(show_id)
+        library = self.library
+        self._run_task("unsubscribe-preview", lambda: library.removal_preview(show_id), show_id)
+
+    def _confirm_unsubscribe(self, show_id: int, preview: dict):
+        """Phase two: confirm exact targets, then remove on a worker."""
+        if not preview or self.library is None:
             return
         dialog = RemovePodcastDialog(preview, self._format_bytes, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -996,15 +1014,25 @@ class MainWindow(QMainWindow):
                 self.playback.stop()
             except Exception:
                 pass
-        result = self.library.remove_subscription(show_id, dialog.delete_files.isChecked())
-        self._previews = OrderedDict((url, feed) for url, feed in self._previews.items() if url != show.feed_url)
+        library = self.library
+        delete_files = dialog.delete_files.isChecked()
+        self._previews = OrderedDict(
+            (url, feed) for url, feed in self._previews.items() if url != show.feed_url
+        )
         if self.pages.currentWidget() is self.episode_page and self._hero_show_id == show_id:
             self._hero_show_id = 0
             self.navigation.select(PAGE_PODCASTS)
-        self._request_reload()
         self.context.show_empty()
-        reclaimed = sum(size for path, size in preview["files"] if path in result.get("removed_files", ()))
-        self._notify(f"Unsubscribed from {show.title}" + (f"  ·  {self._format_bytes(reclaimed)} reclaimed" if reclaimed else ""), "success")
+
+        def work():
+            result = library.remove_subscription(show_id, delete_files)
+            reclaimed = sum(
+                size for path, size in preview["files"]
+                if path in set(result.get("removed_files", ()))
+            )
+            return show.title, reclaimed, len(result.get("failed_files", ()))
+
+        self._run_task("unsubscribe", work, show_id)
 
     def _focus_search(self):
         page = self.pages.currentWidget()
@@ -1100,11 +1128,8 @@ class MainWindow(QMainWindow):
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             self.library.set_setting(confirmation_key, "1")
-        freed = sum(self.downloads.delete(preview.episode_id) for preview in previews)
-        self._request_reload()
-        self._notify(
-            f"Retention removed {len(previews)} download{'s' if len(previews) != 1 else ''} · {self._format_bytes(freed)}",
-            "success",
+        self._delete_downloads_async(
+            previews, "Retention removed {count} download{plural} · {size}"
         )
 
     def _download_many(self, items):
@@ -1346,7 +1371,14 @@ class MainWindow(QMainWindow):
     def _run_read(self, work, apply, key: str):
         """Run `work()` on a worker, then `apply(result)` on the main thread.
         Later requests with the same key supersede earlier ones."""
-        if self.jobs is None or self._closed:
+        # Two different situations were conflated here. "No job runner" means
+        # run inline; "the window is closing" means do not run at all. Sharing
+        # one branch made a closing window take the inline path and apply
+        # results to widgets it had already unsubscribed and torn down —
+        # the exact opposite of rejecting late events.
+        if self._closed:
+            return
+        if self.jobs is None:
             apply(work())
             return
         token = self._read_tokens.get(key, 0) + 1
@@ -1363,6 +1395,33 @@ class MainWindow(QMainWindow):
             self._emit_completed(("read", (key, token, apply), result))
 
         future.add_done_callback(finished)
+
+    def _delete_downloads_async(self, previews, template: str):
+        """Unlink confirmed download targets on a worker.
+
+        `DownloadService.delete()` stats and unlinks per file; looping it in a
+        click handler froze the window for the duration — exactly what the
+        bulk show-removal paths were rewritten to avoid. `template` is
+        formatted with `count` and `size` once the worker reports back.
+        """
+        if self.downloads is None or not previews:
+            return
+        downloads = self.downloads
+        episode_ids = [preview.episode_id for preview in previews]
+
+        def work():
+            return sum(downloads.delete(episode_id) for episode_id in episode_ids)
+
+        self._run_task("delete-downloads", work, (len(episode_ids), template))
+
+    def _later(self, milliseconds: int, callback):
+        """A one-shot timer that does nothing once the window is closing.
+
+        Bare `QTimer.singleShot` calls cannot be cancelled from `closeEvent`,
+        so the startup timers kept firing on windows a theme rebuild had
+        already closed — one of them doing real filesystem work.
+        """
+        QTimer.singleShot(milliseconds, lambda: None if self._closed else callback())
 
     def _run_task(self, kind: str, work, identifier=None):
         if self.jobs is None or self._closed:
@@ -2221,15 +2280,19 @@ class MainWindow(QMainWindow):
         Bulk cleanup stays behind the confirming dialog."""
         if self.downloads is None:
             return
-        previews = self.downloads.played_previews()
-        if episode_ids is not None:
-            wanted = set(episode_ids)
-            previews = [preview for preview in previews if preview.episode_id in wanted]
-        if not previews:
-            return
-        freed = sum(self.downloads.delete(preview.episode_id) for preview in previews)
-        self._request_reload()
-        self._notify(f"Removed {len(previews)} played download{'s' if len(previews) != 1 else ''}  ·  {self._format_bytes(freed)} reclaimed")
+        downloads = self.downloads
+        wanted = None if episode_ids is None else set(episode_ids)
+
+        # played_previews() stats every completed-and-played download; on a
+        # large library that is a filesystem walk, and this runs from ordinary
+        # playback-state changes.
+        def work():
+            previews = downloads.played_previews()
+            if wanted is not None:
+                previews = [p for p in previews if p.episode_id in wanted]
+            return previews, False
+
+        self._run_task("played-previews", work)
 
     # ------------------------------------------------------- item management
     @staticmethod
@@ -2265,25 +2328,15 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        freed = sum(self.downloads.delete(preview.episode_id) for preview in previews)
-        self._request_reload()
-        self._refresh_storage_settings()
-        self._notify(f"Deleted {len(previews)} download{'s' if len(previews) != 1 else ''}  ·  {self._format_bytes(freed)} reclaimed", "success")
+        self._delete_downloads_async(
+            previews, "Deleted {count} download{plural}  ·  {size} reclaimed"
+        )
 
     def _cleanup_played(self):
         if self.downloads is None:
             return
-        previews = self.downloads.played_previews()
-        if not previews:
-            self._notify("No played episodes have downloads to delete")
-            return
-        dialog = DeleteFilesDialog("Delete played downloads", "Downloads for episodes you've finished. Episodes stay in your library.", previews, self._format_bytes, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        freed = sum(self.downloads.delete(preview.episode_id) for preview in previews)
-        self._request_reload()
-        self._refresh_storage_settings()
-        self._notify(f"Deleted {len(previews)} download{'s' if len(previews) != 1 else ''}  ·  {self._format_bytes(freed)} reclaimed", "success")
+        downloads = self.downloads
+        self._run_task("played-previews", lambda: (downloads.played_previews(), True))
 
     def _delete_bookmarks(self, items):
         if self.listening is None:
@@ -3341,6 +3394,67 @@ class MainWindow(QMainWindow):
 
     def _refresh_finished(self, payload):
         kind, identifier, result = payload
+        # One gate for every job kind. Only three of the ~17 branches below
+        # used to re-check this, and _emit_completed's own check happens when
+        # the worker finishes — not when Qt delivers the queued event — so a
+        # theme rebuild could land, say, the export-downloads modal on a
+        # window that was already closed and invisible.
+        if self._closed:
+            return
+        if kind == "unsubscribe-preview":
+            self._unsubscribing.discard(identifier)
+            if result.status == JobStatus.OK and result.value:
+                self._confirm_unsubscribe(identifier, result.value)
+            elif result.status != JobStatus.OK:
+                self._notify(result.message or "Could not read what would be removed", "error")
+            return
+        if kind == "unsubscribe":
+            self._request_reload()
+            self._refresh_storage_settings()
+            if result.status != JobStatus.OK:
+                self._notify(result.message or "Could not remove the podcast", "error")
+                return
+            title, reclaimed, stuck = result.value
+            note = f"  ·  {self._format_bytes(reclaimed)} reclaimed" if reclaimed else ""
+            if stuck:
+                # Files that could not be deleted are kept on record rather
+                # than silently forgotten; say so instead of over-reporting.
+                note += f"  ·  {stuck} file{'s' if stuck != 1 else ''} could not be deleted"
+            self._notify(f"Unsubscribed from {title}{note}", "success")
+            return
+        if kind == "delete-downloads":
+            count, template = identifier
+            self._request_reload()
+            self._refresh_storage_settings()
+            if result.status == JobStatus.OK:
+                self._notify(
+                    template.format(count=count, plural="" if count == 1 else "s",
+                                    size=self._format_bytes(result.value or 0)),
+                    "success",
+                )
+            else:
+                self._notify(result.message or "Could not delete downloads", "error")
+            return
+        if kind == "played-previews":
+            previews, confirm = result.value if result.status == JobStatus.OK else ((), True)
+            if not previews:
+                if confirm:
+                    self._notify("No played episodes have downloads to delete")
+                return
+            if confirm:
+                dialog = DeleteFilesDialog(
+                    "Delete played downloads",
+                    "Downloads for episodes you've finished. Episodes stay in your library.",
+                    previews, self._format_bytes, self,
+                )
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    return
+            self._delete_downloads_async(
+                previews,
+                "Deleted {count} download{plural}  ·  {size} reclaimed" if confirm
+                else "Removed {count} played download{plural}  ·  {size} reclaimed",
+            )
+            return
         if kind == "statistics":
             if result.status != JobStatus.OK:
                 self.settings_page.set_statistics(result.message or "Statistics unavailable")
@@ -3871,7 +3985,12 @@ class MainWindow(QMainWindow):
         if (
             self._last_mode in {"wide", "medium"} and not self._context_user_closed
         ) or self._context_forced:
-            self.context.show()
+            # Through _reveal_context, not a bare show(): every reveal path
+            # has to re-fit the splitter or the pane comes back at whatever
+            # sizes it was left with while hidden. This was the one path that
+            # skipped it, so navigating away from Settings and back restored
+            # the pane at the wrong width.
+            self._reveal_context()
         else:
             self.context.hide()
         self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)

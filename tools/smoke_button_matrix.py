@@ -169,6 +169,22 @@ def process(app, times=3):
         app.processEvents()
 
 
+def settle_until(app, predicate, timeout=5.0):
+    """Pump until `predicate()` holds. Some actions now round-trip through a
+    worker (unsubscribe previews its targets off the Qt thread), so a fixed
+    number of processEvents calls no longer guarantees the result has landed."""
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        _time.sleep(0.02)
+    app.processEvents()
+    return predicate()
+
+
 def main() -> int:
     (WORKSPACE / "tmp").mkdir(exist_ok=True)
     opened_menus = []
@@ -373,7 +389,7 @@ def main() -> int:
         process(app)
         check("PodcastSettingsDialog" in opened_dialogs, "hero Settings did not open the dialog")
         hero.unsubscribe.click()
-        process(app)
+        settle_until(app, lambda: "RemovePodcastDialog" in opened_dialogs)
         check("RemovePodcastDialog" in opened_dialogs and library.shows(), "hero Unsubscribe must preview and keep the show when rejected")
         hero.refresh.click()
         process(app)  # refresh service is None here; must not crash
