@@ -193,7 +193,14 @@ class EpisodeModel(QAbstractListModel):
 
     @staticmethod
     def _key(item):
-        return (item.episode_id, item.bookmark_id, item.title)
+        if item.episode_id or item.bookmark_id:
+            return (item.episode_id, item.bookmark_id, item.title)
+        # Directory previews all carry episode_id 0, so keying on the title
+        # alone made two different previews at the same index look like the
+        # same row — _same_rows would then take the in-place path and leave
+        # the selection pointing at a different episode. Matches the fallback
+        # _ListPageMixin._key already used one layer up.
+        return (0, 0, getattr(item, "media_url", "") or getattr(item, "external_id", "") or item.title)
 
     def replace(self, items):
         items = list(items)

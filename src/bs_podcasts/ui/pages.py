@@ -3,7 +3,7 @@
 from datetime import datetime
 import time
 
-from PySide6.QtCore import QEvent, QTimer, Signal, Qt
+from PySide6.QtCore import QEvent, QItemSelectionModel, QTimer, Signal, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -163,6 +163,21 @@ class _ListPageMixin:
         item = index.data(ItemRoles.ITEM) if index.isValid() else None
         return self._key(item) if item is not None else None
 
+    def _selected_keys(self):
+        """Every selected row's stable key, not just the current one.
+
+        A model reset clears Qt's selection outright, and restoring only the
+        current index silently collapsed a multi-selection to a single row —
+        so a bulk action taken afterwards applied to one episode instead of
+        the dozen the user had picked.
+        """
+        keys = []
+        for index in self.view.selectionModel().selectedIndexes():
+            item = index.data(ItemRoles.ITEM)
+            if item is not None:
+                keys.append(self._key(item))
+        return keys
+
     @staticmethod
     def _key(item):
         if hasattr(item, "episode_id"):
@@ -173,17 +188,34 @@ class _ListPageMixin:
             return ("preview", item.media_url or item.external_id or item.title)
         return ("show", item.show_id, item.feed_url)
 
-    def _restore_selection(self, key, preserve_scroll: bool):
+    def _restore_selection(self, key, preserve_scroll: bool, selected_keys=()):
         scrollbar = self.view.verticalScrollBar()
         scroll_value = scrollbar.value()
         target = 0
-        if key is not None:
-            for row, item in enumerate(self.model._items):
-                if self._key(item) == key:
-                    target = row
-                    break
+        wanted = set(selected_keys or ())
+        rows = []
+        for row, item in enumerate(self.model._items):
+            row_key = self._key(item)
+            if key is not None and row_key == key and target == 0:
+                target = row
+            if row_key in wanted:
+                rows.append(row)
         if self.model.rowCount():
-            self.view.setCurrentIndex(self.model.index(target, 0))
+            if len(rows) > 1:
+                # Reproduce the multi-selection exactly. setCurrentIndex also
+                # selects, so the current row is anchored on the first
+                # survivor rather than added alongside it — otherwise the
+                # restored set would gain a row the user never picked.
+                selection = self.view.selectionModel()
+                selection.clearSelection()
+                self.view.setCurrentIndex(self.model.index(rows[0], 0))
+                for row in rows[1:]:
+                    selection.select(
+                        self.model.index(row, 0),
+                        QItemSelectionModel.SelectionFlag.Select,
+                    )
+            else:
+                self.view.setCurrentIndex(self.model.index(target, 0))
         if preserve_scroll:
             QTimer.singleShot(0, lambda value=scroll_value: scrollbar.setValue(value))
         self._update_empty()
@@ -424,12 +456,16 @@ class PodcastGridPage(BasePage, _ListPageMixin):
 
     def set_items(self, items, preserve_scroll: bool = False):
         key = self._current_key()
+        selected = self._selected_keys()
         self._all_items = list(items)
-        self._apply_filters(restore_key=key, preserve_scroll=preserve_scroll)
+        self._apply_filters(restore_key=key, preserve_scroll=preserve_scroll,
+                            selected_keys=selected)
 
-    def _apply_filters(self, *_args, restore_key=None, preserve_scroll=False):
+    def _apply_filters(self, *_args, restore_key=None, preserve_scroll=False, selected_keys=None):
+        selected = list(selected_keys or ())
         if restore_key is None and not preserve_scroll:
             restore_key = self._current_key()
+            selected = self._selected_keys()
         items = list(self._all_items)
         query = self.header.search.text().strip().lower()
         if query and not self.discover:
@@ -454,7 +490,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         elif self.discover and self._discover_sort == "newest":
             items.sort(key=lambda item: item.latest_sort_key or "", reverse=True)
         self.model.replace(items)
-        self._restore_selection(restore_key, preserve_scroll)
+        self._restore_selection(restore_key, preserve_scroll, selected)
         self._update_empty(query if not self.discover else "")
         self._layout_cards()
 
@@ -737,8 +773,10 @@ class EpisodeListPage(BasePage, _ListPageMixin):
 
     def set_items(self, items, preserve_scroll: bool = True):
         key = self._current_key()
+        selected = self._selected_keys()
         self._all_items = list(items)
-        self._apply_filters(restore_key=key, preserve_scroll=preserve_scroll)
+        self._apply_filters(restore_key=key, preserve_scroll=preserve_scroll,
+                            selected_keys=selected)
 
     def set_filter(self, value: str):
         self._filter = value
@@ -772,9 +810,11 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self.sort_button.setText(label)
         self._apply_filters()
 
-    def _apply_filters(self, *_args, restore_key=None, preserve_scroll=False):
+    def _apply_filters(self, *_args, restore_key=None, preserve_scroll=False, selected_keys=None):
+        selected = list(selected_keys or ())
         if restore_key is None and not preserve_scroll:
             restore_key = self._current_key()
+            selected = self._selected_keys()
         items = list(self._all_items)
         query = self.header.search.text().strip().lower()
         if query:
@@ -805,7 +845,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             elif self._sort == "unplayed":
                 items.sort(key=lambda item: item.played)
         self.model.replace(items)
-        self._restore_selection(restore_key, preserve_scroll)
+        self._restore_selection(restore_key, preserve_scroll, selected)
         self._update_empty(query)
         self._selection_changed()
 
@@ -1012,6 +1052,7 @@ class HomePage(BasePage, _ListPageMixin):
 
     def set_sections(self, in_progress, latest):
         key = self._current_key()
+        selected = self._selected_keys()
         in_progress = list(in_progress)
         latest = list(latest)
         self._resume_lead = in_progress[: self.RESUME_ROWS]
@@ -1022,7 +1063,7 @@ class HomePage(BasePage, _ListPageMixin):
         else:
             self.latest_title.title.setText(self._latest_text)
             self.latest_title.set_count(len(latest))
-        self._restore_selection(key, True)
+        self._restore_selection(key, True, selected)
 
     def set_items(self, items, heading: str | None = None):  # compatibility
         self.set_sections([], items)
