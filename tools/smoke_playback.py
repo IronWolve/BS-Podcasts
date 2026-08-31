@@ -120,7 +120,13 @@ def main() -> int:
     with TemporaryDirectory(prefix="m3-smoke-", dir=LOCAL_TMP, ignore_cleanup_errors=True) as temporary:
         path = Path(temporary) / "library.db"
         repository = LibraryRepository(Database(path))
-        show = repository.add_show("https://samples.invalid/playback.xml", "Playback Sample")
+        # source="local" because the fixture's episodes carry file:// media
+        # URLs. That is how a locally-imported show legitimately looks; an
+        # RSS show with file:// enclosures is the attack shape urlguard now
+        # refuses, so leaving this as "rss" would assert the wrong contract.
+        show = repository.add_show(
+            "https://samples.invalid/playback.xml", "Playback Sample", source="local"
+        )
         repository.import_feed(
             show.id,
             FeedData(

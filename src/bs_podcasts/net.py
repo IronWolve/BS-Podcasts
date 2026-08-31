@@ -5,10 +5,35 @@
 the first window paints, so no startup path should pay for it.
 """
 
+from .urlguard import UnsafeUrl, ensure_fetchable
+
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+def _redirect_guard(response, *args, **kwargs):
+    """Re-check every hop before it is followed.
+
+    A feed-supplied URL can pass the first check and then 30x to loopback or a
+    metadata endpoint, so validating only the URL we were handed protects
+    nothing. Raised as `InvalidURL` (a `RequestException`) so the existing
+    per-feed/per-item handlers treat it as an ordinary fetch failure instead
+    of escaping as an unhandled error on a worker thread.
+    """
+    if not response.is_redirect:
+        return response
+    location = response.headers.get("Location")
+    if location:
+        from urllib.parse import urljoin
+        from requests.exceptions import InvalidURL
+
+        try:
+            ensure_fetchable(urljoin(response.url, location), "Redirect target")
+        except UnsafeUrl as exc:
+            raise InvalidURL(str(exc), response=response) from exc
+    return response
 
 
 class SessionSlot:
@@ -66,4 +91,5 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     session.max_redirects = max_redirects
+    session.hooks["response"].append(_redirect_guard)
     return session
