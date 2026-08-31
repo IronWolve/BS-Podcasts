@@ -153,6 +153,17 @@ class Database:
                 raise
 
     def _initialize(self):
+        migrations_dir = Path(__file__).with_name("migrations")
+        migrations = sorted(migrations_dir.glob("[0-9][0-9][0-9]_*.sql"))
+        # The pre-migration backup must be the FIRST thing that touches a
+        # preexisting file: the WAL pragma and the schema_migrations CREATE
+        # below both mutate it, so backing up after them snapshots a file the
+        # about-to-run migration has already partly shaped. Peeking read-only
+        # decides whether a backup is due without writing anything.
+        if self._preexisting and migrations:
+            applied = self._applied_versions_readonly()
+            if any(int(m.name.split("_", 1)[0]) not in applied for m in migrations):
+                self._backup_before_migration()
         with self.connect() as connection:
             # WAL is persistent in the database file; setting it once here keeps
             # every later connection to the cheap per-connection pragmas only.
@@ -162,16 +173,12 @@ class Database:
                 "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
             )
 
-        migrations_dir = Path(__file__).with_name("migrations")
-        migrations = sorted(migrations_dir.glob("[0-9][0-9][0-9]_*.sql"))
         with self.connect() as connection:
             applied_versions = {
                 row["version"]
                 for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
             }
         pending = [migration for migration in migrations if int(migration.name.split("_", 1)[0]) not in applied_versions]
-        if pending and self._preexisting:
-            self._backup_before_migration()
         for migration in pending:
             version = int(migration.name.split("_", 1)[0])
             with self.connect() as connection:
@@ -182,6 +189,23 @@ class Database:
                     + f"\nINSERT INTO schema_migrations(version) VALUES ({version});\n"
                     + "COMMIT;"
                 )
+
+    def _applied_versions_readonly(self) -> set:
+        """Applied migration versions, read without writing to the file."""
+        try:
+            connection = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            return set()
+        try:
+            return {
+                row[0]
+                for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
+            }
+        except sqlite3.Error:
+            # No schema_migrations table: everything is pending.
+            return set()
+        finally:
+            connection.close()
 
     def _backup_before_migration(self):
         """Keep one recoverable snapshot of the database before schema changes."""
@@ -202,14 +226,26 @@ class Database:
         directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         target = directory / f"library-{stamp}.db"
+        # Write to a sidecar and replace on success: a backup() that failed
+        # halfway used to leave a truncated file with a valid backup name —
+        # exactly the file a user would later restore from.
+        temporary = target.with_suffix(target.suffix + ".tmp")
         with self._lock.shared():
             source = sqlite3.connect(self.path)
-            destination = sqlite3.connect(target)
+            destination = sqlite3.connect(temporary)
             try:
                 source.backup(destination)
-            finally:
+            except BaseException:
                 destination.close()
+                temporary.unlink(missing_ok=True)
+                raise
+            finally:
+                try:
+                    destination.close()
+                except sqlite3.Error:
+                    pass
                 source.close()
+        os.replace(temporary, target)
         return target
 
     def reindex(self):

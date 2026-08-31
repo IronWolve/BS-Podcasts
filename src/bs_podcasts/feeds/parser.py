@@ -94,7 +94,9 @@ def _integer(value: str) -> int | None:
         number = int(value.strip())
     except (TypeError, ValueError):
         return None
-    return number if number >= 0 else None
+    # Season/episode numbers; a feed shipping a 40-digit "number" would
+    # otherwise travel to SQLite and overflow its 8-byte INTEGER on insert.
+    return number if 0 <= number <= 2**31 else None
 
 
 def _explicit(element) -> bool | None:

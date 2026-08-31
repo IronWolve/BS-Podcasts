@@ -62,8 +62,18 @@ class ArtworkCache:
 
         With max_bytes=None every unreferenced file goes. Returns (count, bytes).
         """
+        # A file fetched moments ago may not be linked into the database yet
+        # (fetch happens on a worker; the row write follows). Pruning it in
+        # that window blocked the retry for the whole session, since the
+        # fetch dedup remembered the URL as done. Fresh files are never
+        # candidates; the next pass collects them if they stay unreferenced.
+        threshold = time.time() - 15 * 60
         candidates = sorted(
-            (path for path in self.files() if str(path) not in keep),
+            (
+                path
+                for path in self.files()
+                if str(path) not in keep and path.stat().st_mtime < threshold
+            ),
             key=lambda path: path.stat().st_mtime,
         )
         removed = 0

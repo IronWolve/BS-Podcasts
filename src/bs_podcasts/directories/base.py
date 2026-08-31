@@ -39,6 +39,7 @@ class DirectoryService:
 
     def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:
         errors = []
+        succeeded = False
         for provider in self.providers:
             if not hasattr(provider, "recommend"):
                 continue
@@ -47,9 +48,12 @@ class DirectoryService:
             except Exception as exc:
                 errors.append(f"{provider.name}: {exc}")
                 continue
+            succeeded = True
             if results:
                 return results[:limit]
-        if errors:
+        # An empty answer from a working provider is an answer; raise only
+        # when every provider that was asked actually failed.
+        if errors and not succeeded:
             raise DirectoryError("; ".join(errors))
         return []
 
@@ -57,6 +61,7 @@ class DirectoryService:
         self, category: str, topic: str, limit: int = 30
     ) -> list[DirectoryCandidate]:
         errors = []
+        succeeded = False
         for provider in self.providers:
             if not hasattr(provider, "topic"):
                 continue
@@ -65,14 +70,18 @@ class DirectoryService:
             except Exception as exc:
                 errors.append(f"{provider.name}: {exc}")
                 continue
+            succeeded = True
             if results:
                 return results[:limit]
-        if errors:
+        # An empty answer from a working provider is an answer; raise only
+        # when every provider that was asked actually failed.
+        if errors and not succeeded:
             raise DirectoryError("; ".join(errors))
         return []
 
     def chart(self, chart_type: str, category: str = "", limit: int = 30):
         errors = []
+        succeeded = False
         for provider in self.providers:
             if not hasattr(provider, "chart"):
                 continue
@@ -81,9 +90,12 @@ class DirectoryService:
             except Exception as exc:
                 errors.append(f"{provider.name}: {exc}")
                 continue
+            succeeded = True
             if results:
                 return results[:limit]
-        if errors:
+        # An empty answer from a working provider is an answer; raise only
+        # when every provider that was asked actually failed.
+        if errors and not succeeded:
             raise DirectoryError("; ".join(errors))
         return []
 

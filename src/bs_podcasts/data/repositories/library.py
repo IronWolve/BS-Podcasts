@@ -337,7 +337,9 @@ class LibraryRepository:
             bookmarks = connection.execute(
                 "SELECT COUNT(*) FROM bookmarks b JOIN episodes e ON e.id=b.episode_id WHERE e.show_id=?", (show_id,)
             ).fetchone()[0]
-        with self.database.connect() as connection:
+            # Same transaction as the counts above: reading artwork in a
+            # second one let a concurrent import shift the preview under the
+            # dialog it feeds.
             artwork_rows = connection.execute(
                 "SELECT DISTINCT episode_artwork_path FROM episodes WHERE show_id=? AND episode_artwork_path != ''",
                 (show_id,),

@@ -90,6 +90,17 @@ def svg(name: str, color: str) -> bytes:
 _pixmaps: dict[tuple, QPixmap] = {}
 _icons: dict[tuple, QIcon] = {}
 _renderers: dict[tuple, QSvgRenderer] = {}
+# The key space is finite today (glyph x palette x a few sizes), but nothing
+# enforced that: one caller minting per-item colours would have grown these
+# without bound for the life of the process. Far above any legitimate
+# working set; hitting it drops the oldest half rather than leaking forever.
+_CACHE_CAP = 4096
+
+
+def _bound(cache: dict):
+    if len(cache) > _CACHE_CAP:
+        for key in list(cache.keys())[: _CACHE_CAP // 2]:
+            del cache[key]
 
 
 def _renderer(name: str, color: str) -> QSvgRenderer:
@@ -98,6 +109,7 @@ def _renderer(name: str, color: str) -> QSvgRenderer:
     if renderer is None:
         renderer = QSvgRenderer(QByteArray(svg(name, color)))
         _renderers[key] = renderer
+        _bound(_renderers)
     return renderer
 
 
@@ -117,6 +129,7 @@ def pixmap(name: str, color: str, size: int = 20, scale: float = 1.0) -> QPixmap
     result = QPixmap.fromImage(image)
     result.setDevicePixelRatio(scale)
     _pixmaps[key] = result
+    _bound(_pixmaps)
     return result
 
 
@@ -127,12 +140,16 @@ def icon(name: str, color: str, size: int = 20, disabled: str = "") -> QIcon:
     if cached is not None:
         return cached
     result = QIcon()
-    for scale in (1.0, 2.0):
+    # 3x too: fractional 2.25-3x desktop scales exist (150% on a 4K laptop
+    # panel maps there) and Qt picks the nearest variant, so 2x alone was
+    # upscaled and slightly soft on those displays.
+    for scale in (1.0, 2.0, 3.0):
         result.addPixmap(pixmap(name, color, size, scale), QIcon.Mode.Normal)
         result.addPixmap(pixmap(name, color, size, scale), QIcon.Mode.Active)
         if disabled:
             result.addPixmap(pixmap(name, disabled, size, scale), QIcon.Mode.Disabled)
     _icons[key] = result
+    _bound(_icons)
     return result
 
 

@@ -184,6 +184,11 @@ class PublicDirectory:
             )
             if match and match.genre in CATEGORY_IDS and match.genre not in categories:
                 categories.append(match.genre)
+            if len(categories) >= 2:
+                # Each category browse fans out to ~4 expansion-term
+                # requests; two categories already fill the page, and the
+                # third mostly duplicated results while doubling the wait.
+                break
 
         if not categories:
             return [

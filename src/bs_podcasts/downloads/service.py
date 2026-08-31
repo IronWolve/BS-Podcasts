@@ -10,6 +10,7 @@ import re
 import shutil
 import time
 
+from ..artwork.cache import _looks_textual
 from ..net import SessionSlot
 from ..urlguard import UnsafeUrl, ensure_fetchable
 
@@ -285,6 +286,7 @@ class DownloadService:
             )
             self._emit(episode_id, DownloadState.DOWNLOADING, done, total)
             last_report = done
+            head = b""
             with partial.open("ab" if append else "wb") as handle:
                 for chunk in response.iter_content(64 * 1024):
                     if cancellation.is_set():
@@ -295,6 +297,16 @@ class DownloadService:
                         return self.downloads.get(episode_id)
                     if not chunk:
                         continue
+                    if not append and len(head) < 512:
+                        # The Content-Type gate trusts the header; a missing
+                        # or lying one let an HTML error page be saved and
+                        # marked complete. Let the first bytes veto it —
+                        # same rule the artwork cache applies.
+                        head += chunk[: 512 - len(head)]
+                        if _looks_textual(head):
+                            raise DownloadError(
+                                "Server sent a document instead of audio."
+                            )
                     handle.write(chunk)
                     done += len(chunk)
                     if done - last_report >= 256 * 1024:
@@ -401,7 +413,7 @@ class DownloadService:
         if record is None:
             return 0
         freed = 0
-        failed = ""
+        failures = []
         for candidate in (record.target_path, record.partial_path):
             path = Path(candidate) if candidate else None
             if path is not None and path.is_file():
@@ -410,11 +422,14 @@ class DownloadService:
                     path.unlink()
                     freed += size
                 except OSError as exc:
-                    failed = str(exc)
-        if failed:
+                    # Keep every failure: the partial's error used to
+                    # overwrite the target's, hiding the message that named
+                    # the file the user actually cares about.
+                    failures.append(str(exc))
+        if failures:
             self.downloads.progress(
                 episode_id, DownloadState.ERROR, record.bytes_done, record.bytes_total,
-                f"File could not be deleted: {failed}",
+                "File could not be deleted: " + "; ".join(failures),
             )
         else:
             self.downloads.remove(episode_id)
