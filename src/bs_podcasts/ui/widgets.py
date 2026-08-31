@@ -536,6 +536,43 @@ class SearchField(QLineEdit):
         self.addAction(icons.icon("search", COLORS["subtle"], 16), QLineEdit.ActionPosition.LeadingPosition)
 
 
+def combo_chrome_px(combo) -> int:
+    """Pixels a combo's QSS chrome (padding + arrow subcontrol) takes from its
+    width. Measured from the style, not guessed: a hardcoded allowance
+    under-measures and the widest option still clips under the arrow."""
+    from PySide6.QtCore import QRect
+    from PySide6.QtWidgets import QStyle, QStyleOptionComboBox
+
+    probe_width = scaled_px(400)
+    option = QStyleOptionComboBox()
+    combo.initStyleOption(option)
+    option.rect = QRect(0, 0, probe_width, max(1, combo.sizeHint().height()))
+    field = combo.style().subControlRect(
+        QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxEditField, combo
+    )
+    return probe_width - field.width()
+
+
+def fit_combo_width(combo, floor: int = 0) -> int:
+    """Size a combo to its widest option and return the width used.
+
+    design.md names the 180 px settings combo by hand as a design violation —
+    a fixed width that cages text — so nothing may pin one to a constant its
+    own contents can outgrow. Item tooltips carry the full text as the last
+    resort the rule allows.
+    """
+    metrics = combo.fontMetrics()
+    widest = max(
+        (metrics.horizontalAdvance(combo.itemText(i)) for i in range(combo.count())),
+        default=0,
+    )
+    width = max(floor, widest + combo_chrome_px(combo) + scaled_px(8))
+    combo.setMinimumWidth(width)
+    for index in range(combo.count()):
+        combo.setItemData(index, combo.itemText(index), Qt.ItemDataRole.ToolTipRole)
+    return width
+
+
 class PageHeader(QFrame):
     back_requested = Signal()
 
@@ -553,6 +590,9 @@ class PageHeader(QFrame):
 
         text = QVBoxLayout()
         text.setSpacing(0)
+        self._title_text = title
+        self._subtitle_text = subtitle
+        self._search_allowed = True
         self.title_label = QLabel(title)
         self.title_label.setObjectName("pageTitle")
         # A long title must clip inside its own stretch slot instead of
@@ -579,6 +619,9 @@ class PageHeader(QFrame):
         layout.addWidget(self.search)
         self._show_search = show_search
         self.search.setVisible(show_search)
+        # Re-evaluate as the query changes, so clearing a filter at a narrow
+        # width tidies the field away instead of waiting for the next resize.
+        self.search.textChanged.connect(lambda _text: self._apply_search_visibility())
 
         self.action = None
         if action:
@@ -587,16 +630,68 @@ class PageHeader(QFrame):
             self.action.setCursor(Qt.CursorShape.PointingHandCursor)
             layout.addWidget(self.action)
 
+    def set_title(self, text: str):
+        self._title_text = text
+        self._elide_header_text()
+
     def set_subtitle(self, text: str):
-        self.subtitle_label.setText(text)
+        self._subtitle_text = text
         self.subtitle_label.setVisible(bool(text))
+        self._elide_header_text()
+
+    def _elide_header_text(self):
+        """Elide to the slot, with the full string in a tooltip.
+
+        The Ignored size policy keeps a long title from dictating the header's
+        minimum width, but on its own it also hard-clipped the text
+        mid-character with no way to read the rest — which design.md forbids
+        outright. Eliding costs the layout nothing and leaves the text
+        recoverable.
+        """
+        for label, full in (
+            (self.title_label, getattr(self, "_title_text", "")),
+            (self.subtitle_label, getattr(self, "_subtitle_text", "")),
+        ):
+            available = label.width()
+            if not full:
+                if label.text():
+                    label.setText("")
+                label.setToolTip("")
+                continue
+            metrics = label.fontMetrics()
+            if available <= 0 or metrics.horizontalAdvance(full) <= available:
+                wanted, tip = full, ""
+            else:
+                wanted = metrics.elidedText(full, Qt.TextElideMode.ElideRight, available)
+                tip = full
+            if label.text() != wanted:
+                label.setText(wanted)
+            label.setToolTip(tip)
+
+    def set_search_allowed(self, allowed: bool):
+        """Pages hide the filter on an empty collection; remembering it here
+        stops the next resize putting it straight back."""
+        self._search_allowed = allowed
+        self._apply_search_visibility()
+
+    def _apply_search_visibility(self):
+        if not self._show_search:
+            return
+        # In a tight header the inline filter is the least important control:
+        # hide it before the title and the action button start clipping. But
+        # never hide one that is actually filtering — that left the list cut
+        # down with no visible cause and no way to clear it.
+        wide_enough = self.width() >= scaled_px(430)
+        allowed = getattr(self, "_search_allowed", True)
+        # Focus keeps it too: hiding the field someone is typing in would be
+        # worse than the crowding this trades away.
+        keep = wide_enough or bool(self.search.text()) or self.search.hasFocus()
+        self.search.setVisible(allowed and keep)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # In a tight header the inline filter is the least important control:
-        # hide it before the title and the action button start clipping.
-        if self._show_search:
-            self.search.setVisible(event.size().width() >= scaled_px(430))
+        self._apply_search_visibility()
+        self._elide_header_text()
 
     def apply_metrics(self):
         self.layout().setSpacing(SPACE["md"])

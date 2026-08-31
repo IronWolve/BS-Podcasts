@@ -12,6 +12,11 @@ from . import icons
 from .pixmaps import cover, initials
 from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, app_font, scaled_px
 
+# Widest an episode row's title/meta column is allowed to grow. Rows span the
+# full pane, so without a cap a title on a maximised window trails off across
+# empty space away from its own metadata.
+MAX_ROW_TEXT_PX = 880
+
 
 @dataclass(frozen=True)
 class Podcast:
@@ -554,7 +559,10 @@ class EpisodeDelegate(QStyledItemDelegate):
             painter.setFont(app_font(11, QFont.Weight.DemiBold))
             badge_reserve = painter.fontMetrics().horizontalAdvance(item.state.upper()) + scaled_px(36)
         text_right = row.right() - play_zone - badge_reserve
-        text_width = max(40, text_right - text_left)
+        # Cap the reading column. On a wide window an episode title used a
+        # fraction of a very long row and the eye had to track across
+        # whitespace to the meta; cards already bound themselves to a column.
+        text_width = min(max(40, text_right - text_left), scaled_px(MAX_ROW_TEXT_PX))
 
         title_font = app_font(14, QFont.Weight.DemiBold)
         painter.setFont(title_font)

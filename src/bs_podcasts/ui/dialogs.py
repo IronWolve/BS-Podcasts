@@ -48,7 +48,7 @@ from ..config import APP_NAME, APP_TAGLINE, GITHUB_URL, app_version
 from . import icons
 from .pixmaps import cover, initials
 from .theme import COLORS, SPACE, scaled_px
-from .widgets import safe_feed_html
+from .widgets import fit_combo_width, safe_feed_html
 
 
 SHADOW_MARGIN = 24
@@ -428,8 +428,14 @@ class PodcastSettingsDialog(StyledDialog):
         self.trim.setCurrentIndex(self.TRIM_LEVELS.index(trim_level) if trim_level in self.TRIM_LEVELS else 0)
         self.auto_continue = QCheckBox("Continue with the next queued episode")
         self.auto_continue.setChecked(auto_continue)
-        for field in (self.speed, self.skip_back, self.skip_forward, self.trim):
+        # A fixed 180 px is the exact case design.md calls a design violation:
+        # the Silence trim combo's own options could outgrow it and clip with
+        # no ellipsis and no tooltip. Spin boxes keep the uniform width; the
+        # combo is sized from its widest entry and never narrower.
+        trim_width = fit_combo_width(self.trim, floor=scaled_px(180))
+        for field in (self.speed, self.skip_back, self.skip_forward):
             field.setFixedWidth(scaled_px(180))
+        self.trim.setMinimumWidth(trim_width)
         form.addRow("Playback speed", self.speed)
         form.addRow("Skip back", self.skip_back)
         form.addRow("Skip forward", self.skip_forward)
@@ -455,10 +461,10 @@ class PodcastSettingsDialog(StyledDialog):
         self.retention_days.setSpecialValueText("No age limit")
         self.retention_days.setSuffix(" days")
         self.retention_days.setValue(retention_days or 0)
-        for field in (self.auto_download, self.auto_download_limit, self.retention_keep, self.retention_days):
+        download_width = fit_combo_width(self.auto_download, floor=scaled_px(200))
+        for field in (self.auto_download_limit, self.retention_keep, self.retention_days):
             field.setFixedWidth(scaled_px(200))
-        for index in range(self.auto_download.count()):
-            self.auto_download.setItemData(index, self.auto_download.itemText(index), Qt.ItemDataRole.ToolTipRole)
+        self.auto_download.setMinimumWidth(download_width)
         form.addRow("Automatic downloads", self.auto_download)
         form.addRow("Download at most", self.auto_download_limit)
         form.addRow("Keep downloads", self.retention_keep)

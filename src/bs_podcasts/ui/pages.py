@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from . import icons
 from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, hide_hover_bubble, show_hover_bubble
+from .widgets import combo_chrome_px as widgets_combo_chrome_px
 from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, scaled_px
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 
@@ -195,7 +196,14 @@ class _ListPageMixin:
         elif not has_rows:
             self.empty.set_text(*self._empty_text)
         if not getattr(self, "_persist_search", False):
-            self.header.search.setVisible(has_rows or bool(query))
+            # Through the header so a later resize honours it: setting
+            # visibility directly was undone by the next resizeEvent.
+            self.header.set_search_allowed(has_rows or bool(query))
+        chips = getattr(self, "chips", None)
+        if chips is not None and not getattr(self, "reorder", False):
+            # Filter chips for states nothing is in are noise on an empty
+            # page; keep them while a filter is what emptied it.
+            chips.setVisible(bool(getattr(self, "_all_items", ())) or bool(query))
         if getattr(self, "_hide_action_when_empty", False) and self.header.action is not None:
             self.header.action.setVisible(bool(getattr(self, "_all_items", ())))
 
@@ -1605,21 +1613,13 @@ class SettingsPage(BasePage):
 
     @staticmethod
     def combo_chrome_px(combo) -> int:
-        """Pixels a combo's QSS chrome (padding + arrow subcontrol) takes from
-        its width. Measured from the style, not guessed: a hardcoded allowance
-        under-measured and the widest option still clipped under the arrow."""
-        from PySide6.QtCore import QRect
-        from PySide6.QtWidgets import QStyle, QStyleOptionComboBox
-
-        probe_width = scaled_px(400)
-        option = QStyleOptionComboBox()
-        combo.initStyleOption(option)
-        option.rect = QRect(0, 0, probe_width, max(1, combo.sizeHint().height()))
-        field = combo.style().subControlRect(
-            QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxEditField, combo
-        )
-        chrome = probe_width - field.width()
-        return chrome if 0 < chrome < probe_width else scaled_px(66)
+        """Shared with the podcast-settings dialog, which had its own caged
+        combos; the measurement lives in widgets so both use one rule."""
+        chrome = widgets_combo_chrome_px(combo)
+        # Sanity bound kept from the original: a style that reports something
+        # absurd falls back to a measured-good default rather than a width
+        # that would swallow the field.
+        return chrome if 0 < chrome < scaled_px(400) else scaled_px(66)
 
     def _fit_field(self, field, floor: int):
         """Uniform field width, but never narrower than the widest option —
