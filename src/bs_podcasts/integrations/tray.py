@@ -105,6 +105,20 @@ class TrayController:
         if callback is not None:
             callback()
 
+    def shutdown(self):
+        """Symmetric to MprisController.shutdown(): stop listening and hide
+        the icon, so a rebuilt window's tray cannot receive events meant for
+        the window that owned this one."""
+        bridge = getattr(self.window, "_bridge", None)
+        if bridge is not None:
+            try:
+                bridge.playback_event.disconnect(self._playback_changed)
+            except (RuntimeError, TypeError):
+                pass
+        if self.tray is not None:
+            self.tray.hide()
+            self.tray = None
+
     def _quit(self):
         self.window._force_quit = True
         self.window.close()

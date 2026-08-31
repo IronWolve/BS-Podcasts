@@ -475,7 +475,12 @@ class MainWindow(QMainWindow):
         self.settings_page.database_optimize_requested.connect(lambda: self._database_maintenance("optimize"))
         self.settings_page.database_repair_requested.connect(self._database_repair)
         self._arm_refresh_timer()
-        self._later(1500, self._refresh_if_stale)
+        # The stale-feed check is the heaviest startup task; it now hooks off
+        # the first successful library load (see _reload_library) so it can
+        # never race the first paint. This long timer is only the fallback
+        # for a load that errors out.
+        self._stale_check_done = False
+        self._later(8000, self._refresh_if_stale)
         self._later(2500, self._check_database_if_due)
         self._later(5000, lambda: self._check_for_updates(manual=False))
         self.settings_page.set_shortcuts(self.shortcuts.bindings())
@@ -676,7 +681,7 @@ class MainWindow(QMainWindow):
 
     def _prune_artwork_cache(self):
         """Keep the cache under 400 MB in the background; only unreferenced files go."""
-        if self.refresh is None or getattr(self.refresh, "artwork", None) is None or self.jobs is None:
+        if self.refresh is None or getattr(self.refresh, "artwork", None) is None or self.jobs is None or self._closed:
             return
         cache = self.refresh.artwork
         if not hasattr(cache, "prune"):
@@ -776,6 +781,9 @@ class MainWindow(QMainWindow):
             self._refresh_shows(shows, quiet=True)
 
     def _refresh_if_stale(self):
+        if getattr(self, "_stale_check_done", False):
+            return  # already triggered by the first library load
+        self._stale_check_done = True
         if self.library is None or self.jobs is None or getattr(self.refresh, "refresh", None) is None or self._background_paused():
             return
         minutes = int(self.library.setting("refresh.interval_minutes", "60"))
@@ -789,7 +797,9 @@ class MainWindow(QMainWindow):
                 if not show.suspended and (show.last_refresh is None or show.last_refresh < cutoff)
             ]
 
-        self._run_read(read_stale, self._start_quiet_refresh, "scheduled-refresh")
+        # On the refresh pool: this read exists to feed refreshes, and the
+        # shared UI pool is busy with first-paint reads at exactly this time.
+        self._run_read(read_stale, self._start_quiet_refresh, "scheduled-refresh", pool=self.refresh_jobs)
 
     def _scheduled_refresh(self):
         if self.library is None or self._refresh_batch[0] or getattr(self.refresh, "refresh", None) is None or self._background_paused():
@@ -921,7 +931,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._previews.clear()
-        self._ui_episode_cache.clear()
+        # Under the convert lock: a worker inside _ui_episodes may be reading
+        # the cache this clears.
+        with self._convert_lock:
+            self._ui_episode_cache.clear()
         # SQLite reuses rowids, so a fetched-once set surviving a reset would
         # make a future episode with a recycled id silently skip its
         # chapters/transcript/artwork fetch for the whole session.
@@ -1271,7 +1284,7 @@ class MainWindow(QMainWindow):
         self.player.set_skip_values(back, forward)
 
     def _refresh_storage_settings(self, include_usage: bool = True):
-        if self.library is None:
+        if self.library is None or self._closed:
             return
         self.settings_page.set_storage_info(*self._storage_info(False))
         if include_usage:
@@ -1472,7 +1485,7 @@ class MainWindow(QMainWindow):
             or self.search_overlay._timer.isActive()
         )
 
-    def _run_read(self, work, apply, key: str):
+    def _run_read(self, work, apply, key: str, pool=None):
         """Run `work()` on a worker, then `apply(result)` on the main thread.
         Later requests with the same key supersede earlier ones."""
         # Two different situations were conflated here. "No job runner" means
@@ -1487,7 +1500,7 @@ class MainWindow(QMainWindow):
             return
         token = self._read_tokens.get(key, 0) + 1
         self._read_tokens[key] = token
-        future = self.jobs.submit(work)
+        future = (pool if pool is not None else self.jobs).submit(work)
         self._pending_jobs.add(future)
 
         def finished(completed):
@@ -1650,7 +1663,10 @@ class MainWindow(QMainWindow):
         in_progress = data["in_progress"]
         queued = data["queued"]
         history = data["history"]
-        self.podcast_page.set_items(shows)
+        # preserve_scroll: this runs on every background reload, and the
+        # default reset yanked the grid back to the top mid-browse whenever a
+        # refresh finished.
+        self.podcast_page.set_items(shows, preserve_scroll=True)
         # A library-wide background reload must not replace a podcast detail
         # view (or an unsubscribed preview) with the global episode list.
         self._episode_total = data["episode_total"]
@@ -1695,6 +1711,10 @@ class MainWindow(QMainWindow):
             self.context.show_empty()
         self._apply_playing_marker()
         self._prime_accents(show.artwork_path for show in stored_shows)
+        if not getattr(self, "_stale_check_done", True):
+            # First successful load: the window has its data, so the heavy
+            # stale-feed sweep can start without competing with first paint.
+            self._later(250, self._refresh_if_stale)
 
     def _request_reload(self, callback=None):
         """Coalesce bursts (batch refresh, imports); read+convert run off the main thread."""
@@ -2909,6 +2929,15 @@ class MainWindow(QMainWindow):
     def _download_episode(self, episode_id: int, quiet: bool = False):
         if self.downloads is None or self.jobs is None or not episode_id:
             return
+        # UI-level dedup: the service absorbs duplicates too, but only after
+        # a pool slot is taken — a double-click on a slow disk briefly
+        # occupied two of the download workers with one episode.
+        try:
+            record = next((r for r in self.downloads.records() if r.episode_id == episode_id), None)
+        except Exception:
+            record = None
+        if record is not None and getattr(record.state, "value", "") in {"queued", "downloading"}:
+            return
         future = self.download_jobs.submit(self.downloads.download, episode_id)
         self._pending_jobs.add(future)
 
@@ -3079,6 +3108,13 @@ class MainWindow(QMainWindow):
             self.context.update_download_state(
                 context_id, self._record_ui_state(record) if record is not None else ""
             )
+        # Rate samples exist only to render in-flight rows; entries for
+        # finished or removed downloads would otherwise accumulate for the
+        # life of the process.
+        live = {record.episode_id for record in records if record.state.value in {"queued", "downloading", "paused"}}
+        with self._samples_lock:
+            for episode_id in [key for key in self._download_samples if key not in live]:
+                del self._download_samples[episode_id]
         low = "  ·  low on space" if free < 1024 ** 3 else ""
         self.download_page.header.set_subtitle(f"{self._format_bytes(used)} on disk  ·  {self._format_bytes(free)} free{low}" if items or low else "")
         if self.download_page.header.action:
@@ -3775,7 +3811,8 @@ class MainWindow(QMainWindow):
         if kind == "accents":
             self._accents_priming = False
             if result.status == JobStatus.OK and result.value and not self._closed:
-                self._ui_episode_cache.clear()
+                with self._convert_lock:
+                    self._ui_episode_cache.clear()
                 self._request_reload()
             return
         if kind == "details":
@@ -4063,30 +4100,35 @@ class MainWindow(QMainWindow):
             # Beyond the depth, scrolling or Load more continues to the
             # ceiling. Artwork for rows already shown is a disk-cache hit.
             QTimer.singleShot(0, self._load_more_discover)
+        if operation == "recommend":
+            description = "recommendations based on your library categories"
+        elif operation == "topic":
+            description = f"{value[0]} › {value[1]} podcasts"
+        elif operation == "chart":
+            chart_labels = {
+                "top_shows": "Top Shows", "trending": "Trending Episodes",
+                "subscriber_shows": "Subscriber Shows", "top_series": "Top Series",
+            }
+            chart_type, category = value
+            description = chart_labels.get(chart_type, "Directory Chart")
+            if category:
+                description += f" · {category}"
+        elif operation == "browse":
+            description = f"{value or 'general'} podcasts"
+        else:
+            description = f"results for “{value}”"
         if podcasts:
             self.discover_page.banner.clear()
-            if operation == "recommend":
-                description = "recommendations based on your library categories"
-            elif operation == "topic":
-                description = f"{value[0]} › {value[1]} podcasts"
-            elif operation == "chart":
-                chart_labels = {
-                    "top_shows": "Top Shows", "trending": "Trending Episodes",
-                    "subscriber_shows": "Subscriber Shows", "top_series": "Top Series",
-                }
-                chart_type, category = value
-                description = chart_labels.get(chart_type, "Directory Chart")
-                if category:
-                    description += f" · {category}"
-            elif operation == "browse":
-                description = f"{value or 'general'} podcasts"
-            else:
-                description = f"results for “{value}”"
             ending = "End of available results" if self._discover_exhausted else "Scroll for more"
             self.discover_page.set_discover_summary(f"{len(podcasts)} {description}  ·  {ending}")
         else:
             self.discover_page.banner.clear()
-            self.discover_page.set_discover_summary("No podcasts matched this selection.")
+            # Name what came up empty: a bare "no podcasts matched" left the
+            # user guessing which selection or query it was talking about.
+            self.discover_page.set_discover_summary(f"No {description}.")
+            self.discover_page.empty.set_text(
+                "No matches", f"The directory returned no {description}.", ""
+            )
         if self.discover_page.discover_sort_key() == "newest":
             self._discover_newest_summary = self.discover_page.result_summary.text()
             self._discover_sort_changed("newest")

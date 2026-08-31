@@ -594,7 +594,10 @@ class EpisodeInfoDialog(StyledDialog):
         available = screen.availableGeometry()
         target_width = min(1120, max(700, int(available.width() * 0.92)))
         target_height = min(820, max(600, int(available.height() * 0.88)))
-        self.setFixedSize(min(target_width, available.width()), min(target_height, available.height()))
+        # Sized, not pinned: a fixed size clipped tall content (many long
+        # wrapped URLs at a large type scale) with no way to scroll or grow.
+        self.resize(min(target_width, available.width()), min(target_height, available.height()))
+        self.setMinimumSize(min(560, available.width()), min(420, available.height()))
         self.add_heading(
             _wrap_long_value(getattr(episode, "title", "Episode information")),
             "Feed metadata and local library state. Full show notes remain available through Show details.",
@@ -632,7 +635,16 @@ class EpisodeInfoDialog(StyledDialog):
             holder = QWidget()
             holder.setLayout(form)
             columns.addWidget(holder, 1, Qt.AlignmentFlag.AlignTop)
-        self.card_layout.addLayout(columns, 1)
+        # Overflow scrolls instead of clipping: the row set grows with the
+        # feed (transcripts, chapters, season data) and with the type scale.
+        content = QWidget()
+        content.setLayout(columns)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        self.card_layout.addWidget(scroll, 1)
 
         buttons = QHBoxLayout()
         copy = QPushButton("Copy information")
