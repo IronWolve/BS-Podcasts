@@ -35,6 +35,8 @@ def band(bar, widget):
 
 def main() -> int:
     LOCAL_TMP.mkdir(parents=True, exist_ok=True)
+    skipped = []
+    checked = [0]
     app = create_application(["bs-podcasts-player-bar"])
     snapshot = PlaybackSnapshot(
         state=PlaybackState.PLAYING, episode_id=1, show_id=1,
@@ -73,13 +75,55 @@ def main() -> int:
             require(slider_top >= play_bottom, f"{where}: play circle overlaps the seek bar")
             require(play_top >= 0 and slider_bottom <= bar.height(), f"{where}: transport spills outside the bar")
 
-            # Titles never move the centred transport.
-            offset = abs(bar.play.mapTo(bar, bar.play.rect().center()).x() - bar.width() // 2)
-            require(offset <= 3, f"{where}: play button is {offset}px off the bar's centre")
-            require(
-                bar.left_wrap.width() == bar.tools_wrap.width(),
-                f"{where}: side zones differ ({bar.left_wrap.width()} vs {bar.tools_wrap.width()})",
-            )
+            # Titles never move the centred transport — across the axes that
+            # actually unbalance it. One window size, default skips and a
+            # playing-only snapshot left width, skip-label width and the idle
+            # state completely untested, and set_skip_values' own comment says
+            # differing label widths are what shift the transport.
+            idle = PlaybackSnapshot(state=PlaybackState.IDLE)
+            # The app forces compact chrome at narrow widths, so a full-chrome
+            # bar at 760px is a state it never shows. Testing it would assert
+            # centring in a bar narrower than its own contents.
+            widths = (760, 900, 1100, 1400) if compact else (1000, 1240, 1400, 1920)
+            for width in widths:
+                for skips in ((15, 30), (5, 120), (120, 5)):
+                    for state_label, shot in (("playing", snapshot), ("idle", idle)):
+                        window.resize(width, 900)
+                        bar.set_skip_values(*skips)
+                        bar.set_snapshot(shot)
+                        for _ in range(6):
+                            app.processEvents()
+                        bar.layout().activate()
+                        bar.center_wrap.layout().activate()
+                        for _ in range(4):
+                            app.processEvents()
+                        axis = f"{where}/w={width}/skip={skips}/{state_label}"
+                        offset = abs(
+                            bar.play.mapTo(bar, bar.play.rect().center()).x() - bar.width() // 2
+                        )
+                        # Centring is only achievable while the transport got
+                        # the width it asked for. Squeezed below that, the row
+                        # is compressed and no padding can recover the centre
+                        # line — asserting it there would be asserting the
+                        # impossible, so record the skip instead of hiding it.
+                        squeezed = bar.center_wrap.width() < bar.center_wrap.sizeHint().width()
+                        if squeezed:
+                            skipped.append(f"{axis} (short by "
+                                           f"{bar.center_wrap.sizeHint().width() - bar.center_wrap.width()}px)")
+                        else:
+                            checked[0] += 1
+                            require(offset <= 2, f"{axis}: play button is {offset}px off the bar's centre")
+                        require(
+                            bar.left_wrap.width() == bar.tools_wrap.width(),
+                            f"{axis}: side zones differ "
+                            f"({bar.left_wrap.width()} vs {bar.tools_wrap.width()})",
+                        )
+            # Back to the baseline for the remaining checks.
+            window.resize(1400, 900)
+            bar.set_skip_values(15, 30)
+            bar.set_snapshot(snapshot)
+            for _ in range(6):
+                app.processEvents()
             # Ampersands survive Qt's mnemonic handling (a short title so the
             # check is about escaping, not elision).
             bar.set_snapshot(PlaybackSnapshot(
@@ -95,6 +139,11 @@ def main() -> int:
             del window
     theme.apply_typography("comfortable", "Inter")
     theme.apply_app_stylesheet(app)
+    print(f"  centre line asserted in {checked[0]} configurations; "
+          f"{len(skipped)} skipped as over-constrained")
+    for entry in skipped:
+        print(f"    skipped: {entry}")
+    require(checked[0] >= 48, f"too few centring configurations checked: {checked[0]}")
     print("BS Podcasts player bar geometry passed.")
     return 0
 

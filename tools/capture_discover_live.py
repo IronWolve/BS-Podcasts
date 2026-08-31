@@ -46,6 +46,11 @@ def main() -> int:
     database = Database(DATA / "library.db")
     repository = LibraryRepository(database)
     library = LibraryService(repository)
+    # Every sibling script that builds a MainWindow over real subscriptions
+    # does this. Without it shell.py's 1.5s stale-refresh timer fires while
+    # this script pumps for up to 45s per mode, so a capture run mutates the
+    # shared workspace library over the network as a side effect.
+    library.set_setting("refresh.interval_minutes", "0")
     jobs = JobRunner(max_workers=4)
     refresh = RefreshService(
         repository,
