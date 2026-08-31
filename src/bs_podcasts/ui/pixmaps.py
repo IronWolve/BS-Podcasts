@@ -213,7 +213,18 @@ def cover(
     When the file is missing the placeholder tile is drawn with `fallback_text`
     initials on `fallback_color` so both branches share identical geometry.
     """
-    key = f"cover:{path}:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}"
+    # The fallback branches below read the live COLORS dict, which apply_theme
+    # mutates in place — and rebuilding the window does not clear QPixmapCache.
+    # Keying only on the arguments meant a placeholder rendered before a theme
+    # switch was served back afterwards in the old theme's colours, for as long
+    # as the cache kept it. Bake the resolved colours into the key.
+    theme_key = (
+        ""
+        if path
+        else f":{fallback_color or COLORS['surface_soft']}:{COLORS['muted']}"
+        f":{COLORS['surface_raised']}:{COLORS['border']}"
+    )
+    key = f"cover:{path}:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}"
     cached = QPixmapCache.find(key)
     if cached is not None and not cached.isNull():
         return cached

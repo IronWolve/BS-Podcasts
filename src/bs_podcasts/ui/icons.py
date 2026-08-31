@@ -6,6 +6,7 @@ and rasterised on demand and cached in memory; a file cache is kept only for
 the handful of glyphs Qt style sheets must reference by URL.
 """
 
+from hashlib import sha1
 from pathlib import Path
 import os
 import re
@@ -169,7 +170,12 @@ def _cache_dir() -> Path:
 
 def icon_file(name: str, color: str, size: int) -> str:
     safe_color = re.sub(r"[^0-9A-Za-z]", "", color)
-    target = _cache_dir() / f"{name}-{safe_color}-{size}.png"
+    # The glyph's own path data is part of the name. Keying on name/colour/size
+    # alone meant `target.exists()` was checked but never freshness, so a user
+    # who had generated the PNG once kept it forever — an edited glyph would
+    # never reach them.
+    digest = sha1(GLYPHS.get(name, "").encode("utf-8")).hexdigest()[:8]
+    target = _cache_dir() / f"{name}-{safe_color}-{size}-{digest}.png"
     if not target.exists():
         pixmap(name, color, size, 1.0).save(str(target), "PNG")
     return target.as_posix()
