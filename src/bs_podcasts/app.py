@@ -193,13 +193,19 @@ def _claim_single_instance(app):
     name = f"{APP_ID}-{getpass.getuser()}"
     if _probe_running_instance(name):
         return None
-    QLocalServer.removeServer(name)
     server = QLocalServer(app)
+    # Do NOT clear the socket path before trying to bind it. Removing it up
+    # front meant a second launch could unlink the path a live first instance
+    # had just bound — after which both listen() calls succeeded, neither took
+    # the re-probe branch, and two processes opened the same library. Only a
+    # bind that actually fails justifies clearing, and only after re-probing
+    # confirms nothing is answering there.
     if not server.listen(name):
-        # Lost the race: someone else claimed the name between probe and listen.
         if _probe_running_instance(name, timeout_ms=1500):
             return None
-    else:
+        QLocalServer.removeServer(name)
+        server.listen(name)
+    if server.isListening():
         # Serve the "ok" handshake IMMEDIATELY: heavy init (database,
         # services, window) runs for seconds, and a second launch probing in
         # that window used to read silence, assume a dead peer, and steal
@@ -298,14 +304,25 @@ def main() -> int:
             refresh_jobs=refresh_jobs,
         )
         _mark("main-window")
-        window.tray = TrayController(window, playback)
-        _mark("tray")
-        window.mpris = MprisController(window, playback)
-        _mark("mpris")
+        window.tray = None
+        window.mpris = None
         window.relaunch_requested.connect(lambda: rebuild_window())
         state["window"] = window
         window.show()
         _mark("show")
+
+        def _desktop_integration():
+            # After first paint: neither the tray icon nor MPRIS is needed to
+            # draw the window, and MPRIS in particular touches D-Bus. Building
+            # them first put that work in front of every startup.
+            if window is not state["window"]:
+                return  # superseded by a rebuild before this ran
+            window.tray = TrayController(window, playback)
+            _mark("tray")
+            window.mpris = MprisController(window, playback)
+            _mark("mpris")
+
+        QTimer.singleShot(0, _desktop_integration)
         return window
 
     def rebuild_window():
@@ -314,10 +331,13 @@ def main() -> int:
         if old is not None:
             if getattr(old, "tray", None) is not None and old.tray.tray is not None:
                 old.tray.tray.hide()
-            try:
-                old.mpris.shutdown()
-            except Exception:
-                pass
+            # Both may still be None: they are now built after first paint,
+            # so a rebuild triggered immediately can arrive before they exist.
+            if getattr(old, "mpris", None) is not None:
+                try:
+                    old.mpris.shutdown()
+                except Exception:
+                    pass
             old.close()
             old.deleteLater()
         build_window()
