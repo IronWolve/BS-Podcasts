@@ -31,6 +31,9 @@ class DirectoryCharts:
         self._cache = {}
         self._developer_token = ""
 
+    def invalidate(self):
+        self._cache.clear()
+
     def chart(self, chart_type: str, category: str = ""):
         if chart_type not in CHART_TITLES:
             raise DirectoryError("Unknown directory chart type.")

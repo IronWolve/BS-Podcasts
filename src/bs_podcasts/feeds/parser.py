@@ -10,6 +10,12 @@ from .safety import contains_dtd
 
 MAX_FEED_BYTES = 20 * 1024 * 1024
 MAX_EPISODES = 5000
+# _cap_newest keeps the newest MAX_EPISODES *of what was materialized*; this
+# bounds materialization itself, so a byte-capped feed of hundreds of
+# thousands of minimal items cannot balloon memory building dataclasses that
+# are about to be thrown away. Generous on purpose: at 4x the keep-cap, any
+# feed it truncates is pathological, not a real back catalogue.
+MAX_SCANNED_EPISODES = MAX_EPISODES * 4
 MIN_ENCLOSURE_BYTES = 16 * 1024
 
 
@@ -226,6 +232,8 @@ def _parse_rss(root) -> FeedData:
     episodes = []
     seen = set()
     for item in _children(channel, "item"):
+        if len(episodes) >= MAX_SCANNED_EPISODES:
+            break
         title = _text(item, "title") or "Untitled episode"
         media_url, mime, enclosure_bytes = _rss_enclosure(item)
         if not media_url:
@@ -292,6 +300,8 @@ def _parse_atom(root) -> FeedData:
     episodes = []
     seen = set()
     for entry in _children(root, "entry"):
+        if len(episodes) >= MAX_SCANNED_EPISODES:
+            break
         title = _text(entry, "title") or "Untitled episode"
         media_url, mime, enclosure_bytes = _atom_link(entry, "enclosure")
         if not media_url:
@@ -340,6 +350,49 @@ def _parse_atom(root) -> FeedData:
         categories=_categories(root),
         episodes=tuple(_cap_newest(episodes)),
     )
+
+
+XML_BASE = "{http://www.w3.org/XML/1998/namespace}base"
+_URL_ATTRIBUTES = ("url", "href", "src")
+_URL_TEXT_TAGS = {"link", "url"}
+
+
+def _is_relative(value: str) -> bool:
+    return bool(value) and "://" not in value.split("?", 1)[0][:12]
+
+
+def _apply_xml_base(root, document_base: str):
+    """Absolutize URL-bearing nodes against their nearest xml:base.
+
+    Atom permits xml:base on any element, inherited downward; resolving only
+    against the document URL mis-resolved every URL under one. Runs before
+    the parse proper — resolve_feed_urls then finds those values already
+    absolute and leaves them alone. Iterative on purpose: recursion here
+    would reintroduce the nesting-depth hazard the category walker just had
+    fixed."""
+    from urllib.parse import urljoin
+
+    # `under` is True once any ancestor (or the element itself) declared
+    # xml:base — inheritance is the whole point. Elements not under one are
+    # left for resolve_feed_urls, exactly as before.
+    stack = [(root, document_base, False)]
+    while stack:
+        element, base, under = stack.pop()
+        own = element.attrib.get(XML_BASE, "").strip()
+        if own:
+            base = urljoin(base, own) if base else own
+            under = True
+        if under and base:
+            for name in _URL_ATTRIBUTES:
+                value = (element.attrib.get(name) or "").strip()
+                if _is_relative(value):
+                    element.set(name, urljoin(base, value))
+            if _local(element.tag) in _URL_TEXT_TAGS:
+                text = (element.text or "").strip()
+                if _is_relative(text):
+                    element.text = urljoin(base, text)
+        for child in element:
+            stack.append((child, base, under))
 
 
 def resolve_feed_urls(feed: FeedData, base_url: str) -> FeedData:
@@ -394,6 +447,7 @@ def parse_feed(content: bytes, base_url: str = "") -> FeedData:
     except ET.ParseError as exc:
         raise FeedParseError(f"Invalid XML: {exc}") from exc
 
+    _apply_xml_base(root, base_url)
     kind = _local(root.tag)
     if kind in {"rss", "rdf", "channel"}:
         return resolve_feed_urls(_parse_rss(root), base_url)

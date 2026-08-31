@@ -148,10 +148,17 @@ class LibraryRepository:
             older = False
             if older_than_days:
                 try:
-                    from datetime import datetime
-                    older = datetime.fromisoformat(
+                    from datetime import datetime, timezone
+                    parsed = datetime.fromisoformat(
                         episode.published_at.replace("Z", "+00:00")
-                    ).timestamp() < cutoff
+                    )
+                    if parsed.tzinfo is None:
+                        # The parser stores dates normalized to UTC and then
+                        # naive; .timestamp() on a naive datetime assumes
+                        # LOCAL time, which skewed "delete after N days" by
+                        # the machine's whole UTC offset.
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    older = parsed.timestamp() < cutoff
                 except (TypeError, ValueError):
                     older = False
             if outside_count or older:

@@ -21,6 +21,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QFrame,
     QGridLayout,
@@ -3258,10 +3259,6 @@ class PlayerBar(QFrame):
             self.now_playing_requested.emit()
 
     def _refresh_chrome(self):
-        # Transport buttons appear/disappear with playback state; re-balance
-        # once the new visibility has been applied.
-        if hasattr(self, "_pad_left"):
-            QTimer.singleShot(0, self._centre_play)
         has = self._has_episode
         compact = self._compact
         for widget in (self.back, self.forward, self.next, self.slider, self.elapsed, self.remaining, self.speed):
@@ -3279,6 +3276,12 @@ class PlayerBar(QFrame):
             self.title.setToolTip("")
         elif self.title.text() == mnemonic_safe(self._now_title):
             self.title.setToolTip("Show now playing")
+        # Re-balance only AFTER the new visibility is applied. Balancing
+        # first (as set_compact's apply_metrics does) measured tools_wrap
+        # with the OLD button set, squeezing it on a compact→full flip; and
+        # the deferred _centre_play this replaced could fire after teardown.
+        if hasattr(self, "_pad_left"):
+            self._balance_zones()
 
     # -- state -------------------------------------------------------------
     def set_snapshot(self, snapshot):

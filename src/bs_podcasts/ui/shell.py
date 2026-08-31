@@ -922,6 +922,11 @@ class MainWindow(QMainWindow):
                 pass
         self._previews.clear()
         self._ui_episode_cache.clear()
+        # SQLite reuses rowids, so a fetched-once set surviving a reset would
+        # make a future episode with a recycled id silently skip its
+        # chapters/transcript/artwork fetch for the whole session.
+        self._details_fetched.clear()
+        self._artwork_fetched.clear()
         self.podcast_page.set_items([])
         self.episode_page.set_items([])
         self.episode_page.set_load_more_state(False)
@@ -1038,6 +1043,12 @@ class MainWindow(QMainWindow):
         self._previews = OrderedDict(
             (url, feed) for url, feed in self._previews.items() if url != show.feed_url
         )
+        # The removed show's episode rowids can be reused by the next import;
+        # dropping the whole fetched-once memory is cheap (each fetch
+        # re-checks its own preconditions) and beats a recycled id silently
+        # skipping its chapters/transcript/artwork for the session.
+        self._details_fetched.clear()
+        self._artwork_fetched.clear()
         if self.pages.currentWidget() is self.episode_page and self._hero_show_id == show_id:
             self._hero_show_id = 0
             self.navigation.select(PAGE_PODCASTS)
@@ -3261,6 +3272,12 @@ class MainWindow(QMainWindow):
         key = (operation, repr(value))
         if force:
             self._discover_cache.pop(key, None)
+            # The UI cache is only the outer layer: browse results never
+            # expired and charts held a 900 s TTL underneath, so an explicit
+            # Refresh re-fetched the same stale list from the directory
+            # layer. Refresh means refresh.
+            if hasattr(self.directory, "invalidate"):
+                self.directory.invalidate()
         cached = self._discover_cache.get(key)
         if cached is not None and time.time() - cached[0] < self.DISCOVER_CACHE_SECONDS:
             # Serve the completed result through the normal apply path: the
