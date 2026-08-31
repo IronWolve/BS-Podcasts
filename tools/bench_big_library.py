@@ -11,6 +11,11 @@ import sys
 import time
 
 WORKSPACE = Path(__file__).resolve().parents[2]
+
+# design.md, "Minimum release gates": no production main-thread stall over
+# 100 ms on the 300 x 600 benchmark. Overridable so a slower machine can
+# record what it actually measured rather than silently ignoring the gate.
+STALL_BUDGET = float(os.environ.get("BS_PODCASTS_STALL_BUDGET", "0.100"))
 os.environ.setdefault("TMPDIR", str(WORKSPACE / "tmp"))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -88,6 +93,20 @@ def main() -> int:
         window.close()
         jobs.shutdown(wait=True)
         app.quit()
+
+    # design.md's release gate: "no production main-thread stall over 100 ms".
+    # This used to print the numbers and return 0 regardless, so a 500 ms stall
+    # passed exactly like a 5 ms one — the gate could not fail.
+    breaches = sorted(
+        ((label, worst) for label, (_direct, worst) in results.items() if worst > STALL_BUDGET),
+        key=lambda entry: -entry[1],
+    )
+    if breaches:
+        print(f"\nFAIL main-thread stall budget is {1000 * STALL_BUDGET:.0f} ms:")
+        for label, worst in breaches:
+            print(f"  {label:28} {1000 * worst:7.1f} ms")
+        return 1
+    print(f"\nall actions stayed within the {1000 * STALL_BUDGET:.0f} ms stall budget")
     return 0
 
 
