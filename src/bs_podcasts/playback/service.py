@@ -7,7 +7,7 @@ from threading import RLock, Timer
 import time
 
 from ..data.repositories import LibraryRepository
-from ..urlguard import UnsafeUrl, ensure_media_source, ensure_web_url
+from ..urlguard import UnsafeUrl, ensure_media_source, ensure_web_url, is_web_url
 from .engine import EngineEvent, PlaybackUnavailable
 
 
@@ -62,6 +62,10 @@ class PlaybackService:
         self._sleep_timer: Timer | None = None
         self._load_watchdog: Timer | None = None
         self._load_token = 0
+        # Redirect rescue (see _start_redirect_rescue): which source already
+        # got its one retry, and whether the current load wanted autoplay.
+        self._rescued_source = ""
+        self._load_autoplay = False
         self._engine_loaded = False
         self._deferred_episode_id = None
         self._dead = False
@@ -196,6 +200,8 @@ class PlaybackService:
                 self.engine.set_speed(speed)
             if self.engine.capabilities.silence_trim:
                 self.engine.set_silence_trim(self.snapshot.trim_level)
+            self._rescued_source = ""
+            self._load_autoplay = autoplay
             self.engine.load(source, start, autoplay)
             self._arm_load_watchdog(episode.id, source)
             self._emit()
@@ -254,6 +260,8 @@ class PlaybackService:
                 self.engine.set_speed(1.0)
             if self.engine.capabilities.silence_trim:
                 self.engine.set_silence_trim("off")
+            self._rescued_source = ""
+            self._load_autoplay = autoplay
             self.engine.load(source, 0.0, autoplay)
             self._arm_load_watchdog(None, source)
             self._emit()
@@ -554,8 +562,78 @@ class PlaybackService:
                 self._persist_position(force=True)
             elif event.kind == "error":
                 self._cancel_load_watchdog()
+                if self._start_redirect_rescue():
+                    # One retry with a pre-resolved URL is in flight; stay in
+                    # LOADING instead of flashing an error the retry may fix.
+                    self.snapshot = replace(
+                        self.snapshot, state=PlaybackState.LOADING, message="", buffering=None
+                    )
+                    self._emit()
+                    return
                 self.snapshot = replace(
                     self.snapshot, state=PlaybackState.ERROR, message=str(event.value), buffering=None
+                )
+            self._emit()
+
+    def _start_redirect_rescue(self) -> bool:
+        """Retry a failed web source once with its redirect chain pre-resolved.
+
+        FFmpeg's http protocol refuses more than 8 redirects (a hardcoded
+        MAX_REDIRECTS), and podcast ad/tracker chains now routinely exceed
+        that — a 9-hop enclosure made mpv 'fail to open' a perfectly good
+        episode. The app's own HTTP stack follows long chains and re-checks
+        every hop against the SSRF screen, so resolve the final URL there and
+        hand the engine something it can open directly. Called with the
+        service lock held; the network work runs on its own thread."""
+        import threading
+
+        source = self.snapshot.source
+        if not source or not is_web_url(source) or self._rescued_source == source:
+            return False
+        self._rescued_source = source
+        thread = threading.Thread(
+            target=self._rescue_redirects,
+            args=(source, self.snapshot.position, self._load_autoplay),
+            daemon=True,
+            name="playback-redirect-rescue",
+        )
+        thread.start()
+        return True
+
+    def _rescue_redirects(self, source: str, position: float, autoplay: bool):
+        from ..net import make_session
+
+        final = ""
+        try:
+            # max_redirects raised above the default 8: the whole point is
+            # chains longer than that. Every hop is still re-validated by the
+            # session's redirect guard.
+            response = make_session(max_redirects=20).get(
+                source, stream=True, timeout=(8, 15), allow_redirects=True
+            )
+            try:
+                if response.status_code < 400:
+                    final = str(response.url)
+            finally:
+                response.close()
+        except Exception:
+            final = ""
+        with self._lock:
+            if self._dead or self.snapshot.source != source:
+                return  # the user moved on while we were resolving
+            if not final or final == source:
+                self.snapshot = replace(
+                    self.snapshot, state=PlaybackState.ERROR,
+                    message="Could not open the episode stream.", buffering=None,
+                )
+                self._emit()
+                return
+            try:
+                self.engine.load(final, position, autoplay)
+                self._arm_load_watchdog(self.snapshot.episode_id, source)
+            except Exception as exc:
+                self.snapshot = replace(
+                    self.snapshot, state=PlaybackState.ERROR, message=str(exc), buffering=None
                 )
             self._emit()
 
