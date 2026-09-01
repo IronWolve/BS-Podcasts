@@ -167,6 +167,9 @@ class MainWindow(QMainWindow):
         self._episode_total = 0
         self._history_total = 0
         self._history_items_shown = []
+        # The last converted library payload: accent priming re-tints it in
+        # place instead of re-reading and re-converting the whole library.
+        self._last_library_data = None
         self._accents_priming = False
         self._reload_timer = QTimer(self)
         self._reload_timer.setSingleShot(True)
@@ -526,6 +529,10 @@ class MainWindow(QMainWindow):
             self.episode_page.banner.clear()
             self._reload_library()
         else:
+            # Measured, not assumed: starting this read before the pages are
+            # built does NOT help — construction and the read are both
+            # Python-bound and simply share the GIL, so overlapping them
+            # finishes no sooner (Windows: identical; Linux: slower).
             self._reload_library_async()
 
     def _wire_playback(self):
@@ -1322,7 +1329,9 @@ class MainWindow(QMainWindow):
     def _open_data_folder(self):
         if self.library is None:
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.library.repository.database.path.parent)))
+        # Through the shared opener (which opens a path's parent folder), so
+        # this exit is visible to the same harnesses and rules as every other.
+        self._open_location(str(self.library.repository.database.path))
 
     @staticmethod
     def _format_bytes(value: int) -> str:
@@ -1399,6 +1408,23 @@ class MainWindow(QMainWindow):
             "history": self._history_items(self.library.history(limit=self._history_limit), active),
             "records": records,
         }
+
+    @staticmethod
+    def _retinted(data: dict) -> dict:
+        """Copy of a library payload with every item's accent re-read from the
+        (now primed) tint cache. Mirrors the fallbacks _ui_episode and
+        _ui_podcast use, so a still-missing sample yields the same colour."""
+        def episode_accent(item):
+            return dominant_color(item.artwork_path, ACCENTS[item.show_id % len(ACCENTS)], compute=False)
+
+        patched = dict(data)
+        for key in ("episodes", "in_progress", "queued", "history"):
+            patched[key] = [replace_item(item, accent=episode_accent(item)) for item in data.get(key, ())]
+        patched["shows"] = [
+            replace_item(show, accent=dominant_color(show.artwork_path, ACCENTS[show.show_id % len(ACCENTS)], compute=False))
+            for show in data.get("shows", ())
+        ]
+        return patched
 
     def _history_items(self, episodes, active):
         """UI rows for History; shared by the full reload and Load more."""
@@ -1655,6 +1681,7 @@ class MainWindow(QMainWindow):
         if self.library is None:
             return
         data = data or self._read_library()
+        self._last_library_data = data
         stored_shows = data["stored_shows"]
         episode_total = data.get("episode_total", 0)
         shows = data["shows"]
@@ -3812,8 +3839,15 @@ class MainWindow(QMainWindow):
             self._accents_priming = False
             if result.status == JobStatus.OK and result.value and not self._closed:
                 with self._convert_lock:
-                    self._ui_episode_cache.clear()
-                self._request_reload()
+                    self._ui_episode_cache.clear()  # later conversions pick up the tints
+                # Sampling finishes seconds after launch; it used to trigger a
+                # FULL library reload (a 0.4 s worker read plus every model
+                # reset) just to recolour rows. The converted payload is still
+                # here — re-tint it and re-apply, no database involved.
+                if self._last_library_data is not None:
+                    self._reload_library(self._retinted(self._last_library_data))
+                else:
+                    self._request_reload()
             return
         if kind == "details":
             outcome = result.value if result.status == JobStatus.OK else None
@@ -4099,7 +4133,7 @@ class MainWindow(QMainWindow):
             # depth in the background while the user reads the first rows.
             # Beyond the depth, scrolling or Load more continues to the
             # ceiling. Artwork for rows already shown is a disk-cache hit.
-            QTimer.singleShot(0, self._load_more_discover)
+            self._later(0, self._load_more_discover)
         if operation == "recommend":
             description = "recommendations based on your library categories"
         elif operation == "topic":
@@ -4479,7 +4513,7 @@ class MainWindow(QMainWindow):
         newest = self.discover_page.discover_sort_key() == "newest"
         self.discover_page.set_items(items, preserve_scroll=not newest)
         if newest:
-            QTimer.singleShot(0, self.discover_page.view.scrollToTop)
+            self._later(0, self.discover_page.view.scrollToTop)
         self._trim_preview_cache()
         if scanned:
             if cancelled:
