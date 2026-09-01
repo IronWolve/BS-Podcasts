@@ -299,6 +299,7 @@ def main() -> int:
     # run describes a worker that no longer exists. Park it as paused now, or
     # the UI offers a Pause that silently does nothing until the app restarts.
     downloads.reconcile_interrupted()
+    downloads.reconcile_missing()
     _mark("services")
     state = {"window": None}
 

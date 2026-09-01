@@ -86,6 +86,10 @@ class DownloadRepository:
                     "UPDATE episodes SET downloaded_path=? WHERE id=?", (path, episode_id)
                 )
 
+    def clear_downloaded_path(self, episode_id: int):
+        with self.database.connect() as connection:
+            connection.execute("UPDATE episodes SET downloaded_path='' WHERE id=?", (episode_id,))
+
     def remove(self, episode_id: int):
         """Forget a download record and clear the episode's local path."""
         with self.database.connect() as connection:
