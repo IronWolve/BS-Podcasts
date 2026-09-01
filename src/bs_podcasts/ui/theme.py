@@ -667,7 +667,10 @@ def stylesheet() -> str:
 
     /* ---------- Player bar ---------- */
     QFrame#playerBar {{ background: {c['nav']}; border-top: 1px solid {c['hairline']}; }}
-    QLabel#playerShow {{ color: {c['muted']}; font-size: {small}px; }}
+    QLabel#playerShow {{ color: {c['muted']}; font-size: {small}px; border-radius: {r['sm']}px; padding: 0 2px; }}
+    /* Same treatment as the title button when a library show is behind it. */
+    QLabel#playerShow[linked="true"]:hover {{ color: {c['text_strong']}; background: {c['surface_soft']}; }}
+    QLabel#playerShow[linked="true"]:focus {{ border: {focus_ring}; }}
     QLabel#playerNext {{ color: {c['subtle']}; font-size: {small}px; }}
     QLabel#timeLabel {{ color: {c['muted']}; font-size: {small}px; min-width: {sp(44)}px; }}
     /* seekSlider paints its own track and handle (SeekSlider.paintEvent). */

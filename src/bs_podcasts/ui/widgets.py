@@ -1910,6 +1910,12 @@ class ContextPanel(QFrame):
         self.download.setCursor(Qt.CursorShape.PointingHandCursor)
         self.download.clicked.connect(self._download_clicked)
         self.download.setAccessibleName("Download episode")
+        # Right-click always offers the state's full menu (Retry / Clear /
+        # Remove); a left click keeps doing the one obvious thing.
+        self.download.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.download.customContextMenuRequested.connect(
+            lambda point: self._episode_id and self.download_menu_requested.emit(self._episode_id, self.download.mapToGlobal(point))
+        )
         secondary_row.addWidget(self.secondary, 1)
         secondary_row.addWidget(self.download, 1)
         actions.addWidget(self.primary)
@@ -2969,6 +2975,8 @@ class PlayerBar(QFrame):
         self._now_show_id = 0
         self.show_label.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.show_label.setAccessibleName("Open this podcast")
+        self.show_label.setAttribute(Qt.WidgetAttribute.WA_Hover, True)  # QSS :hover needs it on a QLabel
+        self.show_label.setProperty("linked", "false")
         self.show_label.installEventFilter(self)
         self.next_label = QLabel("")
         self.next_label.setObjectName("playerNext")
@@ -3381,9 +3389,15 @@ class PlayerBar(QFrame):
         hand = Qt.CursorShape.PointingHandCursor if has else Qt.CursorShape.ArrowCursor
         self.art.setCursor(hand)
         self.title.setCursor(hand)
+        linked = "true" if self._now_show_id else "false"
         self.show_label.setCursor(
             Qt.CursorShape.PointingHandCursor if self._now_show_id else Qt.CursorShape.ArrowCursor
         )
+        if self.show_label.property("linked") != linked:
+            # Dynamic property drives the :hover rule; repolish so it applies.
+            self.show_label.setProperty("linked", linked)
+            self.show_label.style().unpolish(self.show_label)
+            self.show_label.style().polish(self.show_label)
         self.art.setToolTip("Show now playing" if has else "")
         # The title's tooltip carries the FULL title when elided; only the
         # generic hint is replaced here.

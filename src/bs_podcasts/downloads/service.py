@@ -226,6 +226,37 @@ class DownloadService:
                 parked += 1
         return parked
 
+    MISSING_FILE_MESSAGE = "Downloaded file is missing — retry to download it again."
+
+    def reconcile_missing(self) -> int:
+        """Complete records whose file is gone become retryable errors.
+
+        A file deleted outside the app (or by a failed removal) left the row
+        reading DOWNLOADED, so every surface offered "open location" and
+        "remove" but nothing offered to download it again. As an error the
+        existing Retry/Clear affordances apply, and Retry starts a fresh
+        transfer because no partial exists.
+        """
+        fixed = 0
+        for record in self.downloads.list():
+            if record.state == DownloadState.COMPLETE and record.target_path and not Path(record.target_path).is_file():
+                self.downloads.progress(record.episode_id, DownloadState.ERROR, 0, 0, self.MISSING_FILE_MESSAGE)
+                self.downloads.clear_downloaded_path(record.episode_id)
+                fixed += 1
+        return fixed
+
+    def discard(self, episode_id: int) -> None:
+        """Clear a failed or paused download: cancel, drop any partial, forget
+        the record, so the episode row returns to plain 'Download'."""
+        self.cancel(episode_id)
+        record = self.downloads.get(episode_id)
+        if record is None:
+            return
+        for candidate in (record.partial_path, record.target_path if record.state != DownloadState.COMPLETE else ""):
+            if candidate:
+                Path(candidate).unlink(missing_ok=True)
+        self.downloads.remove(episode_id)
+
     def pause_all(self) -> int:
         """Stop in-flight transfers (partials are kept) — used at shutdown."""
         with self._lock:

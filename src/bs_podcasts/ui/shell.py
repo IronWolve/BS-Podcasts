@@ -2277,8 +2277,12 @@ class MainWindow(QMainWindow):
                 menu.addAction(icons.icon("pause", COLORS["text"], 16), "Pause download", lambda: self._pause_download(episode.episode_id))
             elif episode.state == "Paused":
                 menu.addAction(icons.icon("play", COLORS["text"], 16), "Resume download", lambda: self._download_episode(episode.episode_id))
+                menu.addAction(icons.icon("close", COLORS["text"], 16), "Discard paused download", lambda: self._discard_download(episode.episode_id))
             elif episode.state == "Error":
                 menu.addAction(icons.icon("download", COLORS["text"], 16), "Retry download", lambda: self._download_episode(episode.episode_id))
+                # A failed download could only be retried; nothing let the
+                # user clear the red ERROR badge off the row.
+                menu.addAction(icons.icon("close", COLORS["text"], 16), "Clear failed download", lambda: self._discard_download(episode.episode_id))
             elif not downloaded:
                 label = f"Download ({status})" if status_pages else "Download"
                 menu.addAction(icons.icon("download", COLORS["text"], 16), label, lambda: self._download_episode(episode.episode_id))
@@ -2471,13 +2475,31 @@ class MainWindow(QMainWindow):
         item = self._ui_episode(episode)
         menu = QMenu(self)
         record = next((r for r in self.downloads.records() if r.episode_id == episode_id), None) if self.downloads else None
-        if record is not None and record.state.value == "downloading":
+        state = record.state.value if record is not None else ""
+        if state in {"downloading", "queued"}:
             menu.addAction(icons.icon("pause", COLORS["text"], 16), "Pause download", lambda: self._pause_download(episode_id))
-            menu.exec(global_position)
-            return
-        menu.addAction(icons.icon("folder", COLORS["text"], 16), "Open file location", lambda: self._open_location(item.downloaded_path))
-        menu.addAction(icons.icon("trash", COLORS["text"], 16), "Remove download", lambda: self._delete_downloads([item]))
+        elif state == "error":
+            menu.addAction(icons.icon("download", COLORS["text"], 16), "Retry download", lambda: self._download_episode(episode_id))
+            menu.addAction(icons.icon("close", COLORS["text"], 16), "Clear failed download", lambda: self._discard_download(episode_id))
+        elif state == "paused":
+            menu.addAction(icons.icon("play", COLORS["text"], 16), "Resume download", lambda: self._download_episode(episode_id))
+            menu.addAction(icons.icon("close", COLORS["text"], 16), "Discard paused download", lambda: self._discard_download(episode_id))
+        else:
+            menu.addAction(icons.icon("folder", COLORS["text"], 16), "Open file location", lambda: self._open_location(item.downloaded_path))
+            menu.addAction(icons.icon("trash", COLORS["text"], 16), "Remove download", lambda: self._delete_downloads([item]))
         menu.exec(global_position)
+
+    def _discard_download(self, episode_id: int):
+        """Clear a failed or paused download so the row is plain again."""
+        if self.downloads is None or not episode_id:
+            return
+        downloads = self.downloads
+
+        def work():
+            downloads.discard(episode_id)
+            return True
+
+        self._run_task("discard-download", work, episode_id)
 
     def _delete_downloads(self, items):
         if self.downloads is None:
@@ -3097,6 +3119,10 @@ class MainWindow(QMainWindow):
 
     def _read_download_items(self):
         items = []
+        # A file deleted outside the app must not keep reading "Downloaded":
+        # as an error the row offers Retry and Clear instead of a dead
+        # "open location". Cheap (one stat per complete record), on the worker.
+        self.downloads.reconcile_missing()
         records = self.downloads.records()
         episodes = self.library.repository.episodes_by_ids(record.episode_id for record in records)
         with self._samples_lock:
@@ -3627,6 +3653,14 @@ class MainWindow(QMainWindow):
                 # than silently forgotten; say so instead of over-reporting.
                 note += f"  ·  {stuck} file{'s' if stuck != 1 else ''} could not be deleted"
             self._notify(f"Unsubscribed from {title}{note}", "success")
+            return
+        if kind == "discard-download":
+            self._request_reload()
+            self._reload_downloads()
+            if result.status == JobStatus.OK:
+                self._notify("Cleared the download", "success")
+            else:
+                self._notify(result.message or "Could not clear the download", "error")
             return
         if kind == "delete-downloads":
             count, template = identifier
