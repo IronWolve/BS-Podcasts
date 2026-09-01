@@ -439,7 +439,7 @@ def main() -> int:
         p.title.click()
         process(app)
         check(window.now_playing.isVisible(), "player title did not open Now Playing")
-        check([action.text() for action in p._create_context_menu().actions()] == ["Show Now Playing", "Episode information…"], "player context menu")
+        check([action.text() for action in p._create_context_menu().actions()] == ["Show Now Playing", "Open podcast", "Episode information…"], "player context menu")
         opened_before = len(opened_dialogs)
         window.now_playing.info_button.click()
         process(app)
