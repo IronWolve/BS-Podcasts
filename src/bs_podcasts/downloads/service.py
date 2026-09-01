@@ -6,6 +6,7 @@ from threading import Event, Lock
 from urllib.parse import urlparse
 import os
 from hashlib import sha256
+import logging
 import re
 import shutil
 import time
@@ -18,8 +19,43 @@ from ..data.repositories import DownloadRepository, LibraryRepository
 from ..domain import DownloadState
 
 
+_log = logging.getLogger("bs_podcasts")
+
+
 class DownloadError(RuntimeError):
     pass
+
+
+def describe_network_error(exc) -> str:
+    """A sentence a person can act on, instead of urllib3's pool dump.
+
+    The raw text ("HTTPSConnectionPool(host=..., port=443): Max retries
+    exceeded with url: ... (Caused by ProtocolError(...ConnectionResetError
+    (10054 ...)))") was what the episode row showed — truncated — when one
+    tracker hop in a nine-redirect enclosure chain reset the connection.
+    Name the host, name the failure, keep the detail as a tail.
+    """
+    import requests
+    from urllib.parse import urlsplit
+
+    request = getattr(exc, "request", None)
+    host = urlsplit(getattr(request, "url", "") or "").hostname or ""
+    where = f" by {host}" if host else ""
+    text = str(exc)
+    lowered = text.lower()
+    if isinstance(exc, requests.exceptions.TooManyRedirects):
+        return f"Too many redirects while following the episode link{where}."
+    if isinstance(exc, requests.exceptions.SSLError):
+        return f"Secure connection failed{where}. ({text[:120]})"
+    if isinstance(exc, requests.exceptions.ConnectTimeout) or "timed out" in lowered:
+        return f"Connection timed out{where}. Retry in a moment."
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        if "reset" in lowered or "10054" in lowered or "forcibly closed" in lowered:
+            return f"Connection reset{where} while following the episode link. Retry in a moment."
+        if "name or service not known" in lowered or "getaddrinfo" in lowered or "11001" in lowered:
+            return f"Could not resolve {host or 'the server'}. Check the network."
+        return f"Could not connect{where}. ({text[:120]})"
+    return text
 
 
 class _TruncatedDownload(DownloadError):
@@ -132,7 +168,19 @@ class DownloadService:
                 record = self.downloads.get(episode_id)
                 if cancellation.is_set() or (record is not None and record.state == DownloadState.PAUSED):
                     return record
-            raise DownloadError(str(last_error) if last_error else "Download failed.")
+            message = (
+                describe_network_error(last_error)
+                if isinstance(last_error, requests.RequestException)
+                else (str(last_error) if last_error else "Download failed.")
+            )
+            # Downloads reported failures only into the record until now; the
+            # log file is where people look first ("is there a log?").
+            _log.warning(
+                "Download failed for episode %s after %d attempts: %s [%s]",
+                episode_id, 1 + len(self.RETRY_DELAYS), message,
+                type(last_error).__name__ if last_error else "unknown",
+            )
+            raise DownloadError(message)
         finally:
             with self._lock:
                 if self._cancellations.get(episode_id) is cancellation:
@@ -354,10 +402,11 @@ class DownloadService:
             raise
         except requests.RequestException as exc:
             done = partial.stat().st_size if partial.exists() else 0
+            message = describe_network_error(exc)
             self.downloads.progress(
-                episode_id, DownloadState.ERROR, done, 0, str(exc)
+                episode_id, DownloadState.ERROR, done, 0, message
             )
-            self._emit(episode_id, DownloadState.ERROR, done, 0, str(exc))
+            self._emit(episode_id, DownloadState.ERROR, done, 0, message)
             raise
         except OSError as exc:
             done = partial.stat().st_size if partial.exists() else 0
