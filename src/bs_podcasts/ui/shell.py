@@ -257,6 +257,7 @@ class MainWindow(QMainWindow):
         self.player = PlayerBar()
         self.player.context_requested.connect(self._toggle_queue)
         self.player.now_playing_requested.connect(self._show_now_playing)
+        self.player.podcast_requested.connect(self._open_playing_podcast)
         self.player.information_requested.connect(self._show_playing_information)
         self.player.play_pause_requested.connect(self._play_pause)
         self.player.skip_back_requested.connect(self._skip_back)
@@ -2146,6 +2147,14 @@ class MainWindow(QMainWindow):
             )
         if card is not None:
             PodcastInfoDialog(card, feed, self).exec()
+
+    def _open_playing_podcast(self):
+        """Player bar show name → that podcast's episode list, playing row selected."""
+        snapshot = self.playback.snapshot if self.playback is not None else None
+        show_id = int(getattr(snapshot, "show_id", 0) or 0)
+        if not show_id:
+            return  # a Discover preview stream has no library show behind it
+        self._open_show_id(show_id, select_episode_id=int(getattr(snapshot, "episode_id", 0) or 0))
 
     def _show_playing_information(self):
         if not self._playing_episode_id or self.library is None:

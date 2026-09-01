@@ -2900,6 +2900,7 @@ class SearchOverlay(QFrame):
 class PlayerBar(QFrame):
     context_requested = Signal()
     now_playing_requested = Signal()
+    podcast_requested = Signal()  # the show name was clicked: open its episode list
     play_pause_requested = Signal()
     skip_back_requested = Signal()
     skip_forward_requested = Signal()
@@ -2962,6 +2963,13 @@ class PlayerBar(QFrame):
         self._title_metrics()
         self.show_label = QLabel("Choose an episode to begin")
         self.show_label.setObjectName("playerShow")
+        # The show name is a link to that podcast's episode list (the title
+        # opens Now Playing). Click or Enter/Space when focused; cursor and
+        # tooltip follow whether a library show is actually behind it.
+        self._now_show_id = 0
+        self.show_label.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.show_label.setAccessibleName("Open this podcast")
+        self.show_label.installEventFilter(self)
         self.next_label = QLabel("")
         self.next_label.setObjectName("playerNext")
         now.addWidget(self.title)
@@ -3220,7 +3228,12 @@ class PlayerBar(QFrame):
         self.title.setToolTip(self._now_title if title != self._now_title else "Show now playing")
         show = self.show_label.fontMetrics().elidedText(self._now_show, Qt.TextElideMode.ElideRight, avail)
         self.show_label.setText(show)
-        self.show_label.setToolTip(self._now_show if show != self._now_show else "")
+        # Elided: the full name wins the tooltip (text-is-never-cut-off rule).
+        # Whole: say what a click does, when it does something.
+        if show != self._now_show:
+            self.show_label.setToolTip(self._now_show)
+        else:
+            self.show_label.setToolTip("Open this podcast's episodes" if self._now_show_id else "")
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -3368,6 +3381,9 @@ class PlayerBar(QFrame):
         hand = Qt.CursorShape.PointingHandCursor if has else Qt.CursorShape.ArrowCursor
         self.art.setCursor(hand)
         self.title.setCursor(hand)
+        self.show_label.setCursor(
+            Qt.CursorShape.PointingHandCursor if self._now_show_id else Qt.CursorShape.ArrowCursor
+        )
         self.art.setToolTip("Show now playing" if has else "")
         # The title's tooltip carries the FULL title when elided; only the
         # generic hint is replaced here.
@@ -3413,6 +3429,7 @@ class PlayerBar(QFrame):
         self._durable_episode = durable_episode
         self._now_title = snapshot.title if self._has_episode else "Nothing playing"
         self._now_show = snapshot.show_title or ("Choose an episode to begin" if not self._has_episode else "")
+        self._now_show_id = int(getattr(snapshot, "show_id", 0) or 0)
         self._elide_now_labels()
         self.art.set_artwork(snapshot.artwork_path, initials(snapshot.show_title or snapshot.title), "")
         self._duration = max(0.0, float(snapshot.duration))
@@ -3469,6 +3486,8 @@ class PlayerBar(QFrame):
         menu = QMenu(self)
         show = menu.addAction(icons.icon("playing", COLORS["text"], 16), "Show Now Playing", self.now_playing_requested.emit)
         show.setEnabled(self._has_episode)
+        podcast = menu.addAction(icons.icon("podcasts", COLORS["text"], 16), "Open podcast", self.podcast_requested.emit)
+        podcast.setEnabled(bool(self._now_show_id))
         info = menu.addAction(icons.icon("info", COLORS["text"], 16), "Episode information…", self.information_requested.emit)
         info.setEnabled(self._durable_episode)
         return menu
@@ -3481,7 +3500,17 @@ class PlayerBar(QFrame):
         self.queue.setToolTip("Hide Up Next" if open_ else "Show Up Next")
 
     def eventFilter(self, watched, event):
-        if watched is self.volume and event.type() == QEvent.Type.Wheel and self.volume.isEnabled():
+        # The show name is installed during __init__, before `volume` exists;
+        # handle it first and never touch later attributes for it.
+        if watched is getattr(self, "show_label", None):
+            if self._now_show_id and (
+                (event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton)
+                or (event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space))
+            ):
+                self.podcast_requested.emit()
+                return True
+            return super().eventFilter(watched, event)
+        if watched is getattr(self, "volume", None) and event.type() == QEvent.Type.Wheel and self.volume.isEnabled():
             step = 5 if event.angleDelta().y() > 0 else -5
             self.volume_requested.emit(float(max(0, min(100, int(self._volume) + step))))
             return True
