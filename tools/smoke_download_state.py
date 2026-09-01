@@ -229,7 +229,14 @@ def test_hostile_media_url_is_refused_first_hop():
         )
 
 
+def test_session_follows_long_tracker_chains():
+    """2026-09-01: a nine-hop enclosure failed with 'Exceeded 8 redirects'."""
+    slot = DownloadService.__dict__["session"]
+    check("download session allows long redirect chains", slot._kwargs.get("max_redirects", 8) >= 16)
+
+
 def main() -> int:
+    test_session_follows_long_tracker_chains()
     test_duplicate_call_is_not_a_completion()
     test_truncated_body_without_content_length()
     test_resume_across_a_changed_resource_restarts()

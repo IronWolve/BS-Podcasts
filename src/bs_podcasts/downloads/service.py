@@ -40,7 +40,11 @@ class DownloadProgress:
 
 
 class DownloadService:
-    session = SessionSlot(read_retries=False)
+    # max_redirects above the stack's default 8: enclosure URLs now routinely
+    # pass through nine or more ad/tracker hops (a real one failed with
+    # "Exceeded 8 redirects" on 2026-09-01). Every hop is still re-validated
+    # by the session's redirect guard, so a longer leash costs no safety.
+    session = SessionSlot(read_retries=False, max_redirects=20)
 
     def __init__(
         self,
