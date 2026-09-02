@@ -165,6 +165,23 @@ def check_cjk_titles_wrap_instead_of_clipping():
     check("a short CJK title is untouched", _wrap_two_lines(metrics, short, 400) == [short])
 
 
+def check_narrow_transport_is_icon_only():
+    """U1: at the 760 px minimum the transport was 43 px short and the skip
+    labels hard-clipped inside 41 px buttons. Compact (narrow) mode drops the
+    numbers; the seconds stay in the tooltip and accessible name."""
+    bar = PlayerBar()
+    try:
+        bar.set_skip_values(15, 30)
+        bar.set_compact(True)
+        check("narrow: skip buttons are icon-only", bar.back.text() == "" and bar.forward.text() == "")
+        check("narrow: skip seconds survive in the tooltip", "15" in bar.back.toolTip() and "30" in bar.forward.toolTip())
+        check("narrow: skip seconds survive in the accessible name", "15" in bar.back.accessibleName())
+        bar.set_compact(False)
+        check("wide: skip labels return", bar.back.text() == "15" and bar.forward.text() == "30")
+    finally:
+        bar.deleteLater()
+
+
 def check_player_bar_elides_with_a_tooltip():
     """The now-playing title is the other surface design.md names."""
     from bs_podcasts.playback.service import PlaybackSnapshot, PlaybackState
@@ -206,6 +223,7 @@ def main() -> int:
     check_header_keeps_an_applied_filter_visible()
     check_podcast_settings_combos_fit_their_options()
     check_cjk_titles_wrap_instead_of_clipping()
+    check_narrow_transport_is_icon_only()
     check_player_bar_elides_with_a_tooltip()
 
     app.processEvents()

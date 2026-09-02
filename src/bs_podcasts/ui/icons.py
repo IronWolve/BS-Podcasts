@@ -8,7 +8,6 @@ the handful of glyphs Qt style sheets must reference by URL.
 
 from hashlib import sha1
 from pathlib import Path
-import os
 import re
 import tempfile
 

@@ -45,7 +45,6 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTextBrowser,
     QTextEdit,
-    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -1072,7 +1071,7 @@ class Toast(QFrame):
         self._closing = False
         self.hide()
         if self._queue:
-            QTimer.singleShot(120, lambda: self.show_message(*self._queue.pop(0)))
+            QTimer.singleShot(120, self, lambda: self.show_message(*self._queue.pop(0)))
 
     def _action(self):
         callback = self._callback
@@ -2316,7 +2315,7 @@ class ContextPanel(QFrame):
         if changed:
             self.tabs.setCurrentIndex(0)
             QTimer.singleShot(
-                0, lambda: self.selected_scroll.verticalScrollBar().setValue(0)
+                0, self, lambda: self.selected_scroll.verticalScrollBar().setValue(0)
             )
 
     def _information_clicked(self):
@@ -3106,8 +3105,7 @@ class PlayerBar(QFrame):
     def set_skip_values(self, back: int, forward: int):
         self._skip_back = int(back)
         self._skip_forward = int(forward)
-        self.back.setText(str(self._skip_back))
-        self.forward.setText(str(self._skip_forward))
+        self._apply_skip_labels()
         self.back.setToolTip(f"Back {self._skip_back} seconds  ·  Ctrl+Left")
         self.back.setAccessibleName(f"Back {self._skip_back} seconds")
         self.forward.setToolTip(f"Forward {self._skip_forward} seconds  ·  Ctrl+Right")
@@ -3116,12 +3114,26 @@ class PlayerBar(QFrame):
         # balance, so re-centre the play button once the new labels have been
         # laid out (an inline call would measure the stale size hints).
         if hasattr(self, "_pad_left"):
-            QTimer.singleShot(0, self._centre_play)
+            QTimer.singleShot(0, self, self._centre_play)
 
     def set_compact(self, compact: bool):
         self._compact = bool(compact)
+        self._apply_skip_labels()
         self.apply_metrics()
         self._refresh_chrome()
+
+    def _apply_skip_labels(self):
+        """Numeric skip labels only where they fit.
+
+        At the 760 px minimum window the transport was handed ~40 px less
+        than it needed and the "15"/"30" labels hard-clipped inside 41 px
+        buttons — a violation of the first product rule at the app's own
+        minimum size. In narrow (compact) mode the buttons are icon-only; the
+        seconds stay in the tooltip and accessible name, exactly as the other
+        compact-hidden controls already do."""
+        show_numbers = not getattr(self, "_compact", False)
+        self.back.setText(str(self._skip_back) if show_numbers else "")
+        self.forward.setText(str(self._skip_forward) if show_numbers else "")
 
     def _title_metrics(self):
         """The now-playing title must fit its full font height plus the 2px

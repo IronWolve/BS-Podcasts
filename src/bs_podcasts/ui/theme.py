@@ -63,16 +63,22 @@ LIGHT = {
     "text": "#1B2233",
     "text_strong": "#0B0F18",
     "muted": "#5B6779",
-    "subtle": "#75819A",
-    "accent": "#D9770F",
-    "accent_hover": "#E8851F",
-    "accent_pressed": "#C46A0A",
+    # Light semantic tokens are tuned to WCAG AA (>= 4.5:1) as TEXT on
+    # `canvas` (badges) and `accent_soft` (chips): unfilled badges draw their label in the state colour, chips
+    # draw accent on accent_soft, and primary buttons draw white on accent.
+    # The previous values (subtle #75819A, accent #D9770F, teal #148F7C,
+    # success #1F9D5A, warning #B7791F, danger #D1445A) sat between 2.7 and
+    # 4.0:1. Ratios are asserted by tools/smoke_contrast.py.
+    "subtle": "#646E83",
+    "accent": "#A1580B",
+    "accent_hover": "#B1610C",
+    "accent_pressed": "#8E4D0A",
     "accent_soft": "#FBE9D2",
-    "teal": "#148F7C",
+    "teal": "#117B6B",
     "blue": "#2F6FE0",
-    "success": "#1F9D5A",
-    "warning": "#B7791F",
-    "danger": "#D1445A",
+    "success": "#187E48",
+    "warning": "#966319",
+    "danger": "#C03E53",
     "scrim": "rgba(20, 25, 40, 0.45)",
     "on_accent": "#FFFFFF",
 }
