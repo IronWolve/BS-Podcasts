@@ -239,7 +239,16 @@ class DownloadService:
         """
         fixed = 0
         for record in self.downloads.list():
-            if record.state == DownloadState.COMPLETE and record.target_path and not Path(record.target_path).is_file():
+            if record.state != DownloadState.COMPLETE or not record.target_path:
+                continue
+            target = Path(record.target_path)
+            if not target.parent.is_dir():
+                # The whole folder is absent (external or network drive not
+                # mounted right now): that is "not here", not "deleted".
+                # Demoting every download and forgetting the paths would
+                # make the files re-download when the drive comes back.
+                continue
+            if not target.is_file():
                 self.downloads.progress(record.episode_id, DownloadState.ERROR, 0, 0, self.MISSING_FILE_MESSAGE)
                 self.downloads.clear_downloaded_path(record.episode_id)
                 fixed += 1
@@ -249,12 +258,20 @@ class DownloadService:
         """Clear a failed or paused download: cancel, drop any partial, forget
         the record, so the episode row returns to plain 'Download'."""
         self.cancel(episode_id)
+        # The worker keeps the partial open until it notices the cancel (up to
+        # a read timeout away); unlinking under it fails on Windows. Wait for
+        # the unwind, then treat a stubborn file as "leave it, still forget
+        # the record" rather than failing the whole clear.
+        self._await_cancelled(episode_id)
         record = self.downloads.get(episode_id)
         if record is None:
             return
         for candidate in (record.partial_path, record.target_path if record.state != DownloadState.COMPLETE else ""):
             if candidate:
-                Path(candidate).unlink(missing_ok=True)
+                try:
+                    Path(candidate).unlink(missing_ok=True)
+                except OSError as exc:
+                    _log.warning("Could not remove %s while clearing a download: %s", candidate, exc)
         self.downloads.remove(episode_id)
 
     def pause_all(self) -> int:

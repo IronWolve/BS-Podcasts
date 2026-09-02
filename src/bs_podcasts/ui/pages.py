@@ -217,7 +217,8 @@ class _ListPageMixin:
             else:
                 self.view.setCurrentIndex(self.model.index(target, 0))
         if preserve_scroll:
-            QTimer.singleShot(0, lambda value=scroll_value: scrollbar.setValue(value))
+            # Context-object overload: Qt drops the shot if the page is destroyed first.
+            QTimer.singleShot(0, self, lambda value=scroll_value: scrollbar.setValue(value))
         self._update_empty()
 
     def _update_empty(self, query: str = ""):
@@ -441,7 +442,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
 
     def showEvent(self, event):
         super().showEvent(event)
-        QTimer.singleShot(0, self._layout_cards)
+        QTimer.singleShot(0, self, self._layout_cards)
 
     def set_density(self, compact: bool):
         self._compact = compact
@@ -551,7 +552,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         if not needs_scan:
             self._apply_filters(preserve_scroll=False)
         if key == "title":
-            QTimer.singleShot(0, self.view.scrollToTop)
+            QTimer.singleShot(0, self, self.view.scrollToTop)
         self.discover_sort_changed.emit(key)
 
     def discover_sort_key(self) -> str:
@@ -610,7 +611,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
                 # Episode cards have no button there; fall through so the
                 # click opens the card instead of dying in a dead zone.
         if watched is self.view.viewport() and event.type() == QEvent.Type.Wheel:
-            QTimer.singleShot(0, lambda: self._check_near_end(self.view.verticalScrollBar().value()))
+            QTimer.singleShot(0, self, lambda: self._check_near_end(self.view.verticalScrollBar().value()))
         return super().eventFilter(watched, event)
 
     def select_show(self, show_id: int):

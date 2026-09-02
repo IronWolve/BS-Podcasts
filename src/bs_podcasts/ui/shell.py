@@ -43,6 +43,7 @@ from ..feeds.parser import parse_feed
 from ..jobs import JobResult, JobStatus
 from ..services.updates import check_for_update
 from ..urlguard import is_web_url
+from ..data.database import DatabaseIntegrityError
 from . import icons
 from .dialogs import AboutDialog, AddPodcastDialog, ConfirmDialog, DeleteFilesDialog, EpisodeInfoDialog, PodcastInfoDialog, PodcastSettingsDialog, RemovePodcastDialog, ShortcutsDialog, TextInputDialog, episode_information_text
 from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast as UiPodcast, plain_snippet, set_item_tooltips
@@ -145,6 +146,9 @@ class MainWindow(QMainWindow):
         self._last_playback_error = ""
         self._last_sleep_deadline = None
         self._download_samples = {}
+        # Last download records delivered to the UI, by episode id: the
+        # click-time dedup reads this instead of querying SQLite on the Qt thread.
+        self._download_records_seen = {}
         self._samples_lock = threading.Lock()
         self._unsubscribing = set()
         self._playback_revision = 0
@@ -941,8 +945,7 @@ class MainWindow(QMainWindow):
         self._previews.clear()
         # Under the convert lock: a worker inside _ui_episodes may be reading
         # the cache this clears.
-        with self._convert_lock:
-            self._ui_episode_cache.clear()
+        self._invalidate_library_caches()
         # SQLite reuses rowids, so a fetched-once set surviving a reset would
         # make a future episode with a recycled id silently skip its
         # chapters/transcript/artwork fetch for the whole session.
@@ -1384,6 +1387,13 @@ class MainWindow(QMainWindow):
 
         future.add_done_callback(finished)
 
+    def _invalidate_library_caches(self):
+        """The converted-row cache and the retint payload are two views of
+        the same data; anything that drops one must drop both."""
+        with self._convert_lock:
+            self._ui_episode_cache.clear()
+        self._last_library_data = None
+
     def _read_library(self):
         """All queries and UI conversion for a reload. Artwork tints are cache
         lookups (compute=False); sampling runs in `_prime_accents` on a worker."""
@@ -1642,8 +1652,13 @@ class MainWindow(QMainWindow):
             return
         try:
             self.library.repository.database.check_integrity()
-        except Exception:
-            pass
+        except DatabaseIntegrityError:
+            pass  # genuinely damaged: offer the rebuild below
+        except Exception as exc:
+            # A lock or disk I/O hiccup is not corruption; rebuilding a
+            # healthy database on that evidence could only make things worse.
+            self.settings_page.set_database_status(f"Could not check right now: {exc}")
+            return
         else:
             self.settings_page.set_database_status("Healthy · repair is not needed")
             return
@@ -2990,10 +3005,7 @@ class MainWindow(QMainWindow):
         # UI-level dedup: the service absorbs duplicates too, but only after
         # a pool slot is taken — a double-click on a slow disk briefly
         # occupied two of the download workers with one episode.
-        try:
-            record = next((r for r in self.downloads.records() if r.episode_id == episode_id), None)
-        except Exception:
-            record = None
+        record = self._download_records_seen.get(episode_id)
         if record is not None and getattr(record.state, "value", "") in {"queued", "downloading"}:
             return
         future = self.download_jobs.submit(self.downloads.download, episode_id)
@@ -3160,6 +3172,7 @@ class MainWindow(QMainWindow):
 
     def _apply_download_items(self, payload):
         items, records, used, free, _total = payload
+        self._download_records_seen = {record.episode_id: record for record in records}
         self.download_page.set_items(items)
         # The context panel snapshots download state when it opens; keep its
         # button live so it never sticks at "Downloading…" (UI-P2-1). A
@@ -3633,349 +3646,383 @@ class MainWindow(QMainWindow):
         # window that was already closed and invisible.
         if self._closed:
             return
-        if kind == "unsubscribe-preview":
-            self._unsubscribing.discard(identifier)
-            if result.status == JobStatus.OK and result.value:
-                self._confirm_unsubscribe(identifier, result.value)
-            elif result.status != JobStatus.OK:
-                self._notify(result.message or "Could not read what would be removed", "error")
+        # Registry dispatch (audit round 6, D1): one gate above, one lookup
+        # here. A new job kind is one method plus one registry line, and the
+        # missing-_closed-check class of bug (batch 6) cannot come back.
+        handler = self._completion_handlers().get(kind, self._on_refresh)
+        handler(kind, identifier, result)
+
+    def _completion_handlers(self):
+        return {
+            "unsubscribe-preview": self._on_unsubscribe_preview,
+            "unsubscribe": self._on_unsubscribe,
+            "discard-download": self._on_discard_download,
+            "delete-downloads": self._on_delete_downloads,
+            "played-previews": self._on_played_previews,
+            "statistics": self._on_statistics,
+            "update-check": self._on_update_check,
+            "remove-preview": self._on_remove_preview,
+            "remove-shows": self._on_remove_shows,
+            "reset-library": self._on_remove_shows,
+            "database-health": self._on_database_health,
+            "database-repair": self._on_database_repair,
+            "database-maintenance": self._on_database_maintenance,
+            "export-downloads": self._on_export_downloads,
+            "directory": self._on_directory,
+            "read": self._on_read,
+            "library": self._on_library,
+            "integrity": self._on_integrity,
+            "accents": self._on_accents,
+            "details": self._on_details,
+            "artwork": self._on_artwork,
+            "preview": self._on_preview,
+            "download": self._on_download,
+        }
+
+    def _on_unsubscribe_preview(self, kind, identifier, result):
+        self._unsubscribing.discard(identifier)
+        if result.status == JobStatus.OK and result.value:
+            self._confirm_unsubscribe(identifier, result.value)
+        elif result.status != JobStatus.OK:
+            self._notify(result.message or "Could not read what would be removed", "error")
+        return
+    def _on_unsubscribe(self, kind, identifier, result):
+        self._request_reload()
+        self._refresh_storage_settings()
+        if result.status != JobStatus.OK:
+            self._notify(result.message or "Could not remove the podcast", "error")
             return
-        if kind == "unsubscribe":
-            self._request_reload()
-            self._refresh_storage_settings()
-            if result.status != JobStatus.OK:
-                self._notify(result.message or "Could not remove the podcast", "error")
-                return
-            title, reclaimed, stuck = result.value
-            note = f"  ·  {self._format_bytes(reclaimed)} reclaimed" if reclaimed else ""
-            if stuck:
-                # Files that could not be deleted are kept on record rather
-                # than silently forgotten; say so instead of over-reporting.
-                note += f"  ·  {stuck} file{'s' if stuck != 1 else ''} could not be deleted"
-            self._notify(f"Unsubscribed from {title}{note}", "success")
-            return
-        if kind == "discard-download":
-            self._request_reload()
-            self._reload_downloads()
-            if result.status == JobStatus.OK:
-                self._notify("Cleared the download", "success")
-            else:
-                self._notify(result.message or "Could not clear the download", "error")
-            return
-        if kind == "delete-downloads":
-            count, template = identifier
-            self._request_reload()
-            self._refresh_storage_settings()
-            if result.status == JobStatus.OK:
-                self._notify(
-                    template.format(count=count, plural="" if count == 1 else "s",
-                                    size=self._format_bytes(result.value or 0)),
-                    "success",
-                )
-            else:
-                self._notify(result.message or "Could not delete downloads", "error")
-            return
-        if kind == "played-previews":
-            previews, confirm = result.value if result.status == JobStatus.OK else ((), True)
-            if not previews:
-                if confirm:
-                    self._notify("No played episodes have downloads to delete")
-                return
+        title, reclaimed, stuck = result.value
+        note = f"  ·  {self._format_bytes(reclaimed)} reclaimed" if reclaimed else ""
+        if stuck:
+            # Files that could not be deleted are kept on record rather
+            # than silently forgotten; say so instead of over-reporting.
+            note += f"  ·  {stuck} file{'s' if stuck != 1 else ''} could not be deleted"
+        self._notify(f"Unsubscribed from {title}{note}", "success")
+        return
+    def _on_discard_download(self, kind, identifier, result):
+        self._request_reload()
+        self._reload_downloads()
+        if result.status == JobStatus.OK:
+            self._notify("Cleared the download", "success")
+        else:
+            self._notify(result.message or "Could not clear the download", "error")
+        return
+    def _on_delete_downloads(self, kind, identifier, result):
+        count, template = identifier
+        self._request_reload()
+        self._refresh_storage_settings()
+        if result.status == JobStatus.OK:
+            self._notify(
+                template.format(count=count, plural="" if count == 1 else "s",
+                                size=self._format_bytes(result.value or 0)),
+                "success",
+            )
+        else:
+            self._notify(result.message or "Could not delete downloads", "error")
+        return
+    def _on_played_previews(self, kind, identifier, result):
+        previews, confirm = result.value if result.status == JobStatus.OK else ((), True)
+        if not previews:
             if confirm:
-                dialog = DeleteFilesDialog(
-                    "Delete played downloads",
-                    "Downloads for episodes you've finished. Episodes stay in your library.",
-                    previews, self._format_bytes, self,
-                )
-                if dialog.exec() != QDialog.DialogCode.Accepted:
-                    return
-            self._delete_downloads_async(
-                previews,
-                "Deleted {count} download{plural}  ·  {size} reclaimed" if confirm
-                else "Removed {count} played download{plural}  ·  {size} reclaimed",
+                self._notify("No played episodes have downloads to delete")
+            return
+        if confirm:
+            dialog = DeleteFilesDialog(
+                "Delete played downloads",
+                "Downloads for episodes you've finished. Episodes stay in your library.",
+                previews, self._format_bytes, self,
             )
-            return
-        if kind == "statistics":
-            if result.status != JobStatus.OK:
-                self.settings_page.set_statistics(result.message or "Statistics unavailable")
+            if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            stats = result.value
-            top = ", ".join(
-                f"{title} ({self._duration_summary(seconds)})"
-                for title, seconds, _completed in stats["top"][:3]
-            ) or "No listening yet"
-            self.settings_page.set_statistics(
-                f"Listened: {self._duration_summary(stats['listened_seconds'])}  ·  "
-                f"Completed: {stats['completed_episodes']}  ·  "
-                f"Silence skipped: {self._duration_summary(stats['silence_saved'])}\n"
-                f"Top podcasts: {top}"
+        self._delete_downloads_async(
+            previews,
+            "Deleted {count} download{plural}  ·  {size} reclaimed" if confirm
+            else "Removed {count} played download{plural}  ·  {size} reclaimed",
+        )
+        return
+    def _on_statistics(self, kind, identifier, result):
+        if result.status != JobStatus.OK:
+            self.settings_page.set_statistics(result.message or "Statistics unavailable")
+            return
+        stats = result.value
+        top = ", ".join(
+            f"{title} ({self._duration_summary(seconds)})"
+            for title, seconds, _completed in stats["top"][:3]
+        ) or "No listening yet"
+        self.settings_page.set_statistics(
+            f"Listened: {self._duration_summary(stats['listened_seconds'])}  ·  "
+            f"Completed: {stats['completed_episodes']}  ·  "
+            f"Silence skipped: {self._duration_summary(stats['silence_saved'])}\n"
+            f"Top podcasts: {top}"
+        )
+        return
+    def _on_update_check(self, kind, identifier, result):
+        if result.status != JobStatus.OK:
+            self.settings_page.set_update_status(
+                f"Installed {app_version()} · Couldn’t check releases: {result.message}"
             )
+            if identifier:
+                self._notify("Couldn’t check for updates", "error")
             return
-        if kind == "update-check":
-            if result.status != JobStatus.OK:
-                self.settings_page.set_update_status(
-                    f"Installed {app_version()} · Couldn’t check releases: {result.message}"
-                )
-                if identifier:
-                    self._notify("Couldn’t check for updates", "error")
-                return
-            update = result.value
-            self.library.set_setting("updates.last_check", str(time.time()))
-            if not update.available:
-                # No release has been published yet: say so calmly instead of
-                # rendering an HTTP error or offering a dead release page.
-                self.settings_page.set_update_status(
-                    f"Installed {update.installed} · No releases published yet"
-                )
-                if identifier:
-                    self._notify("No releases have been published yet", "info")
-                return
-            if update.newer:
-                note = plain_snippet(update.notes, 180)
-                self.settings_page.set_update_status(
-                    f"Installed {update.installed} · Available {update.available}"
-                    + (f"\n{note}" if note else "")
-                )
-                self._notify(
-                    f"BS Podcasts {update.available} is available",
-                    "info", "Release page", lambda: self._open_url(update.url or RELEASES_URL),
-                )
-            else:
-                self.settings_page.set_update_status(
-                    f"Installed {update.installed} · You’re up to date"
-                )
-                if identifier:
-                    self._notify("BS Podcasts is up to date", "success")
-            return
-        if kind == "remove-preview":
-            self.podcast_page.banner.clear()
-            if result.status != JobStatus.OK:
-                self._notify(result.message or "Couldn't check those podcasts", "error")
-                return
-            self._confirm_remove_shows(result.value)
-            return
-        if kind in {"remove-shows", "reset-library"}:
-            self.podcast_page.banner.clear()
-            if result.status != JobStatus.OK:
-                self._notify(result.message or "Removal failed", "error")
-                self._request_reload()
-                return
-            removed = int(result.value or 0)
-            if kind == "reset-library":
-                self._refresh_storage_settings()
-                self._request_reload()
-                self._notify(f"Library reset — removed {removed} podcast{'s' if removed != 1 else ''}", "success")
-            else:
-                self.podcast_page.chips.select("All")
-                self._request_reload(lambda: self.podcast_page._apply_filters())
-                self._notify(f"Removed {removed} unreachable podcast{'s' if removed != 1 else ''}", "success")
-            return
-        if kind == "database-health":
-            if result.status == JobStatus.OK and result.value == "ok":
-                self.settings_page.set_database_status("Healthy · SQLite quick check passed")
-                self.library.set_setting("database.last_quick_check", str(time.time()))
-            else:
-                self.settings_page.set_database_status(
-                    f"Problem found: {result.message or result.value}. Repair is now available.",
-                    repair_available=True,
-                )
-            return
-        if kind == "database-repair":
-            if result.status == JobStatus.OK:
-                self.library.repository.invalidate_settings_cache()
-                self.settings_page.set_database_status(
-                    f"Repair complete · damaged original saved at {result.value}"
-                )
-                self._request_reload()
-            else:
-                self.settings_page.set_database_status(
-                    f"Repair failed: {result.message}. The original database was not replaced.",
-                    repair_available=True,
-                )
-            return
-        if kind == "database-maintenance":
-            if result.status == JobStatus.OK:
-                self.settings_page.set_database_status(
-                    f"{identifier} complete · backup: {result.value}"
-                )
-                self._notify(f"Database {identifier.lower()} complete", "success")
-            else:
-                self.settings_page.set_database_status(
-                    f"{identifier} failed: {result.message}"
-                )
-                self._notify(f"Database {identifier.lower()} failed", "error")
-            return
-        if kind == "export-downloads":
-            if result.status != JobStatus.OK:
-                self._notify(result.message or "Media export failed", "error")
-                return
-            paths = list(result.value)
-            if not paths:
-                self._notify("No downloaded files were available to export", "error")
-                return
-            listing = "\n".join(paths[:8]) + ("\n…" if len(paths) > 8 else "")
-            dialog = ConfirmDialog(
-                f"Exported {len(paths)} media file{'s' if len(paths) != 1 else ''}",
-                listing,
-                "Open folder", parent=self,
+        update = result.value
+        self.library.set_setting("updates.last_check", str(time.time()))
+        if not update.available:
+            # No release has been published yet: say so calmly instead of
+            # rendering an HTTP error or offering a dead release page.
+            self.settings_page.set_update_status(
+                f"Installed {update.installed} · No releases published yet"
             )
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                self._open_location(identifier)
+            if identifier:
+                self._notify("No releases have been published yet", "info")
             return
-        if kind == "directory":
-            self._directory_finished(identifier, result)
+        if update.newer:
+            note = plain_snippet(update.notes, 180)
+            self.settings_page.set_update_status(
+                f"Installed {update.installed} · Available {update.available}"
+                + (f"\n{note}" if note else "")
+            )
+            self._notify(
+                f"BS Podcasts {update.available} is available",
+                "info", "Release page", lambda: self._open_url(update.url or RELEASES_URL),
+            )
+        else:
+            self.settings_page.set_update_status(
+                f"Installed {update.installed} · You’re up to date"
+            )
+            if identifier:
+                self._notify("BS Podcasts is up to date", "success")
+        return
+    def _on_remove_preview(self, kind, identifier, result):
+        self.podcast_page.banner.clear()
+        if result.status != JobStatus.OK:
+            self._notify(result.message or "Couldn't check those podcasts", "error")
             return
-        if kind == "read":
-            key, token, apply = identifier
-            if self._read_tokens.get(key) != token or self._closed:
-                return
-            if result.status == JobStatus.OK:
-                apply(result.value)
-            else:
-                # The banner said "Opening…"; without this it never resolves.
-                message = result.message or "The library could not be read."
-                page = self.pages.currentWidget()
-                banner = getattr(page, "banner", None)
-                if banner is not None:
-                    banner.show_state("error", message)
-                self._notify(message, "error")
-                # A failed Load more must not leave its button stuck on
-                # "Loading…"; recompute availability so it can be retried.
-                if key == "episodes-more":
-                    self._set_global_episode_chrome(len(self._all_episode_items))
-                elif key == "history-more":
-                    self._set_history_chrome(len(self._history_items_shown))
-            return
-        if kind == "library":
-            self._reload_in_flight = False
-            if result.status == JobStatus.OK and not self._closed:
-                self.episode_page.banner.clear()
-                self._reload_library(result.value)
-            elif not self._closed:
-                message = result.message or "The library could not be loaded."
-                self.podcast_page.set_loading(False)
-                self.podcast_page.banner.show_state("error", message)
-                self.episode_page.banner.show_state("error", message)
-            if self._reload_again:
-                self._request_reload()
-            elif result.status == JobStatus.OK:
-                callbacks, self._reload_callbacks = self._reload_callbacks, []
-                for callback in callbacks:
-                    callback()
-            else:
-                self._reload_callbacks.clear()
-            return
-        if kind == "integrity":
-            if result.status == JobStatus.OK and result.value == "ok":
-                self.library.set_setting("database.last_quick_check", str(time.time()))
-            else:
-                message = result.message or str(result.value or "unknown database error")
-                logging.getLogger("bs_podcasts").error("Library integrity check failed: %s", message)
-                self._notify(
-                    "Library integrity check failed — inspect the data folder before making changes.",
-                    "error",
-                    "Open folder",
-                    self._open_data_folder,
-                )
-            return
-        if kind == "accents":
-            self._accents_priming = False
-            if result.status == JobStatus.OK and result.value and not self._closed:
-                with self._convert_lock:
-                    self._ui_episode_cache.clear()  # later conversions pick up the tints
-                # Sampling finishes seconds after launch; it used to trigger a
-                # FULL library reload (a 0.4 s worker read plus every model
-                # reset) just to recolour rows. The converted payload is still
-                # here — re-tint it and re-apply, no database involved.
-                if self._last_library_data is not None:
-                    self._reload_library(self._retinted(self._last_library_data))
-                else:
-                    self._request_reload()
-            return
-        if kind == "details":
-            outcome = result.value if result.status == JobStatus.OK else None
-            if result.status != JobStatus.OK or (outcome and outcome.get("error")):
-                # A transient failure must not blank chapters/transcript for
-                # the whole session: let the next selection retry.
-                self._details_fetched.discard(identifier)
-            if outcome and (outcome.get("chapters") or outcome.get("transcript")):
-                if self.context._episode_id == identifier:
-                    self._load_listening_details(identifier)
-                if self._playing_episode_id == identifier:
-                    chapters = self.listening.chapters(identifier)
-                    self._chapters_cache = {identifier: chapters}
-                    duration = float(self.playback.snapshot.duration) if self.playback else 0.0
-                    self.player.set_chapter_markers([c.start_seconds / duration for c in chapters if duration and 0 < c.start_seconds < duration])
-                    if self.now_playing.isVisible():
-                        self._populate_now_playing()
-            elif outcome and outcome.get("error"):
-                logging.getLogger("bs_podcasts").info("Listening details unavailable for episode %s: %s", identifier, outcome["error"])
-            return
-        if kind == "artwork":
-            if result.status != JobStatus.OK:
-                self._artwork_fetched.discard(identifier)
-            if result.status == JobStatus.OK:
-                self._request_reload()
-                if self.context._episode_id == identifier:
-                    episode = self.library.episode(identifier)
-                    if episode is not None:
-                        self.context.show_episode(self._ui_episode_live(episode))
-            return
-        if kind == "preview":
-            self._preview_pending.discard(identifier)
-            self._discover_newest_active.discard(identifier)
-            newest_scan = identifier in self._discover_newest_pending
-            if result.status == JobStatus.OK:
-                if newest_scan:
-                    card = next((item for item in self.discover_page._all_items if item.feed_url == identifier), None)
-                    if card is not None:
-                        self._discover_newest_updates[identifier] = self._with_preview(card, result.value)
-                    if self._pending_episodes_url == identifier or self.context.preview_url() == identifier:
-                        self._store_preview(identifier, result.value)
-                else:
-                    self._store_preview(identifier, result.value)
-                self._apply_preview(identifier, result.value, update_grid=not newest_scan)
-            else:
-                message = result.message or "unknown error"
-                self.context.show_preview_error(identifier, message)
-                if self._pending_episodes_url == identifier:
-                    self._pending_episodes_url = ""
-                    self.episode_page.banner.show_state("error", f"Couldn’t fetch this podcast’s episodes: {message}")
-            if newest_scan:
-                self._discover_newest_pending.discard(identifier)
-                self._discover_newest_done += 1
-                self._update_newest_scan_toast()
-                self._pump_discover_newest_scan()
-                if not self._discover_newest_pending:
-                    self._finish_discover_newest_scan()
-            else:
-                self._trim_preview_cache()
-            return
-        if kind == "download":
+        self._confirm_remove_shows(result.value)
+        return
+    def _on_remove_shows(self, kind, identifier, result):
+        self.podcast_page.banner.clear()
+        if result.status != JobStatus.OK:
+            self._notify(result.message or "Removal failed", "error")
             self._request_reload()
-            # A finished job is not a finished download. download() also
-            # returns normally when it was absorbed as a duplicate of a live
-            # transfer, or when the user paused mid-retry; announcing those as
-            # "Downloaded" (with a Play action for a file that does not exist)
-            # was reachable on any ordinary double-click.
-            record = result.value if result.status == JobStatus.OK else None
-            complete = getattr(record, "state", None) == DownloadState.COMPLETE
-            if complete and self._play_after_download == identifier:
-                self._play_after_download = 0
-                self._play_episode(identifier)
-                return
-            if complete:
-                episode = self.library.episode(identifier) if self.library else None
-                self._notify(f"Downloaded {episode.title if episode else 'episode'}", "success", "Play", lambda: self._play_episode(identifier))
-                self._native_notify(APP_NAME, f"Downloaded {episode.title if episode else 'episode'}", lambda: self._play_episode(identifier))
-                if episode is not None:
-                    self._apply_retention(episode.show_id)
-            elif result.status == JobStatus.OK:
-                return  # paused or deduped: nothing transferred, say nothing
-            else:
-                self._notify(result.message or "Download failed", "error", "Retry", lambda: self._download_episode(identifier))
-                self._native_notify(APP_NAME, result.message or "Download failed", lambda: self.navigation.select(PAGE_DOWNLOADS))
             return
+        removed = int(result.value or 0)
+        if kind == "reset-library":
+            self._refresh_storage_settings()
+            self._request_reload()
+            self._notify(f"Library reset — removed {removed} podcast{'s' if removed != 1 else ''}", "success")
+        else:
+            self.podcast_page.chips.select("All")
+            self._request_reload(lambda: self.podcast_page._apply_filters())
+            self._notify(f"Removed {removed} unreachable podcast{'s' if removed != 1 else ''}", "success")
+        return
+    def _on_database_health(self, kind, identifier, result):
+        if result.status == JobStatus.OK and result.value == "ok":
+            self.settings_page.set_database_status("Healthy · SQLite quick check passed")
+            self.library.set_setting("database.last_quick_check", str(time.time()))
+        else:
+            self.settings_page.set_database_status(
+                f"Problem found: {result.message or result.value}. Repair is now available.",
+                repair_available=True,
+            )
+        return
+    def _on_database_repair(self, kind, identifier, result):
+        if result.status == JobStatus.OK:
+            self.library.repository.invalidate_settings_cache()
+            self.settings_page.set_database_status(
+                f"Repair complete · damaged original saved at {result.value}"
+            )
+            self._request_reload()
+        else:
+            self.settings_page.set_database_status(
+                f"Repair failed: {result.message}. The original database was not replaced.",
+                repair_available=True,
+            )
+        return
+    def _on_database_maintenance(self, kind, identifier, result):
+        if result.status == JobStatus.OK:
+            self.settings_page.set_database_status(
+                f"{identifier} complete · backup: {result.value}"
+            )
+            self._notify(f"Database {identifier.lower()} complete", "success")
+        else:
+            self.settings_page.set_database_status(
+                f"{identifier} failed: {result.message}"
+            )
+            self._notify(f"Database {identifier.lower()} failed", "error")
+        return
+    def _on_export_downloads(self, kind, identifier, result):
+        if result.status != JobStatus.OK:
+            self._notify(result.message or "Media export failed", "error")
+            return
+        paths = list(result.value)
+        if not paths:
+            self._notify("No downloaded files were available to export", "error")
+            return
+        listing = "\n".join(paths[:8]) + ("\n…" if len(paths) > 8 else "")
+        dialog = ConfirmDialog(
+            f"Exported {len(paths)} media file{'s' if len(paths) != 1 else ''}",
+            listing,
+            "Open folder", parent=self,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._open_location(identifier)
+        return
+    def _on_directory(self, kind, identifier, result):
+        self._directory_finished(identifier, result)
+        return
+    def _on_read(self, kind, identifier, result):
+        key, token, apply = identifier
+        if self._read_tokens.get(key) != token or self._closed:
+            return
+        if result.status == JobStatus.OK:
+            apply(result.value)
+        else:
+            # The banner said "Opening…"; without this it never resolves.
+            message = result.message or "The library could not be read."
+            page = self.pages.currentWidget()
+            banner = getattr(page, "banner", None)
+            if banner is not None:
+                banner.show_state("error", message)
+            self._notify(message, "error")
+            # A failed Load more must not leave its button stuck on
+            # "Loading…"; recompute availability so it can be retried.
+            if key == "episodes-more":
+                self._set_global_episode_chrome(len(self._all_episode_items))
+            elif key == "history-more":
+                self._set_history_chrome(len(self._history_items_shown))
+        return
+    def _on_library(self, kind, identifier, result):
+        self._reload_in_flight = False
+        if result.status == JobStatus.OK and not self._closed:
+            self.episode_page.banner.clear()
+            self._reload_library(result.value)
+        elif not self._closed:
+            message = result.message or "The library could not be loaded."
+            self.podcast_page.set_loading(False)
+            self.podcast_page.banner.show_state("error", message)
+            self.episode_page.banner.show_state("error", message)
+        if self._reload_again:
+            self._request_reload()
+        elif result.status == JobStatus.OK:
+            callbacks, self._reload_callbacks = self._reload_callbacks, []
+            for callback in callbacks:
+                callback()
+        else:
+            self._reload_callbacks.clear()
+        return
+    def _on_integrity(self, kind, identifier, result):
+        if result.status == JobStatus.OK and result.value == "ok":
+            self.library.set_setting("database.last_quick_check", str(time.time()))
+        else:
+            message = result.message or str(result.value or "unknown database error")
+            logging.getLogger("bs_podcasts").error("Library integrity check failed: %s", message)
+            self._notify(
+                "Library integrity check failed — inspect the data folder before making changes.",
+                "error",
+                "Open folder",
+                self._open_data_folder,
+            )
+        return
+    def _on_accents(self, kind, identifier, result):
+        self._accents_priming = False
+        if result.status == JobStatus.OK and result.value and not self._closed:
+            with self._convert_lock:
+                self._ui_episode_cache.clear()  # later conversions pick up the tints
+            # Sampling finishes seconds after launch; it used to trigger a
+            # FULL library reload (a 0.4 s worker read plus every model
+            # reset) just to recolour rows. The converted payload is still
+            # here — re-tint it and re-apply, no database involved.
+            if self._last_library_data is not None:
+                self._reload_library(self._retinted(self._last_library_data))
+            else:
+                self._request_reload()
+        return
+    def _on_details(self, kind, identifier, result):
+        outcome = result.value if result.status == JobStatus.OK else None
+        if result.status != JobStatus.OK or (outcome and outcome.get("error")):
+            # A transient failure must not blank chapters/transcript for
+            # the whole session: let the next selection retry.
+            self._details_fetched.discard(identifier)
+        if outcome and (outcome.get("chapters") or outcome.get("transcript")):
+            if self.context._episode_id == identifier:
+                self._load_listening_details(identifier)
+            if self._playing_episode_id == identifier:
+                chapters = self.listening.chapters(identifier)
+                self._chapters_cache = {identifier: chapters}
+                duration = float(self.playback.snapshot.duration) if self.playback else 0.0
+                self.player.set_chapter_markers([c.start_seconds / duration for c in chapters if duration and 0 < c.start_seconds < duration])
+                if self.now_playing.isVisible():
+                    self._populate_now_playing()
+        elif outcome and outcome.get("error"):
+            logging.getLogger("bs_podcasts").info("Listening details unavailable for episode %s: %s", identifier, outcome["error"])
+        return
+    def _on_artwork(self, kind, identifier, result):
+        if result.status != JobStatus.OK:
+            self._artwork_fetched.discard(identifier)
+        if result.status == JobStatus.OK:
+            self._request_reload()
+            if self.context._episode_id == identifier:
+                episode = self.library.episode(identifier)
+                if episode is not None:
+                    self.context.show_episode(self._ui_episode_live(episode))
+        return
+    def _on_preview(self, kind, identifier, result):
+        self._preview_pending.discard(identifier)
+        self._discover_newest_active.discard(identifier)
+        newest_scan = identifier in self._discover_newest_pending
+        if result.status == JobStatus.OK:
+            if newest_scan:
+                card = next((item for item in self.discover_page._all_items if item.feed_url == identifier), None)
+                if card is not None:
+                    self._discover_newest_updates[identifier] = self._with_preview(card, result.value)
+                if self._pending_episodes_url == identifier or self.context.preview_url() == identifier:
+                    self._store_preview(identifier, result.value)
+            else:
+                self._store_preview(identifier, result.value)
+            self._apply_preview(identifier, result.value, update_grid=not newest_scan)
+        else:
+            message = result.message or "unknown error"
+            self.context.show_preview_error(identifier, message)
+            if self._pending_episodes_url == identifier:
+                self._pending_episodes_url = ""
+                self.episode_page.banner.show_state("error", f"Couldn’t fetch this podcast’s episodes: {message}")
+        if newest_scan:
+            self._discover_newest_pending.discard(identifier)
+            self._discover_newest_done += 1
+            self._update_newest_scan_toast()
+            self._pump_discover_newest_scan()
+            if not self._discover_newest_pending:
+                self._finish_discover_newest_scan()
+        else:
+            self._trim_preview_cache()
+        return
+    def _on_download(self, kind, identifier, result):
+        self._request_reload()
+        # A finished job is not a finished download. download() also
+        # returns normally when it was absorbed as a duplicate of a live
+        # transfer, or when the user paused mid-retry; announcing those as
+        # "Downloaded" (with a Play action for a file that does not exist)
+        # was reachable on any ordinary double-click.
+        record = result.value if result.status == JobStatus.OK else None
+        complete = getattr(record, "state", None) == DownloadState.COMPLETE
+        if complete and self._play_after_download == identifier:
+            self._play_after_download = 0
+            self._play_episode(identifier)
+            return
+        if complete:
+            episode = self.library.episode(identifier) if self.library else None
+            self._notify(f"Downloaded {episode.title if episode else 'episode'}", "success", "Play", lambda: self._play_episode(identifier))
+            self._native_notify(APP_NAME, f"Downloaded {episode.title if episode else 'episode'}", lambda: self._play_episode(identifier))
+            if episode is not None:
+                self._apply_retention(episode.show_id)
+        elif result.status == JobStatus.OK:
+            return  # paused or deduped: nothing transferred, say nothing
+        else:
+            self._notify(result.message or "Download failed", "error", "Retry", lambda: self._download_episode(identifier))
+            self._native_notify(APP_NAME, result.message or "Download failed", lambda: self.navigation.select(PAGE_DOWNLOADS))
+        return
+    def _on_refresh(self, kind, identifier, result):
         identifier, batch_refresh, generation = identifier if isinstance(identifier, tuple) else (identifier, False, 0)
         if result.status == JobStatus.OK and getattr(result.value, "imported", 0):
             # Before any stale-generation exit: episodes imported by a
