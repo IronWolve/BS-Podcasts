@@ -1802,7 +1802,7 @@ class MainWindow(QMainWindow):
             self.settings_page.set_database_status(f"Could not check right now: {exc}")
             return
         else:
-            self.settings_page.set_database_status("Healthy · repair is not needed")
+            self.settings_page.set_database_status("Healthy · no repair needed")
             return
         dialog = ConfirmDialog(
             "Attempt database repair?",
@@ -4075,7 +4075,7 @@ class MainWindow(QMainWindow):
         return
     def _on_database_health(self, kind, identifier, result):
         if result.status == JobStatus.OK and result.value == "ok":
-            self.settings_page.set_database_status("Healthy · SQLite quick check passed")
+            self.settings_page.set_database_status("Healthy · quick check passed")
             self.library.set_setting("database.last_quick_check", str(time.time()))
         else:
             self.settings_page.set_database_status(
