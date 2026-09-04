@@ -18,7 +18,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -1938,10 +1938,12 @@ class ContextPanel(QFrame):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("contextTabs")
         self.tabs.setDocumentMode(True)
-        # Full labels always: a narrow pane scrolls the tab strip instead of
-        # eliding names ("Bookma…") or clipping the last tab.
+        # Whole labels or icons, never a cut word: at the default pane width
+        # the four labels did not fit and Qt showed "Bookma" behind two
+        # scroll arrows (audit F-066). _fit_tabs swaps to icon-only tabs with
+        # tooltips when the full strip is wider than the pane.
         self.tabs.tabBar().setExpanding(False)
-        self.tabs.tabBar().setUsesScrollButtons(True)
+        self.tabs.tabBar().setUsesScrollButtons(False)
         self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
         self.tabs.setMinimumHeight(scaled_px(150))
         self.body = QTextBrowser()
@@ -1974,7 +1976,13 @@ class ContextPanel(QFrame):
         self.bookmark_list.itemClicked.connect(self._seek_item)
         self.bookmark_list.itemActivated.connect(self._seek_item)
         self.tabs.addTab(self.bookmark_list, "Bookmarks")
+        self.tabs.setTabToolTip(0, "Details")
+        self.tabs.setTabToolTip(2, "Transcript")
         self.tabs.setTabToolTip(3, "Bookmarks")
+        self._tab_specs = (("Details", "info"), ("Chapters", "chapters"), ("Transcript", "list"), ("Bookmarks", "bookmark"))
+        self._tabs_full_width = self.tabs.tabBar().sizeHint().width()
+        self._tabs_iconic = False
+        self.tabs.currentChanged.connect(lambda _index: self._tint_tab_icons())
         selected_layout.addWidget(self.tabs, 1)
         selected_layout.addStretch(0)
         self.selected_scroll = QScrollArea()
@@ -2063,7 +2071,6 @@ class ContextPanel(QFrame):
             placeholder = QListWidgetItem("No chapters provided")
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.chapter_list.addItem(placeholder)
-        self.tabs.setTabText(1, "Chapters")
         self.tabs.setTabToolTip(1, f"{len(chapters)} chapter{'s' if len(chapters) != 1 else ''}")
 
     def set_transcript(self, segments):
@@ -2083,7 +2090,6 @@ class ContextPanel(QFrame):
             placeholder = QListWidgetItem("No bookmarks yet")
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.bookmark_list.addItem(placeholder)
-        self.tabs.setTabText(3, "Bookmarks")
         self.tabs.setTabToolTip(3, f"{len(bookmarks)} bookmark{'s' if len(bookmarks) != 1 else ''}")
 
     def show_podcast(self, podcast):
@@ -2355,6 +2361,34 @@ class ContextPanel(QFrame):
         # Keep the artwork proportional to the space that remains for text and tabs.
         reserved = 520 if self.latest_card.isVisible() else 440
         self.art.set_side(min(self.width() - 2 * SPACE["lg"] - 12, self.height() - reserved))
+        self._fit_tabs()
+
+    def _fit_tabs(self):
+        """Full labels when they fit, icon-only tabs (label in the tooltip)
+        when the strip is wider than the pane. Never a truncated label."""
+        available = self.tabs.width() - 2
+        iconic = self._tabs_full_width > available > 0
+        if iconic == self._tabs_iconic:
+            return
+        self._tabs_iconic = iconic
+        for index, (label, glyph) in enumerate(self._tab_specs):
+            if iconic:
+                self.tabs.setTabText(index, "")
+                self.tabs.setTabToolTip(index, label)
+            else:
+                self.tabs.setTabIcon(index, QIcon())
+                self.tabs.setTabText(index, label)
+        self._tint_tab_icons()
+
+    def _tint_tab_icons(self):
+        """Icon tabs have no text for the :selected colour rule to act on, so
+        the current tab's glyph is drawn in the strong text colour."""
+        if not getattr(self, "_tabs_iconic", False):
+            return
+        current = self.tabs.currentIndex()
+        for index, (_label, glyph) in enumerate(self._tab_specs):
+            colour = COLORS["text_strong"] if index == current else COLORS["muted"]
+            self.tabs.setTabIcon(index, icons.icon(glyph, colour, 16))
 
     def set_playing(self, episode_id: int, active: bool, loading: bool = False):
         """Make the primary button a Pause/Resume toggle when this episode is playing."""
