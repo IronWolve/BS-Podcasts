@@ -269,8 +269,8 @@ def main() -> int:
         settle(app, window)
         total = window.episode_page.model.rowCount()
         window.episode_page.header.search.setText("Measure")
-        process(app)
-        check(window.episode_page.model.rowCount() == 1, "filter box did not filter")
+        # The filter box is debounced (audit F-032): wait for the timer.
+        check(settle_until(app, lambda: window.episode_page.model.rowCount() == 1), "filter box did not filter")
         window.episode_page.header.search.clear()
         process(app)
         check(window.episode_page.model.rowCount() == total, "clearing filter did not restore")

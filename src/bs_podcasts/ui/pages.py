@@ -38,6 +38,29 @@ from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, scaled_px
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 
 
+FILTER_DEBOUNCE_MS = 200
+
+
+def _debounce_filter_box(page):
+    """Rebuild the list 200 ms after the last keystroke, not on every one:
+    a 5,000-row page re-filtered and re-modelled per character (audit F-032).
+    Clearing the box applies at once so the full list snaps back."""
+    timer = QTimer(page)
+    timer.setSingleShot(True)
+    timer.setInterval(FILTER_DEBOUNCE_MS)
+    timer.timeout.connect(page._apply_filters)
+    page._filter_timer = timer
+
+    def changed(text: str):
+        if text.strip():
+            timer.start()
+        else:
+            timer.stop()
+            page._apply_filters()
+
+    page.header.search.textChanged.connect(changed)
+
+
 class DiscoverModeTabs(QTabBar):
     def currentData(self):
         return self.tabData(self.currentIndex())
@@ -414,7 +437,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         self.skeleton = SkeletonGrid()
         self.stack.addWidget(self.skeleton)
         self.view.verticalScrollBar().valueChanged.connect(self._check_near_end)
-        self.header.search.textChanged.connect(self._apply_filters)
+        self._connect_filter_box()
         self.chips.selected.connect(self._apply_filters)
         self.activate_requested.connect(self._open)
         # A normal click opens the show's stored or preview episodes on both
@@ -468,6 +491,9 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         self._all_items = list(items)
         self._apply_filters(restore_key=key, preserve_scroll=preserve_scroll,
                             selected_keys=selected)
+
+    def _connect_filter_box(self):
+        _debounce_filter_box(self)
 
     def _apply_filters(self, *_args, restore_key=None, preserve_scroll=False, selected_keys=None):
         selected = list(selected_keys or ())
@@ -768,7 +794,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         view.setItemDelegate(self.delegate)
         self._init_list(view, EpisodeModel(items), EmptyState(*empty, glyph=glyph))
         self.view.selectionModel().selectionChanged.connect(self._selection_changed)
-        self.header.search.textChanged.connect(self._apply_filters)
+        self._connect_filter_box()
         self.header.search.setPlaceholderText("Filter episodes")
         self.chips.selected.connect(self._set_filter)
         self.activate_requested.connect(self.play_requested)
@@ -847,6 +873,9 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self._sort = key
         self.sort_button.setText(label)
         self._apply_filters()
+
+    def _connect_filter_box(self):
+        _debounce_filter_box(self)
 
     def _apply_filters(self, *_args, restore_key=None, preserve_scroll=False, selected_keys=None):
         selected = list(selected_keys or ())
