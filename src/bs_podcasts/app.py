@@ -396,7 +396,12 @@ def main() -> int:
             pass
     server.newConnection.connect(raise_existing)
     app.aboutToQuit.connect(lambda: state["window"]._save_layout() if state["window"] is not None else None)
-    app.aboutToQuit.connect(lambda: state["window"].mpris.shutdown() if state["window"] is not None else None)
+    # window.mpris is None until desktop integration ran (audit F-063).
+    app.aboutToQuit.connect(
+        lambda: state["window"].mpris.shutdown()
+        if state["window"] is not None and getattr(state["window"], "mpris", None) is not None
+        else None
+    )
     app.aboutToQuit.connect(lambda: downloads.pause_all())
     code = app.exec()
     # Bounded shutdown: cancel pending jobs, give running ones a moment, then

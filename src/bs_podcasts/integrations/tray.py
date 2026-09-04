@@ -37,6 +37,7 @@ class TrayController:
         self.window = window
         self.playback = playback
         self._message_callback = None
+        self._connected = False
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         tray = QSystemTrayIcon(_tray_icon(), window)
@@ -72,6 +73,7 @@ class TrayController:
         bridge = getattr(window, "_bridge", None)
         if bridge is not None:
             bridge.playback_event.connect(self._playback_changed)
+            self._connected = True
 
     def _playback_changed(self, snapshot):
         if self.tray is None:
@@ -110,7 +112,10 @@ class TrayController:
         the icon, so a rebuilt window's tray cannot receive events meant for
         the window that owned this one."""
         bridge = getattr(self.window, "_bridge", None)
-        if bridge is not None:
+        # Disconnect only what was connected: without a system tray the
+        # connect never happened and Qt warned on every quit (audit F-062).
+        if bridge is not None and self._connected:
+            self._connected = False
             try:
                 bridge.playback_event.disconnect(self._playback_changed)
             except (RuntimeError, TypeError):
