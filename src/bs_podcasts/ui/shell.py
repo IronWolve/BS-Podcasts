@@ -71,7 +71,7 @@ class _JobBridge(QObject):
 class MainWindow(QMainWindow):
     relaunch_requested = Signal()
 
-    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, parent=None):
+    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None):
         super().__init__(parent)
         self.library = library
         self.jobs = jobs
@@ -79,6 +79,9 @@ class MainWindow(QMainWindow):
         # Batch feed refreshes run on their own pool so UI reads never queue
         # behind network fetches; without one they share the general pool.
         self.refresh_jobs = refresh_jobs or jobs
+        # Discover fetches (directory requests, feed previews, episode
+        # artwork/details) never share the pool that serves library reads.
+        self.network_jobs = network_jobs or jobs
         self.refresh = refresh
         self.directory = directory
         self.playback = playback
@@ -2415,7 +2418,7 @@ class MainWindow(QMainWindow):
             return
         self._details_fetched.add(episode.id)
         session = self.refresh.fetcher.session
-        future = self.jobs.submit(self.listening.ensure_details, episode, session)
+        future = self.network_jobs.submit(self.listening.ensure_details, episode, session)
         self._pending_jobs.add(future)
 
         def finished(completed):
@@ -2442,7 +2445,7 @@ class MainWindow(QMainWindow):
             repository.set_episode_artwork_path(episode.id, path)
             return path
 
-        future = self.jobs.submit(work)
+        future = self.network_jobs.submit(work)
         self._pending_jobs.add(future)
 
         def finished(completed):
@@ -3522,7 +3525,7 @@ class MainWindow(QMainWindow):
 
     def _submit_directory(self, operation: str, value, limit: int = 30):
         self._discover_loading = True
-        future = self.jobs.submit(self._directory_request, operation, value, limit)
+        future = self.network_jobs.submit(self._directory_request, operation, value, limit)
         self._pending_jobs.add(future)
 
         def finished(completed):
@@ -4720,7 +4723,7 @@ class MainWindow(QMainWindow):
             response = fetcher.fetch(feed_url)
             return parse_feed(response.content, base_url=response.final_url)
 
-        future = self.jobs.submit(work)
+        future = self.network_jobs.submit(work)
         self._pending_jobs.add(future)
 
         def finished(completed):
