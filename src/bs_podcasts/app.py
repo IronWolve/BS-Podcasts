@@ -255,9 +255,20 @@ def main() -> int:
         return 0
     _mark("single-instance")
     root = application_data_dir()
+    notice = None
+    if Database.migration_pending(root / "library.db"):
+        # Something visible before the backup + migration blocks (audit F-020).
+        from .ui.dialogs import MigrationNotice
+
+        notice = MigrationNotice()
+        notice.show()
+        app.processEvents()
+        app.processEvents()
     try:
         database = Database(root / "library.db")
     except (sqlite3.DatabaseError, OSError) as exc:
+        if notice is not None:
+            notice.close()
         from .ui.dialogs import StartupErrorDialog
 
         dialog = StartupErrorDialog(
@@ -268,6 +279,9 @@ def main() -> int:
         dialog.exec()
         return 1
     _mark("database")
+    if notice is not None:
+        notice.close()
+        notice.deleteLater()
     repository = LibraryRepository(database)
     library = LibraryService(repository)
     apply_theme(resolve_theme(library.setting("ui.theme", "system")))
