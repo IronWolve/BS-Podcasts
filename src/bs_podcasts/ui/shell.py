@@ -649,6 +649,16 @@ class MainWindow(QMainWindow):
         self.navigation.select(page if 0 <= page < self.page_count and page != PAGE_SETTINGS else 0)
         self._back_stack.clear()
         self._update_navigation_controls()
+        raw = self.library.setting("ui.view_state", "")
+        if raw:
+            self.library.set_setting("ui.view_state", "")
+            try:
+                state = json.loads(raw)
+            except ValueError:
+                state = None
+            if isinstance(state, dict):
+                # After the first library apply, so the shows exist to reopen.
+                self._reload_callbacks.append(lambda: self._restore_view_state(state))
 
     def _save_layout(self):
         if self.library is None:
@@ -660,6 +670,43 @@ class MainWindow(QMainWindow):
         if self._pane_user_width:
             self.library.set_setting("ui.pane_width", str(self._pane_user_width))
         self.library.set_setting("ui.context_closed", "1" if self._context_user_closed else "0")
+
+    def _save_view_state(self):
+        """What a theme rebuild used to lose: the open podcast, the selected
+        episode and the scroll position (audit F-093). Consumed once by the
+        rebuilt window."""
+        if self.library is None:
+            return
+        page = self.pages.currentWidget()
+        view = getattr(page, "view", None)
+        state = {
+            "page": self.pages.currentIndex(),
+            "hero_show_id": int(self._hero_show_id or 0),
+            "episode_id": int(getattr(self.context, "_episode_id", 0) or 0),
+            "scroll": int(view.verticalScrollBar().value()) if view is not None else 0,
+        }
+        self.library.set_setting("ui.view_state", json.dumps(state))
+
+    def _restore_view_state(self, state: dict):
+        try:
+            page = int(state.get("page", 0))
+            hero_show_id = int(state.get("hero_show_id", 0))
+            episode_id = int(state.get("episode_id", 0))
+            scroll = int(state.get("scroll", 0))
+        except (TypeError, ValueError):
+            return
+        if hero_show_id and self.library is not None:
+            show = self.library.repository.get_show(hero_show_id)
+            if show is not None:
+                self._open_podcast(self._ui_podcast(show), select_episode_id=episode_id)
+                self._later(350, lambda: self.episode_page.view.verticalScrollBar().setValue(scroll))
+                return
+        if 0 <= page < self.page_count and page != PAGE_SETTINGS:
+            self.navigation.select(page)
+        current = self.pages.currentWidget()
+        view = getattr(current, "view", None)
+        if view is not None and scroll:
+            self._later(350, lambda: view.verticalScrollBar().setValue(scroll))
 
     def _rail_toggled(self, compact: bool):
         self._rail_user_compact = compact
@@ -1428,6 +1475,7 @@ class MainWindow(QMainWindow):
             elif key == "ui.theme":
                 apply_theme(resolve_theme(value))
                 self._save_layout()
+                self._save_view_state()
                 self._keep_services = True
                 self.relaunch_requested.emit()
 
