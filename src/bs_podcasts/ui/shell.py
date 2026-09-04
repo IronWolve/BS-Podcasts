@@ -495,10 +495,11 @@ class MainWindow(QMainWindow):
         self._later(2500, self._check_database_if_due)
         self._later(5000, lambda: self._check_for_updates(manual=False))
         self.settings_page.set_shortcuts(self.shortcuts.bindings())
-        # Paths are cheap and should be available immediately; byte totals can
-        # touch many files, so populate those once the event loop is running.
+        # Paths are cheap and should be available immediately; byte totals
+        # stat() every cached image, so they are computed when the Settings
+        # page is actually shown (audit F-108), not 100 ms after every launch.
         self._refresh_storage_settings(include_usage=False)
-        self._later(100, self._refresh_storage_settings)
+        self._settings_seen = False
         self.home_page.new_requested.connect(self._show_new_episodes)
         self.home_page.queue_requested.connect(lambda: self.navigation.select(PAGE_QUEUE))
         self.home_page.downloads_requested.connect(lambda: self.navigation.select(PAGE_DOWNLOADS))
@@ -1873,7 +1874,12 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            Path(path).expanduser().write_bytes(self.library.export_opml())
+            # Sidecar + replace: a failure mid-write (disk full, network drive
+            # gone) must not leave a half file where a good one was (audit F-107).
+            target = Path(path).expanduser()
+            temporary = target.with_name(target.name + ".tmp")
+            temporary.write_bytes(self.library.export_opml())
+            os.replace(temporary, target)
         except Exception as exc:
             self.podcast_page.banner.show_state("error", str(exc))
             return
@@ -4323,6 +4329,12 @@ class MainWindow(QMainWindow):
         if index == PAGE_SETTINGS:
             self.context.hide()
             self.player.set_queue_open(False)
+            if not getattr(self, "_settings_seen", False):
+                # First visit: byte totals and listening statistics arrive
+                # populated instead of behind a button (audit F-099, F-108).
+                self._settings_seen = True
+                self._refresh_storage_settings()
+                self._refresh_statistics()
             return
         page = self.pages.currentWidget()
         selected = None
