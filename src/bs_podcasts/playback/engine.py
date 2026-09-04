@@ -313,11 +313,11 @@ class LazyMpvEngine:
     """
 
     def __init__(self, **options):
-        global mpv
-        if mpv is None:
-            import mpv as mpv_module
-
-            mpv = mpv_module
+        # Nothing is imported here: loading libmpv (a dlopen of the whole
+        # library) cost 59 ms on the main thread before the first paint
+        # (audit F-019). The import happens in _real(), i.e. in the deferred
+        # warm-up or on the first real playback call, and a machine without
+        # libmpv falls back to the external player there.
         self._options = options
         self._engine = None
         self._handler: Callable[[EngineEvent], None] = lambda event: None
@@ -373,6 +373,11 @@ class LazyMpvEngine:
                 raise PlaybackUnavailable("The internal playback engine has shut down.")
             if self._engine is None:
                 try:
+                    global mpv
+                    if mpv is None:
+                        import mpv as mpv_module
+
+                        mpv = mpv_module
                     engine = MpvEngine(**self._options)
                 except Exception as exc:
                     # Same fallback the old eager construction had: a machine
