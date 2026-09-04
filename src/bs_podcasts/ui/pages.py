@@ -454,6 +454,10 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             return
         columns = max(2, available // (156 if getattr(self, "_compact", False) else 196))
         width = available // columns
+        grid = (columns, width, getattr(self, "_compact", False))
+        if grid == getattr(self, "_card_grid", None):
+            return  # same grid: every resize step re-laid out all cards (audit F-125)
+        self._card_grid = grid
         self.delegate.set_card_width(width)
         self.view.setGridSize(self.delegate.sizeHint(None, None))
         self.view.doItemsLayout()
