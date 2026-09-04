@@ -45,14 +45,9 @@ class LibraryRepository:
 
     def get_show(self, show_id: int) -> Show | None:
         with self.database.connect() as connection:
-            # The show filter is pushed into the aggregate as well as the
-            # outer WHERE: an outer equality does not reliably reach inside a
-            # LEFT JOINed GROUP BY subquery, so fetching one show was
-            # aggregating every episode in the library — on a path reached
-            # from update_show_playback, i.e. every per-show settings change.
             row = connection.execute(
-                self._show_select("show_id=?") + " WHERE s.id=? GROUP BY s.id",
-                (show_id, show_id),
+                self._show_select() + " WHERE s.id=?",
+                (show_id,),
             ).fetchone()
         return self._show(row) if row else None
 
@@ -747,30 +742,16 @@ class LibraryRepository:
 
     @staticmethod
     def _show_select(episode_filter: str = "") -> str:
-        # One pass over episodes per query instead of an aggregate join plus two
-        # correlated subqueries per show. With exactly one max() aggregate,
-        # SQLite documents that the bare columns (title, published_at) come from
-        # the row where that max was reached; the appended '~'-prefixed id
-        # breaks published_at ties the same way ORDER BY ... , id DESC did.
-        return (
-            "SELECT s.*, COALESCE(agg.episode_count, 0) AS episode_count, "
-            "COALESCE(agg.new_count, 0) AS new_count, "
-            "COALESCE(agg.latest_episode_title, '') AS latest_episode_title, "
-            "COALESCE(agg.latest_episode_published_at, '') AS latest_episode_published_at "
-            "FROM shows s LEFT JOIN ("
-            "SELECT show_id, COUNT(*) AS episode_count, "
-            "COALESCE(SUM(CASE WHEN is_new=1 THEN 1 ELSE 0 END), 0) AS new_count, "
-            # An empty published_at must sort BELOW every real date ('~' alone
-            # would outrank digit-leading ISO strings and pin an undated
-            # episode as the show's 'latest' forever).
-            "MAX(COALESCE(NULLIF(published_at, ''), '0') || printf('~%012d', id)) AS latest_key, "
-            "title AS latest_episode_title, "
-            "published_at AS latest_episode_published_at "
-            "FROM episodes"
-            + (f" WHERE {episode_filter}" if episode_filter else "")
-            + " GROUP BY show_id"
-            ") agg ON agg.show_id=s.id"
-        )
+        """Shows with their cached counters (migration 014).
+
+        The counts and the latest episode used to be aggregated from every
+        episode row on each call (85 ms / 280 MB of reads on a 175k-episode
+        library per reload, audit F-051); triggers now keep them on the
+        shows row. `episode_filter` is accepted for the old call sites and
+        ignored: the counters are per show already.
+        """
+        del episode_filter
+        return "SELECT s.* FROM shows s"
 
     @staticmethod
     def _show(row) -> Show:
