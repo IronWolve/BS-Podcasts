@@ -18,7 +18,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtGui import QAccessible, QAccessibleEvent, QColor, QFont, QIcon, QLinearGradient, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -238,8 +238,19 @@ class EdgeHandle(QPushButton):
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        self._effect.setOpacity(self.DIM)
+        if not self.hasFocus():
+            self._effect.setOpacity(self.DIM)
         super().leaveEvent(event)
+
+    # Keyboard focus at 35 % opacity was nearly invisible (audit F-102).
+    def focusInEvent(self, event):
+        self._effect.setOpacity(1.0)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        if not self.underMouse():
+            self._effect.setOpacity(self.DIM)
+        super().focusOutEvent(event)
 
 
 class Artwork(QWidget):
@@ -594,6 +605,12 @@ def fit_combo_width(combo, floor: int = 0) -> int:
     return width
 
 
+# Below this page width the header drops its inline filter and the chip
+# row goes compact together; two independent cutoffs (430/720) left a band
+# with a crowded header and wrapped chips (audit F-119).
+COMPACT_PAGE_PX = 640
+
+
 class PageHeader(QFrame):
     back_requested = Signal()
 
@@ -702,7 +719,7 @@ class PageHeader(QFrame):
         # hide it before the title and the action button start clipping. But
         # never hide one that is actually filtering — that left the list cut
         # down with no visible cause and no way to clear it.
-        wide_enough = self.width() >= scaled_px(430)
+        wide_enough = self.width() >= scaled_px(COMPACT_PAGE_PX)
         allowed = getattr(self, "_search_allowed", True)
         # Focus keeps it too: hiding the field someone is typing in would be
         # worse than the crowding this trades away.
@@ -1023,6 +1040,8 @@ class Toast(QFrame):
         self.setAccessibleName(message)
         self._effect.setOpacity(0.0)
         self.show()
+        # Screen readers never heard toasts: raise an alert event (audit F-101).
+        QAccessible.updateAccessibility(QAccessibleEvent(self, QAccessible.Event.Alert))
         self.raise_()
         self._animation.stop()
         self._animation.setStartValue(0.0)

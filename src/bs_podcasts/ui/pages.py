@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from . import icons
 from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
-from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, hide_hover_bubble, show_hover_bubble
+from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
 from .widgets import combo_chrome_px as widgets_combo_chrome_px
 from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, scaled_px
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
@@ -931,7 +931,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        narrow = event.size().width() < 720
+        narrow = event.size().width() < scaled_px(COMPACT_PAGE_PX)
         self.chips.set_compact(narrow)
         if self.sort_button is not None:
             self.sort_button.setText("" if narrow else dict(SORT_OPTIONS).get(self._sort, "Newest first"))
