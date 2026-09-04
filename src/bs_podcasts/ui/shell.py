@@ -1602,7 +1602,10 @@ class MainWindow(QMainWindow):
         so the startup timers kept firing on windows a theme rebuild had
         already closed — one of them doing real filesystem work.
         """
-        QTimer.singleShot(milliseconds, lambda: None if self._closed else callback())
+        # Context-object overload: the timer dies with the window, so a
+        # rebuilt (theme switch) window is collected as soon as it closes
+        # instead of living until its last pending timer fires (audit F-122).
+        QTimer.singleShot(milliseconds, self, lambda: None if self._closed else callback())
 
     def _run_task(self, kind: str, work, identifier=None):
         if self.jobs is None or self._closed:
