@@ -18,6 +18,13 @@ from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, app_font,
 MAX_ROW_TEXT_PX = 880
 
 
+def _repaint_target(option):
+    """The viewport a delegate paints into: repainted when a cover decode lands."""
+    widget = getattr(option, "widget", None)
+    viewport = getattr(widget, "viewport", None)
+    return viewport() if callable(viewport) else widget
+
+
 @dataclass(frozen=True)
 class Podcast:
     title: str
@@ -373,7 +380,7 @@ class PodcastDelegate(QStyledItemDelegate):
         art_size = card.width() - 2 * pad
         art = QRect(card.x() + pad, card.y() + pad, art_size, art_size)
         scale = painter.device().devicePixelRatioF() if hasattr(painter.device(), "devicePixelRatioF") else 1.0
-        painter.drawPixmap(art, cover(item.artwork_path, art.width(), art.height(), 10, initials(item.title), item.accent, scale))
+        painter.drawPixmap(art, cover(item.artwork_path, art.width(), art.height(), 10, initials(item.title), item.accent, scale, notify=_repaint_target(option)))
 
         title_font = app_font(13, QFont.Weight.DemiBold)
         painter.setFont(title_font)
@@ -588,7 +595,7 @@ class EpisodeDelegate(QStyledItemDelegate):
             left = row.x() + scaled_px(26)
         art_size = scaled_px(44 if self.compact else 60)
         art = QRect(left, row.center().y() - art_size // 2, art_size, art_size)
-        painter.drawPixmap(art, cover(item.artwork_path, art_size, art_size, 8, initials(item.show), item.accent, scale))
+        painter.drawPixmap(art, cover(item.artwork_path, art_size, art_size, 8, initials(item.show), item.accent, scale, notify=_repaint_target(option)))
         if playing:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(11, 15, 24, 150))

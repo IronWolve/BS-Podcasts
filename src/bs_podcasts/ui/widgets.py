@@ -286,6 +286,7 @@ class Artwork(QWidget):
             self._text,
             self._color,
             self.devicePixelRatioF(),
+            notify=self,
         )
         painter.drawPixmap(0, 0, pixmap)
 

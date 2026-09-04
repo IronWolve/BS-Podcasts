@@ -705,7 +705,7 @@ class PodcastInfoDialog(StyledDialog):
         artwork.setPixmap(
             cover(
                 artwork_path, art_side, art_side, 14, initials(title),
-                getattr(podcast, "accent", ""), self.devicePixelRatioF(),
+                getattr(podcast, "accent", ""), self.devicePixelRatioF(), sync=True,
             )
         )
         artwork.setAccessibleName(f"Artwork for {title}")
