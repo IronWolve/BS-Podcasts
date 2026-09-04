@@ -39,7 +39,10 @@ TEXT_PAIRS = [
     ("accent", "accent_soft", 4.5),      # new-count chips, drop-zone text
     ("on_accent", "accent", 4.5),        # primary button labels
     ("success", "canvas", 4.5), ("warning", "canvas", 4.5), ("danger", "canvas", 4.5),
-    ("blue", "canvas", 4.0), ("teal", "canvas", 4.5),   # blue is large-ish meta text; 4.0 documented
+    ("blue", "canvas", 4.5), ("teal", "canvas", 4.5),
+    # Disabled text/glyphs and the down-arrow: WCAG's 3:1 minimum for
+    # non-text and disabled UI (audit F-069).
+    ("disabled", "canvas", 3.0), ("disabled", "surface", 3.0), ("disabled", "surface_raised", 3.0),
     ("success", "surface", 4.5), ("warning", "surface", 4.5), ("danger", "surface", 4.5), ("teal", "surface", 4.5),
 ]
 

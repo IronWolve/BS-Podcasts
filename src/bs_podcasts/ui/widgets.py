@@ -200,7 +200,7 @@ class _CursorAwareButton(QPushButton):
 def icon_button(name: str, tooltip: str, object_name: str = "iconButton", size: int = 20, checkable=False):
     button = _CursorAwareButton()
     button.setObjectName(object_name)
-    button.setIcon(icons.icon(name, COLORS["text"], size, disabled=COLORS["border"]))
+    button.setIcon(icons.icon(name, COLORS["text"], size, disabled=COLORS["disabled"]))
     button.setIconSize(QSize(size, size))
     button.setToolTip(tooltip)
     button.setAccessibleName(tooltip)
@@ -228,7 +228,7 @@ class EdgeHandle(QPushButton):
         self.set_glyph(name, tooltip)
 
     def set_glyph(self, name: str, tooltip: str):
-        self.setIcon(icons.icon(name, COLORS["text"], 16, disabled=COLORS["border"]))
+        self.setIcon(icons.icon(name, COLORS["text"], 16, disabled=COLORS["disabled"]))
         self.setIconSize(QSize(16, 16))
         self.setToolTip(tooltip)
         self.setAccessibleName(tooltip)
@@ -1909,13 +1909,13 @@ class ContextPanel(QFrame):
         secondary_row.setSpacing(SPACE["sm"])
         self.secondary = QPushButton("Up Next")
         self.secondary.setObjectName("quietButton")
-        self.secondary.setIcon(icons.icon("queue-add", COLORS["text"], 16, disabled=COLORS["border"]))
+        self.secondary.setIcon(icons.icon("queue-add", COLORS["text"], 16, disabled=COLORS["disabled"]))
         self.secondary.setCursor(Qt.CursorShape.PointingHandCursor)
         self.secondary.clicked.connect(self._secondary_clicked)
         self.secondary.setAccessibleName("Add episode to Up Next")
         self.download = QPushButton("Download")
         self.download.setObjectName("quietButton")
-        self.download.setIcon(icons.icon("download", COLORS["text"], 16, disabled=COLORS["border"]))
+        self.download.setIcon(icons.icon("download", COLORS["text"], 16, disabled=COLORS["disabled"]))
         self.download.setCursor(Qt.CursorShape.PointingHandCursor)
         self.download.clicked.connect(self._download_clicked)
         self.download.setAccessibleName("Download episode")
@@ -2260,13 +2260,13 @@ class ContextPanel(QFrame):
             self.download.setToolTip("Downloaded — open location or delete")
         elif state == "Downloading":
             self.download.setText("Downloading…")
-            self.download.setIcon(icons.icon("pause", COLORS["text"], 16, disabled=COLORS["border"]))
+            self.download.setIcon(icons.icon("pause", COLORS["text"], 16, disabled=COLORS["disabled"]))
             self.download.setToolTip("Click to pause")
             self.download.setEnabled(True)
         else:
             self.download.setToolTip("")
             self.download.setText("Retry download" if state == "Error" else "Resume download" if state == "Paused" else "Download")
-            self.download.setIcon(icons.icon("download", COLORS["text"], 16, disabled=COLORS["border"]))
+            self.download.setIcon(icons.icon("download", COLORS["text"], 16, disabled=COLORS["disabled"]))
             self.download.setEnabled(bool(self._episode_id))
 
     def update_download_state(self, episode_id: int, state: str):
@@ -3054,7 +3054,7 @@ class PlayerBar(QFrame):
         controls.addWidget(self._pad_left)
         self.back = QPushButton("15")
         self.back.setObjectName("textButton")
-        self.back.setIcon(icons.icon("skip-back", COLORS["text"], 20, disabled=COLORS["border"]))
+        self.back.setIcon(icons.icon("skip-back", COLORS["text"], 20, disabled=COLORS["disabled"]))
         self.back.setIconSize(QSize(20, 20))
         self.back.setCursor(Qt.CursorShape.PointingHandCursor)
         self.back.clicked.connect(self.skip_back_requested)
@@ -3069,7 +3069,7 @@ class PlayerBar(QFrame):
         self.play.setFixedSize(play_button_size(), play_button_size())
         self.forward = QPushButton("30")
         self.forward.setObjectName("textButton")
-        self.forward.setIcon(icons.icon("skip-forward", COLORS["text"], 20, disabled=COLORS["border"]))
+        self.forward.setIcon(icons.icon("skip-forward", COLORS["text"], 20, disabled=COLORS["disabled"]))
         self.forward.setIconSize(QSize(20, 20))
         self.forward.setCursor(Qt.CursorShape.PointingHandCursor)
         self.forward.clicked.connect(self.skip_forward_requested)
@@ -3536,7 +3536,7 @@ class PlayerBar(QFrame):
         self.speed_popover.set_current(self._speed)
         self._volume = float(snapshot.volume)
         self.volume_popover.set_volume(self._volume)
-        self.volume.setIcon(icons.icon("mute" if self._volume == 0 else "volume", COLORS["text"], 20, disabled=COLORS["border"]))
+        self.volume.setIcon(icons.icon("mute" if self._volume == 0 else "volume", COLORS["text"], 20, disabled=COLORS["disabled"]))
         self.volume.setToolTip("Muted" if self._volume == 0 else f"Volume {int(self._volume)}")
         self._ab_active = snapshot.ab_start is not None
         self._trim_active = snapshot.trim_level != "off"
