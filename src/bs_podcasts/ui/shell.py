@@ -38,7 +38,12 @@ from PySide6.QtWidgets import (
 
 from ..config import APP_NAME, RELEASES_URL, app_version
 from ..logging_setup import log_path
-from ..domain import DownloadState, Health
+from ..domain import DownloadState, FeedData, Health
+
+
+class PeekFeed(FeedData):
+    """A FeedData holding only the newest item, from FeedFetcher.peek_latest."""
+
 from ..jobs import JobResult, JobStatus
 from ..urlguard import is_web_url
 from ..data.database import DatabaseIntegrityError
@@ -4087,15 +4092,18 @@ class MainWindow(QMainWindow):
         self._discover_newest_active.discard(identifier)
         newest_scan = identifier in self._discover_newest_pending
         if result.status == JobStatus.OK:
+            peek = isinstance(result.value, PeekFeed)
             if newest_scan:
                 card = next((item for item in self.discover_page._all_items if item.feed_url == identifier), None)
                 if card is not None:
                     self._discover_newest_updates[identifier] = self._with_preview(card, result.value)
-                if self._pending_episodes_url == identifier or self.context.preview_url() == identifier:
+                if not peek and (self._pending_episodes_url == identifier or self.context.preview_url() == identifier):
                     self._store_preview(identifier, result.value)
-            else:
+            elif not peek:
                 self._store_preview(identifier, result.value)
-            self._apply_preview(identifier, result.value, update_grid=not newest_scan)
+            if not peek:
+                # A peek carries one date, not a feed: never the pane's preview.
+                self._apply_preview(identifier, result.value, update_grid=not newest_scan)
         else:
             message = result.message or "unknown error"
             self.context.show_preview_error(identifier, message)
@@ -4695,7 +4703,47 @@ class MainWindow(QMainWindow):
         while self._discover_newest_waiting and len(self._discover_newest_active) < 4:
             feed_url = self._discover_newest_waiting.pop(0)
             self._discover_newest_active.add(feed_url)
-            self._preview_feed(feed_url, silent=True)
+            self._peek_feed(feed_url)
+
+    def _peek_feed(self, feed_url: str):
+        """Newest-episode date for one Discover card from the feed's first
+        64 KB; the full fetch is the fallback (audit F-089)."""
+        cached = self._previews.get(feed_url)
+        if cached is not None:
+            self._emit_completed(("preview", feed_url, JobResult(JobStatus.OK, value=cached)))
+            return
+        if self.jobs is None or self.refresh is None or feed_url in self._preview_pending:
+            return
+        self._preview_pending.add(feed_url)
+        fetcher = self.refresh.fetcher
+
+        def work():
+            from ..domain import FeedEpisodeData
+            from ..feeds.parser import parse_feed
+
+            peek = None
+            try:
+                peek = fetcher.peek_latest(feed_url)
+            except Exception:
+                peek = None
+            if peek is not None:
+                title, published_at = peek
+                return PeekFeed(title="", episodes=(FeedEpisodeData("peek", title, published_at=published_at),))
+            response = fetcher.fetch(feed_url)
+            return parse_feed(response.content, base_url=response.final_url)
+
+        future = self.network_jobs.submit(work)
+        self._pending_jobs.add(future)
+
+        def finished(completed):
+            self._pending_jobs.discard(completed)
+            try:
+                result = completed.result()
+            except Exception as exc:
+                result = JobResult(JobStatus.ERROR, message=str(exc))
+            self._emit_completed(("preview", feed_url, result))
+
+        future.add_done_callback(finished)
 
     def _finish_discover_newest_scan(self):
         """Merge and sort all scanned dates with one model update."""
@@ -4952,7 +5000,8 @@ class MainWindow(QMainWindow):
             latest_episode_date=self._display_full_date(latest.published_at) if latest else "",
             latest_sort_key=(latest.published_at or "") if latest else "",
             website_url=feed.website_url or item.website_url,
-            episode_count=len(feed.episodes),
+            # A peek knows only the newest item; keep whatever count we had.
+            episode_count=item.episode_count if isinstance(feed, PeekFeed) else len(feed.episodes),
         )
 
     def _load_listening_details(self, episode_id: int, query: str = ""):

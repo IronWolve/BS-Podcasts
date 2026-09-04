@@ -54,6 +54,54 @@ class FeedFetcher:
     def fetch(self, url: str, etag: str = "", last_modified: str = "") -> FeedResponse:
         return self._fetch(url, etag, last_modified, allow_discovery=True)
 
+    PEEK_BYTES = 64 * 1024
+
+    def peek_latest(self, url: str) -> tuple[str, str] | None:
+        """(title, published_at) of the first item in the feed's first 64 KB.
+
+        Discover's 'Newest episode' sort needs one date per result; fetching
+        and parsing every full feed (up to 20 MB each) for that was the most
+        expensive thing the app did (audit F-089). Feeds list newest first
+        almost universally; a caller falls back to the full fetch when this
+        finds nothing.
+        """
+        import re
+
+        import requests
+
+        headers = {"User-Agent": USER_AGENT, "Range": f"bytes=0-{self.PEEK_BYTES - 1}", "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.2"}
+        try:
+            response = self.session.get(url, headers=headers, timeout=(8, 15), allow_redirects=True, stream=True)
+        except requests.RequestException as exc:
+            raise FeedFetchError(describe_network_error(exc, "the feed")) from exc
+        try:
+            if response.status_code not in (200, 206):
+                return None
+            body = bytearray()
+            for chunk in response.iter_content(16 * 1024):
+                body.extend(chunk)
+                if len(body) >= self.PEEK_BYTES:
+                    break
+        except requests.RequestException as exc:
+            raise FeedFetchError(describe_network_error(exc, "the feed")) from exc
+        finally:
+            response.close()
+        text = bytes(body).decode(response.encoding or "utf-8", "replace")
+        start = re.search(r"<(item|entry)[\s>]", text)
+        if start is None:
+            return None
+        head = text[start.end():]
+        date = re.search(r"<(?:pubDate|published|updated|dc:date)[^>]*>\s*(?:<!\[CDATA\[)?([^<\]]+)", head)
+        if date is None:
+            return None
+        title = re.search(r"<title[^>]*>\s*(?:<!\[CDATA\[)?([^<\]]+)", head)
+        from .parser import _date
+
+        normalised = _date(date.group(1).strip())
+        if not normalised:
+            return None
+        return ((title.group(1).strip() if title else ""), normalised)
+
     def _fetch(
         self,
         url: str,
