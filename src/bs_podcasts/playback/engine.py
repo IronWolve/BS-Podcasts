@@ -136,6 +136,16 @@ class MpvEngine:
         self._emit("loading", source)
         self._player.loadfile(source, "replace")
 
+    def unload(self):
+        """Drop the current file (cache, file handle) but keep the core.
+        stop() used to leave the media open inside mpv: a paused episode's
+        demuxer cache stayed resident and, on Windows, the file could not be
+        deleted (audit F-042, F-043)."""
+        self._guard()
+        self._loading = False
+        self._pending_autoplay = False
+        self._player.command_async("stop").add_done_callback(_log_async_result)
+
     def play(self):
         self._guard()
         # Last intent wins: a play/pause while the file is still opening must
@@ -344,6 +354,10 @@ class LazyMpvEngine:
         # whole core (from a tray click or a stray toggle) would be pure waste.
         if self._engine is not None:
             self._engine.play()
+
+    def unload(self):
+        if self._engine is not None:
+            self._engine.unload()
 
     def pause(self):
         if self._engine is not None:

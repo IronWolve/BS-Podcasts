@@ -68,6 +68,9 @@ class ExternalPlayerEngine:
         )
         self._handler(EngineEvent("external", target))
 
+    def unload(self):
+        pass  # nothing is held open: the system player owns the file
+
     def play(self):
         self._guard()
 
