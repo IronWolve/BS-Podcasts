@@ -52,15 +52,17 @@ from .widgets import fit_combo_width, safe_feed_html
 
 
 SHADOW_MARGIN = 24
-_LONG_VALUE = re.compile(r"\S{36,}")
+# 36-character runs still overflowed a two-column field at the dialog minimum;
+# 24 (~150 px) fits (audit F-074).
+_LONG_VALUE = re.compile(r"\S{24,}")
 
 
 def _wrap_long_value(value: str) -> str:
     """Add display-only break opportunities without changing copied data."""
     return _LONG_VALUE.sub(
         lambda match: "\u200b".join(
-            match.group(0)[offset:offset + 36]
-            for offset in range(0, len(match.group(0)), 36)
+            match.group(0)[offset:offset + 24]
+            for offset in range(0, len(match.group(0)), 24)
         ),
         str(value),
     )
