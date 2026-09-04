@@ -2338,10 +2338,6 @@ class ContextPanel(QFrame):
         self.secondary.hide()
         self.download.hide()
 
-    def set_dismissible(self, dismissible: bool):
-        # The edge collapse handle is always available; kept for call sites.
-        del dismissible
-
     def apply_metrics(self):
         self.setMinimumWidth(scaled_px(320))
         self.setMaximumWidth(scaled_px(440))

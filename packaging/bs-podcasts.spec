@@ -103,7 +103,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="BS Podcasts",
-    icon=str(SOURCE / "bs_podcasts" / "assets" / "branding" / "bs-podcasts-icon-master.png"),
+    icon=str(SOURCE.parent / "packaging" / "branding" / "bs-podcasts-icon-master.png"),
     version=str(VERSION_FILE),
     debug=False,
     bootloader_ignore_signals=False,
