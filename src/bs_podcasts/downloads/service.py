@@ -389,6 +389,11 @@ class DownloadService:
             )
             self._emit(episode_id, DownloadState.DOWNLOADING, done, total)
             last_report = done
+            last_report_at = time.monotonic()
+            # Progress is persisted by time, not bytes: a 256 KB step meant
+            # ~400 commits for a 100 MB episode (audit F-053). The UI still
+            # gets a signal for every step that crosses the report interval.
+            report_bytes = max(256 * 1024, (total or 0) // 20)
             head = b""
             with partial.open("ab" if append else "wb") as handle:
                 for chunk in response.iter_content(64 * 1024):
@@ -412,12 +417,14 @@ class DownloadService:
                             )
                     handle.write(chunk)
                     done += len(chunk)
-                    if done - last_report >= 256 * 1024:
+                    now = time.monotonic()
+                    if now - last_report_at >= 2.0 or done - last_report >= report_bytes:
                         self.downloads.progress(
                             episode_id, DownloadState.DOWNLOADING, done, total
                         )
                         self._emit(episode_id, DownloadState.DOWNLOADING, done, total)
                         last_report = done
+                        last_report_at = now
             if total and done < total:
                 raise _TruncatedDownload("Download ended before the expected size.")
             if cancellation.is_set():
