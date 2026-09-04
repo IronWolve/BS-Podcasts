@@ -110,6 +110,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None):
         super().__init__(parent)
+        self.setAcceptDrops(True)
         self.library = library
         self.jobs = jobs
         self.download_jobs = download_jobs or jobs
@@ -1964,6 +1965,9 @@ class MainWindow(QMainWindow):
         path, _filter = QFileDialog.getOpenFileName(self, "Import OPML", str(Path.home()), "OPML files (*.opml *.xml);;All files (*)")
         if not path:
             return
+        self._import_opml_path(path)
+
+    def _import_opml_path(self, path: str):
         try:
             added = self.library.import_opml(Path(path).expanduser().read_bytes())
         except Exception as exc:
@@ -1994,12 +1998,17 @@ class MainWindow(QMainWindow):
             return
         self._notify(f"Exported subscriptions to {Path(path).name}", "success")
 
+    AUDIO_SUFFIXES = (".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac", ".aac", ".m4b")
+
     def _import_local_audio(self):
         if self.library is None:
             return
         path, _filter = QFileDialog.getOpenFileName(self, "Import local audio", str(Path.home()), "Audio files (*.mp3 *.m4a *.ogg *.opus *.wav *.flac);;All files (*)")
         if not path:
             return
+        self._import_local_audio_path(path)
+
+    def _import_local_audio_path(self, path: str):
         try:
             show = self.library.import_local_audio(path)
         except Exception as exc:
@@ -2008,6 +2017,68 @@ class MainWindow(QMainWindow):
         self.navigation.select(PAGE_PODCASTS)
         self._request_reload(lambda: self.podcast_page.select_show(show.id))
         self._notify("Local audio imported", "success")
+
+    # ------------------------------------------------------------- drag & drop
+    # Dropping an OPML file, an audio file or a feed URL onto the window
+    # does what the dialogs do (audit F-103). Only the rail accepted drops
+    # before, and only its own episode rows.
+    def _dropped_payload(self, mime):
+        if mime.hasUrls():
+            for url in mime.urls():
+                if url.isLocalFile():
+                    path = url.toLocalFile()
+                    suffix = Path(path).suffix.lower()
+                    if suffix in (".opml", ".xml"):
+                        return ("opml", path)
+                    if suffix in self.AUDIO_SUFFIXES:
+                        return ("audio", path)
+                elif url.scheme() in ("http", "https"):
+                    return ("feed", url.toString())
+        text = mime.text().strip() if mime.hasText() else ""
+        if text.startswith(("http://", "https://")) and " " not in text:
+            return ("feed", text)
+        return None
+
+    def dragEnterEvent(self, event):
+        if self.library is not None and self._dropped_payload(event.mimeData()) is not None:
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if self.library is not None and self._dropped_payload(event.mimeData()) is not None:
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        payload = self._dropped_payload(event.mimeData()) if self.library is not None else None
+        if payload is None:
+            super().dropEvent(event)
+            return
+        event.acceptProposedAction()
+        kind, value = payload
+        if kind == "opml":
+            self._import_opml_path(value)
+        elif kind == "audio":
+            self._import_local_audio_path(value)
+        else:
+            self._add_podcast_url(value)
+
+    def _add_podcast_url(self, feed_url: str):
+        """Subscribe to a feed URL without the dialog (drops, later: CLI)."""
+        if self.library is None:
+            return
+        try:
+            show = self.library.add_subscription(feed_url)
+        except ValueError as exc:
+            self.podcast_page.banner.show_state("error", str(exc))
+            self.navigation.select(PAGE_PODCASTS)
+            return
+        self.navigation.select(PAGE_PODCASTS)
+        self.podcast_page.banner.show_state("loading", f"Added {show.title or 'podcast'} — fetching episodes…")
+        self._request_reload(lambda: self.podcast_page.select_show(show.id))
+        self._submit_refresh(show.id)
 
     def _subscribe_url(self, feed_url: str):
         if self.library is None:
@@ -4494,7 +4565,6 @@ class MainWindow(QMainWindow):
         else:
             self.context.hide()
         self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)
-        self._sync_context_dismissible()
 
     def _show_all_episodes(self, filter_value: str = "All"):
         if self.library is None:
@@ -4574,7 +4644,6 @@ class MainWindow(QMainWindow):
         self._context_forced = True
         self._context_user_closed = False
         self._reveal_context()
-        self._sync_context_dismissible()
         self.player.set_queue_open(self.context.mode() == 1)
         self._layout_save_timer.start()
 
@@ -5197,7 +5266,6 @@ class MainWindow(QMainWindow):
         self._context_forced = True
         self._context_user_closed = False
         self._reveal_context()
-        self.context.set_dismissible(True)
         self.player.set_queue_open(True)
 
     def _hide_context(self):
@@ -5208,12 +5276,7 @@ class MainWindow(QMainWindow):
         self._context_user_closed = True
         self.context.hide()
         self.player.set_queue_open(False)
-        self._sync_context_dismissible()
         self._layout_save_timer.start()
-
-    def _sync_context_dismissible(self):
-        mode = self._last_mode or "wide"
-        self.context.set_dismissible(mode == "narrow" or self._context_forced)
 
     def _apply_layout_mode(self, width: int):
         # Breakpoints scale with the type size like every other dimension;
@@ -5249,7 +5312,6 @@ class MainWindow(QMainWindow):
             self.context.hide()
         self._last_mode = mode
         self.player.set_queue_open(self.context.isVisible() and self.context.mode() == 1)
-        self._sync_context_dismissible()
 
     def resizeEvent(self, event):
         self._apply_layout_mode(event.size().width())

@@ -80,7 +80,7 @@ else
         'import importlib.util; required=("PyInstaller", "PySide6", "mpv", "requests", "mutagen"); missing=[name for name in required if importlib.util.find_spec(name) is None]; raise SystemExit("Missing build packages; rerun build.sh --setup: " + ", ".join(missing) if missing else 0)'
 fi
 
-ICON_SOURCE="${REPO}/src/bs_podcasts/assets/branding/bs-podcasts-icon-master.png"
+ICON_SOURCE="${REPO}/packaging/branding/bs-podcasts-icon-master.png"
 ICON_ICNS="${TMP}/BS-Podcasts.icns"
 ICON_TMP="$(mktemp -d "${TMP}/BS-Podcasts-icon.XXXXXX")"
 ICONSET="${ICON_TMP}/BS-Podcasts.iconset"
