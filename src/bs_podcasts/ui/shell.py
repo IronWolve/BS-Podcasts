@@ -970,18 +970,29 @@ class MainWindow(QMainWindow):
         self._run_task("reset-library", work)
 
     def _show_about(self):
-        info = {}
-        if self.library is not None:
-            shows = self.library.shows()
-            episodes = sum(show.episode_count for show in shows)
-            info["library"] = f"{len(shows)} podcast{'s' if len(shows) != 1 else ''}  ·  {episodes} episodes"
-            info["data_root"] = str(self.library.repository.database.path.parent)
-        if self.downloads is not None:
-            used, free, _total = self.downloads.storage()
-            info["storage"] = f"{self._format_bytes(used)} of downloads  ·  {self._format_bytes(free)} free"
-        if self.playback is not None:
-            info["engine"] = type(self.playback.engine).__name__.replace("Engine", "") or "—"
-        AboutDialog(info, self).exec()
+        library, downloads, playback = self.library, self.downloads, self.playback
+
+        def work():
+            # The show aggregate (85 ms on a large library) and the disk-usage
+            # call ran on the click thread before the dialog could appear
+            # (audit F-131); both belong on a worker.
+            info = {}
+            if library is not None:
+                shows = library.shows()
+                episodes = sum(show.episode_count for show in shows)
+                info["library"] = f"{len(shows)} podcast{'s' if len(shows) != 1 else ''}  ·  {episodes} episodes"
+                info["data_root"] = str(library.repository.database.path.parent)
+            if downloads is not None:
+                used, free, _total = downloads.storage()
+                info["storage"] = f"{self._format_bytes(used)} of downloads  ·  {self._format_bytes(free)} free"
+            if playback is not None:
+                info["engine"] = type(playback.engine).__name__.replace("Engine", "") or "—"
+            return info
+
+        def apply(info):
+            AboutDialog(info if isinstance(info, dict) else {}, self).exec()
+
+        self._run_read(work, apply, "about")
 
     def _notify(self, message: str, tone: str = "info", action: str = "", callback=None):
         self.toast.show_message(message, tone, action, callback)
@@ -1164,16 +1175,29 @@ class MainWindow(QMainWindow):
     def _apply_retention(self, show_id: int, preview_required: bool = False):
         if self.library is None or self.downloads is None:
             return
-        show = self.library.repository.get_show(show_id)
-        if show is None or (not show.retention_keep and not show.retention_days):
-            return
-        candidates = self.library.repository.retention_candidates(
-            show_id, show.retention_keep, show.retention_days
-        )
-        previews = [self.downloads.cleanup_preview(item.id) for item in candidates]
-        previews = [preview for preview in previews if preview is not None]
-        if not previews:
-            return
+        repository, downloads = self.library.repository, self.downloads
+
+        def work():
+            # Candidate query plus one stat() per downloaded file: worker
+            # work, not click-thread work (audit F-124).
+            show = repository.get_show(show_id)
+            if show is None or (not show.retention_keep and not show.retention_days):
+                return ()  # not None: an EMPTY read result would raise the error banner
+            candidates = repository.retention_candidates(show_id, show.retention_keep, show.retention_days)
+            previews = [downloads.cleanup_preview(item.id) for item in candidates]
+            return show, [preview for preview in previews if preview is not None]
+
+        def apply(value):
+            if not value:
+                return
+            show, previews = value
+            if previews:
+                self._confirm_retention(show, previews, preview_required)
+
+        self._run_read(work, apply, f"retention-{show_id}")
+
+    def _confirm_retention(self, show, previews, preview_required: bool):
+        show_id = show.id
         confirmation_key = f"retention.confirmed.{show_id}"
         first_cleanup = self.library.setting(confirmation_key, "0") != "1"
         if preview_required or first_cleanup:
