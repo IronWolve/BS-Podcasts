@@ -404,7 +404,7 @@ def main() -> int:
         p.play.click()
         process(app)
         check(playback.count("play_pause") >= 3, "player play/pause button")
-        p.slider.setValue(500)
+        p.slider.setValue(p.slider.maximum() // 2)  # the span follows the duration now (audit F-120)
         p.slider.sliderReleased.emit()
         process(app)
         check(playback.last("seek") is not None and abs(playback.last("seek")[1] - 1260.0) < 1, f"slider seek: {playback.last('seek')}")

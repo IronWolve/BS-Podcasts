@@ -1766,16 +1766,25 @@ class SleepPopover(Popover):
         self.remaining = QLabel("No timer running")
         self.remaining.setObjectName("meta")
         layout.addWidget(self.remaining)
+        at_end = QPushButton("At the end of this episode")
+        at_end.setObjectName("quietButton")
+        at_end.setToolTip("Stop when the playing episode finishes instead of continuing to the next one")
+        at_end.clicked.connect(lambda: self._choose(-1))
+        layout.addWidget(at_end)
         cancel = QPushButton("Cancel timer")
         cancel.setObjectName("textButton")
         cancel.clicked.connect(lambda: self._choose(0))
         layout.addWidget(cancel, alignment=Qt.AlignmentFlag.AlignLeft)
 
     def _choose(self, minutes: int):
-        self.sleep_selected.emit(minutes * 60)
+        # -1 means "at the end of this episode" (audit F-098)
+        self.sleep_selected.emit(-1 if minutes < 0 else minutes * 60)
         self.hide()
 
-    def set_deadline(self, deadline):
+    def set_deadline(self, deadline, at_end: bool = False):
+        if at_end:
+            self.remaining.setText("Stops at the end of this episode")
+            return
         if deadline is None:
             self.remaining.setText("No timer running")
             return
@@ -3106,6 +3115,8 @@ class PlayerBar(QFrame):
         self.elapsed.setObjectName("timeLabel")
         self.elapsed.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.slider = SeekSlider()
+        # 1,000 steps made one step 11 s on a 3-hour episode (audit F-120);
+        # the span follows the duration (one step ≈ one second) from _set_span.
         self.slider.setRange(0, 1000)
         self.slider.setAccessibleName("Playback position")
         self.slider.setValue(0)
@@ -3522,7 +3533,7 @@ class PlayerBar(QFrame):
             position = max(0.0, float(snapshot.position))
             if not self.slider.isSliderDown():
                 self.slider.blockSignals(True)
-                self.slider.setValue(int(1000 * position / self._duration) if self._duration else 0)
+                self.slider.setValue(int(self.slider.maximum() * position / self._duration) if self._duration else 0)
                 self.slider.blockSignals(False)
             self.elapsed.setText(self._time(position))
             self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
@@ -3542,11 +3553,14 @@ class PlayerBar(QFrame):
         self._elide_now_labels()
         self.art.set_artwork(snapshot.artwork_path, initials(snapshot.show_title or snapshot.title), "")
         self._duration = max(0.0, float(snapshot.duration))
+        span = max(1000, int(self._duration))
+        if self.slider.maximum() != span:
+            self.slider.setRange(0, span)
         position = max(0.0, float(snapshot.position))
         self.slider.set_duration(self._duration, self._time)
         if not self.slider.isSliderDown():
             self.slider.blockSignals(True)
-            self.slider.setValue(int(1000 * position / self._duration) if self._duration else 0)
+            self.slider.setValue(int(self.slider.maximum() * position / self._duration) if self._duration else 0)
             self.slider.blockSignals(False)
         self.elapsed.setText(self._time(position))
         self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
@@ -3559,7 +3573,7 @@ class PlayerBar(QFrame):
         self.volume.setToolTip("Muted" if self._volume == 0 else f"Volume {int(self._volume)}")
         self._ab_active = snapshot.ab_start is not None
         self._trim_active = snapshot.trim_level != "off"
-        self._sleep_active = snapshot.sleep_deadline is not None
+        self._sleep_active = snapshot.sleep_deadline is not None or getattr(snapshot, "sleep_at_end", False)
         if snapshot.ab_start is None:
             self.ab.setChecked(False)
             self.ab.setToolTip("A–B repeat: set point A  ·  Ctrl+Shift+A")
@@ -3571,8 +3585,8 @@ class PlayerBar(QFrame):
             self.ab.setToolTip(f"Repeating {self._time(snapshot.ab_start)}–{self._time(snapshot.ab_end)} — click to clear")
         self.trim.setChecked(snapshot.trim_level != "off")
         self.trim.setToolTip(f"Silence trim: {snapshot.trim_level}  ·  Ctrl+T")
-        sleeping = snapshot.sleep_deadline is not None
-        self.sleep_popover.set_deadline(snapshot.sleep_deadline)
+        sleeping = snapshot.sleep_deadline is not None or getattr(snapshot, "sleep_at_end", False)
+        self.sleep_popover.set_deadline(snapshot.sleep_deadline, getattr(snapshot, "sleep_at_end", False))
         self.sleep.setChecked(sleeping)
         self.sleep.setToolTip("Sleep timer running — click to change" if sleeping else "Sleep timer")
         playing = str(snapshot.state) == "playing"
@@ -3643,7 +3657,7 @@ class PlayerBar(QFrame):
         if started_on is not None and started_on != getattr(self, "_track_key", None):
             return
         if duration:
-            self.seek_requested.emit(duration * self.slider.value() / 1000)
+            self.seek_requested.emit(duration * self.slider.value() / max(1, self.slider.maximum()))
 
     def _show_speed(self):
         self.speed_popover.set_current(self._speed)

@@ -35,6 +35,7 @@ class PlaybackSnapshot:
     speed: float = 1.0
     volume: float = 100.0
     sleep_deadline: float | None = None
+    sleep_at_end: bool = False  # pause when the current episode finishes (audit F-098)
     message: str = ""
     ab_start: float | None = None
     ab_end: float | None = None
@@ -498,13 +499,20 @@ class PlaybackService:
             self._sleep_timer.start()
             self._emit()
 
+    def set_sleep_at_end(self):
+        """Stop when the current episode ends instead of after N minutes."""
+        with self._lock:
+            self.cancel_sleep_timer()
+            self.snapshot = replace(self.snapshot, sleep_at_end=True)
+            self._emit()
+
     def cancel_sleep_timer(self):
         with self._lock:
             if self._sleep_timer:
                 self._sleep_timer.cancel()
                 self._sleep_timer = None
-            if self.snapshot.sleep_deadline is not None:
-                self.snapshot = replace(self.snapshot, sleep_deadline=None)
+            if self.snapshot.sleep_deadline is not None or self.snapshot.sleep_at_end:
+                self.snapshot = replace(self.snapshot, sleep_deadline=None, sleep_at_end=False)
                 self._emit()
 
     def shutdown(self):
@@ -686,6 +694,10 @@ class PlaybackService:
         self.repository.dequeue(episode_id)
         queue = self.repository.list_queue()
         show = self.repository.get_show(self.snapshot.show_id) if self.snapshot.show_id else None
+        if self.snapshot.sleep_at_end:
+            # The sleep timer was 'end of this episode': finish it, do not advance.
+            self.snapshot = replace(self.snapshot, sleep_at_end=False)
+            queue = []
         if queue and (show is None or show.auto_continue):
             try:
                 self.load_episode(queue[0].id, autoplay=True)
