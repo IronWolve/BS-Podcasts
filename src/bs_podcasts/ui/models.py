@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QToolTip
 
 from . import icons
 from .pixmaps import cover, initials
-from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, app_font, scaled_px
+from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, app_font, scaled_dim, scaled_px
 
 # Widest an episode row's title/meta column is allowed to grow. Rows span the
 # full pane, so without a cap a title on a maximised window trails off across
@@ -310,7 +310,8 @@ def _badge(painter: QPainter, right: int, top: int, text: str, color: str, fille
     """Draw a pill badge right-aligned at `right`; returns its rect."""
     font = app_font(11, QFont.Weight.DemiBold)
     painter.setFont(font)
-    width = painter.fontMetrics().horizontalAdvance(text) + 16
+    height = scaled_dim(height)
+    width = painter.fontMetrics().horizontalAdvance(text) + scaled_dim(16)
     rect = QRect(right - width, top, width, height)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     if filled:
@@ -372,11 +373,11 @@ class PodcastDelegate(QStyledItemDelegate):
         focused = bool(option.state & QStyle.StateFlag.State_HasFocus)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(COLORS["surface_raised"] if selected or hovered else COLORS["surface"]))
-        painter.drawRoundedRect(card, 14, 14)
+        painter.drawRoundedRect(card, scaled_dim(14), scaled_dim(14))
         if selected:
             painter.setPen(QPen(QColor(COLORS["accent"] if focused else COLORS["border"]), 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(card, 14, 14)
+            painter.drawRoundedRect(card, scaled_dim(14), scaled_dim(14))
 
         pad = self.CARD_PAD
         art_size = card.width() - 2 * pad
@@ -452,7 +453,8 @@ class PodcastDelegate(QStyledItemDelegate):
 
         health_color = HEALTH_COLORS.get(item.health)
         if health_color and item.show_id:
-            dot = QRect(card.right() - pad - 8, meta_rect.center().y() - 3, 7, 7)
+            side = scaled_dim(7)
+            dot = QRect(card.right() - pad - scaled_dim(8), meta_rect.center().y() - side // 2, side, side)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(health_color))
             painter.drawEllipse(dot)
@@ -576,7 +578,7 @@ class EpisodeDelegate(QStyledItemDelegate):
             (bool(item.episode_id) and item.episode_id == self.playing_id)
             or (not item.episode_id and bool(item.media_url) and item.media_url == self.playing_source)
         )
-        radius = 12
+        radius = scaled_dim(12)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(COLORS["surface_raised"] if selected or hovered else COLORS["surface"]))
         painter.drawRoundedRect(row, radius, radius)

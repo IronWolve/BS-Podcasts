@@ -464,6 +464,8 @@ class MainWindow(QMainWindow):
             ("navigate_forward", "Alt+Right", self.navigate_forward),
             ("quit", "Ctrl+Q", self._request_quit),
             ("help", "Ctrl+/", self._show_shortcuts),
+            ("cycle_region", "F6", lambda: self._cycle_region(1)),
+            ("cycle_region_back", "Shift+F6", lambda: self._cycle_region(-1)),
         ):
             self.shortcuts.add(name, sequence, handler)
 
@@ -1154,6 +1156,57 @@ class MainWindow(QMainWindow):
             return show.title, reclaimed, len(result.get("failed_files", ()))
 
         self._run_task("unsubscribe", work, show_id)
+
+    def _focus_regions(self):
+        """Focus targets for F6 cycling: rail, page, pane, player. Tab alone
+        walked ~130 stops to cross the window (audit F-100)."""
+        page = self.pages.currentWidget()
+        page_target = getattr(page, "view", None)
+        if page_target is None and hasattr(page, "header") and page.header.search.isVisible():
+            page_target = page.header.search
+        rail_index = max(0, min(self.pages.currentIndex(), len(self.navigation._buttons) - 1))
+        regions = [
+            (self.navigation, self.navigation._buttons[rail_index][0] if self.navigation._buttons else self.navigation),
+            (page, page_target or page),
+            (self.context, getattr(self.context, "primary", self.context)),
+            (self.player, self.player.play),
+        ]
+        return [(owner, target) for owner, target in regions if owner is not None and owner.isVisible()]
+
+    def _cycle_region(self, direction: int):
+        regions = self._focus_regions()
+        if not regions:
+            return
+        focused = QApplication.focusWidget()
+        current = -1
+        for index, (owner, _target) in enumerate(regions):
+            widget = focused
+            while widget is not None:
+                if widget is owner:
+                    current = index
+                    break
+                widget = widget.parentWidget()
+            if current >= 0:
+                break
+        for step in range(1, len(regions) + 1):
+            owner, target = regions[(current + direction * step) % len(regions)]
+            widget = self._first_focusable(owner, target)
+            if widget is None:
+                continue
+            widget.setFocus(Qt.FocusReason.TabFocusReason)
+            if QApplication.focusWidget() is widget:
+                return
+
+    @staticmethod
+    def _first_focusable(owner, preferred):
+        candidates = [preferred] + [w for w in owner.findChildren(QWidget) if w is not preferred]
+        for widget in candidates:
+            if widget is None or not widget.isVisible() or not widget.isEnabled():
+                continue
+            if widget.focusPolicy() in (Qt.FocusPolicy.NoFocus, Qt.FocusPolicy.ClickFocus):
+                continue
+            return widget
+        return None
 
     def _focus_search(self):
         page = self.pages.currentWidget()

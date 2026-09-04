@@ -1215,6 +1215,8 @@ SHORTCUT_GROUPS = (
         ("search_alt", "Filter the current page"),
         ("queue_selected", "Add selection to Up Next"),
         ("help", "Keyboard shortcuts"),
+        ("cycle_region", "Move focus to the next area"),
+        ("cycle_region_back", "Move focus to the previous area"),
     )),
     ("Navigation", (
         ("navigate_back", "Back"),
