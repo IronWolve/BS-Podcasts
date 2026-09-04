@@ -1,13 +1,15 @@
 """Cached, cover-cropped, rounded artwork pixmaps shared by widgets and delegates."""
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
 import math
 import os
 import threading
+import weakref
 
-from PySide6.QtCore import QRect, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QImageReader, QPainter, QPainterPath, QPixmap, QPixmapCache
+from PySide6.QtCore import QObject, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPainterPath, QPixmap, QPixmapCache
 
 from . import icons
 from .theme import COLORS, app_font
@@ -178,18 +180,7 @@ def initials(text: str) -> str:
     return "".join(word[0] for word in words[:2]).upper() or "—"
 
 
-def _source(path: str, width: int, height: int) -> QPixmap | None:
-    """Decode artwork near its painted size instead of loading full covers.
-
-    Scrolling can reveal many unique episode images in quick succession. A
-    target-sized reader keeps those first paints small; the finished rounded
-    covers remain in QPixmapCache for subsequent paints.
-    """
-    key = f"src:{path}:{width}x{height}"
-    cached = QPixmapCache.find(key)
-    if cached is not None and not cached.isNull():
-        return cached
-
+def _target_reader(path: str, width: int, height: int) -> QImageReader:
     reader = QImageReader(path)
     reader.setDecideFormatFromContent(True)
     reader.setAutoTransform(True)
@@ -202,12 +193,110 @@ def _source(path: str, width: int, height: int) -> QPixmap | None:
                 max(height, math.ceil(source_size.height() * factor)),
             )
         )
-    image = reader.read()
-    if image.isNull():
+    return reader
+
+
+def _read_image(path: str, width: int, height: int) -> QImage:
+    """Decode near the painted size. Safe on any thread (QImage, not QPixmap)."""
+    return _target_reader(path, width, height).read()
+
+
+# --- asynchronous decode -----------------------------------------------------
+# paint() used to call QImageReader.read() inline: 5-7 ms per cold cover, and
+# a grid scroll that revealed twenty new covers froze for 180-320 ms (audit
+# F-027). Decoding now happens on one worker thread; paint draws the cached
+# pixmap when there is one and the placeholder otherwise, and the widgets that
+# asked are repainted when the image lands.
+_decoder: ThreadPoolExecutor | None = None
+_decode_lock = threading.Lock()
+_inflight: set[str] = set()
+_failed: set[str] = set()
+_watchers: "weakref.WeakSet" = weakref.WeakSet()
+_bridge = None
+
+
+class _DecodeBridge(QObject):
+    decoded = Signal(str, QImage)
+
+    def __init__(self):
+        super().__init__()
+        # Queued: the signal is emitted from the decode thread; the slot must
+        # run on the GUI thread because it creates QPixmaps and repaints.
+        self.decoded.connect(self._on_decoded, Qt.ConnectionType.QueuedConnection)
+
+    def _on_decoded(self, key: str, image: QImage):
+        with _decode_lock:
+            _inflight.discard(key)
+            if image.isNull():
+                _failed.add(key)
+        if not image.isNull():
+            QPixmapCache.insert(key, QPixmap.fromImage(image))
+        for widget in list(_watchers):
+            try:
+                widget.update()
+            except RuntimeError:
+                pass  # the C++ widget is gone; the WeakSet drops it
+
+
+def _decode_job(key: str, path: str, width: int, height: int, bridge: _DecodeBridge):
+    try:
+        image = _read_image(path, width, height)
+    except Exception:
+        image = QImage()
+    bridge.decoded.emit(key, image)
+
+
+def _schedule_decode(key: str, path: str, width: int, height: int, notify) -> None:
+    global _decoder, _bridge
+    if notify is not None:
+        _watchers.add(notify)
+    with _decode_lock:
+        if key in _inflight or key in _failed:
+            return
+        _inflight.add(key)
+        if _bridge is None:
+            _bridge = _DecodeBridge()
+        if _decoder is None:
+            _decoder = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bs-decode")
+        bridge = _bridge
+    _decoder.submit(_decode_job, key, path, width, height, bridge)
+
+
+def _sync_forced() -> bool:
+    return os.environ.get("BS_PODCASTS_SYNC_ARTWORK") == "1"
+
+
+def pending_decodes() -> int:
+    """Covers still being decoded (tests and screenshot tools wait on this)."""
+    with _decode_lock:
+        return len(_inflight)
+
+
+def _source(path: str, width: int, height: int, sync: bool = False, notify=None) -> QPixmap | None:
+    """Artwork decoded near its painted size, from QPixmapCache.
+
+    Returns None when the image is not ready yet (a decode has been scheduled
+    and `notify` will be repainted when it lands) or cannot be decoded. With
+    `sync=True` the caller waits for the decode on its own thread — for one-off
+    surfaces such as dialogs, never for delegates.
+    """
+    key = f"src:{path}:{width}x{height}"
+    cached = QPixmapCache.find(key)
+    if cached is not None and not cached.isNull():
+        return cached
+    if key in _failed:
         return None
-    pixmap = QPixmap.fromImage(image)
-    QPixmapCache.insert(key, pixmap)
-    return pixmap
+    if sync or _sync_forced():
+        image = _read_image(path, width, height)
+        if image.isNull():
+            with _decode_lock:
+                _failed.add(key)
+            return None
+        pixmap = QPixmap.fromImage(image)
+        QPixmapCache.insert(key, pixmap)
+        return pixmap
+    _schedule_decode(key, path, width, height, notify)
+    return None
 
 
 def cover(
@@ -218,11 +307,16 @@ def cover(
     fallback_text: str = "",
     fallback_color: str = "",
     scale: float = 1.0,
+    sync: bool = False,
+    notify=None,
 ) -> QPixmap:
     """Return artwork scaled to fill `width`x`height`, centre-cropped and rounded.
 
     When the file is missing the placeholder tile is drawn with `fallback_text`
     initials on `fallback_color` so both branches share identical geometry.
+    The same placeholder is returned while the real image is still decoding on
+    the worker thread; `notify` (a widget) is repainted when it is ready.
+    `sync=True` decodes on the calling thread instead.
     """
     # The fallback branches below read the live COLORS dict, which apply_theme
     # mutates in place — and rebuilding the window does not clear QPixmapCache.
@@ -230,9 +324,7 @@ def cover(
     # switch was served back afterwards in the old theme's colours, for as long
     # as the cache kept it. Bake the resolved colours into the key.
     theme_key = (
-        ""
-        if path
-        else f":{fallback_color or COLORS['surface_soft']}:{COLORS['muted']}"
+        f":{fallback_color or COLORS['surface_soft']}:{COLORS['muted']}"
         f":{COLORS['surface_raised']}:{COLORS['border']}"
     )
     key = f"cover:{path}:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}"
@@ -241,6 +333,14 @@ def cover(
         return cached
     physical_w = max(1, int(round(width * scale)))
     physical_h = max(1, int(round(height * scale)))
+    source = _source(path, physical_w, physical_h, sync, notify) if path else None
+    if path and source is None and f"src:{path}:{physical_w}x{physical_h}" not in _failed:
+        # Still decoding: draw the placeholder under its own key so the real
+        # cover is built (and cached under `key`) on the repaint that follows.
+        key = f"coverpending:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}"
+        cached = QPixmapCache.find(key)
+        if cached is not None and not cached.isNull():
+            return cached
     result = QPixmap(physical_w, physical_h)
     result.fill(Qt.GlobalColor.transparent)
     painter = QPainter(result)
@@ -249,7 +349,6 @@ def cover(
     clip = QPainterPath()
     clip.addRoundedRect(QRectF(0, 0, physical_w, physical_h), radius * scale, radius * scale)
     painter.setClipPath(clip)
-    source = _source(path, physical_w, physical_h) if path else None
     if source is not None:
         scaled = source.scaled(
             physical_w,
