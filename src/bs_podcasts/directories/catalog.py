@@ -1,6 +1,6 @@
 """Public podcast-directory adapter; no authentication required."""
 
-from ..net import SessionSlot
+from ..net import SessionSlot, describe_network_error
 
 from ..domain import DirectoryCandidate
 from .base import DirectoryError
@@ -218,7 +218,7 @@ class PublicDirectory:
             response.raise_for_status()
             payload = response.json()
         except (requests.RequestException, ValueError) as exc:
-            raise DirectoryError(str(exc)) from exc
+            raise DirectoryError(describe_network_error(exc, "the directory")) from exc
 
         results = []
         for row in payload.get("results", []):

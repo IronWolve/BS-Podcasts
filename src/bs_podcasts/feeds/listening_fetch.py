@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import re
 
-from ..net import USER_AGENT, make_session
+from ..net import USER_AGENT, describe_network_error, make_session
 from ..urlguard import UnsafeUrl, ensure_fetchable
 
 
@@ -38,15 +38,21 @@ def _get(url: str, session=None) -> tuple[bytes, str]:
         ensure_fetchable(url, "Chapters/transcript URL")
     except UnsafeUrl as exc:
         raise ListeningFetchError(str(exc)) from exc
+    import requests
+
     client = session or make_session()
-    with client.get(url, timeout=TIMEOUT, stream=True, headers={"User-Agent": USER_AGENT}) as response:
-        response.raise_for_status()
-        content = bytearray()
-        for chunk in response.iter_content(64 * 1024):
-            content.extend(chunk)
-            if len(content) > MAX_BYTES:
-                raise ListeningFetchError("File exceeds the size limit.")
-        return bytes(content), response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    try:
+        with client.get(url, timeout=TIMEOUT, stream=True, headers={"User-Agent": USER_AGENT}) as response:
+            response.raise_for_status()
+            content = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                content.extend(chunk)
+                if len(content) > MAX_BYTES:
+                    raise ListeningFetchError("File exceeds the size limit.")
+            return bytes(content), response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    except requests.RequestException as exc:
+        # Same sentence-a-person-can-act-on rule as feeds and downloads.
+        raise ListeningFetchError(describe_network_error(exc, "the chapters/transcript file")) from exc
 
 
 def fetch_chapters(url: str, session=None) -> list[ChapterData]:

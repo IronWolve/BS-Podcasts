@@ -5,7 +5,7 @@ import json
 import re
 import time
 
-from ..net import SessionSlot
+from ..net import SessionSlot, describe_network_error
 
 from ..domain import DirectoryCandidate
 from .base import DirectoryError
@@ -74,7 +74,7 @@ class DirectoryCharts:
             payload = json.loads(unescape(match.group(1)))
             shelves = payload["data"][0]["data"]["shelves"]
         except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
-            raise DirectoryError(str(exc)) from exc
+            raise DirectoryError(describe_network_error(exc, "the directory")) from exc
 
         wanted = CHART_TITLES[chart_type]
         shelf = next(
@@ -143,7 +143,7 @@ class DirectoryCharts:
             data = response.json()["results"][media_type][0]["data"]
         except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
             self._developer_token = ""
-            raise DirectoryError(str(exc)) from exc
+            raise DirectoryError(describe_network_error(exc, "the directory")) from exc
         return [
             candidate
             for rank, item in enumerate(data, start=1)
@@ -188,7 +188,7 @@ class DirectoryCharts:
             self._developer_token = token.group(1)
             return self._developer_token
         except requests.RequestException as exc:
-            raise DirectoryError(str(exc)) from exc
+            raise DirectoryError(describe_network_error(exc, "the directory")) from exc
 
     def _api_candidate(self, item, chart_type: str, rank: int):
         attributes = item.get("attributes", {})
