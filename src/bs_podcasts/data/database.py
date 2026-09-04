@@ -89,8 +89,32 @@ class Database:
         self._connections = threading.local()
         self._generation = 0
         self._preexisting = self.path.is_file() and self.path.stat().st_size > 0
+        if self.path.is_file() and not self._preexisting:
+            # An existing but empty file is damage (full disk, failed copy,
+            # quarantine placeholder), not a first launch. Opening it as a
+            # fresh library silently hid every subscription (audit F-082).
+            # Only when no backup exists at all is "start empty" the safe call.
+            backup = self._recovery_backup()
+            if backup is not None:
+                raise sqlite3.DatabaseError(
+                    f"The library file is empty (0 bytes): {self.path}\n\n"
+                    f"A backup exists: {backup}\n"
+                    "To recover, close the app, rename the backup to library.db in the same folder, "
+                    "and start again. To start with an empty library instead, delete the empty file."
+                )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+
+    def _recovery_backup(self) -> Path | None:
+        """Newest non-empty backup next to the library, if any."""
+        candidates = [self.path.with_suffix(self.path.suffix + ".pre-migration.bak")]
+        backups = self.path.parent / "backups"
+        if backups.is_dir():
+            candidates.extend(backups.glob("library-*.db"))
+        usable = [c for c in candidates if c.is_file() and c.stat().st_size > 0]
+        if not usable:
+            return None
+        return max(usable, key=lambda c: c.stat().st_mtime)
 
     def _new_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10.0)
