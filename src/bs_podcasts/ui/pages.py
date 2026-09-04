@@ -1396,7 +1396,7 @@ class SettingsPage(BasePage):
 
         # Listening statistics -------------------------------------------------
         stats_card, stats_form = self._card("Listening statistics", "Stored only in your local library.")
-        self.statistics = QLabel("Not calculated yet.")
+        self.statistics = QLabel("Not calculated yet")
         self.statistics.setObjectName("meta")
         self.statistics.setWordWrap(True)
         stats_refresh = QPushButton("Refresh statistics")

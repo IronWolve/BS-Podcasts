@@ -26,6 +26,7 @@ def open_web_url(url):
     QDesktopServices.openUrl(QUrl(value))
 
 from PySide6.QtWidgets import (
+    QGridLayout,
     QDialog,
     QApplication,
     QFrame,
@@ -614,8 +615,13 @@ class EpisodeInfoDialog(StyledDialog):
             [(name, value) for name, value in rows if name not in source_names],
             [(name, value) for name, value in rows if name in source_names],
         )
-        columns = QHBoxLayout()
+        # Two columns only when there is room: at the 560 px minimum the
+        # second column was squeezed to ~90 px and hard-clipped its URLs
+        # (audit F-074). The grid is re-placed on resize (see resizeEvent).
+        columns = QGridLayout()
         columns.setSpacing(SPACE["xl"])
+        self._column_holders = []
+        self._two_columns = None
         self.value_labels = []
         for group in groups:
             form = QFormLayout()
@@ -636,11 +642,13 @@ class EpisodeInfoDialog(StyledDialog):
                 self.value_labels.append(field)
             holder = QWidget()
             holder.setLayout(form)
-            columns.addWidget(holder, 1, Qt.AlignmentFlag.AlignTop)
+            self._column_holders.append(holder)
         # Overflow scrolls instead of clipping: the row set grows with the
         # feed (transcripts, chapters, season data) and with the type scale.
         content = QWidget()
         content.setLayout(columns)
+        self._columns = columns
+        self._place_columns(self.width() >= 700)
         scroll = QScrollArea()
         # Named so the theme's transparent-viewport rule applies: unnamed, the
         # viewport painted the palette's white behind light text (audit F-068).
@@ -662,6 +670,22 @@ class EpisodeInfoDialog(StyledDialog):
         buttons.addStretch(1)
         buttons.addWidget(close)
         self.card_layout.addLayout(buttons)
+
+    def _place_columns(self, two: bool):
+        if two == self._two_columns:
+            return
+        self._two_columns = two
+        for holder in self._column_holders:
+            self._columns.removeWidget(holder)
+        for index, holder in enumerate(self._column_holders):
+            row, column = (0, index) if two else (index, 0)
+            self._columns.addWidget(holder, row, column, Qt.AlignmentFlag.AlignTop)
+        for column in range(2):
+            self._columns.setColumnStretch(column, 1 if (two or column == 0) else 0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_columns(self.width() >= 700)
 
 
 class PodcastInfoDialog(StyledDialog):
