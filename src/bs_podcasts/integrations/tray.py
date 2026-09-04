@@ -79,15 +79,23 @@ class TrayController:
         if self.tray is None:
             return
         if snapshot.episode_id is None:
-            self.now_playing.setText("Nothing playing")
-            self.tray.setToolTip(APP_TITLE)
-            self.toggle.setText("Play / Pause")
+            texts = ("Nothing playing", APP_TITLE, "Play / Pause")
+        else:
+            title = snapshot.title if len(snapshot.title) <= 60 else snapshot.title[:57] + "…"
+            state = str(snapshot.state)
+            texts = (
+                f"{'▶' if state == 'playing' else '⏸'}  {title}",
+                f"{snapshot.title} — {snapshot.show_title}\n{APP_TITLE}",
+                "Pause" if state == "playing" else "Play",
+            )
+        # Ten position ticks a second reached here; a tray tooltip update is
+        # a shell round-trip on Windows, so only apply changed text (audit F-092).
+        if texts == getattr(self, "_texts", None):
             return
-        title = snapshot.title if len(snapshot.title) <= 60 else snapshot.title[:57] + "…"
-        state = str(snapshot.state)
-        self.now_playing.setText(f"{'▶' if state == 'playing' else '⏸'}  {title}")
-        self.tray.setToolTip(f"{snapshot.title} — {snapshot.show_title}\n{APP_TITLE}")
-        self.toggle.setText("Pause" if state == "playing" else "Play")
+        self._texts = texts
+        self.now_playing.setText(texts[0])
+        self.tray.setToolTip(texts[1])
+        self.toggle.setText(texts[2])
 
     def _show_window(self):
         self.window.showNormal()

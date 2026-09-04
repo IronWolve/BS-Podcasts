@@ -167,21 +167,26 @@ class MprisController(QObject):
     def _playback_changed(self, _snapshot):
         if not self.available:
             return
+        # Emit on change only. Every 10 Hz position tick used to broadcast
+        # the full property map (audit F-091); the spec also says Position
+        # is never signalled through PropertiesChanged.
+        current = {
+            "PlaybackStatus": self.player_adaptor.PlaybackStatus,
+            "Metadata": self.player_adaptor.Metadata,
+            "Volume": self.player_adaptor.Volume,
+            "Rate": self.player_adaptor.Rate,
+        }
+        previous = getattr(self, "_last_emitted", {})
+        changed = {key: value for key, value in current.items() if previous.get(key) != value}
+        if not changed:
+            return
+        self._last_emitted = current
         message = QDBusMessage.createSignal(
             "/org/mpris/MediaPlayer2",
             "org.freedesktop.DBus.Properties",
             "PropertiesChanged",
         )
-        message.setArguments([
-            "org.mpris.MediaPlayer2.Player",
-            {
-                "PlaybackStatus": self.player_adaptor.PlaybackStatus,
-                "Metadata": self.player_adaptor.Metadata,
-                "Volume": self.player_adaptor.Volume,
-                "Position": self.player_adaptor.Position,
-            },
-            [],
-        ])
+        message.setArguments(["org.mpris.MediaPlayer2.Player", changed, []])
         QDBusConnection.sessionBus().send(message)
 
     def shutdown(self):
