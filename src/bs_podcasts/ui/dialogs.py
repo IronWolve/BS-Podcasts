@@ -925,6 +925,21 @@ class ConfirmDialog(StyledDialog):
         self.add_buttons(action, default_primary=not destructive)
 
 
+class MigrationNotice(StyledDialog):
+    """Shown while a pending schema migration backs up and updates the
+    library. The first launch after an update spent 1-2 s on that with no
+    window at all (audit F-020)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Updating your library")
+        self.set_card_width(460)
+        self.add_heading(
+            "Updating your library…",
+            "Making a backup and applying the update. This takes a few seconds on a large library.",
+        )
+
+
 class StartupErrorDialog(StyledDialog):
     def __init__(self, title: str, message: str, parent=None):
         super().__init__(parent)

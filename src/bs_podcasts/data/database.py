@@ -220,6 +220,22 @@ class Database:
                     + "COMMIT;"
                 )
 
+    @classmethod
+    def migration_pending(cls, path) -> bool:
+        """True when opening `path` would back up and migrate an existing
+        library — the caller can show something before that blocks."""
+        path = Path(path)
+        try:
+            if not path.is_file() or path.stat().st_size == 0:
+                return False
+        except OSError:
+            return False
+        migrations_dir = Path(__file__).with_name("migrations")
+        versions = {int(m.name.split("_", 1)[0]) for m in migrations_dir.glob("[0-9][0-9][0-9]_*.sql")}
+        probe = cls.__new__(cls)
+        probe.path = path
+        return bool(versions - probe._applied_versions_readonly())
+
     def _applied_versions_readonly(self) -> set:
         """Applied migration versions, read without writing to the file."""
         try:
