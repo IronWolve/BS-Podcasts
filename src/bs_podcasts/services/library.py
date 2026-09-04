@@ -4,8 +4,6 @@ from urllib.parse import urlparse
 
 from ..data.repositories import LibraryRepository
 from ..domain import FeedData
-from ..feeds.local import LocalAudioImporter
-from ..feeds.opml import export_opml, import_opml
 
 
 class LibraryService:
@@ -109,6 +107,8 @@ class LibraryService:
         return self.repository.search(query, limit)
 
     def import_opml(self, content: bytes):
+        from ..feeds.opml import import_opml
+
         added = []
         seen = set()
         for entry in import_opml(content):
@@ -123,9 +123,13 @@ class LibraryService:
         return added
 
     def export_opml(self) -> bytes:
+        from ..feeds.opml import export_opml
+
         return export_opml(self.shows())
 
     def import_local_audio(self, path):
+        from ..feeds.local import LocalAudioImporter
+
         return LocalAudioImporter(self.repository).import_file(path)
 
     def mark_show_played(self, show_id: int, played: bool = True) -> int:

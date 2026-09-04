@@ -5,7 +5,6 @@ import os
 import sys
 import threading
 import sqlite3
-import traceback
 
 from PySide6.QtCore import QCoreApplication, QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -23,12 +22,10 @@ from .directories import DirectoryService, PublicDirectory
 from .downloads import DownloadService
 from .feeds import FeedFetcher, RefreshService
 from .jobs import JobRunner
-from .integrations import MprisController, TrayController
 from .logging_setup import configure_logging
 from .playback import ExternalPlayerEngine, LazyMpvEngine, PlaybackService
 from .services import LibraryService, ListeningService
 from .ui.shell import MainWindow
-from .ui.dialogs import StartupErrorDialog
 from .ui.theme import app_font, apply_app_stylesheet, apply_theme, apply_typography, load_fonts, resolve_theme
 
 
@@ -55,6 +52,8 @@ def _install_excepthook():
     logger = logging.getLogger("bs_podcasts")
 
     def hook(exc_type, exc_value, exc_traceback):
+        import traceback
+
         text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
         logger.error("Unhandled exception:\n%s", text)
         _write_crash_file(text)
@@ -68,6 +67,8 @@ def _install_excepthook():
     def thread_hook(args):
         if args.exc_type is SystemExit:
             return
+        import traceback
+
         text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
         logger.error("Unhandled exception in thread %s:\n%s", getattr(args.thread, "name", "?"), text)
         _write_crash_file(f"[thread {getattr(args.thread, 'name', '?')}]\n{text}")
@@ -95,6 +96,8 @@ def _install_stall_monitor(app, threshold_ms: int = 150):
             late = time.monotonic() - beat["at"]
             if late * 1000 >= threshold_ms and beat["at"] != reported:
                 frame = sys._current_frames().get(main_thread_id)
+                import traceback
+
                 stack = "".join(traceback.format_stack(frame)[-6:]) if frame else "(no frame)"
                 logger.warning("main thread stalled %.0f ms; main-thread stack:\n%s", late * 1000, stack)
                 reported = beat["at"]
@@ -255,6 +258,8 @@ def main() -> int:
     try:
         database = Database(root / "library.db")
     except (sqlite3.DatabaseError, OSError) as exc:
+        from .ui.dialogs import StartupErrorDialog
+
         dialog = StartupErrorDialog(
             "Library could not be opened",
             "Close the app and inspect "
@@ -304,7 +309,8 @@ def main() -> int:
     # run describes a worker that no longer exists. Park it as paused now, or
     # the UI offers a Pause that silently does nothing until the app restarts.
     downloads.reconcile_interrupted()
-    downloads.reconcile_missing()
+    # reconcile_missing() stat()s every completed download; it runs on a
+    # worker after the first paint instead (MainWindow), audit F-021.
     _mark("services")
     state = {"window": None}
 
@@ -335,8 +341,12 @@ def main() -> int:
             # them first put that work in front of every startup.
             if window is not state["window"]:
                 return  # superseded by a rebuild before this ran
+            from .integrations import TrayController
+
             window.tray = TrayController(window, playback)
             _mark("tray")
+            from .integrations import MprisController
+
             window.mpris = MprisController(window, playback)
             _mark("mpris")
 
