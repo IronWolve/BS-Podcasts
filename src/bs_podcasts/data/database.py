@@ -97,6 +97,12 @@ class Database:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=10000")
+        # WAL + NORMAL: a commit appends to the WAL without an fsync; the
+        # sync happens at checkpoint. An app crash loses nothing; only an
+        # OS crash or power loss can drop the last few transactions, and
+        # nothing here is worth a disk sync per download-progress tick
+        # (audit F-052).
+        connection.execute("PRAGMA synchronous=NORMAL")
         return connection
 
     @property
