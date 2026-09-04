@@ -44,7 +44,15 @@ class MpvEngine:
             "input_default_bindings": False,
             "audio_display": "no",
             "network_timeout": 15,
-            "cache": "yes",
+            # Bounded demuxer cache. `cache=yes` forced the network-style
+            # cache (150 MiB forward + 50 MiB back) onto local files too, and
+            # a 300 MB WAV cost 280 MB of RSS (audit F-040). 32 MiB forward
+            # is ~6 min of 96 kbps audio; `cache_secs` keeps streams padded
+            # by time when the bitrate is low.
+            "cache": "auto",
+            "demuxer_max_bytes": "32MiB",
+            "demuxer_max_back_bytes": "8MiB",
+            "cache_secs": 60,
         }
         defaults.update(options)
         self._last_error = ""
