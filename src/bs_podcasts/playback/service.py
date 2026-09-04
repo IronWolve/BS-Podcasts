@@ -11,6 +11,26 @@ from ..data.repositories import LibraryRepository
 from ..urlguard import UnsafeUrl, ensure_media_source, ensure_web_url, is_web_url
 from .engine import EngineEvent, PlaybackUnavailable
 
+# Enclosure hosts that are redirect trackers: their chains routinely exceed
+# FFmpeg's 8-redirect limit, so the first open failed and the rescue path
+# opened the episode a second time (audit F-112). Sources on these hosts are
+# resolved by the app's HTTP stack before the engine sees them.
+TRACKER_HOSTS = (
+    "podtrac.com", "chtbl.com", "chartable.com", "megaphone.fm", "arttrk.com",
+    "pdst.fm", "mgln.ai", "prfx.byspotify.com", "swap.fm", "op3.dev",
+    "claritaspod.com", "pscrb.fm", "podscribe.com", "verifi.podscribe.com",
+    "pfx.vpixl.com", "pdcn.co", "traffic.libsyn.com", "www.podtrac.com",
+)
+
+
+def _is_tracker_url(source: str) -> bool:
+    if not is_web_url(source):
+        return False
+    from urllib.parse import urlsplit
+
+    host = (urlsplit(source).hostname or "").lower()
+    return any(host == name or host.endswith("." + name) for name in TRACKER_HOSTS)
+
 
 class PlaybackState(StrEnum):
     IDLE = "idle"
@@ -207,7 +227,7 @@ class PlaybackService:
                 self.engine.set_silence_trim(self.snapshot.trim_level)
             self._rescued_source = ""
             self._load_autoplay = autoplay
-            self.engine.load(source, start, autoplay)
+            self._load_source(source, start, autoplay)
             self._arm_load_watchdog(episode.id, source)
             self._emit()
 
@@ -267,7 +287,7 @@ class PlaybackService:
                 self.engine.set_silence_trim("off")
             self._rescued_source = ""
             self._load_autoplay = autoplay
-            self.engine.load(source, 0.0, autoplay)
+            self._load_source(source, 0.0, autoplay)
             self._arm_load_watchdog(None, source)
             self._emit()
 
@@ -612,6 +632,49 @@ class PlaybackService:
                 )
             self._emit()
 
+    def _load_source(self, source: str, position: float, autoplay: bool):
+        """Hand the engine the source — after resolving a tracker chain on a
+        thread, so the first open succeeds instead of failing and retrying.
+        Called with the lock held."""
+        if not _is_tracker_url(source):
+            self.engine.load(source, position, autoplay)
+            return
+        import threading
+
+        self._rescued_source = source  # the rescue path must not run a second resolve
+        threading.Thread(
+            target=self._resolve_then_load,
+            args=(source, position, autoplay),
+            daemon=True,
+            name="playback-resolve",
+        ).start()
+
+    def _resolve_then_load(self, source: str, position: float, autoplay: bool):
+        final = self._resolve_final(source) or source
+        with self._lock:
+            if self._dead or self.snapshot.source != source:
+                return  # the user moved on while we were resolving
+            try:
+                self.engine.load(final, position, autoplay)
+            except Exception as exc:
+                self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR, message=str(exc), buffering=None)
+                self._emit()
+
+    @staticmethod
+    def _resolve_final(source: str) -> str:
+        """Final URL after following the redirect chain with the app's own
+        HTTP stack (every hop re-checked by the session's redirect guard)."""
+        from ..net import make_session
+
+        try:
+            response = make_session(max_redirects=20).get(source, stream=True, timeout=(8, 15), allow_redirects=True)
+            try:
+                return str(response.url) if response.status_code < 400 else ""
+            finally:
+                response.close()
+        except Exception:
+            return ""
+
     def _start_redirect_rescue(self) -> bool:
         """Retry a failed web source once with its redirect chain pre-resolved.
 
@@ -638,23 +701,7 @@ class PlaybackService:
         return True
 
     def _rescue_redirects(self, source: str, position: float, autoplay: bool):
-        from ..net import make_session
-
-        final = ""
-        try:
-            # max_redirects raised above the default 8: the whole point is
-            # chains longer than that. Every hop is still re-validated by the
-            # session's redirect guard.
-            response = make_session(max_redirects=20).get(
-                source, stream=True, timeout=(8, 15), allow_redirects=True
-            )
-            try:
-                if response.status_code < 400:
-                    final = str(response.url)
-            finally:
-                response.close()
-        except Exception:
-            final = ""
+        final = self._resolve_final(source)
         with self._lock:
             if self._dead or self.snapshot.source != source:
                 return  # the user moved on while we were resolving
