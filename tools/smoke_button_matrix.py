@@ -289,12 +289,11 @@ def main() -> int:
         check(window.episode_page.selection_bar.isVisible(), "selection bar hidden with 2 selected")
         window.episode_page.selection_bar.findChildren(type(window.episode_page.selection_bar.count))  # touch
         buttons = [b for b in window.episode_page.selection_bar.findChildren(dialogs_module.QPushButton) if b.text()]
+        # Bulk actions run as one transaction on a worker (audit F-031).
         {b.text(): b for b in buttons}["Add to Up Next"].click()
-        process(app)
-        check(len(library.queue()) == 2, "selection bar Add to Up Next")
+        check(settle_until(app, lambda: len(library.queue()) == 2), "selection bar Add to Up Next")
         {b.text(): b for b in buttons}["Mark played"].click()
-        process(app)
-        check(all(e.played for e in library.episodes(show_id=show.id)), "selection bar Mark played")
+        check(settle_until(app, lambda: all(e.played for e in library.episodes(show_id=show.id))), "selection bar Mark played")
         for episode in library.episodes(show_id=show.id):
             repository.mark_played(episode.id, False)
         window._reload_library()

@@ -641,6 +641,45 @@ class LibraryRepository:
             ids.remove(episode_id)
         self.reorder_queue([episode_id] + ids)
 
+    def mark_played_many(self, episode_ids, played: bool = True) -> int:
+        """One transaction for a bulk mark: the per-row method committed
+        (and synced) once per selected episode (audit F-031)."""
+        ids = [int(i) for i in episode_ids]
+        if not ids:
+            return 0
+        with self.database.connect() as connection:
+            if played:
+                connection.executemany(
+                    "UPDATE episodes SET played=1, is_new=0, last_played=? WHERE id=?",
+                    [(time.time(), i) for i in ids],
+                )
+            else:
+                connection.executemany(
+                    """UPDATE episodes SET played=0, is_new=0,
+                       position_seconds = CASE
+                           WHEN duration_seconds > 0
+                                AND position_seconds >= duration_seconds - 2
+                           THEN 0 ELSE position_seconds END
+                       WHERE id=?""",
+                    [(i,) for i in ids],
+                )
+        return len(ids)
+
+    def enqueue_many(self, episode_ids) -> int:
+        """Append many episodes to the queue in one transaction, in order."""
+        ids = [int(i) for i in episode_ids]
+        if not ids:
+            return 0
+        now = time.time()
+        with self.database.connect() as connection:
+            for episode_id in ids:
+                connection.execute(
+                    "INSERT OR IGNORE INTO queue(episode_id, position, added_at) "
+                    "SELECT ?, COALESCE(MAX(position), 0) + 1, ? FROM queue",
+                    (episode_id, now),
+                )
+        return len(ids)
+
     def mark_played(self, episode_id: int, played: bool = True):
         with self.database.connect() as connection:
             if played:
