@@ -275,6 +275,11 @@ def main() -> int:
     # Feed refreshes get their own small pool so a batch can never occupy the
     # workers the UI needs for reads, search, and artwork.
     refresh_jobs = JobRunner(max_workers=2)
+    # Discover (directory searches, feed previews, per-episode artwork and
+    # chapter/transcript fetches) has its own pool too: four directory scans
+    # on the general pool made the library reload the page was waiting for
+    # queue behind them (audit F-059).
+    network_jobs = JobRunner(max_workers=2)
     refresh = RefreshService(
         repository,
         fetcher=FeedFetcher(),
@@ -314,6 +319,7 @@ def main() -> int:
             listening=listening,
             download_jobs=download_jobs,
             refresh_jobs=refresh_jobs,
+            network_jobs=network_jobs,
         )
         _mark("main-window")
         window.tray = None
@@ -395,7 +401,7 @@ def main() -> int:
     code = app.exec()
     # Bounded shutdown: cancel pending jobs, give running ones a moment, then
     # leave. Non-daemon worker threads would otherwise hold the process open.
-    busy = jobs.join(3.0) + download_jobs.join(3.0) + refresh_jobs.join(3.0)
+    busy = jobs.join(3.0) + download_jobs.join(3.0) + refresh_jobs.join(3.0) + network_jobs.join(3.0)
     if busy:
         logging.getLogger("bs_podcasts").warning("Exiting with %d background job(s) still running.", busy)
         logging.shutdown()
