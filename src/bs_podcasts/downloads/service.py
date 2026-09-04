@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 from urllib.parse import urlparse
 import os
 from hashlib import sha256
@@ -41,6 +41,81 @@ class DownloadProgress:
     bytes_done: int
     bytes_total: int
     message: str = ""
+
+
+class _StallWatch:
+    """Shuts down a streaming response that is too slow or too long.
+
+    Runs on its own thread because the reader is blocked inside
+    iter_content() and cannot check anything until a chunk completes; a
+    plain close() from another thread does not wake a blocked recv(), so
+    the socket is shut down first.
+    """
+
+    def __init__(self, response, window_seconds: float, min_bytes: int, max_seconds: float):
+        self._response = response
+        self._window = window_seconds
+        self._min_bytes = min_bytes
+        self._max_seconds = max_seconds
+        self._bytes = 0
+        self._stop = Event()
+        self.message = ""
+
+    def start(self):
+        Thread(target=self._run, name="bs-download-watch", daemon=True).start()
+
+    def advance(self, count: int):
+        self._bytes += count
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        import socket
+
+        started = time.monotonic()
+        seen = 0
+        while not self._stop.wait(self._window):
+            now = time.monotonic()
+            if self._bytes - seen < self._min_bytes:
+                self.message = f"Transfer stalled ({(self._bytes - seen) // 1024} KB in {int(self._window)} s). Retry in a moment."
+            elif now - started > self._max_seconds:
+                self.message = "Transfer took too long and was stopped. Retry to resume."
+            if self.message:
+                try:
+                    # urllib3 2.x: the live socket sits under the http.client
+                    # response (raw._fp.fp.raw._sock); raw._connection.sock is
+                    # already None once the body is streaming.
+                    raw = self._response.raw
+                    reader = getattr(getattr(raw, "_fp", None), "fp", None)
+                    sock = getattr(getattr(reader, "raw", None), "_sock", None)
+                    if sock is None:
+                        sock = getattr(getattr(raw, "_connection", None), "sock", None)
+                    if sock is not None:
+                        sock.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
+                    self._response.close()
+                except Exception:
+                    pass
+                return
+            seen = self._bytes
+
+
+def _guarded_chunks(response, stall: "_StallWatch"):
+    """iter_content() that reports a watchdog stop as a DownloadError instead
+    of the connection error the shut socket produces."""
+    import requests
+
+    try:
+        yield from response.iter_content(64 * 1024)
+    except requests.RequestException:
+        if stall.message:
+            raise DownloadError(stall.message)
+        raise
+    finally:
+        stall.stop()
 
 
 class DownloadService:
@@ -195,6 +270,9 @@ class DownloadService:
         return parked
 
     MISSING_FILE_MESSAGE = "Downloaded file is missing — retry to download it again."
+    STALL_WINDOW_SECONDS = 30.0
+    STALL_MIN_BYTES = 8 * 1024  # under ~270 B/s for 30 s counts as stalled
+    MAX_TRANSFER_SECONDS = 4 * 3600
 
     def reconcile_missing(self) -> int:
         """Complete records whose file is gone become retryable errors.
@@ -358,13 +436,21 @@ class DownloadService:
             self._emit(episode_id, DownloadState.DOWNLOADING, done, total)
             last_report = done
             last_report_at = time.monotonic()
+            # A transfer that keeps trickling never hit the per-chunk read
+            # timeout, and iter_content() blocks until a whole chunk has
+            # arrived, so a check inside the loop cannot see a stall either.
+            # The watchdog shuts the socket when fewer than STALL_MIN_BYTES
+            # arrive in STALL_WINDOW_SECONDS or the transfer outlives
+            # MAX_TRANSFER_SECONDS (audit F-057).
+            stall = _StallWatch(response, self.STALL_WINDOW_SECONDS, self.STALL_MIN_BYTES, self.MAX_TRANSFER_SECONDS)
+            stall.start()
             # Progress is persisted by time, not bytes: a 256 KB step meant
             # ~400 commits for a 100 MB episode (audit F-053). The UI still
             # gets a signal for every step that crosses the report interval.
             report_bytes = max(256 * 1024, (total or 0) // 20)
             head = b""
             with partial.open("ab" if append else "wb") as handle:
-                for chunk in response.iter_content(64 * 1024):
+                for chunk in _guarded_chunks(response, stall):
                     if cancellation.is_set():
                         self.downloads.progress(
                             episode_id, DownloadState.PAUSED, done, total
@@ -385,6 +471,7 @@ class DownloadService:
                             )
                     handle.write(chunk)
                     done += len(chunk)
+                    stall.advance(len(chunk))
                     now = time.monotonic()
                     if now - last_report_at >= 2.0 or done - last_report >= report_bytes:
                         self.downloads.progress(
@@ -393,6 +480,9 @@ class DownloadService:
                         self._emit(episode_id, DownloadState.DOWNLOADING, done, total)
                         last_report = done
                         last_report_at = now
+            stall.stop()
+            if stall.message:
+                raise DownloadError(stall.message)
             if total and done < total:
                 raise _TruncatedDownload("Download ended before the expected size.")
             if cancellation.is_set():

@@ -432,7 +432,12 @@ def main() -> int:
     code = app.exec()
     # Bounded shutdown: cancel pending jobs, give running ones a moment, then
     # leave. Non-daemon worker threads would otherwise hold the process open.
-    busy = jobs.join(3.0) + download_jobs.join(3.0) + refresh_jobs.join(3.0) + network_jobs.join(3.0)
+    # One deadline for all pools: four independent 3 s joins let a quit take
+    # up to 12 s while background work drained (audit F-061).
+    deadline = _time.monotonic() + 3.0
+    busy = 0
+    for pool in (jobs, download_jobs, refresh_jobs, network_jobs):
+        busy += pool.join(max(0.0, deadline - _time.monotonic()))
     if busy:
         logging.getLogger("bs_podcasts").warning("Exiting with %d background job(s) still running.", busy)
         logging.shutdown()
