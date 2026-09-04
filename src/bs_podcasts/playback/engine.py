@@ -1,6 +1,7 @@
 """Guarded adapter for the installed python-mpv 1.0.8 API."""
 
 from dataclasses import dataclass
+import logging
 from threading import Lock
 from typing import Any, Callable
 
@@ -28,6 +29,13 @@ class EngineEvent:
     value: Any = None
 
 
+def _log_async_result(future) -> None:
+    try:
+        future.result()
+    except Exception as exc:  # mpv rejected the command; the UI already moved on
+        logging.getLogger("bs_podcasts").warning("mpv async command failed: %s", exc)
+
+
 class MpvEngine:
     capabilities = EngineCapabilities()
 
@@ -44,6 +52,9 @@ class MpvEngine:
             "input_default_bindings": False,
             "audio_display": "no",
             "network_timeout": 15,
+            # Once, here: it used to be re-set synchronously on every speed
+            # change (audit F-029).
+            "audio_pitch_correction": True,
             # Bounded demuxer cache. `cache=yes` forced the network-style
             # cache (150 MiB forward + 50 MiB back) onto local files too, and
             # a 300 MB WAV cost 280 MB of RSS (audit F-040). 32 MiB forward
@@ -130,12 +141,12 @@ class MpvEngine:
         # Last intent wins: a play/pause while the file is still opening must
         # be what the file-loaded handler applies, not the original autoplay.
         self._pending_autoplay = True
-        self._player.pause = False
+        self._set("pause", False)
 
     def pause(self):
         self._guard()
         self._pending_autoplay = False
-        self._player.pause = True
+        self._set("pause", True)
 
     @property
     def autoplay_pending(self) -> bool:
@@ -150,7 +161,7 @@ class MpvEngine:
             self._pending_position = max(0.0, float(seconds))
             self._emit("position", self._pending_position)
             return
-        self._player.seek(max(0.0, float(seconds)), "absolute", "exact")
+        self._player.command_async("seek", max(0.0, float(seconds)), "absolute", "exact").add_done_callback(_log_async_result)
 
     def skip(self, seconds: float):
         self._guard()
@@ -158,26 +169,25 @@ class MpvEngine:
             self._pending_position = max(0.0, self._pending_position + float(seconds))
             self._emit("position", self._pending_position)
             return
-        self._player.seek(float(seconds), "relative", "exact")
+        self._player.command_async("seek", float(seconds), "relative", "exact").add_done_callback(_log_async_result)
 
     def set_speed(self, speed: float):
         self._guard()
-        self._player.audio_pitch_correction = True
-        self._player.speed = max(0.5, min(3.0, float(speed)))
+        self._set("speed", max(0.5, min(3.0, float(speed))))
 
     def set_volume(self, volume: float):
         self._guard()
-        self._player.volume = max(0.0, min(100.0, float(volume)))
+        self._set("volume", max(0.0, min(100.0, float(volume))))
 
     def set_ab_repeat(self, start: float, end: float):
         self._guard()
-        self._player.ab_loop_a = max(0.0, float(start))
-        self._player.ab_loop_b = max(float(start), float(end))
+        self._set("ab-loop-a", max(0.0, float(start)))
+        self._set("ab-loop-b", max(float(start), float(end)))
 
     def clear_ab_repeat(self):
         self._guard()
-        self._player.ab_loop_a = "no"
-        self._player.ab_loop_b = "no"
+        self._set("ab-loop-a", "no")
+        self._set("ab-loop-b", "no")
 
     def set_silence_trim(self, level: str):
         self._guard()
@@ -188,9 +198,10 @@ class MpvEngine:
         }
         threshold = thresholds.get(level)
         if threshold is None:
-            self._player.af = ""
+            self._set("af", "")
             return
-        self._player.af = (
+        self._set(
+            "af",
             "lavfi=[silenceremove=start_periods=1:start_silence=0.1:"
             f"start_threshold={threshold}:stop_periods=-1:stop_duration=0.35:"
             f"stop_threshold={threshold}]"
@@ -202,6 +213,19 @@ class MpvEngine:
         self._dead = True
         player, self._player = self._player, None
         player.terminate()
+
+    def _set(self, name: str, value) -> None:
+        """Set an mpv property without waiting for the core.
+
+        python-mpv's property setters block until mpv has applied the value;
+        rebuilding the audio filter chain (speed, silence trim) took 50-80 ms
+        on the click thread (audit F-029). `set` via command_async returns at
+        once; errors are logged from the reply instead of raised.
+        """
+        if isinstance(value, bool):
+            value = "yes" if value else "no"
+        future = self._player.command_async("set", name, str(value))
+        future.add_done_callback(_log_async_result)
 
     def _guard(self):
         if self._dead or self._player is None:
