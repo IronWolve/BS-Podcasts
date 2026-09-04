@@ -480,6 +480,7 @@ class MainWindow(QMainWindow):
             self.episode_page.header.action.clicked.connect(self._refresh_episode_view)
         self.episode_page.banner.retry_requested.connect(self._refresh_episode_view)
         self.home_page.header.search.returnPressed.connect(self._home_search)
+        self.home_page.header.search.textEdited.connect(self._home_search_typed)
         self.settings_page.setting_changed.connect(self._save_setting)
         self.settings_page.shortcut_changed.connect(self._rebind_shortcut)
         self.settings_page.reset_shortcuts_requested.connect(self._reset_shortcuts)
@@ -3469,6 +3470,18 @@ class MainWindow(QMainWindow):
         self.search_overlay.field.setText(query)
         self._open_search()
         self._global_query(query)
+
+    def _home_search_typed(self, text: str):
+        """Home's box is a launcher for the global search: hand the first
+        keystroke to the overlay instead of waiting for Enter (audit F-110)."""
+        if self.library is None or not text.strip() or self.search_overlay.isVisible():
+            return
+        self.search_overlay.field.setText(text)
+        self._open_search()
+        self.search_overlay.field.setFocus()
+        self.search_overlay.field.setCursorPosition(len(text))
+        self._global_query(text.strip())
+        self.home_page.header.search.clear()
 
 
     # ---------------------------------------------------------------- discover
