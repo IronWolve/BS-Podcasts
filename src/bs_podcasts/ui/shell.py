@@ -1658,6 +1658,11 @@ class MainWindow(QMainWindow):
             return
         downloads = self.downloads
         episode_ids = [preview.episode_id for preview in previews]
+        playing = getattr(getattr(self.playback, "snapshot", None), "episode_id", None)
+        if playing is not None and playing in episode_ids:
+            # The engine holds the file open; on Windows the unlink would fail
+            # with "File could not be deleted" (audit F-043).
+            self.playback.stop()
 
         def work():
             return sum(downloads.delete(episode_id) for episode_id in episode_ids)

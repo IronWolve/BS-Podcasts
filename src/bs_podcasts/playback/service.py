@@ -380,6 +380,15 @@ class PlaybackService:
             except Exception:
                 pass
             self._flush_listening()
+            # Release the file and its cache inside the engine; a later Play
+            # reloads from the saved position (audit F-042).
+            unload = getattr(self.engine, "unload", None)
+            if unload is not None:
+                try:
+                    unload()
+                except Exception:
+                    pass
+            self._engine_loaded = False
             self.snapshot = PlaybackSnapshot(speed=self.snapshot.speed, volume=self.snapshot.volume)
             if episode_id is not None:
                 self.repository.set_current_playback(None, PlaybackState.IDLE.value)
