@@ -225,11 +225,29 @@ _type_scale = 1.0
 _font_key = "Inter"
 
 
+_families_cache: list | None = None
+
+
+def _installed_families() -> list:
+    """QFontDatabase.families() scans the font database (6-9 ms for nine
+    calls at startup, audit F-023); one scan per font load/typography change."""
+    global _families_cache
+    if _families_cache is None:
+        _families_cache = list(QFontDatabase.families())
+    return _families_cache
+
+
+def _forget_families():
+    global _families_cache
+    _families_cache = None
+
+
 def load_fonts() -> list[str]:
     """Register the bundled Inter files so the UI looks identical on every machine.
 
     Returns the family names that were registered; safe to call more than once.
     """
+    _forget_families()
     from ..assets import font_paths
 
     families = []
@@ -280,7 +298,7 @@ def resolve_font_family(key: str) -> str:
     cached = _resolved_families.get(key)
     if cached is not None:
         return cached
-    families = set(QFontDatabase.families())
+    families = set(_installed_families())
     resolved = ""
     if key == "system":
         resolved = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
@@ -301,7 +319,7 @@ def css_font_family() -> str:
     # stack makes Qt populate font aliases for it (a ~250 ms scan plus a
     # warning on macOS). Inter is bundled, so the fallbacks are dead weight
     # anywhere they aren't installed.
-    installed = set(QFontDatabase.families()) if QApplication.instance() is not None else set(FONT_STACK)
+    installed = set(_installed_families()) if QApplication.instance() is not None else set(FONT_STACK)
     extras = [name for name in FONT_STACK if name and name != primary and name in installed]
     names = [primary, *extras] if primary else extras
     quoted = ", ".join(f'"{name}"' for name in names if name)
@@ -315,7 +333,7 @@ def available_ui_fonts() -> list[tuple[str, str]]:
     """Label and setting value for fonts that can actually be used."""
     from PySide6.QtWidgets import QApplication
 
-    families = set(QFontDatabase.families()) if QApplication.instance() is not None else set()
+    families = set(_installed_families()) if QApplication.instance() is not None else set()
     items = [("Inter", "Inter"), ("System UI", "system")]
     for name in CURATED_FONTS:
         if name == "Inter" or name not in families:
@@ -326,6 +344,7 @@ def available_ui_fonts() -> list[tuple[str, str]]:
 
 def apply_typography(size_key: str = "comfortable", font_key: str = "Inter"):
     """Update the shared type scale and UI font. Existing widgets need a stylesheet refresh."""
+    _forget_families()
     global _type_scale, _font_key, FONT_FAMILY
     _type_scale = _TEXT_SIZE_SCALE.get(size_key, 1.0)
     _font_key = font_key or "Inter"

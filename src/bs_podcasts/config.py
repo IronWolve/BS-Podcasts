@@ -14,12 +14,12 @@ RELEASES_API_URL = "https://api.github.com/repos/example/bs-podcasts/releases/la
 
 
 def app_version() -> str:
-    try:
-        from importlib.metadata import version
+    # The package constant, not importlib.metadata: the metadata scan cost
+    # 10 ms at startup (audit F-023) and the constant is what the build
+    # pins anyway (keep it in step with pyproject.toml).
+    from . import __version__
 
-        return version("bs-podcasts")
-    except Exception:
-        return "0.9.5"  # keep in step with pyproject.toml for frozen/source runs without metadata
+    return __version__
 
 
 # Per-platform locations, none created here.

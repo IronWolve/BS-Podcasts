@@ -39,13 +39,45 @@ from PySide6.QtWidgets import (
 from ..config import APP_NAME, RELEASES_URL, app_version
 from ..logging_setup import log_path
 from ..domain import DownloadState, Health
-from ..feeds.parser import parse_feed
 from ..jobs import JobResult, JobStatus
-from ..services.updates import check_for_update
 from ..urlguard import is_web_url
 from ..data.database import DatabaseIntegrityError
 from . import icons
-from .dialogs import AboutDialog, AddPodcastDialog, ConfirmDialog, DeleteFilesDialog, EpisodeInfoDialog, PodcastInfoDialog, PodcastSettingsDialog, RemovePodcastDialog, ShortcutsDialog, TextInputDialog, episode_information_text
+
+
+class _lazy_dialog:
+    """Import ui.dialogs (12 ms) on the first dialog, not before the first
+    paint (audit F-018). Constructors and helpers are only ever called."""
+
+    def __init__(self, name: str):
+        self._name = name
+        self._target = None
+
+    def _resolve(self):
+        if self._target is None:
+            from . import dialogs
+
+            self._target = getattr(dialogs, self._name)
+        return self._target
+
+    def __call__(self, *args, **kwargs):
+        return self._resolve()(*args, **kwargs)
+
+    def __getattr__(self, attribute):
+        return getattr(self._resolve(), attribute)
+
+
+AboutDialog = _lazy_dialog("AboutDialog")
+AddPodcastDialog = _lazy_dialog("AddPodcastDialog")
+ConfirmDialog = _lazy_dialog("ConfirmDialog")
+DeleteFilesDialog = _lazy_dialog("DeleteFilesDialog")
+EpisodeInfoDialog = _lazy_dialog("EpisodeInfoDialog")
+PodcastInfoDialog = _lazy_dialog("PodcastInfoDialog")
+PodcastSettingsDialog = _lazy_dialog("PodcastSettingsDialog")
+RemovePodcastDialog = _lazy_dialog("RemovePodcastDialog")
+ShortcutsDialog = _lazy_dialog("ShortcutsDialog")
+TextInputDialog = _lazy_dialog("TextInputDialog")
+episode_information_text = _lazy_dialog("episode_information_text")
 from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast as UiPodcast, plain_snippet, set_item_tooltips
 from .pixmaps import dominant_color, missing_accents, sample_accents, save_accents
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
@@ -500,6 +532,10 @@ class MainWindow(QMainWindow):
         # page is actually shown (audit F-108), not 100 ms after every launch.
         self._refresh_storage_settings(include_usage=False)
         self._settings_seen = False
+        # Completed downloads whose file vanished become retryable errors;
+        # that stat()s every record, so it runs on a worker after the first
+        # paint instead of synchronously before the window (audit F-021).
+        self._later(1500, self._reconcile_missing_downloads)
         self.home_page.new_requested.connect(self._show_new_episodes)
         self.home_page.queue_requested.connect(lambda: self.navigation.select(PAGE_QUEUE))
         self.home_page.downloads_requested.connect(lambda: self.navigation.select(PAGE_DOWNLOADS))
@@ -1343,6 +1379,17 @@ class MainWindow(QMainWindow):
         forward = int(self.library.setting("playback.skip_forward", "30"))
         self.player.set_skip_values(back, forward)
 
+    def _reconcile_missing_downloads(self):
+        if self.downloads is None or self._closed:
+            return
+        downloads = self.downloads
+
+        def apply(fixed):
+            if fixed:
+                self._request_reload()
+
+        self._run_read(downloads.reconcile_missing, apply, "reconcile-missing")
+
     def _refresh_storage_settings(self, include_usage: bool = True):
         if self.library is None or self._closed:
             return
@@ -1670,7 +1717,7 @@ class MainWindow(QMainWindow):
             if time.time() - last < 24 * 60 * 60:
                 return
         self.settings_page.set_update_status("Checking…")
-        self._run_task("update-check", lambda: check_for_update(app_version()), manual)
+        self._run_task("update-check", lambda: __import__("bs_podcasts.services.updates", fromlist=["check_for_update"]).check_for_update(app_version()), manual)
 
     def _database_health(self):
         if self.library is None:
@@ -4780,6 +4827,8 @@ class MainWindow(QMainWindow):
         fetcher = self.refresh.fetcher
 
         def work():
+            from ..feeds.parser import parse_feed
+
             response = fetcher.fetch(feed_url)
             return parse_feed(response.content, base_url=response.final_url)
 
