@@ -611,6 +611,9 @@ def stylesheet() -> str:
     QScrollArea#contextScroll > QWidget > QWidget {{ background: transparent; border: 0; }}
     QScrollArea#dialogScroll, QScrollArea#dialogScroll QWidget#qt_scrollarea_viewport,
     QScrollArea#dialogScroll > QWidget > QWidget {{ background: transparent; border: 0; }}
+    /* Any scroll area without its own rule inherits the theme instead of the
+       palette's white viewport (an unnamed one shipped unreadable once). */
+    QDialog QScrollArea, QDialog QScrollArea QWidget#qt_scrollarea_viewport {{ background: transparent; border: 0; }}
     QListWidget, QTextEdit, QTextBrowser {{ background: transparent; border: 0; color: {c['text']}; }}
     QListWidget::item {{ padding: {sp(7)}px {sp(8)}px; border-radius: 6px; }}
     QListWidget::item:hover {{ background: {c['surface_raised']}; }}

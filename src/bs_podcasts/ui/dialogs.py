@@ -640,6 +640,9 @@ class EpisodeInfoDialog(StyledDialog):
         content = QWidget()
         content.setLayout(columns)
         scroll = QScrollArea()
+        # Named so the theme's transparent-viewport rule applies: unnamed, the
+        # viewport painted the palette's white behind light text (audit F-068).
+        scroll.setObjectName("dialogScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
