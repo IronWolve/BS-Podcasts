@@ -185,9 +185,11 @@ class PodcastModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return item.title
         if role == Qt.ItemDataRole.ToolTipRole:
-            if not item_tooltips_enabled():
-                return None
             health = HEALTH_LABELS.get(item.health, "") if item.show_id else ""
+            if not item_tooltips_enabled():
+                # The 7 px health dot has no text; its meaning must be
+                # reachable even with hover previews off (audit F-073).
+                return health if health and item.health != "ok" else None
             detail = " · ".join(value for value in (item.display_meta, health) if value)
             return _tooltip_html(item.title, item.author, detail)
         if role == ItemRoles.ITEM:

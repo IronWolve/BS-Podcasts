@@ -142,6 +142,7 @@ class FeedData:
     artwork_url: str = ""
     categories: tuple[str, ...] = ()
     episodes: tuple[FeedEpisodeData, ...] = ()
+    skipped_video: int = 0  # enclosures dropped because they were not audio (audit F-140)
 
 
 @dataclass(frozen=True)

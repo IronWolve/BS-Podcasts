@@ -3702,7 +3702,6 @@ class MainWindow(QMainWindow):
         if self.episode_page.header.action:
             self.episode_page.header.action.setEnabled(enabled)
         self.episode_page.hero.refresh.setEnabled(enabled)
-
     def _refresh_episode_view(self):
         """Refresh the scope represented by the Episodes page."""
         if self._hero_show_id:
@@ -4224,7 +4223,7 @@ class MainWindow(QMainWindow):
                 self._reload_open_podcast_after_refresh(
                     identifier,
                     "partial" if report.health == Health.PARTIAL else "",
-                    "The podcast refreshed but did not contain playable episodes."
+                    (report.message or "The podcast refreshed but did not contain playable episodes.")
                     if report.health == Health.PARTIAL
                     else "",
                 )
@@ -4240,7 +4239,7 @@ class MainWindow(QMainWindow):
         if report.health in {Health.ERROR, Health.SUSPENDED}:
             self.podcast_page.banner.show_state(report.health.value, report.message, retry=True)
         elif report.health == Health.PARTIAL:
-            self.podcast_page.banner.show_state("partial", "The podcast refreshed but did not contain playable episodes.")
+            self.podcast_page.banner.show_state("partial", report.message or "The podcast refreshed but did not contain playable episodes.")
         elif not total:
             self.podcast_page.banner.clear()
             show = self.library.repository.get_show(identifier) if self.library else None

@@ -47,6 +47,26 @@ def _text(element, *names) -> str:
     return "".join(child.itertext()).strip()
 
 
+# Non-audio enclosures seen while parsing the current feed (per thread).
+import threading as _threading
+
+_skipped_local = _threading.local()
+
+
+class _SkippedList:
+    def append(self, mime):
+        getattr(_skipped_local, "items", None) is None and setattr(_skipped_local, "items", [])
+        _skipped_local.items.append(mime)
+
+    def take(self) -> int:
+        items = getattr(_skipped_local, "items", None) or []
+        _skipped_local.items = []
+        return len(items)
+
+
+_SKIPPED = _SkippedList()
+
+
 def _date(value: str) -> str:
     value = value.strip()
     if not value:
@@ -178,6 +198,7 @@ def _rss_enclosure(item) -> tuple[str, str, int]:
                 pass
         mime = child.attrib.get("type", "").strip().lower()
         if mime and not mime.startswith("audio/"):
+            _SKIPPED.append(mime)
             continue
         return url, mime or "audio/*", _integer(length) or 0
     return "", "audio/*", 0
@@ -210,6 +231,7 @@ def _atom_link(element, relation: str) -> tuple[str, str, int]:
             continue
         mime = link.attrib.get("type", "").strip().lower()
         if relation == "enclosure" and mime and not mime.startswith("audio/"):
+            _SKIPPED.append(mime)
             continue
         return (
             href,
@@ -279,6 +301,7 @@ def _parse_rss(root) -> FeedData:
         artwork_url=_artwork(channel),
         categories=_categories(channel),
         episodes=tuple(_cap_newest(episodes)),
+        skipped_video=_SKIPPED.take(),
     )
 
 
@@ -351,6 +374,7 @@ def _parse_atom(root) -> FeedData:
         artwork_url=_text(root, "logo", "icon"),
         categories=_categories(root),
         episodes=tuple(_cap_newest(episodes)),
+        skipped_video=_SKIPPED.take(),
     )
 
 

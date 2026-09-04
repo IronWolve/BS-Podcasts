@@ -88,7 +88,11 @@ class RefreshService:
                     self.repository.set_artwork_path(show_id, str(path))
                 except ArtworkError:
                     pass
-            return RefreshReport(show_id, health, imported=imported)
+            message = ""
+            if health == Health.PARTIAL and feed.skipped_video:
+                n = feed.skipped_video
+                message = f"{n} episode{'s are' if n != 1 else ' is'} video-only and {'were' if n != 1 else 'was'} skipped; this app plays audio."
+            return RefreshReport(show_id, health, imported=imported, message=message)
         except (FeedFetchError, FeedParseError) as exc:
             health = self.repository.record_refresh_failure(show_id)
             return RefreshReport(show_id, health, message=str(exc))
