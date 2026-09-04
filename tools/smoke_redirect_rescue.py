@@ -152,7 +152,9 @@ def real_resolver_contract():
     import inspect
     from bs_podcasts.playback.service import PlaybackService
 
-    source = inspect.getsource(PlaybackService._rescue_redirects)
+    # The session setup moved into _resolve_final (shared with the pre-load
+    # tracker resolution, audit F-112); inspect the pair.
+    source = inspect.getsource(PlaybackService._rescue_redirects) + inspect.getsource(PlaybackService._resolve_final)
     check("rescue raises the redirect cap past FFmpeg's 8",
           "max_redirects=20" in source)
     source_start = inspect.getsource(PlaybackService._start_redirect_rescue)
