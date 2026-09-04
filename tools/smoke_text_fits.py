@@ -214,6 +214,39 @@ def check_player_bar_elides_with_a_tooltip():
         bar.deleteLater()
 
 
+def check_player_bar_elides_at_first_paint():
+    """A remembered episode is set BEFORE the bar is ever shown; the title
+    must still fit its column at the first paint, at wide and narrow widths."""
+    from bs_podcasts.playback.service import PlaybackSnapshot, PlaybackState
+
+    for width, compact in ((scaled_px(1400), False), (scaled_px(720), True)):
+        bar = PlayerBar()
+        try:
+            bar.set_compact(compact)
+            bar.set_snapshot(PlaybackSnapshot(
+                state=PlaybackState.PAUSED, episode_id=1, show_id=1,
+                title=LONG_TITLE, show_title="The Tricorder Transmission — A Very Long Show Name",
+                source="https://samples.invalid/a.mp3", duration=600.0, position=5.0,
+            ))
+            bar.resize(width, scaled_px(96))
+            bar.show()
+            QApplication.processEvents()
+            for label, full, name in (
+                (bar.title, LONG_TITLE, "player title"),
+                (bar.show_label, "The Tricorder Transmission — A Very Long Show Name", "player show"),
+            ):
+                shown = label.text().replace("&&", "&")
+                metrics = label.fontMetrics()
+                check(
+                    f"first paint at {width}px: {name} fits its column",
+                    metrics.horizontalAdvance(shown) <= label.width() + 1,
+                )
+                if shown != full:
+                    check(f"first paint at {width}px: {name} elides visibly", shown.endswith("…"))
+        finally:
+            bar.deleteLater()
+
+
 def main() -> int:
     app = QApplication.instance() or QApplication([])
     apply_theme("dark")
@@ -225,6 +258,7 @@ def main() -> int:
     check_cjk_titles_wrap_instead_of_clipping()
     check_narrow_transport_is_icon_only()
     check_player_bar_elides_with_a_tooltip()
+    check_player_bar_elides_at_first_paint()
 
     app.processEvents()
     for failure in FAILURES:

@@ -3197,6 +3197,8 @@ class PlayerBar(QFrame):
         side = max(side, 0)
         self.left_wrap.setFixedWidth(side)
         self.tools_wrap.setFixedWidth(side)
+        art_width = max(self.art.width(), self.art.minimumWidth())
+        self._now_column = max(0, side - art_width - self.left_wrap.layout().spacing())
         # Settle the layout before measuring. The side widths just set are
         # what determine the transport buttons' final widths, and _centre_play
         # reads those — measuring first meant it used pre-resize sizes and left
@@ -3207,6 +3209,10 @@ class PlayerBar(QFrame):
             self.center_wrap.updateGeometry()
             row.activate()
         self._centre_play()
+        # The column width may have changed without a bar resize (compact
+        # flip, first show): re-elide against it now, not on the next resize.
+        if hasattr(self, "_now_title"):
+            self._elide_now_labels()
 
     def _centre_play(self):
         """Balance the transport row around the play button: the controls are
@@ -3234,10 +3240,19 @@ class PlayerBar(QFrame):
         self._pad_right.setFixedWidth(max(0, -delta))
 
     def _now_text_width(self) -> int:
-        width = self.now_wrap.width()
+        # Prefer the column width _balance_zones just decided: now_wrap's own
+        # width() lags one layout pass behind, which is how a remembered
+        # episode's title hard-clipped at first paint (audit F-065).
+        width = getattr(self, "_now_column", 0)
+        if width < 40:
+            width = self.now_wrap.width()
         if width < 40:  # not laid out yet
             width = self.now_wrap.minimumWidth() or scaled_px(180)
-        return max(60, width - scaled_px(6))
+        # The labels sit inside the column's own layout margins (18 px by
+        # default); eliding against the full column left the show name 9 px
+        # too wide and hard-clipped.
+        margins = self.now_wrap.layout().contentsMargins()
+        return max(60, width - margins.left() - margins.right())
 
     def _elide_now_labels(self):
         """Title/show are a plain button and label: without eliding, a long
