@@ -93,3 +93,37 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
     session.max_redirects = max_redirects
     session.hooks["response"].append(_redirect_guard)
     return session
+
+
+def describe_network_error(exc, what: str = "the link") -> str:
+    """A sentence a person can act on, instead of urllib3's pool dump.
+
+    The raw text ("HTTPSConnectionPool(host=..., port=443): Max retries
+    exceeded with url: ... (Caused by ProtocolError(...ConnectionResetError
+    (10054 ...)))") was what the episode row showed — truncated — when one
+    tracker hop in a nine-redirect enclosure chain reset the connection.
+    Name the host, name the failure, keep the detail as a tail. `what` is
+    the thing being fetched ("the feed", "the episode link", "the directory").
+    Anything that is not a requests exception passes through unchanged.
+    """
+    import requests
+    from urllib.parse import urlsplit
+
+    request = getattr(exc, "request", None)
+    host = urlsplit(getattr(request, "url", "") or "").hostname or ""
+    where = f" by {host}" if host else ""
+    text = str(exc)
+    lowered = text.lower()
+    if isinstance(exc, requests.exceptions.TooManyRedirects):
+        return f"Too many redirects while following {what}{where}."
+    if isinstance(exc, requests.exceptions.SSLError):
+        return f"Secure connection failed{where}. ({text[:120]})"
+    if isinstance(exc, requests.exceptions.ConnectTimeout) or "timed out" in lowered:
+        return f"Connection timed out{where}. Retry in a moment."
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        if "reset" in lowered or "10054" in lowered or "forcibly closed" in lowered:
+            return f"Connection reset{where} while following {what}. Retry in a moment."
+        if "name or service not known" in lowered or "getaddrinfo" in lowered or "11001" in lowered:
+            return f"Could not resolve {host or 'the server'}. Check the network."
+        return f"Could not connect{where}. ({text[:120]})"
+    return text

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
-from ..net import USER_AGENT, SessionSlot
+from ..net import USER_AGENT, SessionSlot, describe_network_error
 
 
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024
@@ -127,7 +127,7 @@ class FeedFetcher:
         except FeedFetchError:
             raise
         except requests.RequestException as exc:
-            raise FeedFetchError(str(exc)) from exc
+            raise FeedFetchError(describe_network_error(exc, "the feed")) from exc
         finally:
             if response is not None:
                 response.close()
