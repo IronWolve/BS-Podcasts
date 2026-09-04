@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from threading import RLock, Timer
+import logging
 import time
 
 from ..data.repositories import LibraryRepository
@@ -45,6 +46,9 @@ class PlaybackSnapshot:
     # connection can be handed an older snapshot after a newer one arrived
     # directly on the UI thread; comparing this lets them drop it.
     revision: int = 0
+
+
+logger = logging.getLogger("bs_podcasts")
 
 
 class PlaybackService:
@@ -516,14 +520,29 @@ class PlaybackService:
         self.engine.shutdown()
 
     def _engine_event(self, event: EngineEvent):
+        # Database writes made from mpv's event thread are collected while the
+        # lock is held and run after it is released: a busy database (10 s
+        # busy timeout, Optimize/Repair) used to hold the lock and with it the
+        # UI's play/pause path (audit F-030).
+        deferred: list = []
+        try:
+            self._engine_event_locked(event, deferred)
+        finally:
+            for write in deferred:
+                try:
+                    write()
+                except Exception:
+                    logger.exception("deferred playback write failed")
+
+    def _engine_event_locked(self, event: EngineEvent, deferred: list):
         with self._lock:
             if self._dead:
                 return
             if event.kind == "position":
                 position = max(0.0, float(event.value))
-                self._measure_silence(position)
+                self._measure_silence(position, deferred)
                 self.snapshot = replace(self.snapshot, position=position)
-                self._persist_position()
+                self._persist_position(deferred=deferred)
             elif event.kind == "duration":
                 self.snapshot = replace(self.snapshot, duration=max(0.0, float(event.value)))
             elif event.kind == "paused":
@@ -534,10 +553,11 @@ class PlaybackService:
                     return
                 state = PlaybackState.PAUSED if event.value else PlaybackState.PLAYING
                 if event.value:
-                    self._flush_listening()
+                    self._flush_listening(deferred)
                 self.snapshot = replace(self.snapshot, state=state)
                 if self.snapshot.episode_id is not None:
-                    self.repository.set_current_playback(self.snapshot.episode_id, state.value)
+                    episode_id = self.snapshot.episode_id
+                    deferred.append(lambda: self.repository.set_current_playback(episode_id, state.value))
             elif event.kind == "file_loaded":
                 self._engine_loaded = True
                 self._cancel_load_watchdog()
@@ -559,7 +579,7 @@ class PlaybackService:
                 self.snapshot = replace(self.snapshot, state=PlaybackState.EXTERNAL)
             elif event.kind in {"stopped", "shutdown"}:
                 self._engine_loaded = False
-                self._persist_position(force=True)
+                self._persist_position(force=True, deferred=deferred)
             elif event.kind == "error":
                 self._cancel_load_watchdog()
                 if self._start_redirect_rescue():
@@ -673,14 +693,20 @@ class PlaybackService:
         self.repository.set_current_playback(episode_id, PlaybackState.IDLE.value)
         self._emit()
 
-    def _persist_position(self, force: bool = False):
+    def _persist_position(self, force: bool = False, deferred: list | None = None):
+        """Save the position (every 5 s or on demand). With `deferred`, the
+        write is queued for after the lock is released instead of run inline."""
         if self.snapshot.episode_id is None:
             return
         if force or abs(self.snapshot.position - self._last_saved_position) >= 5.0:
-            self.repository.update_position(self.snapshot.episode_id, self.snapshot.position)
-            self._last_saved_position = self.snapshot.position
+            episode_id, position = self.snapshot.episode_id, self.snapshot.position
+            self._last_saved_position = position
+            if deferred is not None:
+                deferred.append(lambda: self.repository.update_position(episode_id, position))
+            else:
+                self.repository.update_position(episode_id, position)
 
-    def _measure_silence(self, position: float):
+    def _measure_silence(self, position: float, deferred: list | None = None):
         now = time.monotonic()
         if self._last_metric_time is None or self._last_metric_position is None:
             self._last_metric_time = now
@@ -693,7 +719,7 @@ class PlaybackService:
             if self.snapshot.state == PlaybackState.PLAYING and self.snapshot.show_id:
                 self._unsaved_listening += elapsed
                 if self._unsaved_listening >= 30:
-                    self._flush_listening()
+                    self._flush_listening(deferred)
             if self.snapshot.trim_level == "off":
                 self._last_metric_time = now
                 self._last_metric_position = position
@@ -702,17 +728,26 @@ class PlaybackService:
             expected = (now - self._last_metric_time) * self.snapshot.speed
             self._unsaved_silence += max(0.0, media_delta - expected)
             if self._unsaved_silence >= 1.0 and self.listening:
-                self.listening.add_silence_saved(self._unsaved_silence)
-                saved = self.listening.silence_saved()
+                delta, listening = self._unsaved_silence, self.listening
                 self._unsaved_silence = 0.0
+                if deferred is not None:
+                    deferred.append(lambda: listening.add_silence_saved(delta))
+                    saved = self.snapshot.silence_saved + delta
+                else:
+                    listening.add_silence_saved(delta)
+                    saved = listening.silence_saved()
                 self.snapshot = replace(self.snapshot, silence_saved=saved)
         self._last_metric_time = now
         self._last_metric_position = position
 
-    def _flush_listening(self):
+    def _flush_listening(self, deferred: list | None = None):
         if self._unsaved_listening > 0 and self.listening and self.snapshot.show_id:
-            self.listening.add_listening(self.snapshot.show_id, self._unsaved_listening)
+            show_id, seconds, listening = self.snapshot.show_id, self._unsaved_listening, self.listening
             self._unsaved_listening = 0.0
+            if deferred is not None:
+                deferred.append(lambda: listening.add_listening(show_id, seconds))
+            else:
+                listening.add_listening(show_id, seconds)
 
     def _sleep_expired(self):
         with self._lock:
