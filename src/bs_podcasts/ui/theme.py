@@ -266,6 +266,12 @@ def scaled_px(size_px: int) -> int:
     return max(8, round(int(size_px) * _type_scale))
 
 
+def scaled_dim(size_px: int) -> int:
+    """scaled_px without the 8 px floor, for radii, dots and paddings that
+    are legitimately small (audit F-071)."""
+    return max(1, round(int(size_px) * _type_scale))
+
+
 # The play circle is fixed-size in QSS; layouts that must leave room for it
 # read the size from here rather than guessing or waiting for a polished
 # size hint (an under-estimate lets the circle spill over the seek bar).
