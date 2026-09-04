@@ -1122,15 +1122,35 @@ class MainWindow(QMainWindow):
     def _queue_selected(self):
         self._queue_many([item for item in getattr(self.pages.currentWidget(), "selected_items", list)() if isinstance(item, UiEpisode)])
 
+    BULK_CONFIRM_ROWS = 20
+
+    def _confirm_bulk(self, count: int, verb: str) -> bool:
+        """A multi-select action on more than a screenful of rows asks first;
+        one mis-click on a 5,000-row selection used to be irreversible without Undo."""
+        if count <= self.BULK_CONFIRM_ROWS:
+            return True
+        dialog = ConfirmDialog(
+            f"{verb} {count} episodes?",
+            f"This applies to every selected episode ({count}).",
+            verb, destructive=False, parent=self,
+        )
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
     def _queue_many(self, items):
         if self.library is None:
             return
         ids = [item.episode_id for item in items if item.episode_id]
-        for episode_id in ids:
-            self.library.enqueue(episode_id)
-        if ids:
+        if not ids or not self._confirm_bulk(len(ids), "Add to Up Next"):
+            return
+        library = self.library
+
+        def apply(_count):
             self._reload_queue()
             self._notify(f"Added {len(ids)} episode{'s' if len(ids) != 1 else ''} to Up Next", "success", "Show", self._show_queue)
+
+        # One transaction on a worker instead of one commit per row on the
+        # click thread (audit F-031).
+        self._run_read(lambda: library.enqueue_many(ids), apply, "bulk-queue")
 
     def _queue_ids(self, ids):
         if self.library is None:
@@ -1234,19 +1254,20 @@ class MainWindow(QMainWindow):
         if self.library is None:
             return
         ids = [item.episode_id for item in items if item.episode_id]
-        for episode_id in ids:
-            self.library.repository.mark_played(episode_id, played)
-        if ids:
+        if not ids or not self._confirm_bulk(len(ids), "Mark as played" if played else "Mark as unplayed"):
+            return
+        repository = self.library.repository
+
+        def undo():
+            self._run_read(lambda: repository.mark_played_many(ids, not played), lambda _n: self._request_reload(), "bulk-played")
+
+        def apply(_count):
             self._request_reload()
-
-            def undo():
-                for episode_id in ids:
-                    self.library.repository.mark_played(episode_id, not played)
-                self._request_reload()
-
             self._notify(f"Marked {len(ids)} episode{'s' if len(ids) != 1 else ''} as {'played' if played else 'unplayed'}", "success", "Undo", undo)
             if played and self.library.setting("downloads.delete_played", "0") == "1":
                 self._delete_played_quietly(ids)
+
+        self._run_read(lambda: repository.mark_played_many(ids, played), apply, "bulk-played")
 
     def _remove_from_continue_listening(self, items):
         if self.library is None:
