@@ -47,7 +47,7 @@ from ..data.database import DatabaseIntegrityError
 from . import icons
 from .dialogs import AboutDialog, AddPodcastDialog, ConfirmDialog, DeleteFilesDialog, EpisodeInfoDialog, PodcastInfoDialog, PodcastSettingsDialog, RemovePodcastDialog, ShortcutsDialog, TextInputDialog, episode_information_text
 from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast as UiPodcast, plain_snippet, set_item_tooltips
-from .pixmaps import dominant_color, missing_accents, sample_accents
+from .pixmaps import dominant_color, missing_accents, sample_accents, save_accents
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
 from .shortcuts import ShortcutManager
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
@@ -3563,15 +3563,21 @@ class MainWindow(QMainWindow):
             if not candidate.artwork_url:
                 return ""
             try:
-                return str(artwork_cache.fetch(candidate.artwork_url))
+                path = str(artwork_cache.fetch(candidate.artwork_url))
             except Exception:
                 return ""
+            # Sample the card tint here, on the thread that already has the
+            # bytes: doing it in _directory_finished decoded every result
+            # image on the UI thread (155-257 ms per result page).
+            dominant_color(path, compute=True)
+            return path
 
         # Thirty sequential image fetches made Discover feel broken on slow CDNs.
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=6, thread_name_prefix="bs-art") as pool:
             paths = list(pool.map(fetch, candidates))
+        save_accents()
         return list(zip(candidates, paths))
 
     # ------------------------------------------------------------------ refresh
@@ -4185,7 +4191,7 @@ class MainWindow(QMainWindow):
                     author=(candidate.author if is_chart else saved.author if saved else candidate.author) or candidate.genre or "Podcast directory",
                     episode_count=saved.episode_count if saved else 0,
                     new_count=saved.new_count if saved else 0,
-                    accent=dominant_color((saved.artwork_path if saved else "") or artwork_path, ACCENTS[index % len(ACCENTS)]),
+                    accent=dominant_color((saved.artwork_path if saved else "") or artwork_path, ACCENTS[index % len(ACCENTS)], compute=False),
                     show_id=saved.id if saved else 0,
                     feed_url=candidate.feed_url,
                     artwork_url=candidate.artwork_url,

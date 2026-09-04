@@ -58,13 +58,14 @@ def _load_disk() -> None:
 
 def _save_disk() -> None:
     target = _cache_file()
-    payload = {
-        "version": 1,
-        "items": {
+    with _disk_lock:
+        # Snapshot under the lock: the Discover artwork pool and the accent
+        # priming job can both be inserting while this runs.
+        items = {
             path: {"mtime": _dominant_mtime.get(path, 0.0), "color": color}
             for path, color in _dominant.items()
-        },
-    }
+        }
+    payload = {"version": 1, "items": items}
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(target.suffix + ".tmp")
@@ -165,6 +166,11 @@ def sample_accents(paths) -> int:
         dominant_color(path, compute=True)
     _save_disk()
     return len(pending)
+
+
+def save_accents() -> None:
+    """Persist tints sampled outside `sample_accents` (Discover workers)."""
+    _save_disk()
 
 
 def initials(text: str) -> str:
