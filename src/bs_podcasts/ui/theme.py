@@ -39,6 +39,9 @@ DARK = {
     "text_strong": "#FFFFFF",
     "muted": "#9AA7BD",
     "subtle": "#8593AB",
+    # Disabled text and glyphs: >= 3:1 on canvas, surface and surface_raised
+    # (the `border` token used before sat at 1.4-2.1:1, audit F-069).
+    "disabled": "#6B7A96",
     "accent": "#FFB45E",
     "accent_hover": "#FFC277",
     "accent_pressed": "#EFA246",
@@ -70,12 +73,13 @@ LIGHT = {
     # success #1F9D5A, warning #B7791F, danger #D1445A) sat between 2.7 and
     # 4.0:1. Ratios are asserted by tools/smoke_contrast.py.
     "subtle": "#646E83",
+    "disabled": "#7F899D",
     "accent": "#A1580B",
     "accent_hover": "#B1610C",
     "accent_pressed": "#8E4D0A",
     "accent_soft": "#FBE9D2",
     "teal": "#117B6B",
-    "blue": "#2F6FE0",
+    "blue": "#2358C9",  # 5.6:1 on canvas; #2F6FE0 was 4.15 (audit F-069)
     "success": "#187E48",
     "warning": "#966319",
     "danger": "#C03E53",
@@ -480,7 +484,7 @@ def stylesheet() -> str:
         image: url({{icon:chevron-down:{c['muted']}:14}});
         width: 14px; height: 14px;
     }}
-    QComboBox::down-arrow:disabled {{ image: url({{icon:chevron-down:{c['border']}:14}}); }}
+    QComboBox::down-arrow:disabled {{ image: url({{icon:chevron-down:{c['disabled']}:14}}); }}
     QComboBox QAbstractItemView {{
         background: {c['surface_raised']}; color: {c['text']};
         border: 1px solid {c['border']}; border-radius: {r['sm']}px;
@@ -594,7 +598,7 @@ def stylesheet() -> str:
     }}
     QPushButton#textButton:hover {{ color: {c['text_strong']}; background: {c['surface_soft']}; }}
     QPushButton#textButton:focus {{ border: {focus_ring}; }}
-    QPushButton#textButton:disabled {{ color: {c['border']}; }}
+    QPushButton#textButton:disabled {{ color: {c['disabled']}; }}
     QPushButton:disabled {{ color: {c['subtle']}; }}
 
     QPushButton#chip {{
