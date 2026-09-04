@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import logging
+import os
 from threading import Lock
 from typing import Any, Callable
 
@@ -66,6 +67,10 @@ class MpvEngine:
             "cache_secs": 60,
         }
         defaults.update(options)
+        if os.environ.get("BS_PODCASTS_SILENT") == "1":
+            # Documented for the smoke sweep, previously read by nothing
+            # (audit F-001): route audio to the null device.
+            defaults["ao"] = "null"
         self._last_error = ""
         while True:
             try:

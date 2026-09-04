@@ -4129,6 +4129,8 @@ class MainWindow(QMainWindow):
                     self._populate_now_playing()
         elif outcome and outcome.get("error"):
             logging.getLogger("bs_podcasts").info("Listening details unavailable for episode %s: %s", identifier, outcome["error"])
+            if self.context._episode_id == identifier:
+                self.context.show_details_error(outcome["error"])
         return
     def _on_artwork(self, kind, identifier, result):
         if result.status != JobStatus.OK:
