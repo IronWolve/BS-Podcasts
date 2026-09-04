@@ -21,6 +21,12 @@ class ShortcutManager:
             raise KeyError(name)
         normalized = QKeySequence(sequence).toString()
         if normalized:
+            # A single unmodified printable key ("a", "5") steals typing from
+            # every text field that does not swallow it first (audit F-121).
+            if len(normalized) == 1 and normalized.isprintable() and not normalized.isspace():
+                raise ValueError(
+                    f"'{normalized}' on its own would block typing that letter; add Ctrl, Alt or Shift."
+                )
             conflict = next(
                 (
                     other_name

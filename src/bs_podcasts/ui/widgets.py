@@ -2118,6 +2118,19 @@ class ContextPanel(QFrame):
             or "No transcript provided"
         )
 
+    def show_details_error(self, message: str):
+        """A failed chapters/transcript download looked exactly like 'the
+        feed has none' (audit F-081). Say so; selecting the episode again
+        retries."""
+        text = f"Couldn’t load: {message}\nSelect the episode again to retry."
+        if self.chapter_list.count() <= 1 and (self.chapter_list.count() == 0 or not (self.chapter_list.item(0).flags() & Qt.ItemFlag.ItemIsEnabled)):
+            self.chapter_list.clear()
+            placeholder = QListWidgetItem(text)
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.chapter_list.addItem(placeholder)
+        if self.transcript_text.toPlainText() in ("", "No transcript provided"):
+            self.transcript_text.setPlainText(text)
+
     def set_bookmarks(self, bookmarks):
         self.bookmark_list.clear()
         for bookmark in bookmarks:
