@@ -1204,6 +1204,8 @@ SHORTCUT_GROUPS = (
         ("play_pause", "Play / Pause"),
         ("skip_back", "Skip back"),
         ("skip_forward", "Skip forward"),
+        ("previous_chapter", "Previous chapter"),
+        ("next_chapter", "Next chapter"),
         ("bookmark", "Bookmark this moment"),
         ("ab_repeat", "A–B repeat"),
         ("silence_trim", "Cycle silence trim"),

@@ -450,6 +450,8 @@ class MainWindow(QMainWindow):
             ("play_pause", "Ctrl+Space", self._play_pause),
             ("skip_back", "Ctrl+Left", self._skip_back),
             ("skip_forward", "Ctrl+Right", self._skip_forward),
+            ("previous_chapter", "Ctrl+Shift+Left", lambda: self._jump_chapter(-1)),
+            ("next_chapter", "Ctrl+Shift+Right", lambda: self._jump_chapter(1)),
             ("search", "Ctrl+K", self._open_search),
             ("search_alt", "Ctrl+F", self._focus_search),
             ("escape", "Esc", self._escape),
@@ -2430,6 +2432,9 @@ class MainWindow(QMainWindow):
         else:
             queue = menu.addAction(icons.icon("queue-add", COLORS["text"], 16), "Add to Up Next", lambda: self._queue_many(targets))
             queue.setShortcut(QKeySequence(self.shortcuts.bindings().get("queue_selected", "")))
+            if not many and episode.episode_id:
+                # Front of the queue, from any row — not only from Up Next (audit F-097).
+                menu.addAction(icons.icon("next", COLORS["text"], 16), "Play next", lambda: self._queue_to_front(episode.episode_id))
         if not many:
             if episode.state == "Downloading":
                 menu.addAction(icons.icon("pause", COLORS["text"], 16), "Pause download", lambda: self._pause_download(episode.episode_id))
@@ -2882,6 +2887,23 @@ class MainWindow(QMainWindow):
         if self.playback is not None:
             self.playback.skip_forward()
 
+    def _jump_chapter(self, direction: int):
+        """Next/previous chapter of the playing episode; the service methods
+        existed but nothing called them (audit F-087)."""
+        if self.playback is None or self.listening is None:
+            return
+        snapshot = self.playback.snapshot
+        if snapshot.episode_id is None:
+            return
+        finder = self.listening.next_chapter if direction > 0 else self.listening.previous_chapter
+        chapter = finder(snapshot.episode_id, float(snapshot.position))
+        if chapter is None:
+            self._notify("No next chapter" if direction > 0 else "No previous chapter")
+            return
+        self.playback.seek(float(chapter.start_seconds))
+        if chapter.title:
+            self._notify(chapter.title)
+
     def _seek(self, seconds: float):
         if self.playback is not None:
             self.playback.seek(seconds)
@@ -2897,7 +2919,10 @@ class MainWindow(QMainWindow):
     def _set_sleep(self, seconds: int):
         if self.playback is None:
             return
-        if seconds <= 0:
+        if seconds < 0:
+            self.playback.set_sleep_at_end()
+            self._notify("Stopping at the end of this episode")
+        elif seconds == 0:
             self.playback.cancel_sleep_timer()
             self._notify("Sleep timer off")
         else:
