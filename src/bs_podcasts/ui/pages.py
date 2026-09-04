@@ -510,7 +510,11 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         elif chip == "Problems":
             items = [item for item in items if item.health in {"error", "suspended", "partial"}]
         if not self.discover and hasattr(self, "remove_problems"):
-            self.remove_problems.setVisible(chip == "Problems" and any(item.health in {"error", "suspended"} for item in items))
+            unreachable = sum(1 for item in items if item.health in {"error", "suspended"})
+            # The chip also lists "partial" feeds (refreshed, nothing playable);
+            # the button removes only unreachable ones, so say how many (audit F-139).
+            self.remove_problems.setText(f"Remove unreachable ({unreachable})…" if unreachable else "Remove unreachable…")
+            self.remove_problems.setVisible(chip == "Problems" and unreachable > 0)
             self._empty_text = (
                 ("No problems", "Every subscribed feed refreshed successfully.", "") if chip == "Problems"
                 else ("Your library is empty", "Add a podcast by feed URL, import an OPML file, or browse Discover.", "Add podcast")
