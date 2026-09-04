@@ -198,6 +198,12 @@ class MainWindow(QMainWindow):
         self._refresh_quiet = False
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._scheduled_refresh)
+        # "Played 1 min ago" stayed "1 min ago" for as long as History was
+        # open (audit F-094): re-convert the shown rows once a minute.
+        self._history_clock = QTimer(self)
+        self._history_clock.setInterval(60_000)
+        self._history_clock.timeout.connect(self._refresh_history_times)
+        self._history_clock.start()
         self._closed = False
         self._force_quit = False
         self._close_to_tray_notice_shown = False
@@ -358,11 +364,12 @@ class MainWindow(QMainWindow):
             glyph="queue",
         )
         self.download_page = EpisodeListPage(
-            "Downloads", "", items=(), filters=("All", "Downloading", "Paused", "Downloaded", "Error"), action="Cancel active",
+            "Downloads", "", items=(), filters=("All", "Downloading", "Paused", "Downloaded", "Error"), action="Pause all",
             empty=("No downloads", "Downloaded and in-progress episodes appear here for offline listening.", ""), glyph="downloads",
         )
         if self.download_page.header.action:
-            self.download_page.header.action.setObjectName("dangerButton")
+            # Pausing is not destructive: the quiet style, not the red one (audit F-079).
+            self.download_page.header.action.setObjectName("quietButton")
             self.download_page.header.action.clicked.connect(self._cancel_downloads)
         self.discover_page = PodcastGridPage("Discover", "", discover=True)
         self.bookmark_page = EpisodeListPage(
@@ -1607,6 +1614,25 @@ class MainWindow(QMainWindow):
             return self._history_items(self.library.history(limit=HISTORY_PAGE_SIZE, offset=offset), active)
 
         self._run_read(work, self._append_history, "history-more")
+
+    def _refresh_history_times(self):
+        if self._closed or self.library is None or self.pages.currentIndex() != PAGE_HISTORY:
+            return
+        if not self._history_items_shown:
+            return
+        limit = len(self._history_items_shown)
+
+        def work():
+            active = self._active_downloads(list(self.downloads.records()) if self.downloads else [])
+            return self._history_items(self.library.history(limit=limit), active)
+
+        def apply(items):
+            if self.pages.currentIndex() != PAGE_HISTORY:
+                return
+            self._history_items_shown = list(items)
+            self.history_page.set_items(self._history_items_shown, preserve_scroll=True)
+
+        self._run_read(work, apply, "history-times")
 
     def _append_history(self, chunk):
         self._history_limit += HISTORY_PAGE_SIZE
@@ -3209,7 +3235,7 @@ class MainWindow(QMainWindow):
         if self.downloads is None:
             return
         cancelled = sum(1 for record in self.downloads.records() if self.downloads.cancel(record.episode_id))
-        self._notify(f"Cancelling {cancelled} download{'s' if cancelled != 1 else ''}")
+        self._notify(f"Pausing {cancelled} download{'s' if cancelled != 1 else ''}")
 
     def _download_progress(self, event):
         # Progress arrives every 256 KB; coalesce the list rebuild to ~4/s.
