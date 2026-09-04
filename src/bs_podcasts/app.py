@@ -370,9 +370,11 @@ def main() -> int:
         _marks[-1][1] - _marks[0][1],
     )
     # Warm the playback core off-thread once startup has settled, so the
-    # first press of Play pays only for opening the stream.
+    # first press of Play pays only for opening the stream — but only when a
+    # remembered episode makes that press likely; a session that never plays
+    # does not build a core at all (audit F-049).
     warm = getattr(engine, "warm", None)
-    if warm is not None:
+    if warm is not None and getattr(playback.snapshot, "episode_id", None) is not None:
         QTimer.singleShot(2000, lambda: jobs.submit(warm))
 
     def raise_existing():
