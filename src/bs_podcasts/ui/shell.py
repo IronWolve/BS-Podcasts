@@ -84,7 +84,7 @@ ShortcutsDialog = _lazy_dialog("ShortcutsDialog")
 TextInputDialog = _lazy_dialog("TextInputDialog")
 episode_information_text = _lazy_dialog("episode_information_text")
 from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast as UiPodcast, plain_snippet, set_item_tooltips
-from .pixmaps import dominant_color, missing_accents, sample_accents, save_accents
+from .pixmaps import dominant_color, sample_accents, save_accents
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
 from .shortcuts import ShortcutManager
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
@@ -1467,7 +1467,10 @@ class MainWindow(QMainWindow):
             return
         if artwork_paths is None:
             artwork_paths = (show.artwork_path for show in self.library.shows())
-        paths = missing_accents(artwork_paths)
+        # The freshness check stat()s every artwork file; on the UI thread it
+        # was a 100 ms stall on a 300-show library (audit F-056). The worker
+        # does the check and the sampling together.
+        paths = [path for path in artwork_paths if path]
         if not paths:
             return
         self._accents_priming = True
