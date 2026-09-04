@@ -166,7 +166,11 @@ def linkify(text: str) -> str:
 _LINK_STYLE = "a { color: %s; text-decoration: underline; }" % COLORS["blue"]
 
 
+@lru_cache(maxsize=256)
 def safe_feed_html(text: str) -> str:
+    """Pure function of the text (link colours come from the document
+    stylesheet), so the pane and Now Playing share one sanitised copy
+    instead of re-parsing the same show notes on every click (audit F-128)."""
     if not text:
         return ""
     if "<" not in text or ">" not in text:
@@ -1327,11 +1331,16 @@ class HeroCard(QFrame):
         self.unsubscribe.setVisible(subscribed)
         self.website.setVisible(has_website)
         tint = QColor(accent) if accent else QColor(COLORS["surface_raised"])
-        self.setStyleSheet(
+        css = (
             f"QFrame#heroCard {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
             f"stop:0 rgba({tint.red()}, {tint.green()}, {tint.blue()}, 0.16), stop:0.6 {COLORS['surface']}); "
             f"border: 1px solid {COLORS['hairline']}; border-radius: 16px; }}"
         )
+        # A stylesheet set repolishes the card and every child; skip it when
+        # the tint has not changed (same show reopened, refresh) (audit F-129).
+        if css != getattr(self, "_tint_css", None):
+            self._tint_css = css
+            self.setStyleSheet(css)
         self.show()
 
     def resizeEvent(self, event):
@@ -3389,17 +3398,22 @@ class PlayerBar(QFrame):
     def set_tint(self, color: str):
         """Blend the playing show's colour into the bar background."""
         if not color:
-            self.setStyleSheet("")
-            return
-        tint = QColor(color)
-        light = theme_name() == "light"
-        alpha = 0.22 if light else 0.14
-        end = COLORS["accent_soft"] if light else COLORS["nav"]
-        self.setStyleSheet(
-            f"QFrame#playerBar {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-            f"stop:0 rgba({tint.red()}, {tint.green()}, {tint.blue()}, {alpha}), stop:0.45 {end}); "
-            f"border-top: 1px solid {COLORS['hairline']}; }}"
-        )
+            css = ""
+        else:
+            tint = QColor(color)
+            light = theme_name() == "light"
+            alpha = 0.22 if light else 0.14
+            end = COLORS["accent_soft"] if light else COLORS["nav"]
+            css = (
+                f"QFrame#playerBar {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+                f"stop:0 rgba({tint.red()}, {tint.green()}, {tint.blue()}, {alpha}), stop:0.45 {end}); "
+                f"border-top: 1px solid {COLORS['hairline']}; }}"
+            )
+        # Every playback tick with the same artwork reached here; a stylesheet
+        # set repolishes the whole bar, so only apply a changed tint (audit F-129).
+        if css != getattr(self, "_tint_css", None):
+            self._tint_css = css
+            self.setStyleSheet(css)
 
     def set_chapter_markers(self, fractions):
         self.slider.set_markers(fractions)
