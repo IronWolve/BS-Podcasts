@@ -40,15 +40,15 @@ class JobRunner:
         except Exception as exc:
             return JobResult(JobStatus.ERROR, message=str(exc) or exc.__class__.__name__)
 
-    def shutdown(self, wait: bool = False):
-        self._executor.shutdown(wait=wait, cancel_futures=True)
+    def shutdown(self, wait: bool = False, cancel_futures: bool = True):
+        self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)
 
-    def join(self, grace_seconds: float = 3.0) -> int:
+    def join(self, grace_seconds: float = 3.0, cancel_futures: bool = True) -> int:
         """Stop accepting work, wait up to `grace_seconds` for running jobs, and
         return how many worker threads are still busy. Callers that get a
         non-zero count should exit hard: the interpreter would otherwise block
         at exit joining those (non-daemon) threads."""
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._executor.shutdown(wait=False, cancel_futures=cancel_futures)
         deadline = time.monotonic() + grace_seconds
         for thread in list(getattr(self._executor, "_threads", ())):
             remaining = deadline - time.monotonic()

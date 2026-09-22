@@ -48,6 +48,9 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
         super().__init__(host)
         self.host = host
 
+    def _command(self, name, *args):
+        self.host.window._playback_command(name, *args)
+
     @Property(str)
     def PlaybackStatus(self):
         state = str(self.host.playback.snapshot.state)
@@ -110,36 +113,36 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
 
     @Slot()
     def Next(self):
-        self.host.playback.next()
+        self._command("next")
 
     @Slot()
     def Previous(self):
-        self.host.playback.previous()
+        self._command("previous")
 
     @Slot()
     def Pause(self):
-        self.host.playback.pause()
+        self._command("pause")
 
     @Slot()
     def PlayPause(self):
-        self.host.playback.play_pause()
+        self._command("play_pause")
 
     @Slot()
     def Stop(self):
-        self.host.playback.stop()
+        self._command("stop")
 
     @Slot()
     def Play(self):
-        self.host.playback.play()
+        self._command("play")
 
     @Slot("qlonglong")
     def Seek(self, offset):
         position = self.host.playback.snapshot.position + offset / 1_000_000
-        self.host.playback.seek(position)
+        self._command("seek", position)
 
     @Slot(QDBusObjectPath, "qlonglong")
     def SetPosition(self, _track, position):
-        self.host.playback.seek(position / 1_000_000)
+        self._command("seek", position / 1_000_000)
 
 
 class MprisController(QObject):

@@ -29,6 +29,8 @@ class LibraryRepository:
         self.database = database
         self._settings_cache: dict[str, str] | None = None
         self._settings_lock = threading.Lock()
+        self._settings_pending = {}
+        self._settings_revision = 0
 
     def add_show(self, feed_url: str, title: str = "", source: str = "rss") -> Show:
         now = time.time()
@@ -342,27 +344,14 @@ class LibraryRepository:
             bookmarks = connection.execute(
                 "SELECT COUNT(*) FROM bookmarks b JOIN episodes e ON e.id=b.episode_id WHERE e.show_id=?", (show_id,)
             ).fetchone()[0]
-            # Same transaction as the counts above: reading artwork in a
-            # second one let a concurrent import shift the preview under the
-            # dialog it feeds.
-            artwork_rows = connection.execute(
-                "SELECT DISTINCT episode_artwork_path FROM episodes WHERE show_id=? AND episode_artwork_path != ''",
-                (show_id,),
-            ).fetchall()
         files = []
-        artwork = []
         for row in rows:
             for candidate in (row["target_path"], row["partial_path"]):
                 path = Path(candidate) if candidate else None
                 if path is not None and path.is_file() and str(path) not in {f[0] for f in files}:
                     files.append((str(path), path.stat().st_size))
-        # Artwork is cache-shared by URL: tracked separately so removal can
-        # keep any file another show still references.
-        for candidate in [show.artwork_path] + [row[0] for row in artwork_rows]:
-            path = Path(candidate) if candidate else None
-            if path is not None and path.is_file() and str(path) not in {f[0] for f in artwork}:
-                artwork.append((str(path), path.stat().st_size))
-        files.extend(entry for entry in artwork if entry not in files)
+        # Artwork is shared cache data, not owned by this subscription. Leave
+        # it to cache maintenance; a refresh may be about to attach a reference.
         return {
             "show": show,
             "episodes": episode_count,
@@ -472,13 +461,7 @@ class LibraryRepository:
         removed_files = []
         failed_files = []
         if delete_files:
-            # Artwork the REMAINING library still references must survive: the
-            # cache is keyed by URL, so two shows can share one file. Asking
-            # while this show still exists means excluding its own rows.
-            still_referenced = self.artwork_paths(exclude_show_id=show_id)
             for path, _size in preview["files"]:
-                if path in still_referenced:
-                    continue
                 try:
                     Path(path).unlink()
                 except FileNotFoundError:
@@ -577,10 +560,32 @@ class LibraryRepository:
         with self._settings_lock:
             self._settings_cache = None
 
+    def stage_settings(self, values):
+        """Mirror accepted UI settings immediately, without doing disk I/O."""
+        with self._settings_lock:
+            self._settings_revision += 1
+            revision = self._settings_revision
+            self._settings_pending.update({key: (revision, value) for key, value in values.items()})
+            return {key: revision for key in values}
+
+    def persist_settings(self, values, revisions=None):
+        with self.database.connect() as connection:
+            connection.executemany(
+                "INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                values.items())
+        with self._settings_lock:
+            if self._settings_cache is not None:
+                self._settings_cache.update(values)
+            for key, value in values.items():
+                if revisions is not None and self._settings_pending.get(key) == (revisions.get(key), value):
+                    self._settings_pending.pop(key, None)
+
     def get_setting(self, key: str, default: str = "") -> str:
         # Settings are read on hot paths (startup wiring, every scheduler tick);
         # one read of the tiny table replaces a connection round-trip per call.
         with self._settings_lock:
+            if key in self._settings_pending:
+                return self._settings_pending[key][1]
             if self._settings_cache is None:
                 with self.database.connect() as connection:
                     self._settings_cache = {
