@@ -1,6 +1,6 @@
 """Resumable, cancellable downloads with atomic completion."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Lock, Thread
 from urllib.parse import urlparse
@@ -13,10 +13,11 @@ import time
 
 from ..artwork.cache import _looks_textual
 from ..net import SessionSlot, describe_network_error
-from ..urlguard import UnsafeUrl, ensure_fetchable
+from ..urlguard import UnsafeUrl, ensure_fetchable, SAFE_MEDIA_SUFFIXES, unsafe_media_payload
 
 from ..data.repositories import DownloadRepository, LibraryRepository
-from ..domain import DownloadState
+from ..domain import DownloadState, DownloadRecord
+from ..domain.media import BINARY_AUDIO_TYPES
 
 
 _log = logging.getLogger("bs_podcasts")
@@ -52,8 +53,9 @@ class _StallWatch:
     the socket is shut down first.
     """
 
-    def __init__(self, response, window_seconds: float, min_bytes: int, max_seconds: float):
+    def __init__(self, response, window_seconds: float, min_bytes: int, max_seconds: float, cancellation=None):
         self._response = response
+        self._cancellation = cancellation
         self._window = window_seconds
         self._min_bytes = min_bytes
         self._max_seconds = max_seconds
@@ -75,9 +77,16 @@ class _StallWatch:
 
         started = time.monotonic()
         seen = 0
-        while not self._stop.wait(self._window):
+        window_started = started
+        while not self._stop.wait(min(self._window, 0.1)):
             now = time.monotonic()
-            if self._bytes - seen < self._min_bytes:
+            if self._cancellation is not None and self._cancellation.is_set():
+                self.message = "Transfer paused."
+            elif now - started > self._max_seconds:
+                self.message = "Transfer took too long and was stopped. Retry to resume."
+            elif now - window_started < self._window:
+                continue
+            elif self._bytes - seen < self._min_bytes:
                 self.message = f"Transfer stalled ({(self._bytes - seen) // 1024} KB in {int(self._window)} s). Retry in a moment."
             elif now - started > self._max_seconds:
                 self.message = "Transfer took too long and was stopped. Retry to resume."
@@ -101,6 +110,7 @@ class _StallWatch:
                     pass
                 return
             seen = self._bytes
+            window_started = now
 
 
 def _guarded_chunks(response, stall: "_StallWatch"):
@@ -109,7 +119,7 @@ def _guarded_chunks(response, stall: "_StallWatch"):
     import requests
 
     try:
-        yield from response.iter_content(64 * 1024)
+        yield from response.iter_content(4 * 1024)
     except requests.RequestException:
         if stall.message:
             raise DownloadError(stall.message)
@@ -123,7 +133,7 @@ class DownloadService:
     # pass through nine or more ad/tracker hops (a real one failed with
     # "Exceeded 8 redirects" on 2026-09-01). Every hop is still re-validated
     # by the session's redirect guard, so a longer leash costs no safety.
-    session = SessionSlot(read_retries=False, max_redirects=20)
+    session = SessionSlot(read_retries=False, max_redirects=20, total_timeout=4 * 3600, max_response_bytes=None)
 
     def __init__(
         self,
@@ -137,6 +147,8 @@ class DownloadService:
         self.directory = Path(directory)
         self.session = session
         self._cancellations: dict[int, Event] = {}
+        self._queued: dict[int, Event] = {}
+        self._started: dict[int, float] = {}
         self._listeners = []
         self._lock = Lock()
 
@@ -151,24 +163,49 @@ class DownloadService:
 
     def is_active(self, episode_id: int) -> bool:
         with self._lock:
-            return episode_id in self._cancellations
+            return episode_id in self._cancellations or (episode_id in self._queued and not self._queued[episode_id].is_set())
+
+    def queue(self, episode_id: int):
+        """Register intent before a worker slot is available, without I/O."""
+        with self._lock:
+            active, queued = self._cancellations.get(episode_id), self._queued.get(episode_id)
+            if (active is not None and not active.is_set()) or (queued is not None and not queued.is_set()):
+                return None
+            ticket = Event()
+            self._queued[episode_id] = ticket
+            return ticket
 
     RETRY_DELAYS = (2.0, 5.0, 10.0)
     MIN_FREE_BYTES = 500 * 1024 * 1024
 
-    def download(self, episode_id: int):
+    def download(self, episode_id: int, ticket: Event | None = None):
         """Download with bounded automatic retry on transient network errors."""
         import requests
 
-        episode = self.library.get_episode(episode_id)
-        if episode is None or not episode.media_url:
-            raise DownloadError("Episode has no downloadable media URL.")
-        self._await_cancelled(episode_id)
         with self._lock:
-            if episode_id in self._cancellations:
-                return self.downloads.get(episode_id)
-            cancellation = Event()
-            self._cancellations[episode_id] = cancellation
+            stale = ticket is not None and self._queued.get(episode_id) is not ticket
+        if stale:
+            return self.downloads.get(episode_id)
+        try:
+            episode = self.library.get_episode(episode_id)
+            if episode is None or not episode.media_url:
+                raise DownloadError("Episode has no downloadable media URL.")
+            self._await_cancelled(episode_id)
+        except Exception:
+            with self._lock:
+                if ticket is not None and self._queued.get(episode_id) is ticket:
+                    self._queued.pop(episode_id, None)
+            raise
+        with self._lock:
+            stale = ticket is not None and self._queued.get(episode_id) is not ticket
+            if stale or episode_id in self._cancellations:
+                cancellation = None
+            else:
+                cancellation = self._queued.pop(episode_id, None) or Event()
+                self._cancellations[episode_id] = cancellation
+                self._started[episode_id] = time.monotonic()
+        if cancellation is None:
+            return self.downloads.get(episode_id)
         try:
             # prepare() only after the guard: running it first meant a
             # duplicate call reset a live transfer's counters to zero before
@@ -179,6 +216,8 @@ class DownloadService:
             target = self._target(episode_id, episode.media_url)
             partial = target.with_suffix(target.suffix + ".part")
             self.downloads.prepare(episode_id, episode.media_url, target, partial)
+            if cancellation.is_set():
+                return self._park(episode_id, partial)
             # Setup lives inside the guard: an unusable path (mkdir or
             # disk_usage raising) previously leaked a permanently "active"
             # episode until restart, with the record stuck at queued.
@@ -224,10 +263,18 @@ class DownloadService:
                 type(last_error).__name__ if last_error else "unknown",
             )
             raise DownloadError(message)
+        except Exception as exc:
+            record = self.downloads.get(episode_id)
+            if record is not None and record.state in {DownloadState.QUEUED, DownloadState.DOWNLOADING}:
+                state = DownloadState.PAUSED if cancellation.is_set() else DownloadState.ERROR
+                self.downloads.progress(episode_id, state, record.bytes_done, record.bytes_total, str(exc))
+                self._emit(episode_id, state, record.bytes_done, record.bytes_total, str(exc))
+            raise
         finally:
             with self._lock:
                 if self._cancellations.get(episode_id) is cancellation:
                     self._cancellations.pop(episode_id, None)
+                    self._started.pop(episode_id, None)
 
     CANCEL_UNWIND_TIMEOUT = 5.0
 
@@ -249,6 +296,7 @@ class DownloadService:
                 if self._cancellations.get(episode_id) is not existing:
                     return
             time.sleep(0.05)
+        raise DownloadError("The previous download is still stopping. Retry shortly.")
 
     def reconcile_interrupted(self) -> int:
         """Park rows a previous run left mid-transfer.
@@ -301,32 +349,49 @@ class DownloadService:
         return fixed
 
     def discard(self, episode_id: int) -> None:
-        """Clear a failed or paused download: cancel, drop any partial, forget
-        the record, so the episode row returns to plain 'Download'."""
         self.cancel(episode_id)
-        # The worker keeps the partial open until it notices the cancel (up to
-        # a read timeout away); unlinking under it fails on Windows. Wait for
-        # the unwind, then treat a stubborn file as "leave it, still forget
-        # the record" rather than failing the whole clear.
+        with self._lock:
+            self._queued.pop(episode_id, None)
         self._await_cancelled(episode_id)
         record = self.downloads.get(episode_id)
         if record is None:
             return
-        for candidate in (record.partial_path, record.target_path if record.state != DownloadState.COMPLETE else ""):
+        if record.state == DownloadState.COMPLETE:
+            raise DownloadError("This download finished. Use Remove download to delete its file.")
+        failures = []
+        for candidate in (record.partial_path, record.target_path):
             if candidate:
                 try:
                     Path(candidate).unlink(missing_ok=True)
                 except OSError as exc:
-                    _log.warning("Could not remove %s while clearing a download: %s", candidate, exc)
+                    failures.append(f"{candidate}: {exc}")
+        if failures:
+            message = "Files could not be discarded: " + "; ".join(failures)
+            self.downloads.progress(episode_id, DownloadState.ERROR, record.bytes_done, record.bytes_total, message)
+            self._emit(episode_id, DownloadState.ERROR, record.bytes_done, record.bytes_total, message)
+            raise DownloadError(message)
         self.downloads.remove(episode_id)
 
     def pause_all(self) -> int:
-        """Stop in-flight transfers (partials are kept) — used at shutdown."""
         with self._lock:
-            active = list(self._cancellations.values())
-        for cancellation in active:
+            ids = set(self._cancellations) | set(self._queued)
+            events = [*self._cancellations.values(), *self._queued.values()]
+        for cancellation in events:
             cancellation.set()
-        return len(active)
+        return len(ids)
+
+    def _park(self, episode_id: int, partial: Path):
+        record = self.downloads.get(episode_id)
+        if record is None:
+            return None
+        try:
+            done = partial.stat().st_size if partial.is_file() else 0
+        except OSError:
+            done = record.bytes_done
+        total = record.expected_total or record.bytes_total
+        self.downloads.progress(episode_id, DownloadState.PAUSED, done, total)
+        self._emit(episode_id, DownloadState.PAUSED, done, total)
+        return self.downloads.get(episode_id)
 
     def _download_once(self, episode_id: int, cancellation: Event):
         import requests
@@ -354,17 +419,36 @@ class DownloadService:
         self.directory.mkdir(parents=True, exist_ok=True)
         existing = partial.stat().st_size if partial.is_file() else 0
 
-        headers = {}
+        validator = ""
+        if record is not None:
+            validator = record.etag if record.etag and not record.etag.startswith("W/") else record.last_modified
+        validator = validator.replace("\r", "").replace("\n", "").strip()
+        if existing and not validator:
+            existing = 0  # an unvalidated partial must never be appended
+        headers = {"Accept-Encoding": "identity"}
         if existing:
             headers["Range"] = f"bytes={existing}-"
+            headers["If-Range"] = validator
         response = None
+        stall = None
         try:
+            if target.suffix.lower() not in SAFE_MEDIA_SUFFIXES:
+                raise DownloadError("The prepared target has an unsafe file extension; clear it and retry.")
+            policy = {}
+            if getattr(self.session, "supports_deadlines", False):
+                budget = self.MAX_TRANSFER_SECONDS - (time.monotonic() - self._started.get(episode_id, time.monotonic()))
+                if budget <= 0:
+                    raise DownloadError("The download exceeded its time limit.")
+                policy = {"cancel_event": cancellation, "total_timeout": budget}
             response = self.session.get(
                 episode.media_url,
                 headers=headers,
                 timeout=(8, 30),
                 stream=True,
+                **policy,
             )
+            if response.status_code == 416 and existing:
+                raise _StaleResume("The partial range is no longer available; restarting.")
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
             # Accept audio/video plus ambiguous binary types; reject anything
@@ -373,37 +457,29 @@ class DownloadService:
             acceptable = (
                 not content_type
                 or content_type.startswith(("audio/", "video/"))
-                or content_type in {"application/octet-stream", "binary/octet-stream", "application/ogg"}
+                or content_type in BINARY_AUDIO_TYPES
             )
             if not acceptable:
                 raise DownloadError(f"Server returned {content_type} instead of audio.")
             append = existing > 0 and response.status_code == 206
-            if append:
-                # A 206 whose Content-Range start doesn't match our partial
-                # corrupts the file if appended blindly. A *missing* header
-                # used to be tolerated as "the Range was echoed implicitly",
-                # which meant the offset went unchecked entirely — restart
-                # instead of appending on faith.
+            range_total = 0
+            range_length = None
+            encoded = response.headers.get("Content-Encoding", "").lower() not in {"", "identity"}
+            if response.status_code == 206:
                 content_range = response.headers.get("Content-Range", "")
-                match = re.match(r"bytes (\d+)-(?:\d+)?/(\d+|\*)", content_range)
-                if not match:
-                    # The body is a partial range; writing it as a whole file
-                    # would corrupt it, so discard the partial and start over.
-                    raise _StaleResume("Server sent a range without Content-Range.")
-                if int(match.group(1)) != existing:
-                    raise DownloadError(f"Server resumed at the wrong offset ({content_range}).")
-                if match.group(2) != "*":
-                    # The resource must still be the one the partial came
-                    # from. Without a stored validator its full length is the
-                    # signal we have: a re-encode or CDN swap changes it, and
-                    # appending across that produces a corrupt file that would
-                    # otherwise be renamed into place and marked complete.
-                    served_total = int(match.group(2))
-                    known = (record.bytes_total if record else 0) or episode.enclosure_bytes or 0
-                    if known and served_total != known:
-                        raise _StaleResume(
-                            f"Media changed since the partial download ({served_total} vs {known} bytes)."
-                        )
+                match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", content_range.strip())
+                if match is None or encoded:
+                    raise _StaleResume("Server sent an unverifiable partial response; restarting.")
+                offset, end, range_total = map(int, match.groups())
+                if offset != existing or end < offset or end >= range_total:
+                    raise _StaleResume("Server sent an inconsistent byte range; restarting.")
+                range_length = end - offset + 1
+                if record is not None and existing:
+                    if record.expected_total and record.expected_total != range_total:
+                        raise _StaleResume("Media size changed; restarting.")
+                    returned = response.headers.get("ETag" if validator == record.etag else "Last-Modified", "")
+                    if returned and returned != validator:
+                        raise _StaleResume("Media validator changed; restarting.")
             if existing and not append:
                 # A 200 to a Range request means the server ignored it and is
                 # sending the whole file: overwrite rather than append.
@@ -413,7 +489,15 @@ class DownloadService:
             except ValueError:
                 # A malformed header is an unknown size, not a dead queued row.
                 length = 0
-            total = existing + length if length else 0
+            if range_length is not None and length and length != range_length:
+                raise _StaleResume("Content-Length disagrees with the byte range.")
+            if encoded:
+                length = 0  # iter_content returns decoded bytes, not wire bytes
+            total = range_total or (existing + length if length else 0)
+            authoritative_total = bool(total)
+            etag = response.headers.get("ETag", record.etag if append and record else "")
+            modified = response.headers.get("Last-Modified", record.last_modified if append and record else "")
+            self.downloads.response_metadata(episode_id, etag, modified, total)
             if not total and episode.enclosure_bytes:
                 # No usable Content-Length disables truncation detection, so a
                 # body cut short would be renamed into place and marked
@@ -441,11 +525,11 @@ class DownloadService:
             # arrived, so a check inside the loop cannot see a stall either.
             # The watchdog shuts the socket when fewer than STALL_MIN_BYTES
             # arrive in STALL_WINDOW_SECONDS or the transfer outlives
-            # MAX_TRANSFER_SECONDS (audit F-057).
-            stall = _StallWatch(response, self.STALL_WINDOW_SECONDS, self.STALL_MIN_BYTES, self.MAX_TRANSFER_SECONDS)
+            # MAX_TRANSFER_SECONDS.
+            stall = _StallWatch(response, self.STALL_WINDOW_SECONDS, self.STALL_MIN_BYTES, self.MAX_TRANSFER_SECONDS, cancellation)
             stall.start()
             # Progress is persisted by time, not bytes: a 256 KB step meant
-            # ~400 commits for a 100 MB episode (audit F-053). The UI still
+            # ~400 commits for a 100 MB episode. The UI still
             # gets a signal for every step that crosses the report interval.
             report_bytes = max(256 * 1024, (total or 0) // 20)
             head = b""
@@ -465,9 +549,9 @@ class DownloadService:
                         # marked complete. Let the first bytes veto it —
                         # same rule the artwork cache applies.
                         head += chunk[: 512 - len(head)]
-                        if _looks_textual(head):
+                        if _looks_textual(head) or unsafe_media_payload(head):
                             raise DownloadError(
-                                "Server sent a document instead of audio."
+                                "Server sent a document or executable instead of audio."
                             )
                     handle.write(chunk)
                     done += len(chunk)
@@ -483,18 +567,14 @@ class DownloadService:
             stall.stop()
             if stall.message:
                 raise DownloadError(stall.message)
+            if not done:
+                raise DownloadError("Server returned empty audio.")
             if total and done < total:
                 raise _TruncatedDownload("Download ended before the expected size.")
+            if authoritative_total and done != total:
+                raise DownloadError("Download size does not match the response.")
             if cancellation.is_set():
-                # A delete raced the last chunk: completing now would resurrect
-                # the record (and re-write downloaded_path) the user removed.
-                # The terminal state matters — returning silently left the row
-                # reading "downloading" with no worker behind it, offering a
-                # Pause that did nothing. A deleted record ignores this.
-                partial.unlink(missing_ok=True)
-                self.downloads.progress(episode_id, DownloadState.PAUSED, 0, 0)
-                self._emit(episode_id, DownloadState.PAUSED, 0, 0)
-                return self.downloads.get(episode_id)
+                return self._park(episode_id, partial)
             os.replace(partial, target)
             # `done` is the transfer's own byte count and equals the file size.
             # Calling stat() here let a concurrent delete turn a complete,
@@ -508,12 +588,16 @@ class DownloadService:
             partial.unlink(missing_ok=True)
             raise
         except DownloadError as exc:
+            if cancellation.is_set():
+                return self._park(episode_id, partial)
             self.downloads.progress(
                 episode_id, DownloadState.ERROR, partial.stat().st_size if partial.exists() else 0, 0, str(exc)
             )
             self._emit(episode_id, DownloadState.ERROR, 0, 0, str(exc))
             raise
         except requests.RequestException as exc:
+            if cancellation.is_set():
+                return self._park(episode_id, partial)
             done = partial.stat().st_size if partial.exists() else 0
             message = describe_network_error(exc, "the episode link")
             self.downloads.progress(
@@ -522,11 +606,15 @@ class DownloadService:
             self._emit(episode_id, DownloadState.ERROR, done, 0, message)
             raise
         except OSError as exc:
+            if cancellation.is_set():
+                return self._park(episode_id, partial)
             done = partial.stat().st_size if partial.exists() else 0
             self.downloads.progress(episode_id, DownloadState.ERROR, done, 0, str(exc))
             self._emit(episode_id, DownloadState.ERROR, done, 0, str(exc))
             raise DownloadError(str(exc)) from exc
         except Exception as exc:
+            if cancellation.is_set():
+                return self._park(episode_id, partial)
             # Anything the allow-list above misses — a sqlite error from the
             # repository calls, say — used to escape with no terminal state
             # written, leaving the row stuck on its last progress value.
@@ -534,19 +622,38 @@ class DownloadService:
             self._emit(episode_id, DownloadState.ERROR, 0, 0, str(exc))
             raise
         finally:
+            if stall is not None:
+                stall.stop()
             if response is not None:
                 response.close()
 
     def cancel(self, episode_id: int) -> bool:
         with self._lock:
-            cancellation = self._cancellations.get(episode_id)
-        if cancellation is None:
-            return False
-        cancellation.set()
-        return True
+            events = [value for value in (self._cancellations.get(episode_id), self._queued.get(episode_id)) if value is not None]
+        for cancellation in events:
+            cancellation.set()
+        return bool(events)
 
     def records(self):
-        return self.downloads.list()
+        records = self.downloads.list()
+        with self._lock:
+            queued = dict(self._queued)
+        existing = {record.episode_id: record for record in records}
+        episodes = self.library.episodes_by_ids(queued.keys()) if queued else {}
+        for episode_id, ticket in queued.items():
+            episode = episodes.get(episode_id)
+            if episode is None:
+                continue
+            state = DownloadState.PAUSED if ticket.is_set() else DownloadState.QUEUED
+            if episode_id in existing:
+                existing[episode_id] = replace(existing[episode_id], state=state)
+            else:
+                target = self._target(episode_id, episode.media_url)
+                existing[episode_id] = DownloadRecord(
+                    id=-episode_id, episode_id=episode_id, source_url=episode.media_url,
+                    target_path=str(target), partial_path=str(target.with_suffix(target.suffix + ".part")),
+                    state=state, episode_title=episode.title, show_title=episode.show_title)
+        return list(existing.values())
 
     def storage(self, records=None) -> tuple[int, int, int]:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -578,6 +685,9 @@ class DownloadService:
         survives is marked error instead of removed — removing it while the
         file remained left an untracked orphan reported as reclaimed."""
         self.cancel(episode_id)
+        with self._lock:
+            self._queued.pop(episode_id, None)
+        self._await_cancelled(episode_id)
         record = self.downloads.get(episode_id)
         if record is None:
             return 0
@@ -606,7 +716,7 @@ class DownloadService:
 
     def _target(self, episode_id: int, url: str) -> Path:
         suffix = Path(urlparse(url).path).suffix.lower()
-        if not suffix or len(suffix) > 8:
+        if suffix not in SAFE_MEDIA_SUFFIXES:
             suffix = ".media"
         # SQLite can reuse a deleted episode's rowid; a URL digest in the
         # name keeps a NEW episode from ever colliding with a leftover file

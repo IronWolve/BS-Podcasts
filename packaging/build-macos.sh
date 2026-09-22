@@ -7,8 +7,8 @@ set -Eeuo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/.." && pwd)"
 ROOT="${BS_PODCASTS_BUILD_ROOT:-$(cd "${REPO}/.." && pwd)}"
-VENV="${ROOT}/.venv"
-DIST="${ROOT}/dist"
+VENV="${BS_PODCASTS_MAC_VENV:-${ROOT}/.cache/macos-build/.venv}"
+DIST="${ROOT}/dists/macos"
 TMP="${ROOT}/tmp"
 
 if [[ -x /opt/homebrew/bin/brew ]]; then
@@ -35,7 +35,7 @@ esac
 
 if [[ ! -f "${REPO}/pyproject.toml" ]]; then
     printf 'Synced repository not found at %s\n' "${REPO}" >&2
-    printf 'Run /path/to/work/podcast-codex/sync.sh in WSL first.\n' >&2
+    printf 'Run the project-root sync.sh in WSL first.\n' >&2
     exit 1
 fi
 
@@ -58,6 +58,9 @@ if ! command -v brew >/dev/null 2>&1 || ! brew --prefix mpv >/dev/null 2>&1; the
 fi
 
 mkdir -p "${DIST}" "${TMP}"
+export TMPDIR="${TMP}" PYTHONDONTWRITEBYTECODE=1
+export PYINSTALLER_CONFIG_DIR="${ROOT}/.cache/pyinstaller-macos"
+unset PYTHONPATH
 
 if [[ ! -x "${VENV}/bin/python" ]]; then
     if [[ "${SETUP}" != true ]]; then
@@ -68,14 +71,16 @@ if [[ ! -x "${VENV}/bin/python" ]]; then
     "${PYTHON}" -m venv "${VENV}"
 fi
 
+BS_STAGE_PARENT="$(mktemp -d "${TMP}/macos-source.XXXXXX")"
+"${VENV}/bin/python" -B "${REPO}/packaging/source_manifest.py" stage --destination "${BS_STAGE_PARENT}/source"
+REPO="${BS_STAGE_PARENT}/source"
+
 if [[ "${SETUP}" == true ]]; then
     "${VENV}/bin/python" -m pip install --disable-pip-version-check --upgrade \
         pip setuptools wheel
     "${VENV}/bin/python" -m pip install --disable-pip-version-check --upgrade \
         -e "${REPO}" 'pyinstaller>=6,<7'
 else
-    "${VENV}/bin/python" -m pip install --disable-pip-version-check \
-        --no-build-isolation --no-deps -e "${REPO}"
     "${VENV}/bin/python" -c \
         'import importlib.util; required=("PyInstaller", "PySide6", "mpv", "requests", "mutagen"); missing=[name for name in required if importlib.util.find_spec(name) is None]; raise SystemExit("Missing build packages; rerun build.sh --setup: " + ", ".join(missing) if missing else 0)'
 fi
@@ -116,7 +121,6 @@ iconutil -c icns "${ICONSET}" -o "${ICON_ICNS}"
     --icon "${ICON_ICNS}" \
     --paths "${REPO}/src" \
     --collect-data bs_podcasts \
-    --copy-metadata bs-podcasts \
     --runtime-hook "${REPO}/packaging/runtime_macos.py" \
     --exclude-module PySide6.QtQml \
     --exclude-module PySide6.QtQuick \
@@ -167,3 +171,5 @@ ditto -c -k --sequesterRsrc --keepParent "${APP}" "${ZIP}"
 
 printf '\nBuild complete:\n  %s\n  %s\n' "${APP}" "${ZIP}"
 shasum -a 256 "${ZIP}"
+"${VENV}/bin/python" "${REPO}/packaging/build_manifest.py" \
+    --artifact "${APP}" --archive "${ZIP}" --output "${DIST}/BS-Podcasts-macOS-${ARCH}.manifest.json"

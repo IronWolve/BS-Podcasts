@@ -21,6 +21,8 @@ def _version_key(value: str):
 
 
 def check_for_update(installed: str, session=None) -> UpdateResult:
+    if not RELEASES_API_URL:
+        raise RuntimeError("No release service is configured for this distribution.")
     response = (session or make_session()).get(RELEASES_API_URL, timeout=(5, 12))
     if response.status_code == 404:
         # GitHub's latest-release API returns 404 both for "no release

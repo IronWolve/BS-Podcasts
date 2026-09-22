@@ -7,6 +7,12 @@ import os
 import shutil
 import sqlite3
 import threading
+import weakref
+import tempfile
+
+
+class _Connection(sqlite3.Connection):
+    """Weak-referenceable handle, still used by only one query thread."""
 
 
 class DatabaseIntegrityError(RuntimeError):
@@ -85,14 +91,16 @@ class Database:
         # alone are read dozens of times at startup. The generation counter is
         # how a cached handle learns the file underneath it was replaced
         # (repair does an os.replace): each thread notices and reopens its own,
-        # which is the only thread allowed to close it.
+        # maintenance closes idle handles under the exclusive lock.
         self._connections = threading.local()
+        self._handles = weakref.WeakSet()
+        self._handles_lock = threading.Lock()
         self._generation = 0
         self._preexisting = self.path.is_file() and self.path.stat().st_size > 0
         if self.path.is_file() and not self._preexisting:
             # An existing but empty file is damage (full disk, failed copy,
             # quarantine placeholder), not a first launch. Opening it as a
-            # fresh library silently hid every subscription (audit F-082).
+            # fresh library silently hid every subscription.
             # Only when no backup exists at all is "start empty" the safe call.
             backup = self._recovery_backup()
             if backup is not None:
@@ -110,14 +118,14 @@ class Database:
         candidates = [self.path.with_suffix(self.path.suffix + ".pre-migration.bak")]
         backups = self.path.parent / "backups"
         if backups.is_dir():
-            candidates.extend(backups.glob("library-*.db"))
+            candidates.extend(p for p in backups.glob("library-*.db") if not p.name.startswith("library-damaged-"))
         usable = [c for c in candidates if c.is_file() and c.stat().st_size > 0]
         if not usable:
             return None
         return max(usable, key=lambda c: c.stat().st_mtime)
 
     def _new_connection(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10.0)
+        connection = sqlite3.connect(self.path, timeout=10.0, check_same_thread=False, factory=_Connection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=10000")
@@ -125,7 +133,7 @@ class Database:
         # sync happens at checkpoint. An app crash loses nothing; only an
         # OS crash or power loss can drop the last few transactions, and
         # nothing here is worth a disk sync per download-progress tick
-        # (audit F-052).
+        #.
         connection.execute("PRAGMA synchronous=NORMAL")
         return connection
 
@@ -152,6 +160,8 @@ class Database:
             except sqlite3.Error:
                 pass
         connection = self._new_connection()
+        with self._handles_lock:
+            self._handles.add(connection)
         self._connections.connection = connection
         self._connections.generation = self._generation
         return connection
@@ -164,6 +174,20 @@ class Database:
                 cached.close()
             except sqlite3.Error:
                 pass
+
+    def _retire_connections(self):
+        # Caller holds exclusive: no thread can be using a handle here.
+        with self._handles_lock:
+            handles = list(self._handles)
+            self._handles.clear()
+        self._generation += 1
+        self._connections.connection = None
+        for connection in handles:
+            connection.close()
+
+    def close(self):
+        with self._lock.exclusive():
+            self._retire_connections()
 
     @contextmanager
     def connect(self):
@@ -256,7 +280,9 @@ class Database:
     def _backup_before_migration(self):
         """Keep one recoverable snapshot of the database before schema changes."""
         target = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
-        temporary = target.with_suffix(target.suffix + ".tmp")
+        descriptor, name = tempfile.mkstemp(prefix=".library-backup-", suffix=".tmp", dir=target.parent)
+        os.close(descriptor)
+        temporary = Path(name)
         temporary.unlink(missing_ok=True)
         source = sqlite3.connect(self.path)
         destination = sqlite3.connect(temporary)
@@ -270,7 +296,7 @@ class Database:
     def backup(self) -> Path:
         directory = self.path.parent / "backups"
         directory.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         target = directory / f"library-{stamp}.db"
         # Write to a sidecar and replace on success: a backup() that failed
         # halfway used to leave a truncated file with a valid backup name —
@@ -317,9 +343,10 @@ class Database:
     def repair(self) -> Path:
         """Rebuild into a fresh SQLite file. Call only after integrity failure."""
         with self._lock.exclusive():
+            self._retire_connections()
             directory = self.path.parent / "backups"
             directory.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             damaged = directory / f"library-damaged-{stamp}.db"
             # backup() folds the WAL into the snapshot; a raw file copy of a
             # live WAL database can silently miss recently committed pages,
@@ -336,8 +363,13 @@ class Database:
                 # The file may be too damaged for the backup API; a raw copy
                 # is then still better than nothing.
                 shutil.copy2(self.path, damaged)
-            temporary = self.path.with_suffix(self.path.suffix + ".repair.tmp")
-            temporary.unlink(missing_ok=True)
+                for suffix in ("-wal", "-shm"):
+                    sidecar = Path(str(self.path) + suffix)
+                    if sidecar.is_file():
+                        shutil.copy2(sidecar, Path(str(damaged) + suffix))
+            descriptor, name = tempfile.mkstemp(prefix=".library-repair-", suffix=".tmp", dir=self.path.parent)
+            os.close(descriptor)
+            temporary = Path(name)
             source = sqlite3.connect(self.path)
             destination = sqlite3.connect(temporary)
             succeeded = False
@@ -362,9 +394,5 @@ class Database:
             os.replace(temporary, self.path)
             for sidecar in ("-wal", "-shm"):
                 Path(str(self.path) + sidecar).unlink(missing_ok=True)
-            # Every cached per-thread handle now points at the replaced inode.
-            # Bumping the generation makes each thread reopen its own on next
-            # use; this thread drops its handle immediately.
-            self._generation += 1
-            self._drop_thread_connection()
+            # Old handles were closed before any snapshot or replacement.
             return damaged

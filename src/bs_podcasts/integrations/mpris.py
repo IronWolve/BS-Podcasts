@@ -168,7 +168,7 @@ class MprisController(QObject):
         if not self.available:
             return
         # Emit on change only. Every 10 Hz position tick used to broadcast
-        # the full property map (audit F-091); the spec also says Position
+        # the full property map; the spec also says Position
         # is never signalled through PropertiesChanged.
         current = {
             "PlaybackStatus": self.player_adaptor.PlaybackStatus,

@@ -6,6 +6,9 @@ the first window paints, so no startup path should pay for it.
 """
 
 from .urlguard import UnsafeUrl, ensure_fetchable
+import threading
+
+_request_context = threading.local()
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -32,6 +35,7 @@ def _redirect_guard(response, *args, **kwargs):
         try:
             ensure_fetchable(urljoin(response.url, location), "Redirect target")
         except UnsafeUrl as exc:
+            response.close()
             raise InvalidURL(str(exc), response=response) from exc
     return response
 
@@ -63,7 +67,7 @@ class SessionSlot:
         setattr(instance, self._attr, value)
 
 
-def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_retries: bool = True, max_redirects: int = 8):
+def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_retries: bool = True, max_redirects: int = 8, total_timeout: float = 60, max_response_bytes=20 * 1024 * 1024):
     """A Session safe to share across the job pool.
 
     `retries` covers connection errors and 429/5xx responses with backoff;
@@ -74,9 +78,77 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
 
-    session = Session()
+    from requests.exceptions import Timeout
+    from .netlimits import Deadline, NetworkDeadline, bounded_call, bounded_chunks, abort_response
+
+    class DeadlineRetry(Retry):
+        def increment(self, *args, **kwargs):
+            state = getattr(_request_context, "state", None)
+            if state is not None:
+                state.remaining()
+            return super().increment(*args, **kwargs)
+
+        def sleep(self, response=None):
+            state = getattr(_request_context, "state", None)
+            if state is None:
+                return super().sleep(response)
+            seconds = self.get_retry_after(response) if response is not None and self.respect_retry_after_header else None
+            seconds = seconds or self.get_backoff_time()
+            while seconds > 0:
+                interval = min(.05, seconds, state.remaining())
+                state.cancelled.wait(interval)
+                seconds -= interval
+
+    class BoundedSession(Session):
+        supports_deadlines = True
+
+        def request(self, method, url, **kwargs):
+            streaming = kwargs.pop("stream", False)
+            budget = float(kwargs.pop("total_timeout", total_timeout))
+            state = Deadline(min(budget, 45), kwargs.pop("cancel_event", None))
+            def work():
+                _request_context.state = state
+                try:
+                    return super(BoundedSession, self).request(method, url, stream=True, **kwargs)
+                finally:
+                    _request_context.state = None
+            try:
+                response = bounded_call(work, state, dispose=abort_response)
+                state.expires = state.started + budget
+                if not streaming:
+                    response.content
+                return response
+            except NetworkDeadline as exc:
+                raise Timeout(str(exc)) from exc
+
+        def send(self, request, **kwargs):
+            state = getattr(_request_context, "state", None)
+            if state is not None:
+                remaining = state.remaining()
+                timeout = kwargs.get("timeout") or (8, 20)
+                kwargs["timeout"] = tuple(min(float(value or remaining), remaining) for value in timeout) if isinstance(timeout, tuple) else min(float(timeout), remaining)
+            return super().send(request, **kwargs)
+
+    def guard_body(response, *args, **kwargs):
+        state = getattr(_request_context, "state", None)
+        if state is None:
+            return response
+        state.remaining()
+        original = response.iter_content
+        def chunks(chunk_size=1, decode_unicode=False):
+            if response._content is not False:
+                yield from original(chunk_size, decode_unicode=decode_unicode)
+                return
+            try:
+                yield from bounded_chunks(response, original, state, max_response_bytes, chunk_size, decode_unicode)
+            except NetworkDeadline as exc:
+                raise Timeout(str(exc), response=response) from exc
+        response.iter_content = chunks
+        return response
+
+    session = BoundedSession()
     session.headers["User-Agent"] = USER_AGENT
-    retry = Retry(
+    retry = DeadlineRetry(
         total=retries,
         connect=retries,
         read=retries if read_retries else 0,
@@ -92,6 +164,7 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
     session.mount("http://", adapter)
     session.max_redirects = max_redirects
     session.hooks["response"].append(_redirect_guard)
+    session.hooks["response"].append(guard_body)
     return session
 
 

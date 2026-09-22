@@ -79,7 +79,7 @@ LIGHT = {
     "accent_pressed": "#8E4D0A",
     "accent_soft": "#FBE9D2",
     "teal": "#117B6B",
-    "blue": "#2358C9",  # 5.6:1 on canvas; #2F6FE0 was 4.15 (audit F-069)
+    "blue": "#2358C9",  # 5.6:1 on canvas; #2F6FE0 was 4.15
     "success": "#187E48",
     "warning": "#966319",
     "danger": "#C03E53",

@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 
-from ..urlguard import UnsafeUrl, ensure_media_source, is_web_url
+from ..urlguard import UnsafeUrl, ensure_media_source, ensure_external_media_file, is_web_url
 from .engine import EngineCapabilities, EngineEvent, PlaybackUnavailable
 
 
@@ -25,6 +25,7 @@ class ExternalPlayerEngine:
         self.command = shutil.which(command or default) if os.name != "nt" else None
         self._handler = lambda event: None
         self._dead = False
+        self._pending_source = ""
 
     @property
     def dead(self):
@@ -49,10 +50,19 @@ class ExternalPlayerEngine:
             )
         except UnsafeUrl as exc:
             raise PlaybackUnavailable(str(exc)) from exc
+        try:
+            text = ensure_external_media_file(text)
+        except UnsafeUrl as exc:
+            raise PlaybackUnavailable(str(exc)) from exc
         if is_web_url(text) or text[:5].lower() == "file:":
             target = text
         else:
             target = Path(text).expanduser().resolve().as_uri()
+        if not autoplay:
+            self._pending_source = text
+            self._handler(EngineEvent("external_ready", target))
+            return
+        self._pending_source = ""
         if os.name == "nt":
             os.startfile(target)  # type: ignore[attr-defined]
             self._handler(EngineEvent("external", target))
@@ -69,10 +79,12 @@ class ExternalPlayerEngine:
         self._handler(EngineEvent("external", target))
 
     def unload(self):
-        pass  # nothing is held open: the system player owns the file
+        self._pending_source = ""  # already-open media belongs to the system player
 
     def play(self):
         self._guard()
+        if self._pending_source:
+            self.load(self._pending_source, autoplay=True)
 
     def pause(self):
         self._guard()

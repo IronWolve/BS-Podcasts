@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Cross-compile an LGPL libmpv-2.dll (mpv -Dgpl=false + LGPL FFmpeg) for x86_64 Windows.
 set -euo pipefail
-ROOT="/path/to/work/podcast-codex/tmp/lgpl-mpv"
+BS_BUILD_WORKSPACE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+ROOT="$BS_BUILD_WORKSPACE/tmp/lgpl-mpv"
 PREFIX="$ROOT/prefix"
 SRC="$ROOT/src"
 JOBS=28

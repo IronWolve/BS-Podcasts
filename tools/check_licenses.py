@@ -29,6 +29,7 @@ LICENSES = ROOT / "packaging" / "licenses"
 # authoritative text comes from if it ever needs re-copying. Matched as a
 # substring of the notices so renaming an entry without its file fails loudly.
 EXPECTED = {
+    "mutagen": ("GPL-2.0-mutagen.txt", "licenses/COPYING in the installed mutagen distribution"),
     "libass": ("ISC-libass.txt", "COPYING in the libass source tree"),
     "urllib3": ("MIT-urllib3.txt", "LICENSE.txt in the urllib3 sdist"),
     "charset-normalizer": ("MIT-charset-normalizer.txt", "LICENSE in the charset-normalizer sdist"),
@@ -50,7 +51,11 @@ def main() -> int:
     referenced = set(re.findall(r"licenses/([A-Za-z0-9._-]+\.txt)", text))
     dangling = sorted(referenced - present)
 
-    missing = []
+    import tomllib
+    dependencies = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["dependencies"]
+    undeclared = [re.match(r"[A-Za-z0-9._-]+", dep).group(0) for dep in dependencies
+                  if re.match(r"[A-Za-z0-9._-]+", dep).group(0).casefold() not in text.casefold()]
+    missing = [(name, "component notice", "installed runtime dependency metadata") for name in undeclared]
     for component, (filename, source) in EXPECTED.items():
         if component not in text:
             continue

@@ -33,11 +33,19 @@ class DownloadRepository:
                    episode_id, source_url, target_path, partial_path, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(episode_id) DO UPDATE SET
+                   etag=CASE WHEN source_url=excluded.source_url THEN etag ELSE '' END,
+                   last_modified=CASE WHEN source_url=excluded.source_url THEN last_modified ELSE '' END,
+                   expected_total=CASE WHEN source_url=excluded.source_url THEN expected_total ELSE 0 END,
                    source_url=excluded.source_url,
                    state='queued', error_message='', updated_at=excluded.updated_at""",
                 (episode_id, source_url, str(target), str(partial), now, now),
             )
         return self.get(episode_id)
+
+    def response_metadata(self, episode_id: int, etag: str, last_modified: str, total: int):
+        with self.database.connect() as connection:
+            connection.execute("UPDATE downloads SET etag=?, last_modified=?, expected_total=? WHERE episode_id=?",
+                               (etag, last_modified, max(0, total), episode_id))
 
     def get(self, episode_id: int) -> DownloadRecord | None:
         with self.database.connect() as connection:
@@ -134,4 +142,5 @@ class DownloadRepository:
             error_message=row["error_message"],
             episode_title=row["episode_title"],
             show_title=row["show_title"],
+            etag=row["etag"], last_modified=row["last_modified"], expected_total=row["expected_total"],
         )

@@ -89,7 +89,7 @@ class TrayController:
                 "Pause" if state == "playing" else "Play",
             )
         # Ten position ticks a second reached here; a tray tooltip update is
-        # a shell round-trip on Windows, so only apply changed text (audit F-092).
+        # a shell round-trip on Windows, so only apply changed text.
         if texts == getattr(self, "_texts", None):
             return
         self._texts = texts
@@ -121,7 +121,7 @@ class TrayController:
         the window that owned this one."""
         bridge = getattr(self.window, "_bridge", None)
         # Disconnect only what was connected: without a system tray the
-        # connect never happened and Qt warned on every quit (audit F-062).
+        # connect never happened and Qt warned on every quit.
         if bridge is not None and self._connected:
             self._connected = False
             try:

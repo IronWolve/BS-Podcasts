@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import logging
 import os
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any, Callable
 
 
@@ -28,6 +28,7 @@ class EngineCapabilities:
 class EngineEvent:
     kind: str
     value: Any = None
+    generation: int | None = None
 
 
 def _log_async_result(future) -> None:
@@ -54,11 +55,11 @@ class MpvEngine:
             "audio_display": "no",
             "network_timeout": 15,
             # Once, here: it used to be re-set synchronously on every speed
-            # change (audit F-029).
+            # change.
             "audio_pitch_correction": True,
             # Bounded demuxer cache. `cache=yes` forced the network-style
             # cache (150 MiB forward + 50 MiB back) onto local files too, and
-            # a 300 MB WAV cost 280 MB of RSS (audit F-040). 32 MiB forward
+            # a 300 MB WAV cost 280 MB of RSS. 32 MiB forward
             # is ~6 min of 96 kbps audio; `cache_secs` keeps streams padded
             # by time when the bitrate is low.
             "cache": "auto",
@@ -69,7 +70,7 @@ class MpvEngine:
         defaults.update(options)
         if os.environ.get("BS_PODCASTS_SILENT") == "1":
             # Documented for the smoke sweep, previously read by nothing
-            # (audit F-001): route audio to the null device.
+            #: route audio to the null device.
             defaults["ao"] = "null"
         self._last_error = ""
         while True:
@@ -90,6 +91,11 @@ class MpvEngine:
         # among them); nothing may reach the app before the first load, or a
         # background warm-up reads as "playing" with no file.
         self._activated = False
+        self._state_lock = RLock()
+        self._generation = 0
+        self._expected_entry_id = None
+        self._event_entry_id = None
+        self._resolving = False
         # While a load is in flight, property ticks may still belong to the
         # outgoing file; applying them would corrupt the new episode's state.
         self._loading = False
@@ -102,7 +108,7 @@ class MpvEngine:
         self._player.observe_property("paused-for-cache", self._cache_paused)
         self._player.observe_property("cache-buffering-state", self._cache_state)
         self._event_callback = self._player.event_callback(
-            "file-loaded", "end-file", "shutdown"
+            "start-file", "file-loaded", "end-file", "shutdown"
         )(self._mpv_event)
 
     @staticmethod
@@ -124,22 +130,40 @@ class MpvEngine:
     def set_event_handler(self, handler: Callable[[EngineEvent], None]):
         self._handler = handler
 
+    def prepare_load(self):
+        """Retire outgoing observations before a new snapshot is published."""
+        self._guard()
+        with self._state_lock:
+            self._generation += 1
+            self._loading = True
+            self._resolving = True
+            self._activated = True
+            self._expected_entry_id = None
+            generation = self._generation
+        self._player.command_async("stop").add_done_callback(_log_async_result)
+        return generation
+
     def load(self, source: str, start_position: float = 0.0, autoplay: bool = True):
         self._guard()
-        self._activated = True
-        self._loading = True
-        self._pending_position = max(0.0, float(start_position))
-        self._pending_autoplay = bool(autoplay)
-        self._last_error = ""
-        # A-B loop points are wall-clock times of the OUTGOING file; left in
-        # place they silently loop the next episode at the same clock times.
-        try:
+        with self._state_lock:
+            self._activated = True
+            self._resolving = False
+            self._loading = True
+            self._expected_entry_id = None
+            self._pending_position = max(0.0, float(start_position))
+            self._pending_autoplay = bool(autoplay)
+            self._last_error = ""
             self._player.ab_loop_a = "no"
             self._player.ab_loop_b = "no"
-        except Exception:
-            pass
+            # Playlist replacement returns before native loading/events finish.
+            # Bind this load to its unique entry before releasing the callback
+            # lock. Start paused until the matching FILE_LOADED applies intent.
+            self._player.loadfile(source, "replace", pause="yes")
+            entries = self._player.playlist
+            if len(entries) != 1 or "id" not in entries[0]:
+                raise PlaybackUnavailable("Could not identify the native playback entry.")
+            self._expected_entry_id = entries[0]["id"]
         self._emit("loading", source)
-        self._player.loadfile(source, "replace")
 
     def unload(self):
         """Drop the current file (cache, file handle) but keep the core.
@@ -147,8 +171,11 @@ class MpvEngine:
         demuxer cache stayed resident and, on Windows, the file could not be
         deleted (audit F-042, F-043)."""
         self._guard()
-        self._loading = False
-        self._pending_autoplay = False
+        with self._state_lock:
+            self._loading = False
+            self._pending_autoplay = False
+            self._expected_entry_id = None
+            self._event_entry_id = None
         self._player.command_async("stop").add_done_callback(_log_async_result)
 
     def play(self):
@@ -247,8 +274,17 @@ class MpvEngine:
             raise PlaybackUnavailable("The internal playback engine has shut down.")
 
     def _emit(self, kind: str, value=None):
-        if not self._dead and self._activated:
-            self._handler(EngineEvent(kind, value))
+        with self._state_lock:
+            if self._dead or not self._activated:
+                return
+            if self._loading and kind in {"position", "duration", "paused", "buffering"}:
+                return
+            if kind in {"position", "duration", "paused", "buffering"} and (
+                self._expected_entry_id is None or self._event_entry_id != self._expected_entry_id
+            ):
+                return
+            event = EngineEvent(kind, value, self._generation)
+        self._handler(event)
 
     def _position_changed(self, _name, value):
         if value is not None and not self._loading:
@@ -276,45 +312,66 @@ class MpvEngine:
             self._last_error = f"{prefix}: {text.strip()}" if prefix else text.strip()
 
     def _mpv_event(self, event):
-        event_id = event.event_id.value
-        # This callback runs on mpv's event thread; shutdown() can null the
-        # player at any point, so grab a reference and bail when it is gone.
-        player = self._player
-        if player is None or self._dead:
-            return
-        if event_id == mpv.MpvEventID.FILE_LOADED:
-            self._loading = False
-            try:
-                if self._pending_position:
-                    player.seek(self._pending_position, "absolute", "exact")
-                player.pause = not self._pending_autoplay
-            except Exception:
-                return  # torn down mid-load; the shutdown event follows
-            self._emit("file_loaded")
-            self._emit("paused", not self._pending_autoplay)
-        elif event_id == mpv.MpvEventID.END_FILE:
-            reason = getattr(event.data, "reason", None)
-            error_reason = getattr(event.data, "ERROR", 4)
-            if self._loading and reason != error_reason:
-                # `loadfile replace` first ends the OUTGOING file; that exit
-                # must neither reopen the stale-event gate nor be reported as
-                # this load's eof/stop (an eof here would advance the queue
-                # past the episode that is still opening).
+        events = []
+        with self._state_lock:
+            player = self._player
+            if player is None or self._dead:
                 return
-            if reason == error_reason:
+            event_id = event.event_id.value
+            generation = self._generation
+            if event_id == mpv.MpvEventID.START_FILE:
+                # Track the native event stream, even for a retired load.
+                self._event_entry_id = event.data.playlist_entry_id
+                return
+            if event_id == mpv.MpvEventID.SHUTDOWN:
+                events.append(EngineEvent("shutdown", generation=generation))
+            elif self._resolving or self._expected_entry_id is None:
+                return
+            elif event_id == mpv.MpvEventID.FILE_LOADED:
+                if self._event_entry_id != self._expected_entry_id:
+                    return
+                if not self._loading:
+                    return
+                try:
+                    if self._pending_position:
+                        player.seek(self._pending_position, "absolute", "exact")
+                    player.pause = not self._pending_autoplay
+                except Exception as exc:
+                    events.append(EngineEvent("error", str(exc), generation))
+                else:
+                    self._loading = False
+                    events.extend((EngineEvent("file_loaded", generation=generation),
+                                   EngineEvent("paused", not self._pending_autoplay, generation)))
+            elif event_id == mpv.MpvEventID.END_FILE:
+                if event.data.playlist_entry_id != self._expected_entry_id:
+                    return
+                reason = event.data.reason
+                if reason == getattr(event.data, "REDIRECT", 5):
+                    # Native playlist expansion keeps the logical episode, but
+                    # each expanded entry has a new native identity.
+                    inserted = getattr(event.data, "playlist_insert_id", -1)
+                    count = getattr(event.data, "playlist_insert_num_entries", 0)
+                    if inserted >= 0 and count:
+                        self._expected_entry_id = inserted
+                        self._loading = True
+                        self._event_entry_id = None
+                        return
                 self._loading = False
-                code = getattr(event.data, "error", 0)
-                message = self._last_error
-                if not message:
+                self._expected_entry_id = None
+                self._event_entry_id = None
+                if reason == getattr(event.data, "ERROR", 4):
+                    code = getattr(event.data, "error", 0)
                     try:
-                        message = mpv._mpv_error_string(code).decode("utf-8", "replace") if code else "Unknown playback error"
+                        message = mpv._mpv_error_string(code).decode("utf-8", "replace") if code else self._last_error
                     except Exception:
-                        message = f"mpv error {code}"
-                self._emit("error", message)
-            else:
-                self._emit("eof" if reason == event.data.EOF else "stopped", reason)
-        elif event_id == mpv.MpvEventID.SHUTDOWN:
-            self._emit("shutdown")
+                        message = self._last_error
+                    events.append(EngineEvent("error", message or "Unknown playback error", generation))
+                else:
+                    events.append(EngineEvent("eof" if reason == event.data.EOF else "stopped", reason, generation))
+        # Never hold the native lock while acquiring the service lock. These
+        # events retain the generation captured before a concurrent replacement.
+        for event in events:
+            self._handler(event)
 
 
 class LazyMpvEngine:
@@ -330,7 +387,7 @@ class LazyMpvEngine:
     def __init__(self, **options):
         # Nothing is imported here: loading libmpv (a dlopen of the whole
         # library) cost 59 ms on the main thread before the first paint
-        # (audit F-019). The import happens in _real(), i.e. in the deferred
+        #. The import happens in _real(), i.e. in the deferred
         # warm-up or on the first real playback call, and a machine without
         # libmpv falls back to the external player there.
         self._options = options

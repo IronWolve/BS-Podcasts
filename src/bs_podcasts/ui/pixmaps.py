@@ -6,6 +6,7 @@ import json
 import math
 import os
 import threading
+import time
 import weakref
 
 from PySide6.QtCore import QObject, QRect, QRectF, QSize, Qt, Signal
@@ -210,13 +211,23 @@ def _read_image(path: str, width: int, height: int) -> QImage:
 _decoder: ThreadPoolExecutor | None = None
 _decode_lock = threading.Lock()
 _inflight: set[str] = set()
-_failed: set[str] = set()
-_watchers: "weakref.WeakSet" = weakref.WeakSet()
+_failed: dict[str, float] = {}
+_watchers: dict[str, weakref.WeakSet] = {}
+_waiting = weakref.WeakSet()
+_revisions: dict[str, int] = {}
+_decode_stopped = False
+MAX_PENDING_DECODES = 64
 _bridge = None
 
 
+def _remember_failed(key: str):
+    _failed[key] = time.monotonic()
+    while len(_failed) > 2048:
+        _failed.pop(next(iter(_failed)))
+
+
 class _DecodeBridge(QObject):
-    decoded = Signal(str, QImage)
+    decoded = Signal(str, str, QImage)
 
     def __init__(self):
         super().__init__()
@@ -224,14 +235,18 @@ class _DecodeBridge(QObject):
         # run on the GUI thread because it creates QPixmaps and repaints.
         self.decoded.connect(self._on_decoded, Qt.ConnectionType.QueuedConnection)
 
-    def _on_decoded(self, key: str, image: QImage):
+    def _on_decoded(self, key: str, path: str, image: QImage):
         with _decode_lock:
             _inflight.discard(key)
             if image.isNull():
-                _failed.add(key)
+                _remember_failed(key)
+        if _decode_stopped:
+            return
         if not image.isNull():
             QPixmapCache.insert(key, QPixmap.fromImage(image))
-        for widget in list(_watchers):
+        watchers = list(_watchers.get(path, ())) + list(_waiting)
+        _waiting.clear()
+        for widget in watchers:
             try:
                 widget.update()
             except RuntimeError:
@@ -243,14 +258,23 @@ def _decode_job(key: str, path: str, width: int, height: int, bridge: _DecodeBri
         image = _read_image(path, width, height)
     except Exception:
         image = QImage()
-    bridge.decoded.emit(key, image)
+    try:
+        bridge.decoded.emit(key, path, image)
+    except RuntimeError:
+        pass  # application teardown has destroyed the Qt bridge
 
 
 def _schedule_decode(key: str, path: str, width: int, height: int, notify) -> None:
     global _decoder, _bridge
     if notify is not None:
-        _watchers.add(notify)
+        _watchers.setdefault(path, weakref.WeakSet()).add(notify)
     with _decode_lock:
+        if _decode_stopped:
+            return
+        if len(_inflight) >= MAX_PENDING_DECODES:
+            if notify is not None:
+                _waiting.add(notify)
+            return
         if key in _inflight or key in _failed:
             return
         _inflight.add(key)
@@ -261,6 +285,37 @@ def _schedule_decode(key: str, path: str, width: int, height: int, notify) -> No
         bridge = _bridge
     _decoder.submit(_decode_job, key, path, width, height, bridge)
 
+
+
+def invalidate_artwork(path: str):
+    """Called on the GUI thread when a producer publishes/replaces an image."""
+    _revisions[path] = _revisions.get(path, 0) + 1
+    prefix = f"src:{path}:"
+    with _decode_lock:
+        for key in list(_failed):
+            if key.startswith(prefix):
+                _failed.pop(key, None)
+    for widget in list(_watchers.get(path, ())):
+        try:
+            widget.update()
+        except RuntimeError:
+            pass
+
+
+def shutdown_decodes(grace_seconds: float = 0.0) -> int:
+    """Cancel queued decodes and include running decodes in the app exit budget."""
+    global _decode_stopped
+    with _decode_lock:
+        _decode_stopped = True
+        executor = _decoder
+    if executor is None:
+        return 0
+    executor.shutdown(wait=False, cancel_futures=True)
+    deadline = time.monotonic() + max(0.0, grace_seconds)
+    threads = tuple(getattr(executor, "_threads", ()))
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    return sum(thread.is_alive() for thread in threads)
 
 def _sync_forced() -> bool:
     return os.environ.get("BS_PODCASTS_SYNC_ARTWORK") == "1"
@@ -280,17 +335,19 @@ def _source(path: str, width: int, height: int, sync: bool = False, notify=None)
     `sync=True` the caller waits for the decode on its own thread — for one-off
     surfaces such as dialogs, never for delegates.
     """
-    key = f"src:{path}:{width}x{height}"
+    key = f"src:{path}:{width}x{height}:v{_revisions.get(path, 0)}"
     cached = QPixmapCache.find(key)
     if cached is not None and not cached.isNull():
         return cached
     if key in _failed:
-        return None
+        if not sync and time.monotonic() - _failed[key] < 5:
+            return None
+        _failed.pop(key, None)
     if sync or _sync_forced():
         image = _read_image(path, width, height)
         if image.isNull():
             with _decode_lock:
-                _failed.add(key)
+                _remember_failed(key)
             return None
         pixmap = QPixmap.fromImage(image)
         QPixmapCache.insert(key, pixmap)
@@ -327,14 +384,16 @@ def cover(
         f":{fallback_color or COLORS['surface_soft']}:{COLORS['muted']}"
         f":{COLORS['surface_raised']}:{COLORS['border']}"
     )
-    key = f"cover:{path}:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}"
+    if path and notify is not None:
+        _watchers.setdefault(path, weakref.WeakSet()).add(notify)
+    key = f"cover:{path}:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}:v{_revisions.get(path, 0)}"
     cached = QPixmapCache.find(key)
     if cached is not None and not cached.isNull():
         return cached
     physical_w = max(1, int(round(width * scale)))
     physical_h = max(1, int(round(height * scale)))
     source = _source(path, physical_w, physical_h, sync, notify) if path else None
-    if path and source is None and f"src:{path}:{physical_w}x{physical_h}" not in _failed:
+    if path and source is None:
         # Still decoding: draw the placeholder under its own key so the real
         # cover is built (and cached under `key`) on the repaint that follows.
         key = f"coverpending:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}"

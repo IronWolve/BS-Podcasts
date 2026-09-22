@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "bs-podcasts"
 version = "0.9.5"
 description = "A wide, mobile-inspired desktop podcast player"
-readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
   "PySide6>=6.8,<7",

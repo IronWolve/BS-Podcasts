@@ -50,6 +50,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..assets import icon_path
+from ..domain.times import media_seconds
+from ..urlguard import is_web_url
 from . import icons
 from .pixmaps import cover, initials
 from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, play_button_size, scaled_px, theme_name
@@ -98,7 +100,7 @@ class _SafeFeedHtml(HTMLParser):
             return
         if tag == "a":
             href = next((value for name, value in attrs if name.lower() == "href"), "") or ""
-            if urlsplit(href).scheme.lower() not in {"http", "https"}:
+            if not is_web_url(href):
                 self._anchors.append(False)
                 self.parts.append("<span>")
                 return
@@ -109,6 +111,7 @@ class _SafeFeedHtml(HTMLParser):
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
         tag = tag.lower()
@@ -163,7 +166,9 @@ def linkify(text: str) -> str:
 
 
 # Feed links must read as links inside the rich-text views.
-_LINK_STYLE = "a { color: %s; text-decoration: underline; }" % COLORS["blue"]
+def _link_style() -> str:
+    """Resolve document colors when the themed surface is constructed."""
+    return "a { color: %s; text-decoration: underline; }" % COLORS["blue"]
 
 
 @lru_cache(maxsize=256)
@@ -242,7 +247,7 @@ class EdgeHandle(QPushButton):
             self._effect.setOpacity(self.DIM)
         super().leaveEvent(event)
 
-    # Keyboard focus at 35 % opacity was nearly invisible (audit F-102).
+    # Keyboard focus at 35 % opacity was nearly invisible.
     def focusInEvent(self, event):
         self._effect.setOpacity(1.0)
         super().focusInEvent(event)
@@ -607,7 +612,7 @@ def fit_combo_width(combo, floor: int = 0) -> int:
 
 # Below this page width the header drops its inline filter and the chip
 # row goes compact together; two independent cutoffs (430/720) left a band
-# with a crowded header and wrapped chips (audit F-119).
+# with a crowded header and wrapped chips.
 COMPACT_PAGE_PX = 640
 
 
@@ -648,6 +653,8 @@ class PageHeader(QFrame):
         # orphan sub-layout parents nothing): setVisible(True) on a parentless
         # widget maps it as its own top-level window (a flash at startup).
         self.subtitle_label.setVisible(bool(subtitle))
+        self.title_label.installEventFilter(self)
+        self.subtitle_label.installEventFilter(self)
 
         self.search = SearchField("Filter")
         self.search.setAccessibleName(f"Filter {title}")
@@ -705,6 +712,13 @@ class PageHeader(QFrame):
             if label.text() != wanted:
                 label.setText(wanted)
             label.setToolTip(tip)
+
+    def eventFilter(self, watched, event):
+        if watched in (self.title_label, self.subtitle_label) and event.type() in {
+            QEvent.Type.Resize, QEvent.Type.FontChange,
+        }:
+            self._elide_header_text()
+        return super().eventFilter(watched, event)
 
     def set_search_allowed(self, allowed: bool):
         """Pages hide the filter on an empty collection; remembering it here
@@ -972,6 +986,18 @@ class Toast(QFrame):
         self.icon.setFixedSize(scaled_px(18), scaled_px(18))
         self.text = QLabel()
         self.text.setObjectName("toastText")
+        self.text.setTextFormat(Qt.TextFormat.PlainText)
+        self.text.setWordWrap(True)
+        self.text.setMinimumWidth(0)
+        self.text.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self.text_scroll = QScrollArea(self)
+        self.text_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.text_scroll.setWidgetResizable(True)
+        self.text_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.text_scroll.setWidget(self.text)
+        self.text_scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }")
+        self.text_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.action = QPushButton()
         self.action.setObjectName("textButton")
         self.action.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -979,7 +1005,7 @@ class Toast(QFrame):
         self.close = icon_button("close", "Dismiss", size=14)
         self.close.clicked.connect(self._user_close)
         layout.addWidget(self.icon)
-        layout.addWidget(self.text)
+        layout.addWidget(self.text_scroll, 1)
         layout.addWidget(self.action)
         layout.addWidget(self.close)
         self._effect = QGraphicsOpacityEffect(self)
@@ -1040,7 +1066,7 @@ class Toast(QFrame):
         self.setAccessibleName(message)
         self._effect.setOpacity(0.0)
         self.show()
-        # Screen readers never heard toasts: raise an alert event (audit F-101).
+        # Screen readers never heard toasts: raise an alert event.
         QAccessible.updateAccessibility(QAccessibleEvent(self, QAccessible.Event.Alert))
         self.raise_()
         self._animation.stop()
@@ -1067,8 +1093,33 @@ class Toast(QFrame):
             return
         anchor = getattr(parent, "toast_anchor", None)
         bottom = anchor() if callable(anchor) else parent.height() - SPACE["lg"]
-        self.adjustSize()
-        self.move((parent.width() - self.width()) // 2, bottom - self.height() - SPACE["md"])
+        margins = self.layout().contentsMargins()
+        controls = [self.icon, self.close]
+        if not self.action.isHidden():
+            controls.append(self.action)
+        chrome = (margins.left() + margins.right()
+                  + sum(widget.sizeHint().width() for widget in controls)
+                  + self.layout().spacing() * len(controls))
+        maximum = max(1, parent.width() - 2 * SPACE["md"])
+        natural = chrome + self.text.fontMetrics().horizontalAdvance(self.text.text())
+        self.setFixedWidth(min(maximum, max(chrome + scaled_px(80), natural)))
+        # Long diagnostics scroll inside the toast. Actions never leave the
+        # parent viewport, and the complete text remains selectable/copyable.
+        available = max(1, min(parent.height() - 2 * SPACE["sm"], bottom - SPACE["md"] - SPACE["sm"]))
+        text_width = max(1, self.width() - chrome)
+        cap = max(1, min(scaled_px(220), available) - margins.top() - margins.bottom())
+        self.text.setMinimumHeight(0)
+        text_height = max(self.text.fontMetrics().height(), self.text.heightForWidth(text_width))
+        if text_height > cap:
+            text_width = max(1, text_width - self.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent))
+            text_height = max(text_height, self.text.heightForWidth(text_width))
+        self.text.setMinimumHeight(text_height)
+        self.text_scroll.setFixedHeight(min(cap, text_height))
+        self.layout().activate()
+        height = max(self.text_scroll.height(), *(widget.sizeHint().height() for widget in controls)) + margins.top() + margins.bottom()
+        self.resize(self.width(), min(available, height))
+        self.move((parent.width() - self.width()) // 2,
+                  max(SPACE["sm"], bottom - self.height() - SPACE["md"]))
 
     def _user_close(self):
         callback = self._on_close
@@ -1357,7 +1408,7 @@ class HeroCard(QFrame):
             f"border: 1px solid {COLORS['hairline']}; border-radius: 16px; }}"
         )
         # A stylesheet set repolishes the card and every child; skip it when
-        # the tint has not changed (same show reopened, refresh) (audit F-129).
+        # the tint has not changed (same show reopened, refresh).
         if css != getattr(self, "_tint_css", None):
             self._tint_css = css
             self.setStyleSheet(css)
@@ -1777,7 +1828,7 @@ class SleepPopover(Popover):
         layout.addWidget(cancel, alignment=Qt.AlignmentFlag.AlignLeft)
 
     def _choose(self, minutes: int):
-        # -1 means "at the end of this episode" (audit F-098)
+        # -1 means "at the end of this episode"
         self.sleep_selected.emit(-1 if minutes < 0 else minutes * 60)
         self.hide()
 
@@ -1978,7 +2029,7 @@ class ContextPanel(QFrame):
         self.tabs.setDocumentMode(True)
         # Whole labels or icons, never a cut word: at the default pane width
         # the four labels did not fit and Qt showed "Bookma" behind two
-        # scroll arrows (audit F-066). _fit_tabs swaps to icon-only tabs with
+        # scroll arrows. _fit_tabs swaps to icon-only tabs with
         # tooltips when the full strip is wider than the pane.
         self.tabs.tabBar().setExpanding(False)
         self.tabs.tabBar().setUsesScrollButtons(False)
@@ -1989,7 +2040,7 @@ class ContextPanel(QFrame):
         self.body.setReadOnly(True)
         self.body.setOpenExternalLinks(False)
         self.body.anchorClicked.connect(lambda url: self.open_url_requested.emit(url.toString()))
-        self.body.document().setDefaultStyleSheet(_LINK_STYLE)
+        self.body.document().setDefaultStyleSheet(_link_style())
         self.body.setFrameShape(QFrame.Shape.NoFrame)
         self.tabs.addTab(self.body, "Details")
         self.chapter_list = QListWidget()
@@ -2291,9 +2342,15 @@ class ContextPanel(QFrame):
         self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 18))
         self.primary.setEnabled(True)
         self.secondary.setEnabled(bool(self._episode_id))
+        self._downloadable = is_web_url(episode.media_url) or bool(episode.downloaded_path)
         self._apply_download_button(episode.state)
 
     def _apply_download_button(self, state: str):
+        if not getattr(self, "_downloadable", True):
+            self.download.setEnabled(False)
+            self.download.setText("Local audio")
+            self.download.setToolTip("This file is already on your computer.")
+            return
         if state == "Downloaded":
             self.download.setText("Downloaded")
             self.download.setIcon(icons.icon("downloaded", COLORS["success"], 16, disabled=COLORS["success"]))
@@ -2492,7 +2549,7 @@ class ContextPanel(QFrame):
 
     @staticmethod
     def _time(seconds: float) -> str:
-        total = max(0, int(seconds))
+        total = int(media_seconds(seconds) or 0)
         minutes, secs = divmod(total, 60)
         return f"{minutes}:{secs:02d}"
 
@@ -2639,7 +2696,7 @@ class NowPlayingView(QFrame):
         self.notes.setReadOnly(True)
         self.notes.setOpenExternalLinks(False)
         self.notes.anchorClicked.connect(lambda url: self.open_url_requested.emit(url.toString()))
-        self.notes.document().setDefaultStyleSheet(_LINK_STYLE)
+        self.notes.document().setDefaultStyleSheet(_link_style())
         self.notes.setFrameShape(QFrame.Shape.NoFrame)
         self.tabs.addTab(self.notes, "Show notes")
         self.chapter_list = QListWidget()
@@ -3124,7 +3181,7 @@ class PlayerBar(QFrame):
         self.elapsed.setObjectName("timeLabel")
         self.elapsed.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.slider = SeekSlider()
-        # 1,000 steps made one step 11 s on a 3-hour episode (audit F-120);
+        # 1,000 steps made one step 11 s on a 3-hour episode;
         # the span follows the duration (one step ≈ one second) from _set_span.
         self.slider.setRange(0, 1000)
         self.slider.setAccessibleName("Playback position")
@@ -3325,7 +3382,7 @@ class PlayerBar(QFrame):
     def _now_text_width(self) -> int:
         # Prefer the column width _balance_zones just decided: now_wrap's own
         # width() lags one layout pass behind, which is how a remembered
-        # episode's title hard-clipped at first paint (audit F-065).
+        # episode's title hard-clipped at first paint.
         width = getattr(self, "_now_column", 0)
         if width < 40:
             width = self.now_wrap.width()
@@ -3450,7 +3507,7 @@ class PlayerBar(QFrame):
                 f"border-top: 1px solid {COLORS['hairline']}; }}"
             )
         # Every playback tick with the same artwork reached here; a stylesheet
-        # set repolishes the whole bar, so only apply a changed tint (audit F-129).
+        # set repolishes the whole bar, so only apply a changed tint.
         if css != getattr(self, "_tint_css", None):
             self._tint_css = css
             self.setStyleSheet(css)
@@ -3678,7 +3735,7 @@ class PlayerBar(QFrame):
 
     @staticmethod
     def _time(seconds: float) -> str:
-        total = max(0, int(seconds))
+        total = int(media_seconds(seconds) or 0)
         hours, remainder = divmod(total, 3600)
         minutes, secs = divmod(remainder, 60)
         return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"

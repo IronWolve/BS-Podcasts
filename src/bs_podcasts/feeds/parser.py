@@ -5,6 +5,7 @@ from hashlib import sha256
 import xml.etree.ElementTree as ET
 
 from ..domain import FeedData, FeedEpisodeData
+from ..domain.media import BINARY_AUDIO_TYPES
 from .safety import contains_dtd
 
 
@@ -93,20 +94,21 @@ def _date(value: str) -> str:
 
 
 def _duration(value: str) -> int:
-    value = value.strip()
-    if not value:
-        return 0
+    import math
     try:
+        value = (value or "").strip()
+        if not value:
+            return 0
         if ":" not in value:
-            return max(0, int(float(value)))
-        parts = [int(part) for part in value.split(":")]
-        if len(parts) == 2:
-            return max(0, parts[0] * 60 + parts[1])
-        if len(parts) == 3:
-            return max(0, parts[0] * 3600 + parts[1] * 60 + parts[2])
-    except (TypeError, ValueError):
+            seconds = float(value)
+        else:
+            parts = [int(part) for part in value.split(":")]
+            if len(parts) not in {2, 3}:
+                return 0
+            seconds = sum(part * 60**index for index, part in enumerate(reversed(parts)))
+        return int(seconds) if math.isfinite(seconds) and 0 <= seconds <= 2**31 else 0
+    except (TypeError, ValueError, OverflowError):
         return 0
-    return 0
 
 
 def _integer(value: str) -> int | None:
@@ -186,19 +188,21 @@ def _rss_enclosure(item) -> tuple[str, str, int]:
     for child in item:
         if _local(child.tag) not in {"enclosure", "content"}:
             continue
-        url = child.attrib.get("url", "").strip()
+        attributes = {_local(key): value for key, value in child.attrib.items()}
+        url = (attributes.get("url") or attributes.get("resource") or "").strip()
         if not url:
             continue
-        length = child.attrib.get("length", "").strip()
+        length = attributes.get("length", "").strip()
         if length:
             try:
                 if 0 < int(length) < MIN_ENCLOSURE_BYTES:
                     continue
             except ValueError:
                 pass
-        mime = child.attrib.get("type", "").strip().lower()
-        if mime and not mime.startswith("audio/"):
-            _SKIPPED.append(mime)
+        mime = attributes.get("type", "").split(";", 1)[0].strip().lower()
+        if mime and not mime.startswith("audio/") and mime not in BINARY_AUDIO_TYPES:
+            if mime.startswith("video/"):
+                _SKIPPED.append(mime)
             continue
         return url, mime or "audio/*", _integer(length) or 0
     return "", "audio/*", 0
@@ -229,9 +233,10 @@ def _atom_link(element, relation: str) -> tuple[str, str, int]:
         href = link.attrib.get("href", "").strip()
         if not href:
             continue
-        mime = link.attrib.get("type", "").strip().lower()
-        if relation == "enclosure" and mime and not mime.startswith("audio/"):
-            _SKIPPED.append(mime)
+        mime = link.attrib.get("type", "").split(";", 1)[0].strip().lower()
+        if relation == "enclosure" and mime and not mime.startswith("audio/") and mime not in BINARY_AUDIO_TYPES:
+            if mime.startswith("video/"):
+                _SKIPPED.append(mime)
             continue
         return (
             href,
@@ -255,7 +260,8 @@ def _parse_rss(root) -> FeedData:
 
     episodes = []
     seen = set()
-    for item in _children(channel, "item"):
+    items = _children(root if _local(root.tag) == "rdf" else channel, "item")
+    for item in items:
         if len(episodes) >= MAX_SCANNED_EPISODES:
             break
         title = _text(item, "title") or "Untitled episode"
@@ -263,7 +269,7 @@ def _parse_rss(root) -> FeedData:
         if not media_url:
             continue
         published = _date(_text(item, "pubdate", "published", "date"))
-        external = _external_id(title, published, media_url, _text(item, "guid", "id"))
+        external = _external_id(title, published, media_url, _text(item, "guid", "id") or item.attrib.get("{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about", ""))
         if external in seen:
             continue
         seen.add(external)
@@ -379,7 +385,7 @@ def _parse_atom(root) -> FeedData:
 
 
 XML_BASE = "{http://www.w3.org/XML/1998/namespace}base"
-_URL_ATTRIBUTES = ("url", "href", "src")
+_URL_ATTRIBUTES = ("url", "href", "src", "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}resource", "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about")
 _URL_TEXT_TAGS = {"link", "url"}
 
 

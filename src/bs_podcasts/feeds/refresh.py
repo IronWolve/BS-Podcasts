@@ -52,6 +52,21 @@ class RefreshService:
         show = self.repository.get_show(show_id)
         if show is None:
             return RefreshReport(show_id, Health.ERROR, message="Podcast was not found.")
+        if show.source == "local":
+            from pathlib import Path
+            from urllib.parse import urlsplit
+            from urllib.request import url2pathname
+            from ..urlguard import ensure_media_source
+            try:
+                source = ensure_media_source(show.feed_url, allow_file_url=True)
+                parts = urlsplit(source)
+                path = Path(url2pathname(parts.path) if parts.scheme == "file" else source)
+                health = Health.OK if path.is_file() else Health.PARTIAL
+                message = "" if health == Health.OK else "The local audio file is missing."
+            except (ValueError, OSError) as exc:
+                health, message = Health.PARTIAL, str(exc)
+            self.repository.record_refresh_success(show_id, health)
+            return RefreshReport(show_id, health, message=message)
         if show.suspended:
             return RefreshReport(show_id, Health.SUSPENDED, message="Podcast refresh is suspended.")
 

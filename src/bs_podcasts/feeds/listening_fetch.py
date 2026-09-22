@@ -6,6 +6,7 @@ import re
 
 from ..net import USER_AGENT, describe_network_error, make_session
 from ..urlguard import UnsafeUrl, ensure_fetchable
+from ..domain.times import media_seconds, media_interval
 
 
 MAX_BYTES = 4 * 1024 * 1024
@@ -71,16 +72,14 @@ def parse_chapters(content: bytes) -> list[ChapterData]:
     for entry in entries or ():
         if not isinstance(entry, dict):
             continue
-        try:
-            start = float(entry.get("startTime", 0))
-        except (TypeError, ValueError):
+        start, end = media_interval(entry.get("startTime", 0), entry.get("endTime"))
+        if start is None:
             continue
-        end = entry.get("endTime")
         chapters.append(
             ChapterData(
-                start_seconds=max(0.0, start),
+                start_seconds=start,
                 title=str(entry.get("title") or "").strip(),
-                end_seconds=float(end) if isinstance(end, (int, float)) else None,
+                end_seconds=end,
                 artwork_url=str(entry.get("img") or ""),
             )
         )
@@ -102,7 +101,10 @@ def _stamp(text: str) -> float | None:
     if not match:
         return None
     hours, minutes, seconds, millis = match.groups()
-    return int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int(millis.ljust(3, "0")) / 1000
+    try:
+        return media_seconds(int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int(millis.ljust(3, "0")) / 1000)
+    except (ValueError, OverflowError):
+        return None
 
 
 def parse_transcript(content: bytes, kind: str = "", url: str = "") -> list[SegmentData]:
@@ -131,13 +133,12 @@ def _parse_json_transcript(text: str) -> list[SegmentData]:
         body = str(entry.get("body") or entry.get("text") or "").strip()
         if not body:
             continue
-        start = entry.get("startTime")
-        end = entry.get("endTime")
+        start, end = media_interval(entry.get("startTime"), entry.get("endTime"))
         segments.append(
             SegmentData(
                 text=body,
-                start_seconds=float(start) if isinstance(start, (int, float)) else None,
-                end_seconds=float(end) if isinstance(end, (int, float)) else None,
+                start_seconds=start,
+                end_seconds=end,
             )
         )
     return _merge_short(segments)
