@@ -32,7 +32,7 @@ def main():
             assert release.wait(3)
         return original(show_id,limit,offset)
     library.episodes = held
-    new = shell.MainWindow(library=library, jobs=jobs, view_state=state)
+    new = shell.MainWindow(library=library, jobs=jobs, view_state=state, commands=old.commands)
     new.show()
     end = time.monotonic()+2
     while not entered.is_set() and time.monotonic()<end:

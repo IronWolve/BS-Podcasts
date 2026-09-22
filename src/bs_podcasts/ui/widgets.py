@@ -3594,12 +3594,13 @@ class PlayerBar(QFrame):
             snapshot.source, snapshot.speed, snapshot.volume, snapshot.ab_start,
             snapshot.ab_end, snapshot.trim_level, snapshot.sleep_deadline,
             snapshot.artwork_path, snapshot.message, snapshot.buffering, snapshot.duration,
+            getattr(snapshot, "sleep_at_end", False),
         )
         if chrome_key == getattr(self, "_chrome_key", None):
-            position = max(0.0, float(snapshot.position))
+            position = media_seconds(snapshot.position) or 0.0
             if not self.slider.isSliderDown():
                 self.slider.blockSignals(True)
-                self.slider.setValue(int(self.slider.maximum() * position / self._duration) if self._duration else 0)
+                self.slider.setValue(min(self.slider.maximum(), int(self.slider.maximum() * position / self._duration)) if self._duration else 0)
                 self.slider.blockSignals(False)
             self.elapsed.setText(self._time(position))
             self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
@@ -3618,15 +3619,15 @@ class PlayerBar(QFrame):
         self._now_show_id = int(getattr(snapshot, "show_id", 0) or 0)
         self._elide_now_labels()
         self.art.set_artwork(snapshot.artwork_path, initials(snapshot.show_title or snapshot.title), "")
-        self._duration = max(0.0, float(snapshot.duration))
-        span = max(1000, int(self._duration))
+        self._duration = media_seconds(snapshot.duration) or 0.0
+        span = min(2**31 - 1, max(1000, int(self._duration)))
         if self.slider.maximum() != span:
             self.slider.setRange(0, span)
-        position = max(0.0, float(snapshot.position))
+        position = media_seconds(snapshot.position) or 0.0
         self.slider.set_duration(self._duration, self._time)
         if not self.slider.isSliderDown():
             self.slider.blockSignals(True)
-            self.slider.setValue(int(self.slider.maximum() * position / self._duration) if self._duration else 0)
+            self.slider.setValue(min(self.slider.maximum(), int(self.slider.maximum() * position / self._duration)) if self._duration else 0)
             self.slider.blockSignals(False)
         self.elapsed.setText(self._time(position))
         self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))

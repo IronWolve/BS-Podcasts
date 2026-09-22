@@ -164,9 +164,11 @@ class PlaybackService:
                 pass
         self._emit()
 
-    def load_episode(self, episode_id: int, autoplay: bool = True):
+    def load_episode(self, episode_id: int, autoplay: bool = True, *, cancelled=None, start_position=None):
         with self._lock:
             self._guard()
+            if cancelled is not None and cancelled():
+                return False
             self._flush_listening()
             self._persist_position(force=True)
             # Sleep is session-scoped: a new load's snapshot has no deadline,
@@ -206,6 +208,10 @@ class PlaybackService:
             start = float(episode.position_seconds)
             if episode.duration_seconds and start >= max(0.0, float(episode.duration_seconds) - 2.0):
                 start = 0.0
+            if cancelled is not None and cancelled():
+                return False
+            if start_position is not None:
+                start = max(0.0, float(start_position))
             speed = show.playback_speed if show else 1.0
             self._begin_load(start, autoplay)
             if not self._volume_applied:
@@ -250,6 +256,7 @@ class PlaybackService:
         duration: float = 0.0,
         artwork_path: str = "",
         autoplay: bool = True,
+        cancelled=None,
     ):
         """Play a URL-only episode without adding it to the library.
 
@@ -266,6 +273,8 @@ class PlaybackService:
             raise PlaybackUnavailable(str(exc)) from exc
         with self._lock:
             self._guard()
+            if cancelled is not None and cancelled():
+                return False
             # Retire the outgoing library episode: persist its position and
             # clear the stored current-playback row so a relaunch resumes it
             # deliberately, not on top of this transient stream. Listening
@@ -274,6 +283,10 @@ class PlaybackService:
             if self.snapshot.episode_id is not None:
                 self._persist_position(force=True)
                 self._set_current_playback(None, PlaybackState.IDLE.value)
+            if cancelled is not None and cancelled():
+                if self.snapshot.episode_id is not None:
+                    self._set_current_playback(self.snapshot.episode_id, self.snapshot.state.value)
+                return False
             self.cancel_sleep_timer()
             self._deferred_episode_id = None
             self._begin_load(0.0, autoplay)

@@ -64,11 +64,13 @@ class RecordingPlayback:
     def resume_saved(self, autoplay=False):
         return False
 
-    def load_episode(self, episode_id, autoplay=True):
+    def load_episode(self, episode_id, autoplay=True, *, cancelled=None, start_position=None):
+        if cancelled is not None and cancelled():
+            return False
         self.calls.append(("load", episode_id))
         self._set(state=PlaybackState.PLAYING if autoplay else PlaybackState.PAUSED, episode_id=episode_id,
                   show_id=1, title=f"Episode {episode_id}", show_title="Workshop Radio",
-                  source=f"https://media.invalid/{episode_id}.mp3", position=0.0, duration=2520.0)
+                  source=f"https://media.invalid/{episode_id}.mp3", position=start_position or 0.0, duration=2520.0)
 
     def play_pause(self):
         self.calls.append(("play_pause",))

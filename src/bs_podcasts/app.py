@@ -22,6 +22,7 @@ from .directories import DirectoryService, PublicDirectory
 from .downloads import DownloadService
 from .feeds import FeedFetcher, RefreshService
 from .jobs import JobRunner
+from .jobs.commands import CommandQueue
 from .logging_setup import configure_logging
 from .playback import ExternalPlayerEngine, LazyMpvEngine, PlaybackService
 from .services import LibraryService, ListeningService
@@ -319,6 +320,7 @@ def main() -> int:
     listening_repository = ListeningRepository(database)
     listening = ListeningService(listening_repository)
     playback = PlaybackService(repository, engine, listening=listening_repository)
+    commands = CommandQueue()
     downloads = DownloadService(
         repository,
         DownloadRepository(database),
@@ -346,6 +348,7 @@ def main() -> int:
             refresh_jobs=refresh_jobs,
             network_jobs=network_jobs,
             view_state=view_state,
+            commands=commands,
         )
         _mark("main-window")
         window.tray = None
@@ -437,12 +440,13 @@ def main() -> int:
     )
     app.aboutToQuit.connect(lambda: downloads.pause_all())
     code = app.exec()
+    commands.finish(playback.shutdown)
     # Bounded shutdown: cancel pending jobs, give running ones a moment, then
     # leave. Non-daemon worker threads would otherwise hold the process open.
     # One deadline for all pools: four independent 3 s joins let a quit take
     # up to 12 s while background work drained.
     deadline = _time.monotonic() + 3.0
-    busy = 0
+    busy = commands.join(max(0.0, deadline - _time.monotonic()))
     for pool in (jobs, download_jobs, refresh_jobs, network_jobs):
         busy += pool.join(max(0.0, deadline - _time.monotonic()))
     from .ui.pixmaps import shutdown_decodes

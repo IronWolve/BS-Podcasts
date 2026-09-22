@@ -4,7 +4,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import logging
 import os
-import time
 
 
 WORKSPACE = Path(__file__).resolve().parents[2]
@@ -271,6 +270,7 @@ def main() -> int:
         window._playing_state = "playing"
         window._show_now_playing()
         require(window.now_playing.isVisible(), "Now Playing did not open from player state")
+        settle(app, window)
         require(window.context._episode_id == playing.id, "side pane did not follow Now Playing")
         require(window.context.title.text() == playing.title, "side pane shows the wrong episode")
         scroll = window.context.selected_scroll.verticalScrollBar()
@@ -303,9 +303,7 @@ def main() -> int:
         require(window._discover_loading or window.discover_page.model.rowCount() > 0, "Discover did not auto-load For You")
         # Every view now auto-continues to its full result set; the fixture
         # directory caps at 75.
-        discover_deadline = time.time() + 10
-        while (window._discover_loading or not window._discover_exhausted) and time.time() < discover_deadline:
-            app.processEvents()
+        settle(app, window)
         require(window.discover_page.model.rowCount() == 75, "For You did not auto-continue to the full set")
         window.discover_page.category.blockSignals(True)
         window.discover_page.category.setCurrentIndex(1)
@@ -313,8 +311,7 @@ def main() -> int:
         window.discover_page.set_category_topics(window.discover_page.category.currentText())
         window.discover_page.header.search.setText("daily news")
         window._directory_search()
-        while window._discover_loading:
-            app.processEvents()
+        settle(app, window)
         require(window.discover_page.category.currentText() == "All Categories", "search did not reset category")
         require(window.discover_page.topic.currentText() == "Choose a category first", "search did not reset topic")
         require(window._discover_search_history == ["daily news"], "search was not added to history")
@@ -345,15 +342,11 @@ def main() -> int:
             )
 
         window._start_directory_request("browse", "Technology")
-        discover_deadline = time.time() + 10
-        while (window._discover_loading or not window._discover_exhausted) and time.time() < discover_deadline:
-            app.processEvents()
+        settle(app, window)
         require(window.discover_page.model.rowCount() == 75, "Discover browse did not auto-complete")
         require_stable_discover_geometry("category selection")
         window._start_directory_request("topic", ("News", "Conservative News"))
-        discover_deadline = time.time() + 10
-        while (window._discover_loading or not window._discover_exhausted) and time.time() < discover_deadline:
-            app.processEvents()
+        settle(app, window)
         require(window.discover_page.model.rowCount() == 75, "Discover topic did not load")
         require_stable_discover_geometry("topic selection")
         require(
@@ -361,9 +354,7 @@ def main() -> int:
             "Discover topic summary is missing",
         )
         window.discover_page.chart.setCurrentIndex(1)
-        discover_deadline = time.time() + 10
-        while (window._discover_loading or not window._discover_exhausted) and time.time() < discover_deadline:
-            app.processEvents()
+        settle(app, window)
         require(window.discover_page.model.rowCount() == 75, "Top Shows chart did not auto-complete")
         require_stable_discover_geometry("chart mode selection")
         require(
@@ -403,6 +394,7 @@ def main() -> int:
         require(all(episode.played and not episode.is_new for episode in library.episodes()), "mark-all-played did not update new episodes")
 
         window.close()
+        require(window.commands.join(3) == 0, "command worker did not finish")
         jobs.shutdown(wait=True)
         app.quit()
 

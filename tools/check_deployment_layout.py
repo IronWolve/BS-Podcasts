@@ -37,6 +37,7 @@ def main():
         assert (staged/'main.py').is_file()
         assert not (staged/'.env').exists() and not (staged/'unexpected.py').exists()
         runner=ROOT.parent/'dists/linux/runner.py'
+        sys.path.insert(0,str(runner.parent))
         spec=importlib.util.spec_from_file_location('runtime_probe',runner)
         module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
         module.PID_FILE=Path(folder)/'pid.json'

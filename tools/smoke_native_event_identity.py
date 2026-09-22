@@ -11,12 +11,19 @@ from smoke_playback_ordering import make
 
 
 class Player:
-    def __init__(self): self.serial=0; self.playlist=[]
+    def __init__(self): self.serial=0; self.playlist=[]; self.pending=[]; self.commands=[]
+    def command(self,*args):
+        self.commands.append(args)
+        if args == ('stop',): self.playlist=[]
     def command_async(self,*args):
-        result=Future(); result.set_result(None); return result
+        result=Future(); self.pending.append((args,result)); return result
     def loadfile(self,source,mode,**kwargs):
         assert kwargs['pause']=='yes'
         self.serial+=1; self.playlist=[{'id':self.serial,'filename':source}]
+        # A permitted native schedule: async Stop completes after sync Load.
+        for args,result in self.pending:
+            self.command(*args); result.set_result(None)
+        self.pending.clear()
     def seek(self,*args): pass
     def terminate(self): pass
 
@@ -44,6 +51,9 @@ def main():
                 event(7,first,4)  # outgoing error must not rescue/fail B
                 assert engine._loading and repo.get_episode(ids['b']).position_seconds==0
                 event(6,second); event(8)
+                engine.pause(); engine.play(); engine.seek_absolute(9)
+                assert engine._player.commands[-3:] == [
+                    ('set','pause','yes'), ('set','pause','no'), ('seek',9.0,'absolute','exact')]
                 engine._position_changed('time-pos',17)
                 assert repo.get_episode(ids['b']).position_seconds==17
                 service.load_episode(ids['b'],autoplay=False); third=engine._expected_entry_id
@@ -55,7 +65,7 @@ def main():
                 assert service.snapshot.episode_id is None
         finally:
             service.shutdown(); repo.database.close()
-    print('B12: PASS outgoing completion/error/position, same-URL replacement, current entry and stop')
+    print('B12/C11: PASS native command ordering, outgoing completion/error/position, same-URL replacement, current entry and stop')
 
 
 if __name__=='__main__': main()

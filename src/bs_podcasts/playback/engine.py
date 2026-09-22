@@ -31,13 +31,6 @@ class EngineEvent:
     generation: int | None = None
 
 
-def _log_async_result(future) -> None:
-    try:
-        future.result()
-    except Exception as exc:  # mpv rejected the command; the UI already moved on
-        logging.getLogger("bs_podcasts").warning("mpv async command failed: %s", exc)
-
-
 class MpvEngine:
     capabilities = EngineCapabilities()
 
@@ -140,7 +133,7 @@ class MpvEngine:
             self._activated = True
             self._expected_entry_id = None
             generation = self._generation
-        self._player.command_async("stop").add_done_callback(_log_async_result)
+        self._player.command("stop")
         return generation
 
     def load(self, source: str, start_position: float = 0.0, autoplay: bool = True):
@@ -176,7 +169,7 @@ class MpvEngine:
             self._pending_autoplay = False
             self._expected_entry_id = None
             self._event_entry_id = None
-        self._player.command_async("stop").add_done_callback(_log_async_result)
+        self._player.command("stop")
 
     def play(self):
         self._guard()
@@ -203,7 +196,7 @@ class MpvEngine:
             self._pending_position = max(0.0, float(seconds))
             self._emit("position", self._pending_position)
             return
-        self._player.command_async("seek", max(0.0, float(seconds)), "absolute", "exact").add_done_callback(_log_async_result)
+        self._player.command("seek", max(0.0, float(seconds)), "absolute", "exact")
 
     def skip(self, seconds: float):
         self._guard()
@@ -211,7 +204,7 @@ class MpvEngine:
             self._pending_position = max(0.0, self._pending_position + float(seconds))
             self._emit("position", self._pending_position)
             return
-        self._player.command_async("seek", float(seconds), "relative", "exact").add_done_callback(_log_async_result)
+        self._player.command("seek", float(seconds), "relative", "exact")
 
     def set_speed(self, speed: float):
         self._guard()
@@ -257,17 +250,15 @@ class MpvEngine:
         player.terminate()
 
     def _set(self, name: str, value) -> None:
-        """Set an mpv property without waiting for the core.
+        """Complete commands in caller order, off the GUI thread.
 
-        python-mpv's property setters block until mpv has applied the value;
-        rebuilding the audio filter chain (speed, silence trim) took 50-80 ms
-        on the click thread (audit F-029). `set` via command_async returns at
-        once; errors are logged from the reply instead of raised.
+        libmpv may reorder async calls with any other calls. Waiting for each
+        native command prevents an old Stop/Pause/seek from landing on a new
+        load. User actions now run on the command worker, not the Qt thread.
         """
         if isinstance(value, bool):
             value = "yes" if value else "no"
-        future = self._player.command_async("set", name, str(value))
-        future.add_done_callback(_log_async_result)
+        self._player.command("set", name, str(value))
 
     def _guard(self):
         if self._dead or self._player is None:

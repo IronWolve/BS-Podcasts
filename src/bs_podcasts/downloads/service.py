@@ -575,6 +575,13 @@ class DownloadService:
                 raise DownloadError("Download size does not match the response.")
             if cancellation.is_set():
                 return self._park(episode_id, partial)
+            # Resume can join a previously incomplete header to new bytes.
+            # Validate the combined file, including when the initial transfer
+            # rejected a signature only after writing its first fragment.
+            with partial.open("rb") as verification:
+                complete_head = verification.read(512)
+            if _looks_textual(complete_head) or unsafe_media_payload(complete_head):
+                raise DownloadError("Server sent a document or executable instead of audio.")
             os.replace(partial, target)
             # `done` is the transfer's own byte count and equals the file size.
             # Calling stat() here let a concurrent delete turn a complete,

@@ -6,36 +6,19 @@ from pathlib import Path
 import signal
 import sys
 import time
+from runtime_state import process_stamp, read_record, process_state, runtime_lock, retire_stale
 
 DEPLOYMENT = Path(__file__).resolve().parent
 PROJECT = DEPLOYMENT.parent.parent
 PID_FILE = PROJECT/'tmp/bs-podcasts.pid.json'
 
 
-def process_stamp(pid):
-    try:
-        return Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[19]
-    except (OSError,IndexError):
-        return None
-
-
 def record():
-    try:
-        value=json.loads(PID_FILE.read_text())
-        return value if value.get('kind')=='bs-podcasts-runtime' and value.get('project')==str(PROJECT) else None
-    except (OSError,ValueError,AttributeError):
-        return None
+    return read_record(PROJECT, PID_FILE)
 
 
 def running(value):
-    if not value or not isinstance(value.get('pid'),int):
-        return False
-    try:
-        args=Path(f'/proc/{value["pid"]}/cmdline').read_bytes().split(b'\0')
-    except OSError:
-        return False
-    return (process_stamp(value['pid'])==value.get('started') and
-            os.fsencode(str(DEPLOYMENT/'runner.py')) in args)
+    return process_state(PROJECT, value, DEPLOYMENT/'runner.py') == 'running'
 
 
 def environment():
@@ -63,52 +46,7 @@ def environment():
     return bs_podcasts
 
 
-def main():
-    parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--plain',action='store_true')
-    parser.add_argument('--status',action='store_true')
-    parser.add_argument('--check',action='store_true')
-    parser.add_argument('--stop',action='store_true')
-    args,extra=parser.parse_known_args()
-    current=record()
-    if args.stop:
-        if not running(current):
-            print('BS Podcasts is not running from this deployment.')
-            return 0
-        # A pidfd prevents PID reuse between validation and signalling.
-        if not hasattr(os,'pidfd_open') or not hasattr(signal,'pidfd_send_signal'):
-            raise RuntimeError('Safe process signalling requires Linux pidfd support; nothing was stopped.')
-        descriptor=os.pidfd_open(current['pid'])
-        try:
-            if not running(current):
-                print('The recorded process has exited; nothing was stopped.')
-                return 0
-            signal.pidfd_send_signal(descriptor,signal.SIGTERM)
-        finally:
-            os.close(descriptor)
-        deadline=time.monotonic()+5
-        while running(current) and time.monotonic()<deadline:
-            time.sleep(.1)
-        print('Stopped.' if not running(current) else 'Still stopping; inspect the project logs. No forced kill was sent.')
-        return 0 if not running(current) else 1
-    module=environment()
-    color='\033[1;36m' if sys.stdout.isatty() and not args.plain and 'NO_COLOR' not in os.environ else ''
-    reset='\033[0m' if color else ''
-    print(f'{color}BS Podcasts {module.__version__}{reset}',flush=True)
-    print(f'Runtime: {DEPLOYMENT}\nPython: {sys.version.split()[0]}\nData: {os.environ["BS_PODCASTS_DATA_DIR"]}\nLog: {PROJECT/"logs/bs-podcasts.log"}',flush=True)
-    print(f'State: running (PID {current["pid"]})' if running(current) else 'State: stopped',flush=True)
-    if args.check or args.status or running(current):
-        return 0
-    if PID_FILE.exists():
-        if current is None:
-            raise RuntimeError('Unrecognized PID file; inspect it before launch.')
-        PID_FILE.unlink()
-    value={'kind':'bs-podcasts-runtime','project':str(PROJECT),'pid':os.getpid(),'started':process_stamp(os.getpid())}
-    with PID_FILE.open('x') as handle:
-        json.dump(value,handle)
-    requested=[False]
-    signal.signal(signal.SIGTERM,lambda *_:requested.__setitem__(0,True))
-    signal.signal(signal.SIGINT,lambda *_:requested.__setitem__(0,True))
+def _run_gui(extra, requested):
     from bs_podcasts import app
     original=app.create_application
     def create(argv=None):
@@ -125,13 +63,75 @@ def main():
         qt._project_stop_timer=timer
         return qt
     app.create_application=create
+    original_argv=sys.argv
     sys.argv=[sys.argv[0],*extra]
-    print(f'Starting PID {os.getpid()} (local desktop; no public endpoint).',flush=True)
     try:
         return app.main()
     finally:
-        if record()==value:
-            PID_FILE.unlink(missing_ok=True)
+        app.create_application=original
+        sys.argv=original_argv
+
+
+def _describe(args):
+    module=environment()
+    current=record()
+    color='\033[1;36m' if sys.stdout.isatty() and not args.plain and 'NO_COLOR' not in os.environ else ''
+    reset='\033[0m' if color else ''
+    print(f'{color}BS Podcasts {module.__version__}{reset}',flush=True)
+    print(f'Runtime: {DEPLOYMENT}\nPython: {sys.version.split()[0]}\nData: {os.environ["BS_PODCASTS_DATA_DIR"]}\nLog: {PROJECT/"logs/bs-podcasts.log"}',flush=True)
+    print(f'State: running (PID {current["pid"]})' if running(current) else 'State: stopped',flush=True)
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--plain',action='store_true')
+    parser.add_argument('--status',action='store_true')
+    parser.add_argument('--check',action='store_true')
+    parser.add_argument('--stop',action='store_true')
+    args,extra=parser.parse_known_args()
+    current=record()
+    if args.stop:
+        if not running(current):
+            if process_state(PROJECT,current)=='stale':
+                with runtime_lock(PROJECT):
+                    retire_stale(PROJECT,PID_FILE)
+            print('BS Podcasts is not running from this deployment.')
+            return 0
+        if not hasattr(os,'pidfd_open') or not hasattr(signal,'pidfd_send_signal'):
+            raise RuntimeError('Safe process signalling requires Linux pidfd support; nothing was stopped.')
+        descriptor=os.pidfd_open(current['pid'])
+        try:
+            if not running(current):
+                return 0
+            signal.pidfd_send_signal(descriptor,signal.SIGTERM)
+        finally:
+            os.close(descriptor)
+        deadline=time.monotonic()+5
+        while running(current) and time.monotonic()<deadline:
+            time.sleep(.1)
+        print('Stopped.' if not running(current) else 'Still stopping; inspect the project logs. No forced kill was sent.')
+        return 0 if not running(current) else 1
+    if args.status or args.check:
+        _describe(args)
+        return 0
+    with runtime_lock(PROJECT,inherit=True):
+        _describe(args)
+        retire_stale(PROJECT,PID_FILE)
+        value={'kind':'bs-podcasts-runtime','project':str(PROJECT),'pid':os.getpid(),'started':process_stamp(os.getpid())}
+        signals={}
+        try:
+            with PID_FILE.open('x') as handle:
+                json.dump(value,handle)
+            requested=[False]
+            for kind in (signal.SIGTERM,signal.SIGINT):
+                signals[kind]=signal.signal(kind,lambda *_:requested.__setitem__(0,True))
+            print(f'Starting PID {os.getpid()} (local desktop; no public endpoint).',flush=True)
+            return _run_gui(extra,requested)
+        finally:
+            for kind,handler in signals.items():
+                signal.signal(kind,handler)
+            if record()==value:
+                PID_FILE.unlink(missing_ok=True)
 
 
 if __name__=='__main__':
