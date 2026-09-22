@@ -54,7 +54,7 @@ from .widgets import fit_combo_width, safe_feed_html
 
 SHADOW_MARGIN = 24
 # 36-character runs still overflowed a two-column field at the dialog minimum;
-# 24 (~150 px) fits (audit F-074).
+# 24 (~150 px) fits.
 _LONG_VALUE = re.compile(r"\S{24,}")
 
 
@@ -617,7 +617,7 @@ class EpisodeInfoDialog(StyledDialog):
         )
         # Two columns only when there is room: at the 560 px minimum the
         # second column was squeezed to ~90 px and hard-clipped its URLs
-        # (audit F-074). The grid is re-placed on resize (see resizeEvent).
+        #. The grid is re-placed on resize (see resizeEvent).
         columns = QGridLayout()
         columns.setSpacing(SPACE["xl"])
         self._column_holders = []
@@ -651,7 +651,7 @@ class EpisodeInfoDialog(StyledDialog):
         self._place_columns(self.width() >= 700)
         scroll = QScrollArea()
         # Named so the theme's transparent-viewport rule applies: unnamed, the
-        # viewport painted the palette's white behind light text (audit F-068).
+        # viewport painted the palette's white behind light text.
         scroll.setObjectName("dialogScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -1038,6 +1038,7 @@ class AboutDialog(StyledDialog):
         github = QPushButton("GitHub")
         github.setObjectName("quietButton")
         github.setToolTip(GITHUB_URL)
+        github.setEnabled(bool(GITHUB_URL))
         github.setCursor(Qt.CursorShape.PointingHandCursor)
         github.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(GITHUB_URL)))
         folder = QPushButton("Open data folder")

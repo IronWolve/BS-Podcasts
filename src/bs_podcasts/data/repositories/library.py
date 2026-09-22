@@ -34,8 +34,8 @@ class LibraryRepository:
         now = time.time()
         with self.database.connect() as connection:
             connection.execute(
-                "INSERT OR IGNORE INTO shows(feed_url, title, source, added_at) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO shows(id, feed_url, title, source, added_at) "
+                "VALUES ((SELECT value+1 FROM entity_sequences WHERE kind=\'show\'), ?, ?, ?, ?)",
                 (feed_url, title, source, now),
             )
             row = connection.execute(
@@ -119,6 +119,16 @@ class LibraryRepository:
                    FROM episodes e JOIN shows s ON s.id=e.show_id
                    WHERE e.favorite=1 ORDER BY e.published_at DESC, e.id DESC"""
             ).fetchall()
+        return [self._episode(row) for row in rows]
+
+    def list_in_progress(self) -> list[Episode]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT e.*, s.title AS show_title, "
+                "COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path "
+                "FROM episodes e JOIN shows s ON s.id=e.show_id "
+                "WHERE e.played=0 AND e.position_seconds>0 "
+                "ORDER BY e.last_played DESC, e.id DESC").fetchall()
         return [self._episode(row) for row in rows]
 
     def retention_candidates(
@@ -214,13 +224,13 @@ class LibraryRepository:
                     continue
                 connection.execute(
                     """INSERT INTO episodes(
-                       show_id, external_id, title, description, media_url,
+                       id, show_id, external_id, title, description, media_url,
                        mime_type, published_at, duration_seconds,
                        transcript_url, transcript_type, is_new, added_at,
                        chapters_url, artwork_url, website_url, author,
                        season_number, episode_number, episode_type, explicit,
                        enclosure_bytes)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       VALUES ((SELECT value+1 FROM entity_sequences WHERE kind='episode'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(show_id, external_id) DO UPDATE SET
                        title=excluded.title,
                        description=excluded.description,
@@ -363,6 +373,7 @@ class LibraryRepository:
         }
 
     ORPHAN_SETTING = "storage.orphans"
+    ORPHAN_OWNER = "storage.orphans.owner"
     MAX_ORPHANS = 200
 
     def orphaned_files(self) -> list[str]:
@@ -376,29 +387,72 @@ class LibraryRepository:
         return [path for path in stored if isinstance(path, str)]
 
     def _remember_orphans(self, paths):
-        """Keep a file that survived deletion findable.
-
-        Once a show's rows are gone nothing else names its files, so a failed
-        unlink would otherwise become untracked disk usage no sweep could
-        ever reach.
-        """
-        merged = list(dict.fromkeys([*self.orphaned_files(), *paths]))
-        self.set_setting(self.ORPHAN_SETTING, json.dumps(merged[-self.MAX_ORPHANS :]))
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT value FROM settings WHERE key=?", (self.ORPHAN_SETTING,)).fetchone()
+            try:
+                existing = json.loads(row[0]) if row else []
+            except (ValueError, TypeError):
+                existing = []
+            if not isinstance(existing, list):
+                existing = []
+            owner = connection.execute("SELECT value FROM settings WHERE key=?", (self.ORPHAN_OWNER,)).fetchone()
+            current_owner = str(self.database.path.resolve())
+            if existing and (owner is None or owner[0] != current_owner):
+                # A copied/legacy database cannot authorize deletion at its old
+                # absolute paths. Preserve those records for manual inspection.
+                connection.execute("INSERT INTO settings(key,value) VALUES (?,?) "
+                                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                                   (self.ORPHAN_SETTING + ".retired", json.dumps(existing)))
+                existing = []
+            merged = list(dict.fromkeys([p for p in existing if isinstance(p, str)] + list(paths)))
+            connection.execute("INSERT INTO settings(key,value) VALUES (?,?) "
+                               "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                               (self.ORPHAN_SETTING, json.dumps(merged)))
+            connection.execute("INSERT INTO settings(key,value) VALUES (?,?) "
+                               "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                               (self.ORPHAN_OWNER, current_owner))
+        self.invalidate_settings_cache()
 
     def sweep_orphans(self) -> list[str]:
-        """Retry previously-stuck deletions; returns the paths cleared."""
-        remaining = []
-        cleared = []
-        for path in self.orphaned_files():
-            candidate = Path(path)
+        """Check live references under the same write transaction as retirement."""
+        cleared, remaining = [], []
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            owner = connection.execute("SELECT value FROM settings WHERE key=?", (self.ORPHAN_OWNER,)).fetchone()
+            if owner is None or owner[0] != str(self.database.path.resolve()):
+                # Fail closed for old libraries and copies made outside the
+                # migration tool too. Merely opening one must never erase its source.
+                return []
+            row = connection.execute("SELECT value FROM settings WHERE key=?", (self.ORPHAN_SETTING,)).fetchone()
             try:
-                if candidate.is_file():
-                    candidate.unlink()
-                cleared.append(path)
-            except OSError:
-                remaining.append(path)
+                paths = json.loads(row[0]) if row else []
+            except (ValueError, TypeError):
+                paths = []
+            if not isinstance(paths, list):
+                paths = []
+            referenced = {row[0] for row in connection.execute(
+                "SELECT artwork_path FROM shows UNION SELECT episode_artwork_path FROM episodes "
+                "UNION SELECT downloaded_path FROM episodes UNION SELECT target_path FROM downloads "
+                "UNION SELECT partial_path FROM downloads") if row[0]}
+            for path in paths:
+                if not isinstance(path, str):
+                    continue
+                if path in referenced:
+                    cleared.append(path)  # tracking retired; the live file stays
+                    continue
+                try:
+                    candidate = Path(path)
+                    if candidate.is_file():
+                        candidate.unlink()
+                    cleared.append(path)
+                except OSError:
+                    remaining.append(path)
+            if cleared:
+                connection.execute("UPDATE settings SET value=? WHERE key=?",
+                                   (json.dumps(remaining), self.ORPHAN_SETTING))
         if cleared:
-            self.set_setting(self.ORPHAN_SETTING, json.dumps(remaining))
+            self.invalidate_settings_cache()
         return cleared
 
     def remove_show(self, show_id: int, delete_files: bool = True) -> dict:
@@ -577,18 +631,29 @@ class LibraryRepository:
                     (position, episode_id),
                 )
 
-    def update_position(self, episode_id: int, seconds: float):
+    def update_position(self, episode_id: int, seconds: float, stamp: float | None = None):
         # Position ticks come from the playback event thread while it holds
         # the playback lock; blocking here for a whole VACUUM would freeze
         # every playback control. Skipping a 5-second save is harmless.
         if self.database.maintenance_active:
             return
+        stamp = time.time() if stamp is None else stamp
         # Starting an episode is what makes it "not new" everywhere in the UI.
         with self.database.connect() as connection:
             connection.execute(
-                "UPDATE episodes SET position_seconds=?, last_played=?, is_new=0 WHERE id=?",
-                (max(0.0, float(seconds)), time.time(), episode_id),
+                "UPDATE episodes SET position_seconds=?, last_played=?, is_new=0, position_updated_at=? "
+                "WHERE id=? AND position_updated_at<=?",
+                (max(0.0, float(seconds)), stamp, stamp, episode_id, stamp),
             )
+
+    def set_observed_duration(self, episode_id: int, seconds: float):
+        import math
+        if not math.isfinite(seconds) or not 0 < seconds <= 2**31:
+            return
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE episodes SET observed_duration_seconds=? WHERE id=?",
+                (max(1, round(seconds)), episode_id))
 
     def set_episode_artwork_path(self, episode_id: int, path: str):
         with self.database.connect() as connection:
@@ -618,7 +683,7 @@ class LibraryRepository:
     def mark_show_played(self, show_id: int, played: bool = True) -> int:
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE episodes SET played=?, is_new=0 WHERE show_id=? AND played!=?",
+                "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=?, is_new=0 WHERE show_id=? AND played!=?",
                 (int(played), show_id, int(played)),
             )
             return cursor.rowcount
@@ -641,6 +706,52 @@ class LibraryRepository:
             ids.remove(episode_id)
         self.reorder_queue([episode_id] + ids)
 
+    _PLAYED_FIELDS = ("played", "is_new", "position_seconds", "last_played")
+
+    def mark_played_with_undo(self, episode_ids, played: bool = True, show_id=None):
+        """Change and snapshot in one transaction; Undo never guesses old state."""
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if show_id is not None:
+                ids = [row[0] for row in connection.execute(
+                    "SELECT id FROM episodes WHERE show_id=?", (show_id,))]
+            else:
+                ids = list(dict.fromkeys(int(i) for i in episode_ids))
+            changes = []
+            for episode_id in ids:
+                before = connection.execute(
+                    "SELECT id, show_id, external_id, played, is_new, position_seconds, last_played "
+                    "FROM episodes WHERE id=?", (episode_id,)).fetchone()
+                if before is None:
+                    continue
+                if played:
+                    connection.execute(
+                        "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=1, is_new=0, last_played=? WHERE id=?",
+                        (time.time(), episode_id))
+                else:
+                    connection.execute(
+                        "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=0, is_new=0, position_seconds=CASE "
+                        "WHEN COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds)>0 AND position_seconds>=COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds)-2 "
+                        "THEN 0 ELSE position_seconds END WHERE id=?", (episode_id,))
+                after = connection.execute(
+                    "SELECT played, is_new, position_seconds, last_played FROM episodes WHERE id=?",
+                    (episode_id,)).fetchone()
+                changes.append((tuple(before), tuple(after)))
+        return changes
+
+    def undo_played(self, changes) -> int:
+        """Restore only rows still in the state this operation wrote."""
+        restored = 0
+        with self.database.connect() as connection:
+            for before, after in changes:
+                identity, values = before[:3], before[3:]
+                restored += connection.execute(
+                    "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=?, is_new=?, position_seconds=?, last_played=? "
+                    "WHERE id=? AND show_id=? AND external_id=? "
+                    "AND played IS ? AND is_new IS ? AND position_seconds IS ? AND last_played IS ?",
+                    (*values, *identity, *after)).rowcount
+        return restored
+
     def mark_played_many(self, episode_ids, played: bool = True) -> int:
         """One transaction for a bulk mark: the per-row method committed
         (and synced) once per selected episode (audit F-031)."""
@@ -650,15 +761,15 @@ class LibraryRepository:
         with self.database.connect() as connection:
             if played:
                 connection.executemany(
-                    "UPDATE episodes SET played=1, is_new=0, last_played=? WHERE id=?",
+                    "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=1, is_new=0, last_played=? WHERE id=?",
                     [(time.time(), i) for i in ids],
                 )
             else:
                 connection.executemany(
-                    """UPDATE episodes SET played=0, is_new=0,
+                    """UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=0, is_new=0,
                        position_seconds = CASE
-                           WHEN duration_seconds > 0
-                                AND position_seconds >= duration_seconds - 2
+                           WHEN COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds) > 0
+                                AND position_seconds >= COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds) - 2
                            THEN 0 ELSE position_seconds END
                        WHERE id=?""",
                     [(i,) for i in ids],
@@ -684,7 +795,7 @@ class LibraryRepository:
         with self.database.connect() as connection:
             if played:
                 connection.execute(
-                    "UPDATE episodes SET played=1, is_new=0, last_played=? WHERE id=?",
+                    "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=1, is_new=0, last_played=? WHERE id=?",
                     (time.time(), episode_id),
                 )
             else:
@@ -693,23 +804,24 @@ class LibraryRepository:
                 # position that immediately re-reaches EOF. Genuine partial
                 # progress is preserved — only an at-the-end position resets.
                 connection.execute(
-                    """UPDATE episodes SET played=0, is_new=0,
+                    """UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=0, is_new=0,
                        position_seconds = CASE
-                           WHEN duration_seconds > 0
-                                AND position_seconds >= duration_seconds - 2
+                           WHEN COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds) > 0
+                                AND position_seconds >= COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds) - 2
                            THEN 0 ELSE position_seconds END
                        WHERE id=?""",
                     (episode_id,),
                 )
 
-    def set_current_playback(self, episode_id: int | None, state: str):
+    def set_current_playback(self, episode_id: int | None, state: str, stamp: float | None = None):
         if self.database.maintenance_active:
             return  # written again on the next state change
+        stamp = time.time() if stamp is None else stamp
         with self.database.connect() as connection:
             connection.execute(
                 """UPDATE playback_state SET episode_id=?, state=?, updated_at=?
-                   WHERE singleton_id=1""",
-                (episode_id, state, time.time()),
+                   WHERE singleton_id=1 AND updated_at<=?""",
+                (episode_id, state, stamp, stamp),
             )
 
     def current_playback(self) -> tuple[int | None, str]:
@@ -839,7 +951,7 @@ class LibraryRepository:
             media_url=row["media_url"],
             mime_type=row["mime_type"],
             published_at=row["published_at"],
-            duration_seconds=row["duration_seconds"],
+            duration_seconds=(row["observed_duration_seconds"] if "observed_duration_seconds" in row.keys() else 0) or row["duration_seconds"],
             position_seconds=row["position_seconds"],
             played=bool(row["played"]),
             is_new=bool(row["is_new"]),
@@ -858,4 +970,5 @@ class LibraryRepository:
             explicit=(bool(row["explicit"]) if "explicit" in row.keys() and row["explicit"] is not None else None),
             enclosure_bytes=row["enclosure_bytes"] if "enclosure_bytes" in row.keys() else 0,
             favorite=bool(row["favorite"]) if "favorite" in row.keys() else False,
+            episode_artwork_path=row["episode_artwork_path"] if "episode_artwork_path" in row.keys() else "",
         )

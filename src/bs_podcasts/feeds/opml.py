@@ -69,6 +69,8 @@ def export_opml(shows) -> bytes:
     ET.SubElement(head, "dateCreated").text = datetime.now(timezone.utc).isoformat()
     body = ET.SubElement(root, "body")
     for show in shows:
+        if getattr(show, "source", "rss") == "local":
+            continue
         attributes = {
             "type": "rss",
             "text": show.title or show.feed_url,

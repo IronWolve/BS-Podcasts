@@ -3,6 +3,7 @@
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import logging
+import os
 
 from .config import data_dir
 
@@ -11,6 +12,9 @@ LOGGER_NAME = "bs_podcasts"
 
 
 def log_path() -> Path:
+    configured = os.environ.get("BS_PODCASTS_LOG_DIR")
+    if configured:
+        return Path(configured).expanduser() / "bs-podcasts.log"
     return data_dir() / "logs" / "bs-podcasts.log"
 
 

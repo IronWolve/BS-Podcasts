@@ -65,9 +65,10 @@ def _blocked_reason(ip) -> str:
 
 def _addresses(host: str) -> list:
     try:
-        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    except (OSError, UnicodeError):
-        return []
+        from .netlimits import bounded_call, Deadline, DNS
+        infos = bounded_call(lambda: socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP), Deadline(8), gate=DNS)
+    except (OSError, UnicodeError) as exc:
+        raise UnsafeUrl(f"Could not resolve {host} safely: {exc}") from exc
     found = []
     for info in infos:
         try:
@@ -127,3 +128,39 @@ def ensure_media_source(value, what: str = "Media source", allow_file_url: bool 
     if not scheme or (len(scheme) == 1 and text[1:2] == ":"):
         return text
     raise UnsafeUrl(f"{what} must be http(s) or a local file: {text[:120]!r}")
+
+# A downloaded suffix must never select a script/executable OS handler.
+SAFE_MEDIA_SUFFIXES = frozenset({
+    ".mp3", ".mp2", ".m4a", ".m4b", ".mp4", ".ogg", ".opus", ".wav", ".flac",
+    ".aac", ".aif", ".aiff", ".au", ".wma", ".webm", ".ape", ".caf", ".media",
+})
+
+
+def unsafe_media_payload(head: bytes) -> bool:
+    head = head.lstrip()
+    return head.startswith((
+        b"MZ", b"\x7fELF", b"#!", b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
+        b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce", b"\xca\xfe\xba\xbe",
+        b"L\x00\x00\x00\x01\x14\x02\x00",
+    )) or head.lower().startswith((b"<svg", b"<?xml", b"[internetshortcut]"))
+
+
+def ensure_external_media_file(value: str) -> str:
+    """Validate a local target before handing it to the OS's file association."""
+    from pathlib import Path
+    from urllib.request import url2pathname
+
+    text = ensure_media_source(value, allow_file_url=True)
+    if is_web_url(text):
+        return text
+    parts = urlsplit(text)
+    path = Path(url2pathname(parts.path) if parts.scheme.lower() == "file" else text).expanduser()
+    if path.suffix.lower() not in SAFE_MEDIA_SUFFIXES:
+        raise UnsafeUrl("This file type cannot be opened through the external player.")
+    try:
+        with path.open("rb") as handle:
+            if unsafe_media_payload(handle.read(512)):
+                raise UnsafeUrl("The file contains executable or document content, not audio.")
+    except OSError as exc:
+        raise UnsafeUrl(f"Could not read the media file: {exc}") from exc
+    return str(path.resolve())

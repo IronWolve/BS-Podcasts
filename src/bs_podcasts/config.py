@@ -8,14 +8,15 @@ import sys
 APP_NAME = "BS Podcasts"
 APP_ID = "bs-podcasts"
 APP_TAGLINE = "A desktop player for the podcasts you already have."
-GITHUB_URL = "https://github.com/example"
-RELEASES_URL = "https://github.com/example/bs-podcasts/releases"
-RELEASES_API_URL = "https://api.github.com/repos/example/bs-podcasts/releases/latest"
+# Distribution identity is local configuration, never a maintainer's account.
+GITHUB_URL = os.environ.get("BS_PODCASTS_GITHUB_URL", "")
+RELEASES_URL = os.environ.get("BS_PODCASTS_RELEASES_URL", "")
+RELEASES_API_URL = os.environ.get("BS_PODCASTS_RELEASES_API_URL", "")
 
 
 def app_version() -> str:
     # The package constant, not importlib.metadata: the metadata scan cost
-    # 10 ms at startup (audit F-023) and the constant is what the build
+    # 10 ms at startup and the constant is what the build
     # pins anyway (keep it in step with pyproject.toml).
     from . import __version__
 
@@ -51,6 +52,9 @@ def data_dir() -> Path:
 
 def cache_dir() -> Path:
     """Artwork and rendered icons — safe to delete at any time."""
+    configured = os.environ.get("BS_PODCASTS_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
     override = _override()
     if override:
         return override / "cache"

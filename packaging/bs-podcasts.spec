@@ -10,10 +10,7 @@ import os
 import re
 from pathlib import Path
 
-from PyInstaller.utils.hooks import copy_metadata
-
-
-ROOT = Path(SPECPATH).parent
+ROOT = Path(os.environ["BS_PODCASTS_SOURCE_STAGE"])
 SOURCE = ROOT / "src"
 LIBMPV = Path(os.environ["BS_PODCASTS_LIBMPV_DLL"])
 
@@ -28,7 +25,7 @@ NUMERIC = tuple((list(map(int, re.findall(r"\d+", VERSION))) + [0, 0, 0, 0])[:4]
 
 # Identify the process as BS Podcasts (not the Python bootloader) in Task
 # Manager and file properties.
-VERSION_FILE = ROOT / "build" / "windows-version-info.txt"
+VERSION_FILE = Path(os.environ["BS_PODCASTS_BUILD_WORK"]) / "windows-version-info.txt"
 VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
 VERSION_FILE.write_text(
     f"""VSVersionInfo(
@@ -55,7 +52,6 @@ datas = [
     (str(SOURCE / "bs_podcasts" / "data" / "migrations"), "bs_podcasts/data/migrations"),
     (str(ROOT / "packaging" / "licenses"), "licenses"),
     (str(ROOT / "packaging" / "THIRD-PARTY-NOTICES.txt"), "."),
-    *copy_metadata("bs-podcasts"),
 ]
 
 analysis = Analysis(

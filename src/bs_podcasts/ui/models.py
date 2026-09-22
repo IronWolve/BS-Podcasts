@@ -87,6 +87,7 @@ class Episode:
     artwork_url: str = ""
     played: bool = False
     favorite: bool = False
+    position_seconds: float = 0.0
 
 
 class ItemRoles:
@@ -182,13 +183,20 @@ class PodcastModel(QAbstractListModel):
         if not index.isValid() or not 0 <= index.row() < len(self._items):
             return None
         item = self._items[index.row()]
+        if role == Qt.ItemDataRole.AccessibleTextRole:
+            return " — ".join(value for value in (item.title, item.author) if value)
+        if role == Qt.ItemDataRole.AccessibleDescriptionRole:
+            return " · ".join(value for value in (
+                f"{item.episode_count} episodes", f"{item.new_count} new",
+                HEALTH_LABELS.get(item.health, ""), item.latest_episode_date,
+            ) if value)
         if role == Qt.ItemDataRole.DisplayRole:
             return item.title
         if role == Qt.ItemDataRole.ToolTipRole:
             health = HEALTH_LABELS.get(item.health, "") if item.show_id else ""
             if not item_tooltips_enabled():
                 # The 7 px health dot has no text; its meaning must be
-                # reachable even with hover previews off (audit F-073).
+                # reachable even with hover previews off.
                 return health if health and item.health != "ok" else None
             detail = " · ".join(value for value in (item.display_meta, health) if value)
             return _tooltip_html(item.title, item.author, detail)
@@ -238,6 +246,15 @@ class EpisodeModel(QAbstractListModel):
         if not index.isValid() or not 0 <= index.row() < len(self._items):
             return None
         item = self._items[index.row()]
+        if role == Qt.ItemDataRole.AccessibleTextRole:
+            return " — ".join(value for value in (item.title, item.show) if value)
+        if role == Qt.ItemDataRole.AccessibleDescriptionRole:
+            return " · ".join(value for value in (
+                "Played" if item.played else "Unplayed",
+                "Favorite" if item.favorite else "", "New" if item.is_new else "",
+                item.state, item.duration, item.published,
+                f"Position {item.position_seconds:g} seconds" if item.position_seconds else "",
+            ) if value)
         if role == Qt.ItemDataRole.DisplayRole:
             return item.title
         if role == Qt.ItemDataRole.ToolTipRole:

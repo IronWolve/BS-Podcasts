@@ -257,16 +257,21 @@ def main() -> int:
     root = application_data_dir()
     notice = None
     if Database.migration_pending(root / "library.db"):
-        # Something visible before the backup + migration blocks (audit F-020).
+        # Something visible before the backup + migration blocks.
         from .ui.dialogs import MigrationNotice
 
         notice = MigrationNotice()
         notice.show()
         app.processEvents()
         app.processEvents()
+    lease = None
     try:
+        from .data.lease import LibraryLease
+        lease = LibraryLease(root / "library.db")
         database = Database(root / "library.db")
     except (sqlite3.DatabaseError, OSError) as exc:
+        if lease is not None:
+            lease.close()
         if notice is not None:
             notice.close()
         from .ui.dialogs import StartupErrorDialog
@@ -297,7 +302,7 @@ def main() -> int:
     # Discover (directory searches, feed previews, per-episode artwork and
     # chapter/transcript fetches) has its own pool too: four directory scans
     # on the general pool made the library reload the page was waiting for
-    # queue behind them (audit F-059).
+    # queue behind them.
     network_jobs = JobRunner(max_workers=2)
     refresh = RefreshService(
         repository,
@@ -328,7 +333,7 @@ def main() -> int:
     _mark("services")
     state = {"window": None}
 
-    def build_window():
+    def build_window(view_state=None):
         window = MainWindow(
             library=library,
             jobs=jobs,
@@ -340,6 +345,7 @@ def main() -> int:
             download_jobs=download_jobs,
             refresh_jobs=refresh_jobs,
             network_jobs=network_jobs,
+            view_state=view_state,
         )
         _mark("main-window")
         window.tray = None
@@ -369,6 +375,7 @@ def main() -> int:
 
     def rebuild_window():
         old = state["window"]
+        view_state = old._capture_view_state() if old is not None else None
         apply_app_stylesheet(app)
         if old is not None:
             if getattr(old, "tray", None) is not None:
@@ -382,7 +389,7 @@ def main() -> int:
                     pass
             old.close()
             old.deleteLater()
-        build_window()
+        build_window(view_state)
 
     build_window()
     logger.info(
@@ -396,7 +403,7 @@ def main() -> int:
     # Warm the playback core off-thread once startup has settled, so the
     # first press of Play pays only for opening the stream — but only when a
     # remembered episode makes that press likely; a session that never plays
-    # does not build a core at all (audit F-049).
+    # does not build a core at all.
     warm = getattr(engine, "warm", None)
     if warm is not None and getattr(playback.snapshot, "episode_id", None) is not None:
         QTimer.singleShot(2000, lambda: jobs.submit(warm))
@@ -422,7 +429,7 @@ def main() -> int:
             pass
     server.newConnection.connect(raise_existing)
     app.aboutToQuit.connect(lambda: state["window"]._save_layout() if state["window"] is not None else None)
-    # window.mpris is None until desktop integration ran (audit F-063).
+    # window.mpris is None until desktop integration ran.
     app.aboutToQuit.connect(
         lambda: state["window"].mpris.shutdown()
         if state["window"] is not None and getattr(state["window"], "mpris", None) is not None
@@ -433,13 +440,17 @@ def main() -> int:
     # Bounded shutdown: cancel pending jobs, give running ones a moment, then
     # leave. Non-daemon worker threads would otherwise hold the process open.
     # One deadline for all pools: four independent 3 s joins let a quit take
-    # up to 12 s while background work drained (audit F-061).
+    # up to 12 s while background work drained.
     deadline = _time.monotonic() + 3.0
     busy = 0
     for pool in (jobs, download_jobs, refresh_jobs, network_jobs):
         busy += pool.join(max(0.0, deadline - _time.monotonic()))
+    from .ui.pixmaps import shutdown_decodes
+    busy += shutdown_decodes(max(0.0, deadline - _time.monotonic()))
     if busy:
         logging.getLogger("bs_podcasts").warning("Exiting with %d background job(s) still running.", busy)
         logging.shutdown()
         os._exit(code)
+    database.close()
+    lease.close()
     return code

@@ -77,6 +77,7 @@ class Episode:
     explicit: bool | None = None
     enclosure_bytes: int = 0
     favorite: bool = False
+    episode_artwork_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -142,7 +143,7 @@ class FeedData:
     artwork_url: str = ""
     categories: tuple[str, ...] = ()
     episodes: tuple[FeedEpisodeData, ...] = ()
-    skipped_video: int = 0  # enclosures dropped because they were not audio (audit F-140)
+    skipped_video: int = 0  # enclosures dropped because they were not audio
 
 
 @dataclass(frozen=True)
@@ -178,3 +179,6 @@ class DownloadRecord:
     error_message: str = ""
     episode_title: str = ""
     show_title: str = ""
+    etag: str = ""
+    last_modified: str = ""
+    expected_total: int = 0

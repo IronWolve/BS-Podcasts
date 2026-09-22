@@ -5,6 +5,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 from ..net import USER_AGENT, SessionSlot, describe_network_error
+from ..urlguard import ensure_fetchable, UnsafeUrl
 
 
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024
@@ -65,8 +66,10 @@ class FeedFetcher:
         almost universally; a caller falls back to the full fetch when this
         finds nothing.
         """
-        import re
-
+        try:
+            url = ensure_fetchable(url, "Feed URL")
+        except UnsafeUrl as exc:
+            raise FeedFetchError(str(exc)) from exc
         import requests
 
         headers = {"User-Agent": USER_AGENT, "Range": f"bytes=0-{self.PEEK_BYTES - 1}", "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.2"}
@@ -86,21 +89,19 @@ class FeedFetcher:
             raise FeedFetchError(describe_network_error(exc, "the feed")) from exc
         finally:
             response.close()
-        text = bytes(body).decode(response.encoding or "utf-8", "replace")
-        start = re.search(r"<(item|entry)[\s>]", text)
-        if start is None:
+        # A partial document cannot prove which episode is newest: feeds may
+        # be oldest-first. Small complete feeds stay cheap; larger feeds use
+        # the caller's existing bounded full-fetch fallback.
+        from .parser import parse_feed, FeedParseError
+        try:
+            feed = parse_feed(bytes(body), base_url=response.url)
+        except FeedParseError:
             return None
-        head = text[start.end():]
-        date = re.search(r"<(?:pubDate|published|updated|dc:date)[^>]*>\s*(?:<!\[CDATA\[)?([^<\]]+)", head)
-        if date is None:
+        dated = [episode for episode in feed.episodes if episode.published_at]
+        if not dated:
             return None
-        title = re.search(r"<title[^>]*>\s*(?:<!\[CDATA\[)?([^<\]]+)", head)
-        from .parser import _date
-
-        normalised = _date(date.group(1).strip())
-        if not normalised:
-            return None
-        return ((title.group(1).strip() if title else ""), normalised)
+        latest = max(dated, key=lambda episode: episode.published_at)
+        return latest.title, latest.published_at
 
     def _fetch(
         self,
@@ -109,6 +110,10 @@ class FeedFetcher:
         last_modified: str = "",
         allow_discovery: bool = True,
     ) -> FeedResponse:
+        try:
+            url = ensure_fetchable(url, "Feed URL")
+        except UnsafeUrl as exc:
+            raise FeedFetchError(str(exc)) from exc
         import requests
 
         headers = {

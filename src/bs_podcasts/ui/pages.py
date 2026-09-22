@@ -479,7 +479,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         width = available // columns
         grid = (columns, width, getattr(self, "_compact", False))
         if grid == getattr(self, "_card_grid", None):
-            return  # same grid: every resize step re-laid out all cards (audit F-125)
+            return  # same grid: every resize step re-laid out all cards
         self._card_grid = grid
         self.delegate.set_card_width(width)
         self.view.setGridSize(self.delegate.sizeHint(None, None))
@@ -512,7 +512,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         if not self.discover and hasattr(self, "remove_problems"):
             unreachable = sum(1 for item in items if item.health in {"error", "suspended"})
             # The chip also lists "partial" feeds (refreshed, nothing playable);
-            # the button removes only unreachable ones, so say how many (audit F-139).
+            # the button removes only unreachable ones, so say how many.
             self.remove_problems.setText(f"Remove unreachable ({unreachable})…" if unreachable else "Remove unreachable…")
             self.remove_problems.setVisible(chip == "Problems" and unreachable > 0)
             self._empty_text = (
@@ -875,7 +875,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         if key not in dict(SORT_OPTIONS):
             return
         self._sort = key
-        self.sort_button.setText(label)
+        self._update_sort_button()
         self._apply_filters()
 
     def _connect_filter_box(self):
@@ -901,12 +901,13 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             # "Downloaded" but it can still be played / in progress.
             items = [item for item in items if item.played]
         elif self._filter == "In progress":
-            items = [item for item in items if not item.played and 0 < item.progress < 1]
+            items = [item for item in items if not item.played and (item.position_seconds > 0 or 0 < item.progress < 1)]
         elif self._filter == "Downloaded":
             items = [item for item in items if item.downloaded_path]
         elif self._filter != "All":
             items = [item for item in items if item.state.lower() == self._filter.lower()]
-        if self.sort_button is not None and self._sort != "newest":
+        if self.sort_button is not None:
+            items.sort(key=lambda item: (item.published_at, item.episode_id), reverse=True)
             if self._sort == "oldest":
                 items.reverse()
             elif self._sort == "shortest":
@@ -919,6 +920,18 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self._restore_selection(restore_key, preserve_scroll, selected)
         self._update_empty(query)
         self._selection_changed()
+        self._update_sort_button()
+
+    def _update_sort_button(self):
+        if self.sort_button is None:
+            return
+        narrow = self.width() < scaled_px(COMPACT_PAGE_PX)
+        label = dict(SORT_OPTIONS).get(self._sort, "Newest first")
+        self.sort_button.setText("" if narrow else label)
+        self.sort_button.setToolTip(f"Sort episodes — {label}")
+        self.sort_button.setAccessibleName(f"Sort episodes — {label}")
+        self.sort_button.setMinimumWidth(scaled_px(38) if narrow else 0)
+        self.sort_button.setMaximumWidth(scaled_px(38) if narrow else 16777215)
 
     def set_playing(self, episode_id: int, active: bool, source: str = ""):
         self.delegate.set_playing(episode_id, active, source)
@@ -933,12 +946,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         super().resizeEvent(event)
         narrow = event.size().width() < scaled_px(COMPACT_PAGE_PX)
         self.chips.set_compact(narrow)
-        if self.sort_button is not None:
-            self.sort_button.setText("" if narrow else dict(SORT_OPTIONS).get(self._sort, "Newest first"))
-            compact_width = scaled_px(38)
-            self.sort_button.setFixedWidth(compact_width if narrow else 0)
-            self.sort_button.setMinimumWidth(compact_width if narrow else 0)
-            self.sort_button.setMaximumWidth(compact_width if narrow else 16777215)
+        self._update_sort_button()
 
     def eventFilter(self, watched, event):
         if watched is self.view.viewport():
