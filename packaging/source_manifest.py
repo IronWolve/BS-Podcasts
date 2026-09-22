@@ -86,10 +86,16 @@ def stage(destination, root=ROOT):
         shutil.copy2(root/name, target)
     if source_digest(destination) != expected or source_digest(root) != expected:
         raise ValueError('Source changed while staging; build cancelled before compilation.')
-    commit = subprocess.run(['git','-C',str(root),'rev-parse','HEAD'],capture_output=True,text=True)
-    status = subprocess.run(['git','-C',str(root),'status','--porcelain'],capture_output=True,text=True)
-    origin={'commit':commit.stdout.strip() if commit.returncode==0 else None,
-            'dirty':status.returncode!=0 or bool(status.stdout.strip()),'sha256':expected}
+    origin={'commit':None,'dirty':True,'sha256':expected}
+    try:
+        top = subprocess.run(['git','-C',str(root),'rev-parse','--show-toplevel'],capture_output=True,text=True,timeout=5)
+        if top.returncode==0 and Path(top.stdout.strip()).resolve()==root:
+            commit = subprocess.run(['git','-C',str(root),'rev-parse','HEAD'],capture_output=True,text=True,timeout=5)
+            status = subprocess.run(['git','-C',str(root),'status','--porcelain'],capture_output=True,text=True,timeout=5)
+            origin.update(commit=commit.stdout.strip() if commit.returncode==0 else None,
+                          dirty=status.returncode!=0 or bool(status.stdout.strip()))
+    except (OSError,subprocess.TimeoutExpired):
+        pass  # Build hosts without Git still get content-addressed development artifacts.
     (destination/'.build-origin.json').write_text(json.dumps(origin,indent=2)+'\n')
     return destination
 
