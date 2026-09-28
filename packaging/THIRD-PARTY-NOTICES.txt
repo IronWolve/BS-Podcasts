@@ -13,36 +13,36 @@ Qt / PySide6 / Shiboken (The Qt Company)
   The Qt libraries ship as separate, replaceable DLL files; you may replace
   them with your own builds as provided for by the LGPL.
 
-mpv / libmpv (libmpv-2.dll)
+mpv / libmpv (Windows libmpv-2.dll; Linux native/libmpv.so.2)
   License: GNU Lesser General Public License v2.1 or later
   (licenses/LGPL-2.1.txt). This copy of libmpv was built from unmodified mpv
   sources configured in LGPL mode (-Dgpl=false).
   https://mpv.io / https://github.com/mpv-player/mpv
 
-FFmpeg (statically linked into libmpv-2.dll)
+FFmpeg (statically linked into the bundled Windows/Linux libmpv)
   License: GNU Lesser General Public License v2.1 or later
   (licenses/LGPL-2.1.txt), built from unmodified sources in the default LGPL
   configuration (no --enable-gpl, no --enable-nonfree).
   https://ffmpeg.org
 
-libplacebo (statically linked into libmpv-2.dll)
+libplacebo (statically linked into the bundled Windows/Linux libmpv)
   License: GNU Lesser General Public License v2.1 or later
   https://code.videolan.org/videolan/libplacebo
 
-libass (statically linked into libmpv-2.dll)
+libass (statically linked into the bundled Windows/Linux libmpv)
   License: ISC (licenses/ISC-libass.txt)
   https://github.com/libass/libass
 
-HarfBuzz (statically linked into libmpv-2.dll)
+HarfBuzz (statically linked into the bundled Windows/Linux libmpv)
   License: MIT ("Old MIT") (licenses/MIT-HarfBuzz.txt)
   https://github.com/harfbuzz/harfbuzz
 
-FreeType (statically linked into libmpv-2.dll)
+FreeType (statically linked into the bundled Windows/Linux libmpv)
   License: FreeType License (BSD-style, with credit clause)
   (licenses/FTL.txt)
   https://freetype.org
 
-Fribidi (statically linked into libmpv-2.dll)
+Fribidi (statically linked into the bundled Windows/Linux libmpv)
   License: GNU Lesser General Public License v2.1 or later
   https://github.com/fribidi/fribidi
 

@@ -38,9 +38,12 @@ def main() -> int:
         engine = MpvEngine(ao='null', vo='null')
         try:
             checks['native core initialized'] = bool(engine._player.mpv_version)
-            if sys.platform == 'win32' and getattr(sys,'frozen',False):
+            if sys.platform.startswith('linux') or (sys.platform == 'win32' and getattr(sys,'frozen',False)):
                 numeric = engine._player.ffmpeg_version.split('-')[0]
                 checks['patched bundled FFmpeg'] = tuple(int(x) for x in numeric.split('.')) >= (9,0,2)
+            if sys.platform.startswith('linux'):
+                native_root = Path(__file__).resolve().parents[2]/'native'
+                checks['native library inside deployment'] = Path(mpv.backend._name).resolve().is_relative_to(native_root)
         finally:
             engine.shutdown()
         if getattr(sys,'frozen',False):

@@ -2,7 +2,10 @@
 import argparse
 import hashlib
 import json
+import platform
 from pathlib import Path
+import re
+import subprocess
 import tarfile
 import tempfile
 import urllib.request
@@ -77,6 +80,12 @@ def sanitize(header, root):
 def record(artifact):
     lock=Path(__file__).with_name('native-sources.json')
     receipt={'format':1,'artifact':artifact.name,'sha256':digest(artifact),'inputs_sha256':digest(lock)}
+    if artifact.name == 'libmpv.so.2':
+        versions = subprocess.check_output(['readelf','--version-info',str(artifact)],text=True,timeout=10)
+        glibc = {tuple(map(int,value.split('.'))) for value in re.findall(r'GLIBC_([0-9.]+)',versions)}
+        receipt.update(platform='linux', architecture=platform.machine(),
+                       minimum_glibc='.'.join(map(str,max(glibc))),
+                       recipe_sha256=digest(lock.with_name('build-libmpv-linux.sh')))
     target=artifact.with_name('native-build.json')
     with tempfile.NamedTemporaryFile(dir=target.parent,delete=False) as stream:
         temporary=Path(stream.name)
