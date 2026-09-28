@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import weakref
 import tempfile
+from .files import private_file
 
 
 class _Connection(sqlite3.Connection):
@@ -110,7 +111,8 @@ class Database:
                     "To recover, close the app, rename the backup to library.db in the same folder, "
                     "and start again. To start with an empty library instead, delete the empty file."
                 )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        private_file(self.path)
         self._initialize()
 
     def _recovery_backup(self) -> Path | None:
@@ -283,7 +285,6 @@ class Database:
         descriptor, name = tempfile.mkstemp(prefix=".library-backup-", suffix=".tmp", dir=target.parent)
         os.close(descriptor)
         temporary = Path(name)
-        temporary.unlink(missing_ok=True)
         source = sqlite3.connect(self.path)
         destination = sqlite3.connect(temporary)
         try:
@@ -295,13 +296,15 @@ class Database:
 
     def backup(self) -> Path:
         directory = self.path.parent / "backups"
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         target = directory / f"library-{stamp}.db"
         # Write to a sidecar and replace on success: a backup() that failed
         # halfway used to leave a truncated file with a valid backup name —
         # exactly the file a user would later restore from.
-        temporary = target.with_suffix(target.suffix + ".tmp")
+        descriptor, name = tempfile.mkstemp(prefix=".library-backup-", suffix=".tmp", dir=directory)
+        os.close(descriptor)
+        temporary = Path(name)
         with self._lock.shared():
             source = sqlite3.connect(self.path)
             destination = sqlite3.connect(temporary)
@@ -345,9 +348,10 @@ class Database:
         with self._lock.exclusive():
             self._retire_connections()
             directory = self.path.parent / "backups"
-            directory.mkdir(parents=True, exist_ok=True)
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             damaged = directory / f"library-damaged-{stamp}.db"
+            private_file(damaged)
             # backup() folds the WAL into the snapshot; a raw file copy of a
             # live WAL database can silently miss recently committed pages,
             # making the advertised "recoverable original" unrecoverable.

@@ -93,7 +93,7 @@ def fetch_transcript(url: str, declared_type: str = "", session=None) -> list[Se
 
 
 _TIMESTAMP = re.compile(r"(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})")
-_TAGS = re.compile(r"<[^>]+>")
+_TAGS = re.compile(r"<[^<>]+>")
 
 
 def _stamp(text: str) -> float | None:

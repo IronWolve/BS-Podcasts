@@ -4,6 +4,8 @@ from urllib.parse import urlparse
 
 from ..data.repositories import LibraryRepository
 from ..domain import FeedData
+from ..privacy import feed_label
+from ..urlguard import ensure_web_url
 
 
 class LibraryService:
@@ -28,14 +30,14 @@ class LibraryService:
         return None
 
     def add_subscription(self, feed_url: str, title: str = ""):
-        feed_url = feed_url.strip()
+        feed_url = ensure_web_url(feed_url, 'Feed URL')
         parsed = urlparse(feed_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("Enter a complete http:// or https:// feed URL.")
         existing = self.find_subscription(feed_url)
         if existing is not None:
             raise ValueError(f"Already subscribed as “{existing.title}”.")
-        fallback = title.strip() or parsed.netloc
+        fallback = title.strip() or feed_label(feed_url)
         show = self.repository.add_show(feed_url, fallback)
         self.repository.update_show_playback(
             show.id,

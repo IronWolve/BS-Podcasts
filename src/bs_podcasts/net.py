@@ -29,11 +29,14 @@ def _redirect_guard(response, *args, **kwargs):
         return response
     location = response.headers.get("Location")
     if location:
-        from urllib.parse import urljoin
+        from urllib.parse import urljoin, urlsplit
         from requests.exceptions import InvalidURL
 
         try:
-            ensure_fetchable(urljoin(response.url, location), "Redirect target")
+            target = urljoin(response.url, location)
+            if urlsplit(response.url).scheme.lower() == 'https' and urlsplit(target).scheme.lower() == 'http':
+                raise UnsafeUrl('A secure URL redirected to insecure HTTP; use an HTTPS endpoint.')
+            ensure_fetchable(target, "Redirect target")
         except UnsafeUrl as exc:
             response.close()
             raise InvalidURL(str(exc), response=response) from exc
@@ -75,7 +78,7 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
     is reported (and resumed by the caller) rather than replayed from zero.
     """
     from requests import Session
-    from requests.adapters import HTTPAdapter
+    from .safe_transport import guarded_adapter
     from urllib3.util.retry import Retry
 
     from requests.exceptions import Timeout
@@ -147,6 +150,9 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
         return response
 
     session = BoundedSession()
+    # Untrusted feed URLs must never select credentials from the machine's
+    # .netrc, or silently route through process-wide proxy/CA configuration.
+    session.trust_env = False
     session.headers["User-Agent"] = USER_AGENT
     retry = DeadlineRetry(
         total=retries,
@@ -159,7 +165,8 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
         respect_retry_after_header=True,
         raise_on_status=False,
     )
-    adapter = HTTPAdapter(pool_connections=pool, pool_maxsize=pool, max_retries=retry)
+    adapter = guarded_adapter(pool_connections=pool, pool_maxsize=pool, max_retries=retry,
+                              deadline_provider=lambda: getattr(_request_context, 'state', None))
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     session.max_redirects = max_redirects
@@ -185,7 +192,8 @@ def describe_network_error(exc, what: str = "the link") -> str:
     request = getattr(exc, "request", None)
     host = urlsplit(getattr(request, "url", "") or "").hostname or ""
     where = f" by {host}" if host else ""
-    text = str(exc)
+    from .privacy import redact
+    text = redact(exc)
     lowered = text.lower()
     if isinstance(exc, requests.exceptions.TooManyRedirects):
         return f"Too many redirects while following {what}{where}."

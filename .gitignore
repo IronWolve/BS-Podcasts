@@ -1,4 +1,7 @@
 # Deny by default. Add exact files to source-manifest.json and this allowlist.
+# Private/agent state (.codex, .agents, .claude, AGENTS.md), .env files, keys,
+# profiles, databases, logs, captures, caches, environments and builds stay out.
+# These rules do not scrub already-tracked files or historical Git objects.
 *
 
 # Traversable source directories; their other contents remain ignored.
@@ -38,6 +41,7 @@
 !/packaging/build-macos.sh
 !/packaging/build-windows.ps1
 !/packaging/build_manifest.py
+!/packaging/check_dependencies.py
 !/packaging/deploy.py
 !/packaging/install-desktop.sh
 !/packaging/launch.sh
@@ -55,12 +59,15 @@
 !/packaging/licenses/MPL-2.0.txt
 !/packaging/licenses/PSF.txt
 !/packaging/macos-entitlements.plist
+!/packaging/native-sources.json
+!/packaging/native_sources.py
 !/packaging/project-build.sh
 !/packaging/project-start.sh
 !/packaging/project-stop.sh
 !/packaging/project-sync.sh
 !/packaging/render-desktop.py
 !/packaging/requirements-linux.lock
+!/packaging/requirements-windows.lock
 !/packaging/runtime_macos.py
 !/packaging/runtime_runner.py
 !/packaging/runtime_state.py
@@ -143,9 +150,12 @@
 !/src/bs_podcasts/logging_setup.py
 !/src/bs_podcasts/net.py
 !/src/bs_podcasts/netlimits.py
+!/src/bs_podcasts/privacy.py
+!/src/bs_podcasts/safe_transport.py
 !/src/bs_podcasts/playback/__init__.py
 !/src/bs_podcasts/playback/engine.py
 !/src/bs_podcasts/playback/external.py
+!/src/bs_podcasts/playback/http_stream.py
 !/src/bs_podcasts/playback/service.py
 !/src/bs_podcasts/selfcheck.py
 !/src/bs_podcasts/services/__init__.py
@@ -201,6 +211,7 @@
 !/tools/smoke_gui_remediation.py
 !/tools/smoke_gui_second_pass.py
 !/tools/smoke_gui_state.py
+!/tools/smoke_guarded_stream.py
 !/tools/smoke_input_safety.py
 !/tools/smoke_large_library.py
 !/tools/smoke_library.py
@@ -225,6 +236,7 @@
 !/tools/smoke_redirect_rescue.py
 !/tools/smoke_removal_safety.py
 !/tools/smoke_runtime_cseries.py
+!/tools/smoke_security_boundaries.py
 !/tools/smoke_selection.py
 !/tools/smoke_show_counts.py
 !/tools/smoke_shutdown.py

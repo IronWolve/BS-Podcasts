@@ -209,6 +209,7 @@ def _claim_single_instance(app):
     if _probe_running_instance(name):
         return None
     server = QLocalServer(app)
+    server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
     # Do NOT clear the socket path before trying to bind it. Removing it up
     # front meant a second launch could unlink the path a live first instance
     # had just bound — after which both listen() calls succeeded, neither took

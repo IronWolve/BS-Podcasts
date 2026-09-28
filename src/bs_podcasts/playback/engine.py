@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import logging
 import os
+import uuid
 from threading import Lock, RLock
 from typing import Any, Callable
 
@@ -41,6 +42,15 @@ class MpvEngine:
 
             mpv = mpv_module
         defaults = {
+            "config": False,
+            "load_scripts": False,
+            "load_unsafe_playlists": False,
+            "access_references": False,
+            "autoload_files": False,
+            "tls_verify": True,
+            # Top-level bytes arrive through mpv's file/custom I/O. FFmpeg
+            # must not open a second HTTP/file protocol from media references.
+            "demuxer_lavf_o": "protocol_whitelist=bshttp",
             "video": False,
             "ytdl": False,
             "terminal": False,
@@ -75,6 +85,8 @@ class MpvEngine:
                 # has no scripting layer, so `ytdl` does not exist). Drop the
                 # missing option and retry instead of failing playback.
                 option = self._missing_option(exc)
+                if option in {"config", "access_references", "autoload_files", "tls_verify", "demuxer_lavf_o"}:
+                    raise PlaybackUnavailable("This native player cannot enforce the required security options.") from exc
                 if option is None or option not in defaults:
                     raise
                 del defaults[option]
@@ -94,6 +106,11 @@ class MpvEngine:
         self._loading = False
         self._pending_position = 0.0
         self._pending_autoplay = False
+        self._http_sources = {}
+        self._http_streams = []
+        self._http_lock = Lock()
+        self._http_failure = None
+        self._player.register_stream_protocol('bshttp', self._open_http)
 
         self._player.observe_property("time-pos", self._position_changed)
         self._player.observe_property("duration", self._duration_changed)
@@ -123,6 +140,35 @@ class MpvEngine:
     def set_event_handler(self, handler: Callable[[EngineEvent], None]):
         self._handler = handler
 
+    def _open_http(self, uri):
+        from .http_stream import HttpStream
+        with self._http_lock:
+            source = self._http_sources.get(uri)
+        if source is None:
+            raise ValueError('This playback request has expired.')
+        # Register cancellation before waiting for HTTP headers. Otherwise
+        # Stop would have no frontend to cancel while open_fn was blocked.
+        def failed(message):
+            with self._http_lock:
+                if self._http_sources.get(uri) == source:
+                    self._http_failure = message
+        stream = HttpStream(source, defer_open=True, on_error=failed)
+        with self._http_lock:
+            if self._http_sources.get(uri) != source:
+                stream.close()
+                raise ValueError('This playback request was cancelled.')
+            self._http_streams.append(stream)
+        stream.open()
+        return stream
+
+    def _cancel_http(self):
+        with self._http_lock:
+            self._http_sources.clear()
+            self._http_failure = None
+            streams, self._http_streams = self._http_streams, []
+        for stream in streams:
+            stream.cancel()
+
     def prepare_load(self):
         """Retire outgoing observations before a new snapshot is published."""
         self._guard()
@@ -133,6 +179,7 @@ class MpvEngine:
             self._activated = True
             self._expected_entry_id = None
             generation = self._generation
+        self._cancel_http()
         self._player.command("stop")
         return generation
 
@@ -151,7 +198,13 @@ class MpvEngine:
             # Playlist replacement returns before native loading/events finish.
             # Bind this load to its unique entry before releasing the callback
             # lock. Start paused until the matching FILE_LOADED applies intent.
-            self._player.loadfile(source, "replace", pause="yes")
+            from ..urlguard import is_web_url
+            native_source = source
+            if is_web_url(source):
+                native_source = 'bshttp://' + uuid.uuid4().hex
+                with self._http_lock:
+                    self._http_sources[native_source] = source
+            self._player.loadfile(native_source, "replace", pause="yes")
             entries = self._player.playlist
             if len(entries) != 1 or "id" not in entries[0]:
                 raise PlaybackUnavailable("Could not identify the native playback entry.")
@@ -169,6 +222,7 @@ class MpvEngine:
             self._pending_autoplay = False
             self._expected_entry_id = None
             self._event_entry_id = None
+        self._cancel_http()
         self._player.command("stop")
 
     def play(self):
@@ -246,6 +300,7 @@ class MpvEngine:
         if self._dead:
             return
         self._dead = True
+        self._cancel_http()
         player, self._player = self._player, None
         player.terminate()
 
@@ -337,6 +392,8 @@ class MpvEngine:
                 if event.data.playlist_entry_id != self._expected_entry_id:
                     return
                 reason = event.data.reason
+                with self._http_lock:
+                    transport_error = self._http_failure
                 if reason == getattr(event.data, "REDIRECT", 5):
                     # Native playlist expansion keeps the logical episode, but
                     # each expanded entry has a new native identity.
@@ -350,7 +407,9 @@ class MpvEngine:
                 self._loading = False
                 self._expected_entry_id = None
                 self._event_entry_id = None
-                if reason == getattr(event.data, "ERROR", 4):
+                if transport_error:
+                    events.append(EngineEvent("error", transport_error, generation))
+                elif reason == getattr(event.data, "ERROR", 4):
                     code = getattr(event.data, "error", 0)
                     try:
                         message = mpv._mpv_error_string(code).decode("utf-8", "replace") if code else self._last_error

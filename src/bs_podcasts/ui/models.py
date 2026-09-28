@@ -94,7 +94,7 @@ class ItemRoles:
     ITEM = Qt.ItemDataRole.UserRole + 1
 
 
-_TAG = re.compile(r"<[^>]+>")
+_TAG = re.compile(r"<[^<>]+>")
 _WS = re.compile(r"\s+")
 _LONG_TOKEN = re.compile(r"\S{32,}")
 

@@ -10,6 +10,17 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 
+PRIVATE_ROOTS = frozenset({'data', 'docs', 'logs', 'tmp', 'run', 'dist', 'dists', 'build', 'node_modules'})
+PRIVATE_NAMES = frozenset({'agents.md', 'agent.md', 'claude.md', 'auth.json', 'credentials.json', 'id_rsa', 'id_ed25519'})
+
+
+def private_path(name):
+    parts = PurePosixPath(name).parts
+    return (parts[0].lower() in PRIVATE_ROOTS
+            or any(part.lower() in PRIVATE_NAMES for part in parts)
+            or any(part.startswith('.') for part in parts if part not in {'.gitignore', '.gitattributes'})
+            or PurePosixPath(name).suffix.lower() in {'.db', '.sqlite', '.sqlite3', '.log', '.pcap', '.key', '.pem'})
+
 
 def inventory(root=ROOT):
     root = Path(root).resolve()
@@ -23,6 +34,8 @@ def inventory(root=ROOT):
         path = PurePosixPath(name)
         if path.is_absolute() or '..' in path.parts or str(path) != name or any(c in name for c in '\\:\0\r\n'):
             raise ValueError(f'Invalid manifest path: {name}')
+        if private_path(name):
+            raise ValueError(f'Private/agent/runtime path is not an approved source input: {name}')
         source = root / name
         if not source.is_file() or source.is_symlink() or not source.resolve().is_relative_to(root):
             raise ValueError(f'Missing or unsafe source file: {name}')
@@ -35,6 +48,8 @@ def inventory(root=ROOT):
         path = PurePosixPath(name)
         if path.is_absolute() or '..' in path.parts or str(path) != name or any(c in name for c in '\\:\0\r\n'):
             raise ValueError(f'Invalid runtime path: {name}')
+        if private_path(name):
+            raise ValueError(f'Private/agent/runtime path is not an approved deployment output: {name}')
     return files, runtime
 
 
@@ -61,13 +76,20 @@ def check(root=ROOT):
         if any(value.encode() in raw for value in denied):
             failures.append(name)
             continue
-        if b'\0' in raw:
-            continue
         text = raw.decode('utf-8', 'replace')
         if secrets.search(text):
             failures.append(name)
     if failures:
         raise ValueError('Private references or credential patterns in: '+', '.join(failures))
+    try:
+        top = subprocess.run(['git','-C',str(root),'rev-parse','--show-toplevel'],capture_output=True,text=True,timeout=5)
+        if top.returncode == 0 and Path(top.stdout.strip()).resolve() == root:
+            tracked = subprocess.run(['git','-C',str(root),'ls-files','-z'],capture_output=True,text=True,timeout=5,check=True)
+            unexpected = set(tracked.stdout.split('\0')) - {''} - set(files)
+            if unexpected:
+                raise ValueError('Tracked files outside the source allowlist: '+', '.join(sorted(unexpected)))
+    except (OSError, subprocess.SubprocessError):
+        pass  # Manifest-only snapshots/build hosts need not have Git available.
     return len(files)
 
 

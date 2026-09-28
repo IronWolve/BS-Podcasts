@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 
 from .safety import contains_dtd
+from ..privacy import feed_label
 
 
 MAX_OPML_BYTES = 2 * 1024 * 1024
@@ -73,8 +74,8 @@ def export_opml(shows) -> bytes:
             continue
         attributes = {
             "type": "rss",
-            "text": show.title or show.feed_url,
-            "title": show.title or show.feed_url,
+            "text": show.title or feed_label(show.feed_url),
+            "title": show.title or feed_label(show.feed_url),
             "xmlUrl": show.feed_url,
         }
         if show.website_url:

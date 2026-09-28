@@ -87,6 +87,14 @@ def create_manifest(artifact, archive=None, require_clean=False):
     }
     if archive is not None:
         result["archive"] = {"name": archive.name, "bytes": archive.stat().st_size, "sha256": digest(archive)}
+    if sys.platform == 'win32' and os.environ.get('BS_PODCASTS_NATIVE_RECEIPT'):
+        receipt=json.loads(Path(os.environ['BS_PODCASTS_NATIVE_RECEIPT']).read_text())
+        native=artifact/'_internal/libmpv-2.dll'
+        lock=ROOT/'packaging/native-sources.json'
+        if receipt['sha256']!=digest(native) or receipt['inputs_sha256']!=digest(lock):
+            raise ValueError('Native artifact does not match its approved inputs.')
+        result['runtime']['native']={'file':'_internal/libmpv-2.dll','sha256':receipt['sha256'],
+                                    'inputs':json.loads(lock.read_text())}
     return result
 
 

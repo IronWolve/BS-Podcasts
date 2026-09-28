@@ -7,6 +7,7 @@ import os
 import time
 
 from ..net import SessionSlot
+from ..data.files import open_private
 from ..urlguard import UnsafeUrl, ensure_fetchable
 
 
@@ -153,7 +154,7 @@ class ArtworkCache:
             size = 0
             head = b""
             deadline = time.monotonic() + MAX_TRANSFER_SECONDS
-            with partial.open("wb") as handle:
+            with open_private(partial, "wb") as handle:
                 for chunk in response.iter_content(64 * 1024):
                     if time.monotonic() > deadline:
                         raise ArtworkError("Artwork transfer took too long.")

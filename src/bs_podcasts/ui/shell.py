@@ -47,6 +47,7 @@ class PeekFeed(FeedData):
 from ..jobs import JobResult, JobStatus
 from ..jobs.commands import CommandQueue
 from ..urlguard import is_web_url
+from ..privacy import feed_label
 from ..data.database import DatabaseIntegrityError
 from . import icons
 
@@ -2277,7 +2278,7 @@ class MainWindow(QMainWindow):
             from ..data.files import atomic_write
             return atomic_write(Path(path).expanduser(), library.export_opml())
         self._run_read(work, lambda target: self._notify(
-            f"Exported subscriptions to {target.name}", "success"), "export-opml")
+            f"Exported subscriptions to {target.name}. Keep it private: feed URLs may contain access tokens.", "success"), "export-opml")
 
     AUDIO_SUFFIXES = (".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac", ".aac", ".m4b")
 
@@ -5531,7 +5532,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _ui_podcast(show) -> UiPodcast:
         return UiPodcast(
-            title=show.title or show.feed_url,
+            title=show.title or feed_label(show.feed_url),
             author=show.author or "Podcast feed",
             episode_count=show.episode_count,
             new_count=show.new_count,
