@@ -2,6 +2,7 @@ param(
     [string]$LibMpvDll = "",
     [string]$Destination = "",
     [string]$SourceStage = "",
+    [string]$CheckRoot = "",
     [switch]$Clean,
     [switch]$Installer
 )
@@ -15,6 +16,22 @@ $stageRoot = Join-Path $buildRoot "source"
 $sourceDir = Join-Path $buildRoot "dist\BS Podcasts"
 $sourceExe = Join-Path $sourceDir "BS Podcasts.exe"
 if (-not $Destination) { $Destination = Join-Path $workspace "dists\windows" }
+if (-not $CheckRoot) {
+    if ($workspace.StartsWith("\\")) {
+        $privateBuild = Join-Path $workspace ".config\build.json"
+        if (Test-Path -LiteralPath $privateBuild) {
+            $configured = Get-Content -LiteralPath $privateBuild -Raw | ConvertFrom-Json
+            if ($configured.windows_copy_destination) {
+                $CheckRoot = Join-Path $configured.windows_copy_destination "audit-tmp"
+            }
+        }
+    } else {
+        $CheckRoot = Join-Path $workspace "tmp"
+    }
+}
+if (-not $CheckRoot -or $CheckRoot -notmatch '^[A-Za-z]:[\\/]') {
+    throw "Use -CheckRoot on your local Windows project drive; SQLite checks cannot use a WSL/network share."
+}
 
 if (-not $LibMpvDll) {
     # Default to the workspace-built LGPL libmpv (mpv -Dgpl=false + LGPL FFmpeg),
@@ -82,7 +99,7 @@ if (-not (Test-Path -LiteralPath $sourceExe)) {
 }
 
 # Execute only the non-GUI diagnostic in a disposable profile before publication.
-$checkDir = Join-Path $buildRoot "self-check"
+$checkDir = Join-Path $CheckRoot ("build-self-check-" + [guid]::NewGuid().ToString("N"))
 $checkArgs = '--self-check --self-check-dir "' + $checkDir + '"'
 $checkStart = New-Object System.Diagnostics.ProcessStartInfo
 $checkStart.FileName = $sourceExe

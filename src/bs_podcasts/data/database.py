@@ -113,7 +113,11 @@ class Database:
                 )
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         private_file(self.path)
-        self._initialize()
+        try:
+            self._initialize()
+        except BaseException:
+            self.close()
+            raise
 
     def _recovery_backup(self) -> Path | None:
         """Newest non-empty backup next to the library, if any."""
@@ -128,15 +132,15 @@ class Database:
 
     def _new_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10.0, check_same_thread=False, factory=_Connection)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=10000")
-        # WAL + NORMAL: a commit appends to the WAL without an fsync; the
-        # sync happens at checkpoint. An app crash loses nothing; only an
-        # OS crash or power loss can drop the last few transactions, and
-        # nothing here is worth a disk sync per download-progress tick
-        #.
-        connection.execute("PRAGMA synchronous=NORMAL")
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=10000")
+            # WAL + NORMAL syncs at checkpoints, not every progress update.
+            connection.execute("PRAGMA synchronous=NORMAL")
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
     @property
