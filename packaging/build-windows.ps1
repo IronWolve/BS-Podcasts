@@ -84,7 +84,13 @@ if (-not (Test-Path -LiteralPath $sourceExe)) {
 # Execute only the non-GUI diagnostic in a disposable profile before publication.
 $checkDir = Join-Path $buildRoot "self-check"
 $checkArgs = '--self-check --self-check-dir "' + $checkDir + '"'
-$checkProcess = Start-Process -FilePath $sourceExe -ArgumentList $checkArgs -WorkingDirectory $buildRoot -PassThru
+$checkStart = New-Object System.Diagnostics.ProcessStartInfo
+$checkStart.FileName = $sourceExe
+$checkStart.Arguments = $checkArgs
+$checkStart.WorkingDirectory = $buildRoot
+$checkStart.UseShellExecute = $false
+$checkStart.CreateNoWindow = $true
+$checkProcess = [System.Diagnostics.Process]::Start($checkStart)
 if (-not $checkProcess.WaitForExit(30000)) {
     $checkProcess.Kill()  # Only the owned diagnostic process, never another app.
     throw "Packaged self-check timed out; previous application unchanged"
