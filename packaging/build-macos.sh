@@ -82,7 +82,7 @@ if [[ "${SETUP}" == true ]]; then
         -r "${REPO}/packaging/requirements-linux.lock" 'pyinstaller==6.22.3'
 else
     "${VENV}/bin/python" -c \
-        'import importlib.util; required=("PyInstaller", "PySide6", "mpv", "requests", "mutagen"); missing=[name for name in required if importlib.util.find_spec(name) is None]; raise SystemExit("Missing build packages; rerun build.sh --setup: " + ", ".join(missing) if missing else 0)'
+        'import importlib.util; required=("PyInstaller", "PySide6", "mpv", "requests"); missing=[name for name in required if importlib.util.find_spec(name) is None]; raise SystemExit("Missing build packages; rerun build.sh --setup: " + ", ".join(missing) if missing else 0)'
 fi
 
 # The runtime snapshot is platform-independent; wheel selection is native.
@@ -130,6 +130,7 @@ iconutil -c icns "${ICONSET}" -o "${ICON_ICNS}"
     --exclude-module PySide6.QtQml \
     --exclude-module PySide6.QtQuick \
     --exclude-module PySide6.QtPdf \
+    --exclude-module mutagen \
     --distpath "${DIST}" \
     --workpath "${TMP}/pyinstaller-work" \
     --specpath "${TMP}" \

@@ -1,6 +1,7 @@
 """Small dependency and migration self-check; no test discovery."""
 
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,6 +22,7 @@ def main() -> int:
     workspace_tmp = args.self_check_dir or Path(os.environ.get("TMPDIR") or cache_dir()/'selfcheck')
     workspace_tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
     checks = {"Python >=3.14.7": sys.version_info[:3] >= (3,14,7)}
+    checks['retired metadata dependency absent'] = importlib.util.find_spec('mutagen') is None
     try:
         import PySide6
         import requests
@@ -69,7 +71,28 @@ def main() -> int:
         checks["migrations applied"] = bool(versions) and versions == list(
             range(1, len(versions) + 1)
         ) and len(versions) == shipped
-        database.close()
+        previous_cache = os.environ.get('BS_PODCASTS_CACHE_DIR')
+        try:
+            import wave
+            from .data.repositories import LibraryRepository
+            from .feeds.local import LocalAudioImporter
+            os.environ['BS_PODCASTS_CACHE_DIR'] = str(root/'cache')
+            audio = root/'silent metadata check.wav'
+            with wave.open(str(audio), 'wb') as stream:
+                stream.setparams((1, 2, 8000, 0, 'NONE', 'not compressed'))
+                stream.writeframes(bytes(16000))
+            repository = LibraryRepository(database)
+            show = LocalAudioImporter(repository).import_file(audio)
+            episode = repository.list_episodes(show.id)[0]
+            checks['isolated local audio metadata'] = show.source == 'local' and episode.duration_seconds == 1
+        except Exception:
+            checks['isolated local audio metadata'] = False
+        finally:
+            if previous_cache is None:
+                os.environ.pop('BS_PODCASTS_CACHE_DIR', None)
+            else:
+                os.environ['BS_PODCASTS_CACHE_DIR'] = previous_cache
+            database.close()
 
     failed = [name for name, passed in checks.items() if not passed]
     if args.self_check_dir:

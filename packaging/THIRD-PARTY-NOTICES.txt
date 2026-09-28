@@ -51,12 +51,6 @@ python-mpv
   (licenses/LGPL-2.1.txt)
   https://github.com/jaseg/python-mpv
 
-mutagen (local audio metadata)
-  License: GNU General Public License v2.0 or later
-  (licenses/GPL-2.0-mutagen.txt; copied from the installed distribution)
-  https://github.com/quodlibet/mutagen
-  This component has different license terms from the LGPL media stack.
-
 Python (python.org) and its standard library
   License: Python Software Foundation License (licenses/PSF.txt)
   https://www.python.org

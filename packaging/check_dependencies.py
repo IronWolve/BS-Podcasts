@@ -9,6 +9,12 @@ def check(lock):
     if sys.version_info < (3,14,7):
         raise RuntimeError('The security-updated application requires Python 3.14.7 or newer.')
     failures=[]
+    try:
+        importlib.metadata.version('mutagen')
+    except importlib.metadata.PackageNotFoundError:
+        pass
+    else:
+        failures.append('Retired dependency mutagen is still installed; remove it from this project environment before building.')
     count=0
     for line in Path(lock).read_text().splitlines():
         line=line.strip()

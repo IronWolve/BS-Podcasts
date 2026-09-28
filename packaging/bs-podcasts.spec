@@ -64,6 +64,7 @@ analysis = Analysis(
     hooksconfig={},
     runtime_hooks=[str(ROOT / "packaging" / "runtime_windows.py")],
     excludes=[
+        "mutagen",
         "PySide6.QtDBus",
         "PySide6.QtQml",
         "PySide6.QtQuick",
