@@ -96,6 +96,17 @@ def privacy(folder):
 
 
 def storage(folder):
+    import sqlite3
+    class FailedConnection:
+        closed=False
+        def execute(self,*args): raise sqlite3.OperationalError('fixture initialization failure')
+        def close(self): self.closed=True
+    failed=FailedConnection(); probe=Database.__new__(Database); probe.path=folder/'unused.db'
+    with patch('bs_podcasts.data.database.sqlite3.connect',return_value=failed):
+        try: probe._new_connection()
+        except sqlite3.OperationalError: pass
+        else: raise AssertionError('Connection failure was hidden')
+    assert failed.closed
     target = folder/'private.txt'; target.write_bytes(b'keep me')
     link = folder/'partial'
     if os.name == 'posix':
