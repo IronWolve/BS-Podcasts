@@ -178,6 +178,8 @@ class DownloadService:
 
     RETRY_DELAYS = (2.0, 5.0, 10.0)
     MIN_FREE_BYTES = 500 * 1024 * 1024
+    MAX_DOWNLOAD_BYTES = 32 * 1024**3
+    SPACE_CHECK_BYTES = 4 * 1024 * 1024
 
     def download(self, episode_id: int, ticket: Event | None = None):
         """Download with bounded automatic retry on transient network errors."""
@@ -435,6 +437,8 @@ class DownloadService:
         try:
             if target.suffix.lower() not in SAFE_MEDIA_SUFFIXES:
                 raise DownloadError("The prepared target has an unsafe file extension; clear it and retry.")
+            if existing > self.MAX_DOWNLOAD_BYTES:
+                raise DownloadError("The partial download exceeds the supported size limit.")
             policy = {}
             if getattr(self.session, "supports_deadlines", False):
                 budget = self.MAX_TRANSFER_SECONDS - (time.monotonic() - self._started.get(episode_id, time.monotonic()))
@@ -496,6 +500,8 @@ class DownloadService:
                 length = 0  # iter_content returns decoded bytes, not wire bytes
             total = range_total or (existing + length if length else 0)
             authoritative_total = bool(total)
+            if total > self.MAX_DOWNLOAD_BYTES:
+                raise DownloadError("The download exceeds the supported 32 GiB size limit.")
             etag = response.headers.get("ETag", record.etag if append and record else "")
             modified = response.headers.get("Last-Modified", record.last_modified if append and record else "")
             self.downloads.response_metadata(episode_id, etag, modified, total)
@@ -508,13 +514,12 @@ class DownloadService:
                 declared = int(episode.enclosure_bytes)
                 if declared > existing:
                     total = declared
-            if total:
-                free = shutil.disk_usage(self.directory).free
-                remaining = max(0, total - existing)
-                if free < remaining:
-                    raise DownloadError("Not enough free space for this download.")
+            free_budget = max(0, shutil.disk_usage(partial.parent).free - self.MIN_FREE_BYTES)
+            if total and max(0, total - existing) > free_budget:
+                raise DownloadError("Not enough free space for this download while preserving the safety reserve.")
 
             done = existing
+            space_checked_at = done
             self.downloads.progress(
                 episode_id, DownloadState.DOWNLOADING, done, total
             )
@@ -544,6 +549,13 @@ class DownloadService:
                         return self.downloads.get(episode_id)
                     if not chunk:
                         continue
+                    if done + len(chunk) > self.MAX_DOWNLOAD_BYTES:
+                        raise DownloadError("The download exceeds the supported 32 GiB size limit.")
+                    if done - space_checked_at >= self.SPACE_CHECK_BYTES:
+                        free_budget = max(0, shutil.disk_usage(partial.parent).free - self.MIN_FREE_BYTES)
+                        space_checked_at = done
+                    if len(chunk) > free_budget:
+                        raise DownloadError("Download stopped before exhausting free disk space; free space and retry.")
                     if not append and len(head) < 512:
                         # The Content-Type gate trusts the header; a missing
                         # or lying one let an HTML error page be saved and
@@ -556,6 +568,7 @@ class DownloadService:
                             )
                     handle.write(chunk)
                     done += len(chunk)
+                    free_budget -= len(chunk)
                     stall.advance(len(chunk))
                     now = time.monotonic()
                     if now - last_report_at >= 2.0 or done - last_report >= report_bytes:

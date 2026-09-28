@@ -8,6 +8,57 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Publish-Application {
+    param([string]$Application, [string]$Manifest, [string]$Target)
+    New-Item -ItemType Directory -Path $Target -Force | Out-Null
+    $lease = [System.IO.File]::Open((Join-Path $Target ".publish.lock"), "OpenOrCreate", "ReadWrite", "None")
+    $token = [guid]::NewGuid().ToString("N")
+    $incoming = Join-Path $Target (".incoming-" + $token)
+    $previous = Join-Path $Target (".previous-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + $token)
+    $names = @("BS Podcasts", "BS-Podcasts-Windows.manifest.json")
+    $retired = @()
+    $published = @()
+    try {
+        New-Item -ItemType Directory -Path $incoming | Out-Null
+        Copy-Item -LiteralPath $Application -Destination (Join-Path $incoming $names[0]) -Recurse
+        Copy-Item -LiteralPath $Manifest -Destination (Join-Path $incoming $names[1])
+        if (Get-Process -Name "BS Podcasts" -ErrorAction SilentlyContinue) {
+            throw "Close BS Podcasts before replacing it. The verified new build is retained at $incoming."
+        }
+        New-Item -ItemType Directory -Path $previous | Out-Null
+        try {
+            foreach ($name in $names) {
+                $current = Join-Path $Target $name
+                if (Test-Path -LiteralPath $current) {
+                    if ((Get-Item -LiteralPath $current).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                        throw "Refusing to replace an artifact link: $name"
+                    }
+                    Move-Item -LiteralPath $current -Destination (Join-Path $previous $name)
+                    $retired += $name
+                }
+            }
+            foreach ($name in $names) {
+                Move-Item -LiteralPath (Join-Path $incoming $name) -Destination (Join-Path $Target $name)
+                $published += $name
+            }
+        } catch {
+            [array]::Reverse($published)
+            foreach ($name in $published) {
+                Move-Item -LiteralPath (Join-Path $Target $name) -Destination (Join-Path $incoming $name)
+            }
+            [array]::Reverse($retired)
+            foreach ($name in $retired) {
+                Move-Item -LiteralPath (Join-Path $previous $name) -Destination (Join-Path $Target $name)
+            }
+            throw
+        }
+        Write-Output "Previous application and manifest retained: $previous"
+    } finally {
+        $lease.Dispose()
+    }
+}
+
 $repo = Split-Path -Parent $PSScriptRoot
 $workspace = Split-Path -Parent $repo
 $python = Join-Path $workspace ".cache\windows-build\.venv\Scripts\python.exe"
@@ -120,37 +171,16 @@ $checked = Get-Content -LiteralPath $checkReport -Raw | ConvertFrom-Json
 if (-not $checked.passed) { throw "Packaged dependency/storage/asset check failed; previous application unchanged" }
 Write-Output "Packaged self-check passed (no GUI, real profile or audio device)."
 
-# Stage a complete replacement and keep the previous app recoverable.
-New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-$copiedDir = Join-Path $Destination "BS Podcasts"
-$bsStage = Join-Path $Destination (".BS-Podcasts-incoming-" + [guid]::NewGuid().ToString("N"))
-$retiredDir = Join-Path $Destination ("BS Podcasts.previous-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
-Copy-Item -LiteralPath $sourceDir -Destination $bsStage -Recurse -ErrorAction Stop
-$bsRunning = Get-Process -Name "BS Podcasts" -ErrorAction SilentlyContinue
-if ($bsRunning) {
-    throw "Close BS Podcasts before replacing it. New build is staged at $bsStage; the previous copy is unchanged."
-}
-if (Test-Path -LiteralPath $copiedDir) {
-    Move-Item -LiteralPath $copiedDir -Destination $retiredDir -ErrorAction Stop
-}
-try {
-    Move-Item -LiteralPath $bsStage -Destination $copiedDir -ErrorAction Stop
-}
-catch {
-    if ((Test-Path -LiteralPath $retiredDir) -and -not (Test-Path -LiteralPath $copiedDir)) {
-        Move-Item -LiteralPath $retiredDir -Destination $copiedDir
-    }
-    throw
-}
-if (Test-Path -LiteralPath $retiredDir) {
-    Write-Output "Previous application retained: $retiredDir"
-}
-
-# Surface the third-party notices at the folder root where users can find them.
-$notices = Join-Path $copiedDir "_internal\THIRD-PARTY-NOTICES.txt"
+# Complete notices and provenance before replacing any previous artifact.
+$notices = Join-Path $sourceDir "_internal\THIRD-PARTY-NOTICES.txt"
 if (Test-Path -LiteralPath $notices) {
-    Copy-Item -LiteralPath $notices -Destination (Join-Path $copiedDir "THIRD-PARTY-NOTICES.txt") -Force
+    Copy-Item -LiteralPath $notices -Destination (Join-Path $sourceDir "THIRD-PARTY-NOTICES.txt")
 }
+$preparedManifest = Join-Path $buildRoot "BS-Podcasts-Windows.manifest.json"
+& $python -B (Join-Path $stageRoot "packaging\build_manifest.py") --artifact $sourceDir --output $preparedManifest
+if ($LASTEXITCODE -ne 0) { throw "Artifact manifest generation failed; previous application unchanged" }
+Publish-Application -Application $sourceDir -Manifest $preparedManifest -Target $Destination
+$copiedDir = Join-Path $Destination "BS Podcasts"
 
 $copiedExe = Join-Path $copiedDir "BS Podcasts.exe"
 $size = (Get-ChildItem -LiteralPath $copiedDir -Recurse -File | Measure-Object -Sum Length).Sum
@@ -159,10 +189,6 @@ Write-Output "Copied application: $copiedDir"
 Write-Output "Launcher: $copiedExe"
 Write-Output "Total size: $size bytes"
 Write-Output "Launcher SHA-256: $($hash.Hash)"
-
-$manifest = Join-Path $Destination "BS-Podcasts-Windows.manifest.json"
-& $python -B (Join-Path $stageRoot "packaging\build_manifest.py") --artifact $copiedDir --output $manifest
-if ($LASTEXITCODE -ne 0) { throw "Artifact manifest generation failed" }
 
 if ($Installer) {
     $iscc = @(

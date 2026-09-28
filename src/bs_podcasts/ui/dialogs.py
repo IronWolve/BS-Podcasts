@@ -49,7 +49,7 @@ from ..config import APP_NAME, APP_TAGLINE, GITHUB_URL, app_version
 from . import icons
 from .pixmaps import cover, initials
 from .theme import COLORS, SPACE, scaled_px
-from .widgets import fit_combo_width, safe_feed_html
+from .widgets import PlainTextLabel, fit_combo_width, safe_feed_html
 
 
 SHADOW_MARGIN = 24
@@ -79,7 +79,7 @@ def _episode_date(value: str) -> str:
         hour = parsed.strftime("%I").lstrip("0") or "0"
         zone = parsed.strftime(" %Z") if parsed.tzinfo is not None else ""
         return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year} at {hour}:{parsed.strftime('%M %p')}{zone}"
-    except ValueError:
+    except (ValueError, OverflowError, OSError):
         return value
 
 
@@ -304,12 +304,12 @@ class StyledDialog(QDialog):
 
     # -- helpers --------------------------------------------------------------
     def add_heading(self, title: str, body: str = ""):
-        heading = QLabel(title)
+        heading = PlainTextLabel(title)
         heading.setObjectName("cardTitle")
         heading.setWordWrap(True)
         self.card_layout.addWidget(heading)
         if body:
-            text = QLabel(body)
+            text = PlainTextLabel(body)
             text.setObjectName("muted")
             text.setWordWrap(True)
             self.card_layout.addWidget(text)
@@ -349,7 +349,7 @@ class AddPodcastDialog(StyledDialog):
         self.url.setObjectName("searchField")
         self.url.setPlaceholderText("https://example.com/feed.xml")
         self.url.setAccessibleName("Feed URL")
-        self.error = QLabel("")
+        self.error = PlainTextLabel("")
         self.error.setObjectName("errorText")
         self.error.setWordWrap(True)
         self.error.hide()
@@ -472,7 +472,7 @@ class PodcastSettingsDialog(StyledDialog):
         form.addRow("Download at most", self.auto_download_limit)
         form.addRow("Keep downloads", self.retention_keep)
         form.addRow("Delete downloads older than", self.retention_days)
-        protection = QLabel("Favorites are always kept. You will see a preview before the first cleanup.")
+        protection = PlainTextLabel("Favorites are always kept. You will see a preview before the first cleanup.")
         protection.setObjectName("settingHint")
         protection.setWordWrap(True)
         self.card_layout.addWidget(protection)
@@ -515,16 +515,16 @@ class RemovePodcastDialog(StyledDialog):
         ]
         for label, value in facts:
             row = QHBoxLayout()
-            key = QLabel(label)
+            key = PlainTextLabel(label)
             key.setObjectName("muted")
             key.setFixedWidth(scaled_px(130))
-            val = QLabel(value)
+            val = PlainTextLabel(value)
             row.addWidget(key)
             row.addWidget(val, 1)
             rows.addLayout(row)
         self.card_layout.addLayout(rows)
         if preview["files"]:
-            listing = QLabel("\n".join(path for path, _size in preview["files"][:8]) + ("\n…" if len(preview["files"]) > 8 else ""))
+            listing = PlainTextLabel("\n".join(path for path, _size in preview["files"][:8]) + ("\n…" if len(preview["files"]) > 8 else ""))
             listing.setObjectName("settingHint")
             listing.setWordWrap(True)
             listing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -550,10 +550,10 @@ class DeleteFilesDialog(StyledDialog):
         self.set_card_width(560)
         total = sum(preview.bytes_reclaimed for preview in previews)
         self.add_heading(title, message)
-        summary = QLabel(f"{len(previews)} file{'s' if len(previews) != 1 else ''}  ·  {format_bytes(total)} reclaimed")
+        summary = PlainTextLabel(f"{len(previews)} file{'s' if len(previews) != 1 else ''}  ·  {format_bytes(total)} reclaimed")
         summary.setObjectName("cardTitle")
         self.card_layout.addWidget(summary)
-        listing = QLabel("\n".join(f"{p.path}  ({format_bytes(p.bytes_reclaimed)})" for p in previews[:8]) + ("\n…" if len(previews) > 8 else ""))
+        listing = PlainTextLabel("\n".join(f"{p.path}  ({format_bytes(p.bytes_reclaimed)})" for p in previews[:8]) + ("\n…" if len(previews) > 8 else ""))
         listing.setObjectName("settingHint")
         listing.setWordWrap(True)
         listing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -630,12 +630,12 @@ class EpisodeInfoDialog(StyledDialog):
             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
             form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             for name, value in group:
-                field = QLabel(_wrap_long_value(value))
+                field = PlainTextLabel(_wrap_long_value(value))
                 field.setTextFormat(Qt.TextFormat.PlainText)
                 field.setWordWrap(True)
                 field.setToolTip(value)
                 field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                label = QLabel(name)
+                label = PlainTextLabel(name)
                 label.setObjectName("muted")
                 label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
                 form.addRow(label, field)
@@ -725,7 +725,7 @@ class PodcastInfoDialog(StyledDialog):
 
         hero = QHBoxLayout()
         hero.setSpacing(SPACE["lg"])
-        artwork = QLabel()
+        artwork = PlainTextLabel()
         art_side = scaled_px(148)
         artwork.setFixedSize(art_side, art_side)
         artwork.setPixmap(
@@ -738,17 +738,17 @@ class PodcastInfoDialog(StyledDialog):
         hero.addWidget(artwork, 0, Qt.AlignmentFlag.AlignTop)
         summary = QVBoxLayout()
         summary.setSpacing(SPACE["xs"])
-        heading = QLabel(_wrap_long_value(title))
+        heading = PlainTextLabel(_wrap_long_value(title))
         heading.setObjectName("contextTitle")
         heading.setWordWrap(True)
         summary.addWidget(heading)
         if author:
-            author_label = QLabel(author)
+            author_label = PlainTextLabel(author)
             author_label.setObjectName("meta")
             author_label.setWordWrap(True)
             summary.addWidget(author_label)
         if categories:
-            category_label = QLabel(str(categories))
+            category_label = PlainTextLabel(str(categories))
             category_label.setObjectName("scopePill")
             category_label.setWordWrap(True)
             summary.addWidget(category_label, 0, Qt.AlignmentFlag.AlignLeft)
@@ -761,7 +761,7 @@ class PodcastInfoDialog(StyledDialog):
             ) if part
         )
         if summary_text:
-            summary_meta = QLabel(summary_text)
+            summary_meta = PlainTextLabel(summary_text)
             summary_meta.setObjectName("meta")
             summary.addWidget(summary_meta)
         summary.addStretch(1)
@@ -786,14 +786,14 @@ class PodcastInfoDialog(StyledDialog):
         actions.addWidget(copy_feed)
         actions.addStretch(1)
         content_layout.addLayout(actions)
-        link_help = QLabel(
+        link_help = PlainTextLabel(
             "Website opens the public podcast page. RSS feed is the subscription address used by podcast readers."
         )
         link_help.setObjectName("settingHint")
         link_help.setWordWrap(True)
         content_layout.addWidget(link_help)
 
-        about_heading = QLabel("ABOUT")
+        about_heading = PlainTextLabel("ABOUT")
         about_heading.setObjectName("eyebrow")
         content_layout.addWidget(about_heading)
         about = QTextBrowser()
@@ -817,12 +817,12 @@ class PodcastInfoDialog(StyledDialog):
         for name, value in podcast_information_rows(podcast, feed):
             if name not in friendly_names:
                 continue
-            field = QLabel(_wrap_long_value(value))
+            field = PlainTextLabel(_wrap_long_value(value))
             field.setTextFormat(Qt.TextFormat.PlainText)
             field.setWordWrap(True)
             field.setToolTip(value)
             field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            label = QLabel(name)
+            label = PlainTextLabel(name)
             label.setObjectName("muted")
             label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             facts.addRow(label, field)
@@ -844,12 +844,12 @@ class PodcastInfoDialog(StyledDialog):
         for name, value in podcast_information_rows(podcast, feed):
             if name not in technical_names:
                 continue
-            field = QLabel(_wrap_long_value(value))
+            field = PlainTextLabel(_wrap_long_value(value))
             field.setTextFormat(Qt.TextFormat.PlainText)
             field.setWordWrap(True)
             field.setToolTip(value)
             field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            label = QLabel("RSS feed" if name == "Feed URL" else "Website" if name == "Podcast website" else name)
+            label = PlainTextLabel("RSS feed" if name == "Feed URL" else "Website" if name == "Podcast website" else name)
             label.setObjectName("muted")
             label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             technical_form.addRow(label, field)
@@ -908,15 +908,15 @@ class ShortcutsDialog(StyledDialog):
         left, right = QVBoxLayout(), QVBoxLayout()
         for index, (title, entries) in enumerate(list(groups) + [("Fixed keys", self.FIXED)]):
             target = left if index % 2 == 0 else right
-            heading = QLabel(title.upper())
+            heading = PlainTextLabel(title.upper())
             heading.setObjectName("eyebrow")
             target.addWidget(heading)
             for key, label in entries:
                 row = QHBoxLayout()
-                key_label = QLabel(key)
+                key_label = PlainTextLabel(key)
                 key_label.setObjectName("cardTitle")
                 key_label.setFixedWidth(scaled_px(110))
-                text = QLabel(label)
+                text = PlainTextLabel(label)
                 text.setObjectName("muted")
                 text.setWordWrap(True)
                 row.addWidget(key_label, 0, Qt.AlignmentFlag.AlignTop)
@@ -972,7 +972,7 @@ class StartupErrorDialog(StyledDialog):
         self.setWindowTitle(title)
         self.set_card_width(560)
         self.add_heading(title)
-        body = QLabel(message)
+        body = PlainTextLabel(message)
         body.setObjectName("contextBody")
         body.setWordWrap(True)
         body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -993,7 +993,7 @@ class AboutDialog(StyledDialog):
         super().__init__(parent)
         self.setWindowTitle(f"About {APP_NAME}")
         self.set_card_width(560)
-        logo = QLabel()
+        logo = PlainTextLabel()
         pixmap = QPixmap(str(logo_path()))
         if not pixmap.isNull():
             logo.setPixmap(pixmap.scaledToWidth(360, Qt.TransformationMode.SmoothTransformation))
@@ -1002,7 +1002,7 @@ class AboutDialog(StyledDialog):
         name = QLabel(f"{APP_NAME}  <span style='color:{COLORS['muted']}; font-weight:400'>v{app_version()}</span>")
         name.setObjectName("cardTitle")
         name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tagline = QLabel(APP_TAGLINE)
+        tagline = PlainTextLabel(APP_TAGLINE)
         tagline.setObjectName("muted")
         tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.card_layout.addWidget(name)
@@ -1021,10 +1021,10 @@ class AboutDialog(StyledDialog):
         ]
         for label, value in details:
             row = QHBoxLayout()
-            key = QLabel(label)
+            key = PlainTextLabel(label)
             key.setObjectName("muted")
             key.setFixedWidth(scaled_px(120))
-            val = QLabel(value)
+            val = PlainTextLabel(value)
             val.setWordWrap(True)
             val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             row.addWidget(key, 0, Qt.AlignmentFlag.AlignTop)

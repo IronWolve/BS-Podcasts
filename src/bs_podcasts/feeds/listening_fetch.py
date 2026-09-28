@@ -63,11 +63,9 @@ def fetch_chapters(url: str, session=None) -> list[ChapterData]:
 
 def parse_chapters(content: bytes) -> list[ChapterData]:
     """Podcast Namespace JSON chapters: {"chapters": [{"startTime": 0, "title": ...}]}."""
-    try:
-        payload = json.loads(content.decode("utf-8", "replace"))
-    except ValueError as exc:
-        raise ListeningFetchError(f"Chapters are not valid JSON: {exc}") from exc
-    entries = payload.get("chapters") if isinstance(payload, dict) else payload
+    if len(content) > MAX_BYTES:
+        raise ListeningFetchError("Chapters exceed the size limit.")
+    entries = _json_entries(content.decode('utf-8', 'replace'), 'chapters', 'Chapters')
     chapters = []
     for entry in entries or ():
         if not isinstance(entry, dict):
@@ -92,7 +90,7 @@ def fetch_transcript(url: str, declared_type: str = "", session=None) -> list[Se
     return parse_transcript(content, declared_type or content_type, url)
 
 
-_TIMESTAMP = re.compile(r"(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})")
+_TIMESTAMP = re.compile(r"(?<!\d)(?:(\d{1,6}):)?(\d{1,2}):(\d{2})[.,](\d{1,3})(?!\d)")
 _TAGS = re.compile(r"<[^<>]+>")
 
 
@@ -108,6 +106,8 @@ def _stamp(text: str) -> float | None:
 
 
 def parse_transcript(content: bytes, kind: str = "", url: str = "") -> list[SegmentData]:
+    if len(content) > MAX_BYTES:
+        raise ListeningFetchError("Transcript exceeds the size limit.")
     text = content.decode("utf-8", "replace").replace("\r\n", "\n")
     kind = (kind or "").lower()
     lowered_url = url.lower()
@@ -120,12 +120,21 @@ def parse_transcript(content: bytes, kind: str = "", url: str = "") -> list[Segm
     return _parse_plain(text)
 
 
-def _parse_json_transcript(text: str) -> list[SegmentData]:
+def _json_entries(text: str, field: str, label: str) -> list:
     try:
         payload = json.loads(text)
-    except ValueError as exc:
-        raise ListeningFetchError(f"Transcript is not valid JSON: {exc}") from exc
-    entries = payload.get("segments") if isinstance(payload, dict) else payload
+    except (ValueError, RecursionError) as exc:
+        raise ListeningFetchError(f"{label} are not valid JSON.") from exc
+    entries = payload.get(field) if isinstance(payload, dict) else payload
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        raise ListeningFetchError(f"{label} must contain a list of entries.")
+    return entries
+
+
+def _parse_json_transcript(text: str) -> list[SegmentData]:
+    entries = _json_entries(text, 'segments', 'Transcript segments')
     segments = []
     for entry in entries or ():
         if not isinstance(entry, dict):

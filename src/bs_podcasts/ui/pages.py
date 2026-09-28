@@ -34,6 +34,7 @@ from . import icons
 from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
 from .widgets import combo_chrome_px as widgets_combo_chrome_px
+from .widgets import PlainTextLabel
 from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, scaled_px
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 
@@ -360,7 +361,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self._discover_sort = "rank"
             secondary_filters.addWidget(self.discover_sort)
             secondary_filters.addStretch(1)
-            self.scope_label = QLabel("All Categories · Directory chart")
+            self.scope_label = PlainTextLabel("All Categories · Directory chart")
             self.scope_label.setObjectName("scopePill")
             self.scope_label.setVisible(False)
             secondary_filters.addWidget(self.scope_label)
@@ -380,7 +381,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             secondary_filters.addWidget(self.topic)
             filter_layout.addWidget(self.secondary_filters_widget)
             self.root.addWidget(filters)
-            self.result_summary = QLabel("Choose For You, search, or select a category.")
+            self.result_summary = PlainTextLabel("Choose For You, search, or select a category.")
             self.result_summary.setObjectName("meta")
             self.result_summary.setFixedHeight(scaled_px(22))
             self.root.addWidget(self.result_summary)
@@ -998,15 +999,15 @@ class SummaryCard(QPushButton):
         layout.setSpacing(SPACE["md"])
         text = QVBoxLayout()
         text.setSpacing(0)
-        self.number = QLabel("0")
+        self.number = PlainTextLabel("0")
         self.number.setObjectName("summaryNumber")
-        self.label = QLabel(label)
+        self.label = PlainTextLabel(label)
         self.label.setObjectName("summaryLabel")
         self.label.setWordWrap(True)
         text.addWidget(self.number)
         text.addWidget(self.label)
         layout.addLayout(text, 1)
-        self.icon = QLabel()
+        self.icon = PlainTextLabel()
         self.icon.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
         layout.addWidget(self.icon)
         self._label_text = label
@@ -1325,7 +1326,7 @@ class SettingsPage(BasePage):
             lambda index: self.setting_changed.emit("discover.search_limit", self.search_depth.itemData(index))
         )
         self.background_paused = QCheckBox("Pause background work")
-        self.background_status = QLabel("Background refresh, artwork, transcripts and automatic downloads are running.")
+        self.background_status = PlainTextLabel("Background refresh, artwork, transcripts and automatic downloads are running.")
         self.background_status.setObjectName("settingHint")
         self.background_status.setWordWrap(True)
         library_form.addRow("Background", self.background_paused)
@@ -1406,7 +1407,7 @@ class SettingsPage(BasePage):
 
         # Listening statistics -------------------------------------------------
         stats_card, stats_form = self._card("Listening statistics", "Stored only in your local library.")
-        self.statistics = QLabel("Not calculated yet")
+        self.statistics = PlainTextLabel("Not calculated yet")
         self.statistics.setObjectName("meta")
         self.statistics.setWordWrap(True)
         stats_refresh = QPushButton("Refresh statistics")
@@ -1419,7 +1420,7 @@ class SettingsPage(BasePage):
         # Updates --------------------------------------------------------------
         update_card, update_form = self._card("App updates", "Checks the project releases page; updates are never installed automatically.")
         self.update_checks = QCheckBox("Check for updates in the background")
-        self.update_status = QLabel("Not checked")
+        self.update_status = PlainTextLabel("Not checked")
         self.update_status.setObjectName("meta")
         self.update_status.setWordWrap(True)
         check_now = QPushButton("Check now")
@@ -1433,7 +1434,7 @@ class SettingsPage(BasePage):
 
         # Database -------------------------------------------------------------
         database_card, database_form = self._card("Library database", "Maintenance creates a backup first. Repair is offered only if a health check finds a problem.")
-        self.database_status = QLabel("Not checked")
+        self.database_status = PlainTextLabel("Not checked")
         self.database_status.setObjectName("meta")
         self.database_status.setWordWrap(True)
         database_actions = QHBoxLayout()
@@ -1463,7 +1464,7 @@ class SettingsPage(BasePage):
         shortcut_layout.setContentsMargins(SPACE["xl"], SPACE["lg"], SPACE["xl"], SPACE["lg"])
         shortcut_layout.setSpacing(SPACE["md"])
         shortcut_head = QHBoxLayout()
-        shortcut_title = QLabel("Keyboard shortcuts")
+        shortcut_title = PlainTextLabel("Keyboard shortcuts")
         shortcut_title.setObjectName("cardTitle")
         shortcut_head.addWidget(shortcut_title, 1)
         reset = QPushButton("Reset to defaults")
@@ -1472,13 +1473,13 @@ class SettingsPage(BasePage):
         reset.clicked.connect(self.reset_shortcuts_requested)
         shortcut_head.addWidget(reset)
         shortcut_layout.addLayout(shortcut_head)
-        hint = QLabel("Click a field and press the new key combination.")
+        hint = PlainTextLabel("Click a field and press the new key combination.")
         hint.setObjectName("settingHint")
         shortcut_layout.addWidget(hint)
         self.shortcut_form = QVBoxLayout()
         self.shortcut_form.setSpacing(SPACE["sm"])
         shortcut_layout.addLayout(self.shortcut_form)
-        self.shortcut_error = QLabel("")
+        self.shortcut_error = PlainTextLabel("")
         self.shortcut_error.setObjectName("errorText")
         self.shortcut_error.hide()
         shortcut_layout.addWidget(self.shortcut_error)
@@ -1490,14 +1491,14 @@ class SettingsPage(BasePage):
         # Storage --------------------------------------------------------------
         storage_card, storage_layout = self._card("Files & storage", "")
         storage_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        self.data_root = QLabel("—")
-        self.library_path = QLabel("—")
-        self.download_path = QLabel("—")
-        self.download_usage = QLabel("—")
-        self.artwork_path = QLabel("—")
-        self.artwork_usage = QLabel("—")
-        self.temp_path = QLabel("—")
-        self.log_path = QLabel("—")
+        self.data_root = PlainTextLabel("—")
+        self.library_path = PlainTextLabel("—")
+        self.download_path = PlainTextLabel("—")
+        self.download_usage = PlainTextLabel("—")
+        self.artwork_path = PlainTextLabel("—")
+        self.artwork_usage = PlainTextLabel("—")
+        self.temp_path = PlainTextLabel("—")
+        self.log_path = PlainTextLabel("—")
         for label in (self.data_root, self.library_path, self.download_path, self.artwork_path, self.temp_path, self.log_path):
             label.setObjectName("meta")
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -1607,11 +1608,11 @@ class SettingsPage(BasePage):
         outer = QVBoxLayout(card)
         outer.setContentsMargins(SPACE["xl"], SPACE["lg"], SPACE["xl"], SPACE["lg"])
         outer.setSpacing(SPACE["md"])
-        heading = QLabel(title)
+        heading = PlainTextLabel(title)
         heading.setObjectName("cardTitle")
         outer.addWidget(heading)
         if hint:
-            hint_label = QLabel(hint)
+            hint_label = PlainTextLabel(hint)
             hint_label.setObjectName("settingHint")
             hint_label.setWordWrap(True)
             outer.addWidget(hint_label)
@@ -1803,7 +1804,7 @@ class SettingsPage(BasePage):
         self._shortcut_editors.clear()
         self.shortcut_error.hide()
         for group, entries in SHORTCUT_GROUPS:
-            heading = QLabel(group.upper())
+            heading = PlainTextLabel(group.upper())
             heading.setObjectName("eyebrow")
             self.shortcut_form.addWidget(heading)
             for name, label in entries:
@@ -1813,7 +1814,7 @@ class SettingsPage(BasePage):
                 row_layout = QHBoxLayout(row)
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.setSpacing(SPACE["lg"])
-                text = QLabel(label)
+                text = PlainTextLabel(label)
                 text.setFixedWidth(scaled_px(260))
                 editor = QKeySequenceEdit()
                 editor.setFixedWidth(scaled_px(self.FIELD_WIDTH))

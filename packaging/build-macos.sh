@@ -45,8 +45,8 @@ if [[ -z "${PYTHON}" ]]; then
     exit 1
 fi
 
-if ! "${PYTHON}" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 14))'; then
-    printf 'Expected Python 3.14, got: ' >&2
+if ! "${PYTHON}" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 14) or sys.version_info[:3] < (3, 14, 7))'; then
+    printf 'Expected Python 3.14.7 or newer in the 3.14 series, got: ' >&2
     "${PYTHON}" --version >&2
     exit 1
 fi
@@ -79,11 +79,15 @@ if [[ "${SETUP}" == true ]]; then
     "${VENV}/bin/python" -m pip install --disable-pip-version-check --upgrade \
         pip setuptools wheel
     "${VENV}/bin/python" -m pip install --disable-pip-version-check --upgrade \
-        -e "${REPO}" 'pyinstaller>=6,<7'
+        -r "${REPO}/packaging/requirements-linux.lock" 'pyinstaller==6.22.3'
 else
     "${VENV}/bin/python" -c \
         'import importlib.util; required=("PyInstaller", "PySide6", "mpv", "requests", "mutagen"); missing=[name for name in required if importlib.util.find_spec(name) is None]; raise SystemExit("Missing build packages; rerun build.sh --setup: " + ", ".join(missing) if missing else 0)'
 fi
+
+# The runtime snapshot is platform-independent; wheel selection is native.
+"${VENV}/bin/python" -B "${REPO}/packaging/check_dependencies.py" \
+    "${REPO}/packaging/requirements-linux.lock"
 
 ICON_SOURCE="${REPO}/packaging/branding/bs-podcasts-icon-master.png"
 ICON_ICNS="${TMP}/BS-Podcasts.icns"
@@ -120,7 +124,8 @@ iconutil -c icns "${ICONSET}" -o "${ICON_ICNS}"
     --target-architecture "${ARCH}" \
     --icon "${ICON_ICNS}" \
     --paths "${REPO}/src" \
-    --collect-data bs_podcasts \
+    --add-data "${REPO}/src/bs_podcasts/assets:bs_podcasts/assets" \
+    --add-data "${REPO}/src/bs_podcasts/data/migrations:bs_podcasts/data/migrations" \
     --runtime-hook "${REPO}/packaging/runtime_macos.py" \
     --exclude-module PySide6.QtQml \
     --exclude-module PySide6.QtQuick \
