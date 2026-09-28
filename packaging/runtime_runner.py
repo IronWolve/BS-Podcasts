@@ -40,6 +40,8 @@ def environment():
     source=(PROJECT/'repo').resolve()
     sys.path[:]=[p for p in sys.path if p and not Path(p).resolve().is_relative_to(source)]
     sys.path.insert(0,str(DEPLOYMENT/'app'))
+    from runtime_linux import bind_native
+    bind_native(DEPLOYMENT/'native/libmpv.so.2')
     import bs_podcasts
     if not Path(bs_podcasts.__file__).resolve().is_relative_to(DEPLOYMENT/'app'):
         raise RuntimeError('Refusing an application import outside the deployment.')
@@ -113,6 +115,16 @@ def main():
         return 0 if not running(current) else 1
     if args.status or args.check:
         _describe(args)
+        if args.check:
+            from tempfile import TemporaryDirectory
+            from bs_podcasts.selfcheck import main as check
+            with TemporaryDirectory(prefix='runtime-check-', dir=PROJECT/'tmp') as folder:
+                previous = sys.argv
+                try:
+                    sys.argv = ['selfcheck', '--self-check-dir', folder]
+                    return check()
+                finally:
+                    sys.argv = previous
         return 0
     with runtime_lock(PROJECT,inherit=True):
         _describe(args)

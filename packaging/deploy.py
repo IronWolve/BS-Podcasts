@@ -60,10 +60,21 @@ def deploy():
         target = temporary/relative
         target.parent.mkdir(parents=True,exist_ok=True)
         shutil.copy2(snapshot/name,target)
+    native = workspace/'.cache/linux-build/libmpv-lgpl'
+    receipt = json.loads((native/'native-build.json').read_text())
+    if (receipt['sha256'] != file_digest(native/'libmpv.so.2')
+            or receipt['inputs_sha256'] != file_digest(snapshot/'packaging/native-sources.json')
+            or receipt['recipe_sha256'] != file_digest(snapshot/'packaging/build-libmpv-linux.sh')):
+        raise RuntimeError('Linux native library differs from its approved inputs; rebuild it first.')
+    (temporary/'native').mkdir()
+    for name in ('libmpv.so.2', 'native-build.json'):
+        shutil.copy2(native/name, temporary/'native'/name)
+    deployed = [*runtime.values(), 'native/libmpv.so.2', 'native/native-build.json']
     version = tomllib.loads((snapshot/'pyproject.toml').read_text())['project']['version']
     record = {'version':version,'built_at':datetime.now(timezone.utc).isoformat(),
               'source_sha256':source_digest(snapshot),
-              'files':{relative:file_digest(temporary/relative) for relative in runtime.values()}}
+              'files':{relative:file_digest(temporary/relative) for relative in deployed},
+              'native':receipt}
     (temporary/'deployment.json').write_text(json.dumps(record,indent=2)+'\n')
     # Preserve the prior runtime; never replace personal settings, data or venv.
     previous = workspace/'.cache/previous-deployments'/temporary.name
@@ -72,7 +83,7 @@ def deploy():
         retire_stale(workspace)
         retired, published = [], []
         try:
-            for name in ('app','licenses','THIRD-PARTY-NOTICES.txt','runner.py','runtime_state.py','start.sh','stop.sh','requirements-linux.lock','deployment.json'):
+            for name in ('app','native','licenses','THIRD-PARTY-NOTICES.txt','runner.py','runtime_state.py','runtime_linux.py','start.sh','stop.sh','requirements-linux.lock','deployment.json'):
                 current = destination/name
                 built = temporary/name
                 if current.exists():

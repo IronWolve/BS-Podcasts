@@ -3,6 +3,7 @@ import argparse
 import io
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import subprocess
@@ -102,10 +103,15 @@ def build(output):
 
     linux = ROOT.parent / 'dists/linux'
     linux_record = json.loads((linux/'deployment.json').read_text())
-    expected = {relative: file_digest(linux/relative) for relative in runtime.values()}
+    deployed = [*runtime.values(), 'native/libmpv.so.2', 'native/native-build.json']
+    expected = {relative: file_digest(linux/relative) for relative in deployed}
     if linux_record['version'] != version or linux_record['source_sha256'] != fingerprint or linux_record['files'] != expected:
         raise ValueError('Linux build is stale or differs from its manifest.')
-    linux_files = {'dists/linux/'+name: (linux/name).read_bytes() for name in runtime.values()}
+    if (linux_record['native']['sha256'] != expected['native/libmpv.so.2']
+            or linux_record['native']['inputs_sha256'] != file_digest(ROOT/'packaging/native-sources.json')
+            or linux_record['native']['recipe_sha256'] != file_digest(ROOT/'packaging/build-libmpv-linux.sh')):
+        raise ValueError('Linux native library does not match the pinned source inputs.')
+    linux_files = {'dists/linux/'+name: (linux/name).read_bytes() for name in deployed}
     linux_files['dists/linux/deployment.json'] = (linux/'deployment.json').read_bytes()
     linux_files['setup.sh'] = (ROOT/'packaging/linux-setup.sh').read_bytes()
     for name in ('start', 'stop'):
@@ -114,7 +120,10 @@ def build(output):
             f'exec bash "$BS_PROJECT/dists/linux/{name}.sh" "$@"\n').encode()
     linux_files['INSTALL.txt'] = (
         'BS Podcasts '+version+' - Linux runtime\n\n'
-        'Requires Python 3.14.7+, libmpv and native desktop libraries from your system.\n'
+        'Requires Python 3.14.7+ and compatible native desktop/audio libraries.\n'
+        'Requires glibc '+linux_record['native']['minimum_glibc']+' or newer.\n'
+        'Bundles libmpv 0.41.0 with FFmpeg 9.0.2; the launcher never falls back to system libmpv.\n'
+        'Built and tested on Ubuntu 26.04 '+platform.machine()+'. Other Linux distributions need ABI validation.\n'
         'Run bash setup.sh to create the project-local environment and install locked packages.\n'
         'Then bash start.sh --check --plain; bash start.sh launches the GUI.\n'
         'This is not a self-contained Linux binary. No developer checkout is required.\n'
@@ -126,11 +135,13 @@ def build(output):
     work = Path(tempfile.mkdtemp(prefix='.release-', dir=output.parent))
     zip_files(work/f'BS-Podcasts-{version}-Source.zip', source_files, f'BS-Podcasts-{version}-Source', source_executable)
     zip_files(work/f'BS-Podcasts-{version}-Windows-x64.zip', windows_files, 'BS Podcasts')
-    tar_files(work/f'BS-Podcasts-{version}-Linux.tar.gz', linux_files, f'BS-Podcasts-{version}-Linux',
+    linux_name = f'BS-Podcasts-{version}-Linux-{platform.machine()}'
+    tar_files(work/(linux_name+'.tar.gz'), linux_files, linux_name,
               ('start.sh', 'stop.sh', 'setup.sh', 'dists/linux/start.sh', 'dists/linux/stop.sh'))
     (work/'Windows.manifest.json').write_text(json.dumps(win_record, indent=2)+'\n')
     report = {'version': version, 'source': {'commit': commit, 'sha256': fingerprint},
-              'windows_signed': False, 'linux_runtime_dependencies': 'Python >=3.14.7 and system libmpv; run setup.sh',
+              'windows_signed': False, 'linux_runtime_dependencies': 'Python >=3.14.7 and compatible ALSA/PulseAudio/desktop libraries; run setup.sh',
+              'linux_architecture':platform.machine(), 'linux_native':linux_record['native'],
               'source_files': len(source_files), 'windows_files': len(windows_files),
               'linux_files': len(linux_files), 'archives': {}}
     for path in sorted(work.iterdir()):

@@ -8,6 +8,7 @@
     "packaging/bs-podcasts.iss",
     "packaging/bs-podcasts.spec",
     "packaging/build-libmpv-lgpl.sh",
+    "packaging/build-libmpv-linux.sh",
     "packaging/build-macos.sh",
     "packaging/build-windows.ps1",
     "packaging/build_manifest.py",
@@ -41,6 +42,7 @@
     "packaging/requirements-linux.lock",
     "packaging/requirements-windows.lock",
     "packaging/runtime_macos.py",
+    "packaging/runtime_linux.py",
     "packaging/runtime_runner.py",
     "packaging/runtime_state.py",
     "packaging/runtime_windows.py",
@@ -230,6 +232,7 @@
     "tools/smoke_windows_release.py"
   ],
   "runtime": {
+    "packaging/runtime_linux.py": "runtime_linux.py",
     "packaging/THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt",
     "packaging/licenses/Apache-2.0.txt": "licenses/Apache-2.0.txt",
     "packaging/licenses/BSD-3-Clause-idna.txt": "licenses/BSD-3-Clause-idna.txt",

@@ -1,5 +1,5 @@
 """Small offline release-inventory, privacy and archive-format checks."""
-import json
+import ctypes.util
 from pathlib import Path
 import sys
 import tarfile
@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'packaging'))
 import build_manifest
 from release_archives import scan_inputs, tar_files, verify_files, zip_files
+from runtime_linux import bind_native
 
 
 def rejects(call):
@@ -47,6 +48,17 @@ def main():
         with patch.object(build_manifest.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=str(folder))) as git:
             assert build_manifest.git_value('status', '--porcelain') is None
             assert git.call_count == 1, 'Parent repository status must not be inspected'
+        native = folder/'libmpv.so.2'; native.write_bytes(b'lookup-only fixture, never loaded')
+        with patch.object(ctypes.util, 'find_library', return_value='ambient'):
+            bind_native(native)
+            assert ctypes.util.find_library('mpv') == str(native.resolve())
+            assert ctypes.util.find_library('other') == 'ambient'
+        try:
+            bind_native(folder/'missing.so')
+        except OSError:
+            pass
+        else:
+            raise AssertionError('Missing bundled native library silently fell back')
     print('Release archives: PASS exact inventories, stable path ordering, private/traversal rejection, ZIP/tar integrity and parent-Git isolation')
 
 
