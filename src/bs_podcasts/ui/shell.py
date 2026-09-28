@@ -2291,14 +2291,34 @@ class MainWindow(QMainWindow):
         self._import_local_audio_path(path)
 
     def _import_local_audio_path(self, path: str):
-        try:
-            show = self.library.import_local_audio(path)
-        except Exception as exc:
-            self.podcast_page.banner.show_state("error", str(exc))
+        if self.library is None or self._closed:
             return
-        self.navigation.select(PAGE_PODCASTS)
-        self._request_reload(lambda: self.podcast_page.select_show(show.id))
-        self._notify("Local audio imported", "success")
+        library = self.library
+        navigation = self._read_tokens.get('show-open', 0)
+        def work():
+            try:
+                return library.import_local_audio(path), ''
+            except Exception as exc:
+                return None, str(exc)
+        def apply(result):
+            show, error = result
+            if show is None:
+                self.podcast_page.banner.show_state('error', error)
+                self._notify(error, 'error')
+                return
+            if self._read_tokens.get('show-open', 0) == navigation:
+                self.navigation.select(PAGE_PODCASTS)
+                token = self._read_tokens.get('show-open', 0)
+                context = self._context_revision
+                def select():
+                    if self._read_tokens.get('show-open', 0) == token and self._context_revision == context:
+                        self.podcast_page.select_show(show.id)
+                self._request_reload(select)
+            else:
+                self._request_reload()
+            self._notify('Local audio imported', 'success')
+        self._notify('Reading local audio metadata…', 'info')
+        self._run_read(work, apply, f'local-import-{path}')
 
     # ------------------------------------------------------------- drag & drop
     # Dropping an OPML file, an audio file or a feed URL onto the window

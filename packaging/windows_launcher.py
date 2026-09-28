@@ -37,6 +37,13 @@ def _windows_prelaunch():
     # Timed out: the other instance may be dead; the normal guard decides.
 
 
+if "--probe-local-audio" in sys.argv:
+    try:
+        from bs_podcasts.feeds.local_probe import main as probe_main
+        raise SystemExit(probe_main())
+    except Exception:
+        raise SystemExit(1)
+
 if "--self-check" in sys.argv:
     # Do not acquire the GUI-instance mutex or import the application for an
     # owned-copy diagnostic. No window, user profile or network is opened.

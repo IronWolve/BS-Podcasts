@@ -2,8 +2,7 @@ from .fetch import FeedFetchError, FeedFetcher, FeedResponse
 from .parser import FeedParseError, parse_feed
 from .refresh import RefreshReport, RefreshService
 
-# local (pulls mutagen, ~5 ms) and opml are imported on first use: nothing
-# on the startup path needs them.
+# Local audio and OPML are only needed when explicitly importing files.
 _LAZY = {
     "LocalAudioError": ".local", "LocalAudioImporter": ".local",
     "OpmlEntry": ".opml", "OpmlError": ".opml", "export_opml": ".opml", "import_opml": ".opml",

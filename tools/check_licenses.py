@@ -29,7 +29,6 @@ LICENSES = ROOT / "packaging" / "licenses"
 # authoritative text comes from if it ever needs re-copying. Matched as a
 # substring of the notices so renaming an entry without its file fails loudly.
 EXPECTED = {
-    "mutagen": ("GPL-2.0-mutagen.txt", "licenses/COPYING in the installed mutagen distribution"),
     "libass": ("ISC-libass.txt", "COPYING in the libass source tree"),
     "urllib3": ("MIT-urllib3.txt", "LICENSE.txt in the urllib3 sdist"),
     "charset-normalizer": ("MIT-charset-normalizer.txt", "LICENSE in the charset-normalizer sdist"),
