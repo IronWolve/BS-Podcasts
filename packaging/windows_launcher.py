@@ -37,6 +37,15 @@ def _windows_prelaunch():
     # Timed out: the other instance may be dead; the normal guard decides.
 
 
+if "--self-check" in sys.argv:
+    # Do not acquire the GUI-instance mutex or import the application for an
+    # owned-copy diagnostic. No window, user profile or network is opened.
+    try:
+        from bs_podcasts.selfcheck import main as selfcheck_main
+        raise SystemExit(selfcheck_main())
+    except Exception:
+        raise SystemExit(1)  # A windowed bootloader must not show a traceback dialog.
+
 _windows_prelaunch()
 
 from bs_podcasts.__main__ import main

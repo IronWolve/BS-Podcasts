@@ -1,6 +1,7 @@
 param(
     [string]$LibMpvDll = "",
     [string]$Destination = "",
+    [string]$SourceStage = "",
     [switch]$Clean,
     [switch]$Installer
 )
@@ -18,7 +19,7 @@ if (-not $Destination) { $Destination = Join-Path $workspace "dists\windows" }
 if (-not $LibMpvDll) {
     # Default to the workspace-built LGPL libmpv (mpv -Dgpl=false + LGPL FFmpeg),
     # See the complete third-party inventory before distribution.
-    $LibMpvDll = Join-Path $workspace "tmp\windows-build\libmpv-lgpl\libmpv-2.dll"
+    $LibMpvDll = Join-Path $workspace ".cache\windows-build\libmpv-lgpl\libmpv-2.dll"
 }
 
 if (-not (Test-Path -LiteralPath $python)) {
@@ -35,8 +36,28 @@ $env:TMP = $buildRoot
 $env:PYTHONDONTWRITEBYTECODE = "1"
 $env:PYINSTALLER_CONFIG_DIR = Join-Path $workspace ".cache\pyinstaller-windows"
 Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-& $python -B (Join-Path $repo "packaging\source_manifest.py") stage --destination $stageRoot
-if ($LASTEXITCODE -ne 0) { throw "Source staging failed" }
+if ($SourceStage) {
+    $stageRoot = (Resolve-Path -LiteralPath $SourceStage).ProviderPath
+    $originPath = Join-Path $stageRoot ".build-origin.json"
+    if (-not (Test-Path -LiteralPath $originPath)) { throw "Source stage has no origin record" }
+    $origin = Get-Content -LiteralPath $originPath -Raw | ConvertFrom-Json
+    $digest = & $python -B (Join-Path $stageRoot "packaging\source_manifest.py") hash
+    if ($LASTEXITCODE -ne 0 -or $digest.Trim() -ne $origin.sha256) { throw "Source stage fingerprint mismatch" }
+} else {
+    & $python -B (Join-Path $repo "packaging\source_manifest.py") stage --destination $stageRoot
+    if ($LASTEXITCODE -ne 0) { throw "Source staging failed" }
+}
+& $python -B (Join-Path $stageRoot "packaging\check_dependencies.py") (Join-Path $stageRoot "packaging\requirements-windows.lock")
+if ($LASTEXITCODE -ne 0) { throw "Build environment failed the approved dependency check" }
+$nativeReceiptPath = Join-Path (Split-Path -Parent $env:BS_PODCASTS_LIBMPV_DLL) "native-build.json"
+if (-not (Test-Path -LiteralPath $nativeReceiptPath)) { throw "Native input receipt is missing; rebuild the pinned native dependencies" }
+$nativeReceipt = Get-Content -LiteralPath $nativeReceiptPath -Raw | ConvertFrom-Json
+$nativeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:BS_PODCASTS_LIBMPV_DLL).Hash.ToLowerInvariant()
+$nativeLockHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stageRoot "packaging\native-sources.json")).Hash.ToLowerInvariant()
+if ($nativeReceipt.sha256 -ne $nativeHash -or $nativeReceipt.inputs_sha256 -ne $nativeLockHash) {
+    throw "Native DLL or dependency inputs differ from the recorded build"
+}
+$env:BS_PODCASTS_NATIVE_RECEIPT = $nativeReceiptPath
 $spec = Join-Path $stageRoot "packaging\bs-podcasts.spec"
 $env:BS_PODCASTS_SOURCE_STAGE = $stageRoot
 $env:BS_PODCASTS_BUILD_WORK = Join-Path $buildRoot "work"
@@ -59,6 +80,22 @@ finally {
 if (-not (Test-Path -LiteralPath $sourceExe)) {
     throw "Build finished but the application folder is missing: $sourceExe"
 }
+
+# Execute only the non-GUI diagnostic in a disposable profile before publication.
+$checkDir = Join-Path $buildRoot "self-check"
+$checkArgs = '--self-check --self-check-dir "' + $checkDir + '"'
+$checkProcess = Start-Process -FilePath $sourceExe -ArgumentList $checkArgs -WorkingDirectory $buildRoot -PassThru
+if (-not $checkProcess.WaitForExit(30000)) {
+    $checkProcess.Kill()  # Only the owned diagnostic process, never another app.
+    throw "Packaged self-check timed out; previous application unchanged"
+}
+$checkReport = Join-Path $checkDir "self-check.json"
+if ($checkProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $checkReport)) {
+    throw "Packaged self-check failed; previous application unchanged"
+}
+$checked = Get-Content -LiteralPath $checkReport -Raw | ConvertFrom-Json
+if (-not $checked.passed) { throw "Packaged dependency/storage/asset check failed; previous application unchanged" }
+Write-Output "Packaged self-check passed (no GUI, real profile or audio device)."
 
 # Stage a complete replacement and keep the previous app recoverable.
 New-Item -ItemType Directory -Path $Destination -Force | Out-Null

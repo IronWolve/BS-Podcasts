@@ -13,6 +13,34 @@ from source_manifest import ROOT, check, inventory, source_digest, file_digest, 
 from runtime_state import runtime_lock, retire_stale
 
 
+def install_entrypoints(workspace, destination, previous):
+    template = '''#!/usr/bin/env bash
+set -euo pipefail
+BS_PROJECT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+exec bash "$BS_PROJECT/dists/linux/COMMAND.sh" "$@"
+'''
+    for command in ('start', 'stop'):
+        if not (destination/(command+'.sh')).is_file():
+            continue
+        target = workspace/(command+'.sh')
+        content = template.replace('COMMAND', command)
+        old = content.replace('dists/linux/'+command+'.sh', 'repo/packaging/project-'+command+'.sh')
+        if target.is_symlink() or (target.exists() and target.read_text() not in (old, content)):
+            print(f'Customized {command}.sh preserved; use dists/linux/{command}.sh directly.')
+            continue
+        if target.exists():
+            shutil.copy2(target, previous/('root-'+command+'.sh'))
+        descriptor, name = tempfile.mkstemp(prefix='.launcher-',dir=workspace/'tmp')
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor,'w') as handle:
+                handle.write(content)
+            temporary.chmod(0o755)
+            os.replace(temporary,target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def deploy():
     workspace = ROOT.parent
     destination = workspace/'dists/linux'
@@ -44,7 +72,7 @@ def deploy():
         retire_stale(workspace)
         retired, published = [], []
         try:
-            for name in ('app','licenses','THIRD-PARTY-NOTICES.txt','runner.py','runtime_state.py','deployment.json'):
+            for name in ('app','licenses','THIRD-PARTY-NOTICES.txt','runner.py','runtime_state.py','start.sh','stop.sh','requirements-linux.lock','deployment.json'):
                 current = destination/name
                 built = temporary/name
                 if current.exists():
@@ -60,6 +88,7 @@ def deploy():
                 (previous/name).rename(destination/name)
             raise
         snapshot.rename(previous/'source-inputs')
+        install_entrypoints(workspace, destination, previous)
     temporary.rmdir()
     print(f'Built BS Podcasts {version}: {destination}')
     print(f'Source SHA-256: {record["source_sha256"]}')
@@ -67,6 +96,8 @@ def deploy():
 
 
 if __name__ == '__main__':
+    from check_dependencies import check as check_dependencies
+    check_dependencies(ROOT/'packaging/requirements-linux.lock')
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check',action='store_true')
     args=parser.parse_args()

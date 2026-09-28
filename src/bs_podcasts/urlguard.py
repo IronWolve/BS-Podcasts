@@ -28,17 +28,24 @@ def _split(value: str):
 def is_web_url(value) -> bool:
     """True when `value` is an http(s) URL with a host. Never raises."""
     try:
-        parts = _split(str(value or ""))
+        text = str(value or "").strip()
+        if any(ord(c) < 32 or ord(c) == 127 for c in text) or "\\" in text:
+            return False
+        parts = _split(text)
+        port = parts.port  # Reject malformed/out-of-range ports before a consumer reparses them.
     except ValueError:
         return False
-    return parts.scheme.lower() in WEB_SCHEMES and bool(parts.hostname)
+    return parts.scheme.lower() in WEB_SCHEMES and bool(parts.hostname) and port != 0
 
 
 def ensure_web_url(value, what: str = "URL") -> str:
     """Return `value` when it is an http(s) URL, else raise `UnsafeUrl`."""
     text = str(value or "").strip()
     if not is_web_url(text):
-        raise UnsafeUrl(f"{what} is not an http(s) URL: {text[:120]!r}")
+        raise UnsafeUrl(f"{what} is not a valid http(s) URL.")
+    parts = _split(text)
+    if parts.scheme.lower() == 'http' and parts.username is not None:
+        raise UnsafeUrl("URLs containing credentials require HTTPS.")
     return text
 
 
@@ -53,10 +60,13 @@ _BLOCKED = (
     ("is_multicast", "a multicast address"),
     ("is_reserved", "a reserved address"),
 )
+_METADATA = frozenset({ipaddress.ip_address('fd00:ec2::254'), ipaddress.ip_address('100.100.100.200')})
 
 
 def _blocked_reason(ip) -> str:
     mapped = getattr(ip, "ipv4_mapped", None) or ip
+    if mapped in _METADATA:
+        return "a cloud metadata address"
     for attribute, reason in _BLOCKED:
         if getattr(mapped, attribute, False):
             return reason
@@ -81,11 +91,9 @@ def _addresses(host: str) -> list:
 def ensure_fetchable(value, what: str = "URL") -> str:
     """Scheme-check `value`, then refuse hosts the app should never reach.
 
-    Best-effort by construction: the name is resolved here and again by the
-    HTTP stack, so a DNS rebind between the two is not covered. It does stop
-    what matters for untrusted feed content — cloud-metadata endpoints
-    (169.254.169.254 is link-local), loopback services, and multicast or
-    reserved probes.
+    This is an early screen. The app's HTTP adapter also checks and pins the
+    addresses used for its actual connection, closing the DNS-rebinding gap.
+    Native/external players have their own transport; this is not their sandbox.
     """
     text = ensure_web_url(value, what)
     host = _split(text).hostname or ""
@@ -116,7 +124,7 @@ def ensure_media_source(value, what: str = "Media source", allow_file_url: bool 
     parts = _split(text)
     scheme = parts.scheme.lower()
     if scheme in WEB_SCHEMES:
-        return text
+        return ensure_web_url(text, what)
     if scheme == "file":
         if not allow_file_url:
             raise UnsafeUrl(f"{what} may not be a file URL: {text[:120]!r}")

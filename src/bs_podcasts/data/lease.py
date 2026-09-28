@@ -1,13 +1,14 @@
 """Cooperative process ownership for app/migration access to one library."""
 import os
 from pathlib import Path
+from .files import _private_descriptor
 
 
 class LibraryLease:
     def __init__(self, database_path):
         path = Path(str(database_path) + ".use-lock")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = _private_descriptor(path)
         self._handle = os.fdopen(descriptor, "r+b", buffering=0)
         try:
             if os.name == "nt":

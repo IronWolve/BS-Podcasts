@@ -36,7 +36,7 @@ def main():
         engine.__dict__.update(_player=Player(),_handler=lambda e:None,_dead=False,
             _activated=False,_state_lock=RLock(),_generation=0,_expected_entry_id=None,
             _event_entry_id=None,_resolving=False,_loading=False,_pending_position=0,
-            _pending_autoplay=False,_last_error='')
+            _pending_autoplay=False,_last_error='',_http_sources={},_http_streams=[],_http_lock=RLock(),_http_failure=None)
         service=PlaybackService(repo,engine)
         def event(kind,entry=None,reason=0):
             engine._mpv_event(NS(event_id=NS(value=kind),data=NS(
@@ -61,6 +61,9 @@ def main():
                 event(8); event(7,second,0)
                 assert engine._loading and not repo.get_episode(ids['b']).played
                 event(6,third); event(8)
+                engine._http_failure='Transport ended early'
+                event(7,third,0)
+                assert service.snapshot.state.value=='error' and not repo.get_episode(ids['b']).played
                 service.stop(); engine._position_changed('time-pos',81)
                 assert service.snapshot.episode_id is None
         finally:

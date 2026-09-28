@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+from ..data.files import open_private
 from threading import Event, Lock, Thread
 from urllib.parse import urlparse
 import os
@@ -533,7 +534,7 @@ class DownloadService:
             # gets a signal for every step that crosses the report interval.
             report_bytes = max(256 * 1024, (total or 0) // 20)
             head = b""
-            with partial.open("ab" if append else "wb") as handle:
+            with open_private(partial, "ab" if append else "wb") as handle:
                 for chunk in _guarded_chunks(response, stall):
                     if cancellation.is_set():
                         self.downloads.progress(

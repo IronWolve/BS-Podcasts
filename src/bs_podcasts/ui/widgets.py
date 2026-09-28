@@ -137,7 +137,7 @@ class _SafeFeedHtml(HTMLParser):
 # how feeds usually write "megaphone.fm/adchoices"). A bare "Node.js" or
 # "audio.mp3" has no path segment, so it is left alone.
 _URL_PATTERN = re.compile(
-    r"""(?P<url>
+    r"""(?<![A-Za-z0-9_.-])(?P<url>
         https?://[^\s<>"']+
         | www\.[^\s<>"']+
         | [A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9\-]+)+/[^\s<>"']*
@@ -171,8 +171,22 @@ def _link_style() -> str:
     return "a { color: %s; text-decoration: underline; }" % COLORS["blue"]
 
 
-@lru_cache(maxsize=256)
+MAX_SHOW_NOTE_CHARS = 64 * 1024
+
+
 def safe_feed_html(text: str) -> str:
+    # Bound both Qt layout and the cache keys themselves, with an explicit
+    # notice rather than silently discarding exceptionally large show notes.
+    text = text or ""
+    shortened = len(text) > MAX_SHOW_NOTE_CHARS
+    result = _safe_feed_html(text[:MAX_SHOW_NOTE_CHARS])
+    if shortened:
+        result += "<p>Show notes shortened for display. Open the episode website for the complete text.</p>"
+    return result
+
+
+@lru_cache(maxsize=256)
+def _safe_feed_html(text: str) -> str:
     """Pure function of the text (link colours come from the document
     stylesheet), so the pane and Now Playing share one sanitised copy
     instead of re-parsing the same show notes on every click (audit F-128)."""
