@@ -81,7 +81,7 @@ def _date(value: str) -> str:
             from datetime import datetime
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
-            return value
+            return ""
     if parsed is None:
         return ""
     # Stored text is compared lexically by SQLite; only a normalized UTC
@@ -89,7 +89,10 @@ def _date(value: str) -> str:
     # timezone offsets.
     if parsed.tzinfo is not None:
         from datetime import timezone
-        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        try:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        except (ValueError, OverflowError):
+            return ""
     return parsed.isoformat()
 
 
@@ -145,10 +148,12 @@ def _artwork(element) -> str:
 def _categories(element) -> tuple[str, ...]:
     """Return useful leaf categories from RSS/iTunes or Atom metadata."""
     values = []
+    seen = set()
 
     def add(value: str):
         value = " ".join((value or "").split())
-        if value and value.casefold() not in {item.casefold() for item in values}:
+        if value and value.casefold() not in seen:
+            seen.add(value.casefold())
             values.append(value)
 
     def visit(node, depth: int = 0):

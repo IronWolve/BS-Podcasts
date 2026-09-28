@@ -37,6 +37,9 @@ def source_inventory(root=ROOT):
 
 def git_value(*args):
     try:
+        top = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5)
+        if top.returncode != 0 or Path(top.stdout.strip()).resolve() != ROOT:
+            return None
         result = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -47,7 +50,7 @@ def artifact_inventory(path):
     if not path.exists():
         raise ValueError(f"Artifact not found: {path}")
     root = path if path.is_dir() else path.parent
-    paths = sorted(path.rglob("*")) if path.is_dir() else [path]
+    paths = sorted(path.rglob("*"), key=lambda item: item.relative_to(root).as_posix()) if path.is_dir() else [path]
     entries = []
     for item in paths:
         relative = item.relative_to(root).as_posix()
@@ -63,13 +66,15 @@ def artifact_inventory(path):
 
 
 def create_manifest(artifact, archive=None, require_clean=False):
-    status, commit = git_value("status", "--porcelain"), git_value("rev-parse", "HEAD")
+    status, commit = None, None
     origin_path = ROOT / '.build-origin.json'
     if origin_path.is_file():
         origin = json.loads(origin_path.read_text())
         commit, status = origin.get('commit'), 'dirty' if origin.get('dirty', True) else ''
         if origin.get('sha256') != source_inventory():
             raise ValueError('Staged source changed after its snapshot was taken.')
+    else:
+        status, commit = git_value("status", "--porcelain"), git_value("rev-parse", "HEAD")
     if require_clean and (commit is None or status != ""):
         raise ValueError("A release manifest requires a clean Git checkout.")
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]

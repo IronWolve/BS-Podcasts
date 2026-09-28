@@ -14,6 +14,7 @@ from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPainte
 
 from . import icons
 from .theme import COLORS, app_font
+from ..data.files import atomic_write
 
 
 QPixmapCache.setCacheLimit(96 * 1024)  # 96 MB of decoded artwork
@@ -68,14 +69,12 @@ def _save_disk() -> None:
             path: {"mtime": _dominant_mtime.get(path, 0.0), "color": color}
             for path, color in _dominant.items()
         }
-    payload = {"version": 1, "items": items}
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix(target.suffix + ".tmp")
-        temporary.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(temporary, target)
-    except OSError:
-        pass
+        payload = {"version": 1, "items": items}
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            atomic_write(target, json.dumps(payload).encode('utf-8'))
+        except OSError:
+            pass
 
 
 def _fresh(path: str) -> bool:

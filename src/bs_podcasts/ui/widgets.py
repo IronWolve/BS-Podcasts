@@ -73,6 +73,26 @@ RAIL_WIDTH = 224
 RAIL_COMPACT_WIDTH = 72
 
 
+def plain_tooltip(text: str) -> str:
+    if any(character in text for character in '<>&'):
+        return '<qt>' + html_escape(text).replace('\n', '<br>') + '</qt>'
+    return text
+
+
+class PlainTextLabel(QLabel):
+    """Labels never interpret feed metadata, errors or paths as markup."""
+
+    def __init__(self, text='', parent=None):
+        if isinstance(text, QWidget) or text is None:
+            parent, text = text, ''
+        super().__init__(parent)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setText(text)
+
+    def setToolTip(self, text):
+        super().setToolTip(plain_tooltip(text))
+
+
 class _SafeFeedHtml(HTMLParser):
     """Small allow-list sanitizer for untrusted feed descriptions."""
 
@@ -355,7 +375,7 @@ class NavigationRail(QFrame):
 
         brand = QHBoxLayout()
         brand.setSpacing(SPACE["sm"])
-        self.mark = QLabel()
+        self.mark = PlainTextLabel()
         self.mark.setObjectName("brandIcon")
         self.mark.setPixmap(
             QPixmap(str(icon_path(64))).scaled(
@@ -371,12 +391,12 @@ class NavigationRail(QFrame):
         brand_col = QVBoxLayout(self.brand_text)
         brand_col.setContentsMargins(0, 0, 0, 0)
         brand_col.setSpacing(0)
-        self.brand_name = QLabel("BS Podcasts")
+        self.brand_name = PlainTextLabel("BS Podcasts")
         self.brand_name.setObjectName("brandName")
         self.brand_name.setToolTip("About BS Podcasts")
         self.brand_name.setCursor(Qt.CursorShape.PointingHandCursor)
         self.brand_name.installEventFilter(self)
-        self.summary = QLabel("Library")
+        self.summary = PlainTextLabel("Library")
         self.summary.setObjectName("brandSub")
         brand_col.addWidget(self.brand_name)
         brand_col.addWidget(self.summary)
@@ -409,7 +429,7 @@ class NavigationRail(QFrame):
                 )
             )
             self.group.addButton(button, index)
-            badge = QLabel()
+            badge = PlainTextLabel()
             badge.setObjectName("navBadge")
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             badge.hide()
@@ -423,14 +443,14 @@ class NavigationRail(QFrame):
         self._paint_icons()
 
         layout.addStretch(1)
-        self.background_status = QLabel("Background paused")
+        self.background_status = PlainTextLabel("Background paused")
         self.background_status.setObjectName("scopePill")
         self.background_status.setToolTip("Feed refreshes, artwork, transcripts and automatic downloads are paused")
         self.background_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.background_status.hide()
         layout.addWidget(self.background_status)
         footer = QHBoxLayout()
-        self.version = QLabel(self._version_text())
+        self.version = PlainTextLabel(self._version_text())
         self.version.setObjectName("eyebrow")
         self.version.hide()
         footer.addWidget(self.version, 1)
@@ -650,14 +670,14 @@ class PageHeader(QFrame):
         self._title_text = title
         self._subtitle_text = subtitle
         self._search_allowed = True
-        self.title_label = QLabel(title)
+        self.title_label = PlainTextLabel(title)
         self.title_label.setObjectName("pageTitle")
         # A long title must clip inside its own stretch slot instead of
         # forcing its full text width as a layout minimum — that minimum is
         # what shoved the search field underneath the action button when the
         # header got tight.
         self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.subtitle_label = QLabel(subtitle)
+        self.subtitle_label = PlainTextLabel(subtitle)
         self.subtitle_label.setObjectName("pageSubtitle")
         self.subtitle_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         text.addWidget(self.title_label)
@@ -928,11 +948,11 @@ class StateBanner(QFrame):
         row = QHBoxLayout()
         row.setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["sm"], SPACE["sm"])
         row.setSpacing(SPACE["sm"])
-        self.icon = QLabel()
+        self.icon = PlainTextLabel()
         self.icon.setFixedSize(scaled_px(18), scaled_px(18))
-        self.prefix = QLabel()
+        self.prefix = PlainTextLabel()
         self.prefix.setObjectName("bannerPrefix")
-        self.label = QLabel()
+        self.label = PlainTextLabel()
         self.label.setObjectName("muted")
         self.label.setWordWrap(True)
         self.retry = QPushButton("Retry")
@@ -996,9 +1016,9 @@ class Toast(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE["lg"], SPACE["sm"] + 2, SPACE["sm"], SPACE["sm"] + 2)
         layout.setSpacing(SPACE["md"])
-        self.icon = QLabel()
+        self.icon = PlainTextLabel()
         self.icon.setFixedSize(scaled_px(18), scaled_px(18))
-        self.text = QLabel()
+        self.text = PlainTextLabel()
         self.text.setObjectName("toastText")
         self.text.setTextFormat(Qt.TextFormat.PlainText)
         self.text.setWordWrap(True)
@@ -1185,14 +1205,14 @@ class EmptyState(QWidget):
         self.badge.setFixedSize(scaled_px(56), scaled_px(56))
         badge_layout = QVBoxLayout(self.badge)
         badge_layout.setContentsMargins(0, 0, 0, 0)
-        self.glyph = QLabel()
+        self.glyph = PlainTextLabel()
         self.glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.glyph.setPixmap(icons.pixmap(glyph, COLORS["muted"], scaled_px(24), self.devicePixelRatioF()))
         badge_layout.addWidget(self.glyph)
-        self.heading = QLabel(title)
+        self.heading = PlainTextLabel(title)
         self.heading.setObjectName("emptyTitle")
         self.heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.body_label = QLabel(body)
+        self.body_label = PlainTextLabel(body)
         self.body_label.setObjectName("emptyBody")
         self.body_label.setWordWrap(True)
         self.body_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1233,9 +1253,9 @@ class SectionHeader(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SPACE["sm"])
-        self.title = QLabel(title)
+        self.title = PlainTextLabel(title)
         self.title.setObjectName("sectionTitle")
-        self.count = QLabel("")
+        self.count = PlainTextLabel("")
         self.count.setObjectName("meta")
         layout.addWidget(self.title)
         layout.addWidget(self.count)
@@ -1303,14 +1323,14 @@ class HeroCard(QFrame):
         layout.addWidget(self.art, 0, Qt.AlignmentFlag.AlignTop)
         text = QVBoxLayout()
         text.setSpacing(SPACE["xs"])
-        self.eyebrow = QLabel("PODCAST")
+        self.eyebrow = PlainTextLabel("PODCAST")
         self.eyebrow.setObjectName("eyebrow")
-        self.title = QLabel("")
+        self.title = PlainTextLabel("")
         self.title.setObjectName("contextTitle")
         self.title.setWordWrap(True)
-        self.meta = QLabel("")
+        self.meta = PlainTextLabel("")
         self.meta.setObjectName("meta")
-        self.description = QLabel("")
+        self.description = PlainTextLabel("")
         self.description.setObjectName("contextBody")
         self.description.setWordWrap(True)
         self.description.setMaximumHeight(44)
@@ -1475,7 +1495,7 @@ class SelectionBar(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE["md"], SPACE["xs"] + 2, SPACE["xs"], SPACE["xs"] + 2)
         layout.setSpacing(SPACE["sm"])
-        self.count = QLabel("2 selected")
+        self.count = PlainTextLabel("2 selected")
         self.count.setObjectName("selectionCount")
         layout.addWidget(self.count)
         layout.addStretch(1)
@@ -1518,7 +1538,7 @@ class HoverBubble(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE["sm"] + 2, 3, SPACE["sm"] + 2, 3)
         layout.setSpacing(0)
-        self.label = QLabel("")
+        self.label = PlainTextLabel("")
         self.label.setObjectName("seekBubbleText")
         layout.addWidget(self.label)
 
@@ -1784,7 +1804,7 @@ class VolumePopover(Popover):
         self.slider.setFixedWidth(scaled_px(140))
         self.slider.setAccessibleName("Volume")
         self.slider.valueChanged.connect(lambda value: self.volume_changed.emit(float(value)))
-        self.value = QLabel("100")
+        self.value = PlainTextLabel("100")
         self.value.setObjectName("meta")
         self.value.setFixedWidth(scaled_px(28))
         self.value.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -1813,7 +1833,7 @@ class SleepPopover(Popover):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACE["md"], SPACE["md"], SPACE["md"], SPACE["md"])
         layout.setSpacing(SPACE["sm"])
-        title = QLabel("Sleep in")
+        title = PlainTextLabel("Sleep in")
         title.setObjectName("cardTitle")
         layout.addWidget(title)
         row = QHBoxLayout()
@@ -1828,7 +1848,7 @@ class SleepPopover(Popover):
         row.addWidget(self.minutes)
         row.addWidget(start)
         layout.addLayout(row)
-        self.remaining = QLabel("No timer running")
+        self.remaining = PlainTextLabel("No timer running")
         self.remaining.setObjectName("meta")
         layout.addWidget(self.remaining)
         at_end = QPushButton("At the end of this episode")
@@ -1946,10 +1966,10 @@ class ContextPanel(QFrame):
         art_row.addWidget(self.art)
         art_row.addStretch(1)
         selected_layout.addLayout(art_row)
-        self.title = QLabel("Select a podcast or episode")
+        self.title = PlainTextLabel("Select a podcast or episode")
         self.title.setObjectName("contextTitle")
         self.title.setWordWrap(True)
-        self.meta = QLabel("")
+        self.meta = PlainTextLabel("")
         self.meta.setObjectName("meta")
         self.meta.setWordWrap(True)
         self.show_link = QPushButton()
@@ -1958,7 +1978,7 @@ class ContextPanel(QFrame):
         self.show_link.setIcon(icons.icon("episodes", COLORS["muted"], 16))
         self.show_link.clicked.connect(lambda: self.open_show_requested.emit(self._show_id))
         self.show_link.hide()
-        self.health = QLabel("")
+        self.health = PlainTextLabel("")
         self.health.setObjectName("meta")
         self.health.setWordWrap(True)
         self.links = QWidget()
@@ -2029,9 +2049,9 @@ class ContextPanel(QFrame):
         latest_layout = QVBoxLayout(self.latest_card)
         latest_layout.setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["md"], SPACE["sm"])
         latest_layout.setSpacing(2)
-        self.latest_heading = QLabel("LATEST EPISODE")
+        self.latest_heading = PlainTextLabel("LATEST EPISODE")
         self.latest_heading.setObjectName("eyebrow")
-        self.latest_episode = QLabel("")
+        self.latest_episode = PlainTextLabel("")
         self.latest_episode.setObjectName("latestTitle")
         self.latest_episode.setWordWrap(True)
         latest_layout.addWidget(self.latest_heading)
@@ -2106,7 +2126,7 @@ class ContextPanel(QFrame):
         queue_layout.setContentsMargins(0, 0, SPACE["sm"], SPACE["sm"])
         self._queue_layout = queue_layout
         queue_layout.setSpacing(SPACE["sm"])
-        self.queue_summary = QLabel("Your queue is empty")
+        self.queue_summary = PlainTextLabel("Your queue is empty")
         self.queue_summary.setObjectName("meta")
         queue_layout.addWidget(self.queue_summary)
         self.queue_view = QListView()
@@ -2599,7 +2619,7 @@ def set_button_text_elided(button: QPushButton, text: str, cap_px: int):
     button.setToolTip(text if elided != text else "")
 
 
-class ElidedValueLabel(QLabel):
+class ElidedValueLabel(PlainTextLabel):
     """Middle-elided, selectable label that never forces its layout wider."""
 
     def __init__(self, text: str = "", parent=None):
@@ -2655,7 +2675,7 @@ class NowPlayingView(QFrame):
         left = QVBoxLayout()
         left.setSpacing(SPACE["md"])
         top = QHBoxLayout()
-        eyebrow = QLabel("NOW PLAYING")
+        eyebrow = PlainTextLabel("NOW PLAYING")
         eyebrow.setObjectName("eyebrow")
         top.addWidget(eyebrow)
         top.addStretch(1)
@@ -2669,7 +2689,7 @@ class NowPlayingView(QFrame):
         self.art = Artwork(scaled_px(320), 20)
         self.art.set_bounds(scaled_px(160), scaled_px(420))
         left.addWidget(self.art, 0, Qt.AlignmentFlag.AlignHCenter)
-        self.title = QLabel("Nothing playing")
+        self.title = PlainTextLabel("Nothing playing")
         self.title.setObjectName("contextTitle")
         self.title.setWordWrap(True)
         self.title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -2677,7 +2697,7 @@ class NowPlayingView(QFrame):
         self.show_link.setObjectName("textButton")
         self.show_link.setCursor(Qt.CursorShape.PointingHandCursor)
         self.show_link.clicked.connect(lambda: self.show_requested.emit(self._show_id))
-        self.meta = QLabel("")
+        self.meta = PlainTextLabel("")
         self.meta.setObjectName("meta")
         self.meta.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         left.addWidget(self.title)
@@ -2791,7 +2811,7 @@ class NowPlayingView(QFrame):
                 widget.deleteLater()
         rows = [(label, value) for label, value in rows if value]
         for index, (label, value) in enumerate(rows):
-            key = QLabel(label)
+            key = PlainTextLabel(label)
             key.setObjectName("statKey")
             key.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
             text = ElidedValueLabel(value)
@@ -2926,7 +2946,7 @@ class SearchOverlay(QFrame):
         card_layout.addWidget(self.results, 1)
         # Say what Enter does per result kind: mixed lists made one bare
         # "open" ambiguous between opening a podcast and playing an episode.
-        self.hint = QLabel("↑↓ to move  ·  Enter opens podcasts, plays episodes  ·  Esc to close")
+        self.hint = PlainTextLabel("↑↓ to move  ·  Enter opens podcasts, plays episodes  ·  Esc to close")
         self.hint.setObjectName("settingHint")
         card_layout.addWidget(self.hint)
         outer.addWidget(self.card, 0, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
@@ -3118,7 +3138,7 @@ class PlayerBar(QFrame):
         self.title.setStyleSheet("text-align: left; padding: 2px 0; font-weight: 600;")
         self.title.clicked.connect(self._open_now_playing)
         self._title_metrics()
-        self.show_label = QLabel("Choose an episode to begin")
+        self.show_label = PlainTextLabel("Choose an episode to begin")
         self.show_label.setObjectName("playerShow")
         # The show name is a link to that podcast's episode list (the title
         # opens Now Playing). Click or Enter/Space when focused; cursor and
@@ -3129,7 +3149,7 @@ class PlayerBar(QFrame):
         self.show_label.setAttribute(Qt.WidgetAttribute.WA_Hover, True)  # QSS :hover needs it on a QLabel
         self.show_label.setProperty("linked", "false")
         self.show_label.installEventFilter(self)
-        self.next_label = QLabel("")
+        self.next_label = PlainTextLabel("")
         self.next_label.setObjectName("playerNext")
         now.addWidget(self.title)
         now.addWidget(self.show_label)
@@ -3191,7 +3211,7 @@ class PlayerBar(QFrame):
         controls.addStretch(1)
         timeline = QHBoxLayout()
         timeline.setSpacing(SPACE["sm"])
-        self.elapsed = QLabel("0:00")
+        self.elapsed = PlainTextLabel("0:00")
         self.elapsed.setObjectName("timeLabel")
         self.elapsed.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.slider = SeekSlider()
@@ -3202,7 +3222,7 @@ class PlayerBar(QFrame):
         self.slider.setValue(0)
         self.slider.sliderPressed.connect(self._capture_drag_duration)
         self.slider.sliderReleased.connect(self._seek_from_slider)
-        self.remaining = QLabel("−0:00")
+        self.remaining = PlainTextLabel("−0:00")
         self.remaining.setObjectName("timeLabel")
         timeline.addWidget(self.elapsed)
         timeline.addWidget(self.slider, 1)

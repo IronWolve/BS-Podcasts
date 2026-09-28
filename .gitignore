@@ -45,6 +45,7 @@
 !/packaging/deploy.py
 !/packaging/install-desktop.sh
 !/packaging/launch.sh
+!/packaging/linux-setup.sh
 !/packaging/licenses/Apache-2.0.txt
 !/packaging/licenses/BSD-3-Clause-idna.txt
 !/packaging/licenses/FTL.txt
@@ -66,6 +67,7 @@
 !/packaging/project-stop.sh
 !/packaging/project-sync.sh
 !/packaging/render-desktop.py
+!/packaging/release_archives.py
 !/packaging/requirements-linux.lock
 !/packaging/requirements-windows.lock
 !/packaging/runtime_macos.py
@@ -234,6 +236,8 @@
 !/tools/smoke_player_show_link.py
 !/tools/smoke_podcast_refresh_scope.py
 !/tools/smoke_redirect_rescue.py
+!/tools/smoke_release_hardening.py
+!/tools/smoke_release_archives.py
 !/tools/smoke_removal_safety.py
 !/tools/smoke_runtime_cseries.py
 !/tools/smoke_security_boundaries.py

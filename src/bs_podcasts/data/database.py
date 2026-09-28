@@ -1,6 +1,6 @@
 """Connection factory and numbered transactional migrations."""
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from datetime import datetime
 import os
@@ -269,7 +269,7 @@ class Database:
     def _applied_versions_readonly(self) -> set:
         """Applied migration versions, read without writing to the file."""
         try:
-            connection = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+            connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
         except sqlite3.Error:
             return set()
         try:
@@ -289,14 +289,12 @@ class Database:
         descriptor, name = tempfile.mkstemp(prefix=".library-backup-", suffix=".tmp", dir=target.parent)
         os.close(descriptor)
         temporary = Path(name)
-        source = sqlite3.connect(self.path)
-        destination = sqlite3.connect(temporary)
         try:
-            source.backup(destination)
+            with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(temporary)) as destination:
+                source.backup(destination)
+            os.replace(temporary, target)
         finally:
-            destination.close()
-            source.close()
-        os.replace(temporary, target)
+            temporary.unlink(missing_ok=True)
 
     def backup(self) -> Path:
         directory = self.path.parent / "backups"
@@ -309,22 +307,13 @@ class Database:
         descriptor, name = tempfile.mkstemp(prefix=".library-backup-", suffix=".tmp", dir=directory)
         os.close(descriptor)
         temporary = Path(name)
-        with self._lock.shared():
-            source = sqlite3.connect(self.path)
-            destination = sqlite3.connect(temporary)
-            try:
-                source.backup(destination)
-            except BaseException:
-                destination.close()
-                temporary.unlink(missing_ok=True)
-                raise
-            finally:
-                try:
-                    destination.close()
-                except sqlite3.Error:
-                    pass
-                source.close()
-        os.replace(temporary, target)
+        try:
+            with self._lock.shared():
+                with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(temporary)) as destination:
+                    source.backup(destination)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
         return target
 
     def reindex(self):
@@ -360,13 +349,8 @@ class Database:
             # live WAL database can silently miss recently committed pages,
             # making the advertised "recoverable original" unrecoverable.
             try:
-                snapshot_source = sqlite3.connect(self.path)
-                snapshot_target = sqlite3.connect(damaged)
-                try:
+                with closing(sqlite3.connect(self.path)) as snapshot_source, closing(sqlite3.connect(damaged)) as snapshot_target:
                     snapshot_source.backup(snapshot_target)
-                finally:
-                    snapshot_target.close()
-                    snapshot_source.close()
             except sqlite3.Error:
                 # The file may be too damaged for the backup API; a raw copy
                 # is then still better than nothing.
@@ -378,23 +362,19 @@ class Database:
             descriptor, name = tempfile.mkstemp(prefix=".library-repair-", suffix=".tmp", dir=self.path.parent)
             os.close(descriptor)
             temporary = Path(name)
-            source = sqlite3.connect(self.path)
-            destination = sqlite3.connect(temporary)
             succeeded = False
             try:
-                script = "\n".join(source.iterdump())
-                destination.executescript(script)
-                destination.commit()
-                # The rebuilt file must stay in WAL mode: the shared lock lets
-                # readers run alongside a writer on exactly that premise.
-                destination.execute("PRAGMA journal_mode=WAL")
-                report = destination.execute("PRAGMA quick_check").fetchone()[0]
-                if report != "ok":
-                    raise DatabaseIntegrityError(report)
+                with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(temporary)) as destination:
+                    script = "\n".join(source.iterdump())
+                    destination.executescript(script)
+                    destination.commit()
+                    # Shared readers require WAL after replacement too.
+                    destination.execute("PRAGMA journal_mode=WAL")
+                    report = destination.execute("PRAGMA quick_check").fetchone()[0]
+                    if report != "ok":
+                        raise DatabaseIntegrityError(report)
                 succeeded = True
             finally:
-                destination.close()
-                source.close()
                 if not succeeded:
                     temporary.unlink(missing_ok=True)
             # Replace first, sidecars after: unlinking the WAL before a failed
