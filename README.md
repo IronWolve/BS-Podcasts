@@ -39,8 +39,8 @@ feeds and public-domain cover art from [LibriVox](https://librivox.org/pages/pub
 
 ## Download and run
 
-Choose the package for your operating system from the repository's **Releases**
-page. Current version: **0.9.11**.
+Choose the latest package for your operating system from the repository's
+**Releases** page.
 
 | Platform | Getting started |
 | --- | --- |
