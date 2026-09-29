@@ -2,6 +2,9 @@
 set -euo pipefail
 BS_PROJECT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 BS_PYTHON="$BS_PROJECT/dists/linux/.venv/bin/python"
+if [[ "$(uname -s)" == Darwin ]]; then
+    exec bash "$BS_PROJECT/repo/packaging/build-macos.sh" "$@"
+fi
 if [[ "${1:-}" == --windows ]]; then
     shift
     mkdir -p "$BS_PROJECT/tmp"

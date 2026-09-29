@@ -19,8 +19,10 @@ analysis = Analysis(
     excludes=['mutagen','PySide6.QtDBus','PySide6.QtQml','PySide6.QtQuick','PySide6.QtPdf'],
     noarchive=False, optimize=1,
 )
-UNUSED = ('qtqml','qtquick','qtpdf','qtvirtualkeyboard','qtvirtualkeyboardplugin','imageformats/qpdf')
+UNUSED = ('qtqml','qtquick','qtpdf','qtvirtualkeyboard','qtvirtualkeyboardplugin','imageformats/qpdf','imageformats/libqpdf')
 analysis.binaries = TOC(entry for entry in analysis.binaries
+    if not any(marker in entry[0].replace('\\','/').lower() for marker in UNUSED))
+analysis.datas = TOC(entry for entry in analysis.datas
     if not any(marker in entry[0].replace('\\','/').lower() for marker in UNUSED))
 pyz = PYZ(analysis.pure)
 exe = EXE(pyz, analysis.scripts, [], exclude_binaries=True, name='BS Podcasts',
