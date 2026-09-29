@@ -3,7 +3,7 @@
 from datetime import datetime
 import time
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QTimer, Signal, Qt
+from PySide6.QtCore import QEvent, QItemSelectionModel, QModelIndex, QTimer, Signal, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -204,6 +204,8 @@ class _ListPageMixin:
 
     @staticmethod
     def _key(item):
+        if getattr(item, "bookmark_id", 0):
+            return ("bookmark", item.bookmark_id)
         if hasattr(item, "episode_id"):
             if item.episode_id:
                 return ("episode", item.episode_id)
@@ -215,31 +217,29 @@ class _ListPageMixin:
     def _restore_selection(self, key, preserve_scroll: bool, selected_keys=()):
         scrollbar = self.view.verticalScrollBar()
         scroll_value = scrollbar.value()
-        target = 0
+        target = None
         wanted = set(selected_keys or ())
         rows = []
         for row, item in enumerate(self.model._items):
             row_key = self._key(item)
-            if key is not None and row_key == key and target == 0:
+            if key is not None and row_key == key and target is None:
                 target = row
             if row_key in wanted:
                 rows.append(row)
         if self.model.rowCount():
-            if len(rows) > 1:
-                # Reproduce the multi-selection exactly. setCurrentIndex also
-                # selects, so the current row is anchored on the first
-                # survivor rather than added alongside it — otherwise the
-                # restored set would gain a row the user never picked.
+            if wanted:
                 selection = self.view.selectionModel()
                 selection.clearSelection()
-                self.view.setCurrentIndex(self.model.index(rows[0], 0))
-                for row in rows[1:]:
+                anchor = target if target in rows else (rows[0] if rows else None)
+                selection.setCurrentIndex(self.model.index(anchor, 0) if anchor is not None else QModelIndex(),
+                                          QItemSelectionModel.SelectionFlag.NoUpdate)
+                for row in rows:
                     selection.select(
                         self.model.index(row, 0),
                         QItemSelectionModel.SelectionFlag.Select,
                     )
             else:
-                self.view.setCurrentIndex(self.model.index(target, 0))
+                self.view.setCurrentIndex(self.model.index(target or 0, 0))
         if preserve_scroll:
             # Context-object overload: Qt drops the shot if the page is destroyed first.
             QTimer.singleShot(0, self, lambda value=scroll_value: scrollbar.setValue(value))

@@ -1,0 +1,128 @@
+[
+  {
+    "name": "qtbase",
+    "version": "6.11.2",
+    "url": "https://download.qt.io/archive/qt/6.11/6.11.2/submodules/qtbase-everywhere-src-6.11.2.tar.xz",
+    "archive": "qtbase-everywhere-src-6.11.2.tar.xz",
+    "sha256": "5b2e00eccaf5a4d8c14134ffa0ea8dfd0a35ae1ffc7f8d87fa4305a1ed23cf22"
+  },
+  {
+    "name": "qtsvg",
+    "version": "6.11.2",
+    "url": "https://download.qt.io/archive/qt/6.11/6.11.2/submodules/qtsvg-everywhere-src-6.11.2.tar.xz",
+    "archive": "qtsvg-everywhere-src-6.11.2.tar.xz",
+    "sha256": "d594337feca84c26fb67fe87b85e6a5c12fda404b611d905f9d138210c311876"
+  },
+  {
+    "name": "qtimageformats",
+    "version": "6.11.2",
+    "url": "https://download.qt.io/archive/qt/6.11/6.11.2/submodules/qtimageformats-everywhere-src-6.11.2.tar.xz",
+    "archive": "qtimageformats-everywhere-src-6.11.2.tar.xz",
+    "sha256": "cecd8900f34b6550076309bc94f62f828008b633a4239e0a08c86788f41001f8"
+  },
+  {
+    "name": "qtshadertools",
+    "version": "6.11.2",
+    "url": "https://download.qt.io/archive/qt/6.11/6.11.2/submodules/qtshadertools-everywhere-src-6.11.2.tar.xz",
+    "archive": "qtshadertools-everywhere-src-6.11.2.tar.xz",
+    "sha256": "805046b8b7757665586890b375940047e874ae3ab00adb6d3f2b38fc6b200b1c"
+  },
+  {
+    "name": "pyside-setup",
+    "version": "6.11.2",
+    "url": "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.2-src/pyside-setup-everywhere-src-6.11.2.tar.xz",
+    "archive": "pyside-setup-everywhere-src-6.11.2.tar.xz",
+    "sha256": "cba47efbaad1bedd529725cbc14e21f156c7a19366f07b3edfbb076ffd7afdf8"
+  },
+  {
+    "name": "python-mpv",
+    "version": "1.0.8",
+    "url": "https://files.pythonhosted.org/packages/77/bc/6aa34c8805ff62e2fefc7d171563c60598aac215d5241186031a2c839935/python_mpv-1.0.8.tar.gz",
+    "archive": "python_mpv-1.0.8.tar.gz",
+    "sha256": "017fa359da059c831a94c419083491903e6d2f7c81b9841c33c196cabf4b3fe3"
+  },
+  {
+    "name": "certifi",
+    "version": "2026.7.22",
+    "url": "https://files.pythonhosted.org/packages/a3/c2/24167ea9858356b47a87a50d39908bfdb72ceeefe0041586e704e5376b3a/certifi-2026.7.22.tar.gz",
+    "archive": "certifi-2026.7.22.tar.gz",
+    "sha256": "741e2c3b351ddf169a738da9f2c048608ff7f2c5cc02f1ebc6b118bb090d5d55"
+  },
+  {
+    "name": "requests",
+    "version": "2.34.2",
+    "url": "https://files.pythonhosted.org/packages/ac/c3/e2a2b89f2d3e2179abd6d00ebd70bff6273f37fb3e0cc209f48b39d00cbf/requests-2.34.2.tar.gz",
+    "archive": "requests-2.34.2.tar.gz",
+    "sha256": "f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed"
+  },
+  {
+    "name": "urllib3",
+    "version": "2.8.0",
+    "url": "https://files.pythonhosted.org/packages/e3/05/b17359e1cefb4f909b5e40b1b90a496d987258916dbbf88e842c729f510e/urllib3-2.8.0.tar.gz",
+    "archive": "urllib3-2.8.0.tar.gz",
+    "sha256": "63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63"
+  },
+  {
+    "name": "idna",
+    "version": "3.20",
+    "url": "https://files.pythonhosted.org/packages/f5/08/8eea9d4b8302028f3abb2c0813953f7aec26d33b7a8960ed760e65ff29fa/idna-3.20.tar.gz",
+    "archive": "idna-3.20.tar.gz",
+    "sha256": "a7db850025b95ded1eae8a46181a1a6c56c92c96f0e2b005d9ff8dc0210cab44"
+  },
+  {
+    "name": "charset-normalizer",
+    "version": "3.5.1",
+    "url": "https://files.pythonhosted.org/packages/e5/3f/143b048436775b0f76ac3eec145c019e8173ccc2885c8f20319b996d5e83/charset_normalizer-3.5.1.tar.gz",
+    "archive": "charset_normalizer-3.5.1.tar.gz",
+    "sha256": "6117b84ea48435e5356dc737f5121485c30920ba43375fa7b434fd753df0eac3"
+  },
+  {
+    "name": "pillow",
+    "version": "12.3.0",
+    "url": "https://files.pythonhosted.org/packages/1c/3d/bb7fca845737cf9d7dbde16ed1843984665ff2e0a518f5db43e77ec540b9/pillow-12.3.0.tar.gz",
+    "archive": "pillow-12.3.0.tar.gz",
+    "sha256": "3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce"
+  },
+  {
+    "name": "setuptools",
+    "version": "84.0.0",
+    "url": "https://files.pythonhosted.org/packages/6d/44/f5da03a8ef95d369145c5bb53050e7877c9f3d312e128605fd9504829143/setuptools-84.0.0.tar.gz",
+    "archive": "setuptools-84.0.0.tar.gz",
+    "sha256": "f4695c21257f0d9b537ec2692c941d02ee143b7cc1276941349a546573b2ef73"
+  },
+  {
+    "name": "packaging",
+    "version": "26.3",
+    "url": "https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce895c0e6303a5ab7d53da063554f534556b134a54d6093/packaging-26.3.tar.gz",
+    "archive": "packaging-26.3.tar.gz",
+    "sha256": "94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79"
+  },
+  {
+    "name": "pyinstaller",
+    "version": "6.22.3",
+    "url": "https://files.pythonhosted.org/packages/63/41/f90302845945abd4ed647933ff5ee7c6ac93983187be67f897b6cb613331/pyinstaller-6.22.3.tar.gz",
+    "archive": "pyinstaller-6.22.3.tar.gz",
+    "sha256": "05eb2f5615503e72939a7224d68b4aff572c6b0438ee4a17d0a4b481f399362d"
+  },
+  {
+    "name": "macholib",
+    "version": "1.16.4",
+    "url": "https://files.pythonhosted.org/packages/10/2f/97589876ea967487978071c9042518d28b958d87b17dceb7cdc1d881f963/macholib-1.16.4.tar.gz",
+    "archive": "macholib-1.16.4.tar.gz",
+    "sha256": "f408c93ab2e995cd2c46e34fe328b130404be143469e41bc366c807448979362"
+  },
+  {
+    "name": "altgraph",
+    "version": "0.17.5",
+    "url": "https://files.pythonhosted.org/packages/7e/f8/97fdf103f38fed6792a1601dbc16cc8aac56e7459a9fff08c812d8ae177a/altgraph-0.17.5.tar.gz",
+    "archive": "altgraph-0.17.5.tar.gz",
+    "sha256": "c87b395dd12fabde9c99573a9749d67da8d29ef9de0125c7f536699b4a9bc9e7"
+  },
+  {
+    "name": "pkgconf",
+    "version": "2.5.1",
+    "url": "https://distfiles.ariadne.space/pkgconf/pkgconf-2.5.1.tar.xz",
+    "archive": "pkgconf-2.5.1.tar.xz",
+    "sha256": "cd05c9589b9f86ecf044c10a2269822bc9eb001eced2582cfffd658b0a50c243"
+  }
+]

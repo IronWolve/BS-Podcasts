@@ -14,7 +14,7 @@ MAX_STREAM_BYTES = 32 * 1024**3
 class HttpStream:
     def __init__(self, url, session=None, defer_open=False, on_error=None):
         self.url = ensure_web_url(url)
-        self.session = session or make_session(max_response_bytes=None, total_timeout=24*3600)
+        self.session = session or make_session(max_response_bytes=None, total_timeout=24*3600, foreground=True)
         self.cancelled = Event()
         self._lock = Lock()
         self._response = None
@@ -162,4 +162,12 @@ class HttpStream:
 
     def close(self):
         self.cancel()
+        chunks, self._chunks = self._chunks, iter(())
+        try:
+            close = getattr(chunks, 'close', None)
+            if close is not None:
+                close()
+        except ValueError:
+            pass  # A cancelled read is still unwinding on its native thread.
+        self._buffer = b''
         self.session.close()

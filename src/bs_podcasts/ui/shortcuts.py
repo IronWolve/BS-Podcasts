@@ -4,9 +4,10 @@ from PySide6.QtGui import QKeySequence, QShortcut
 
 
 class ShortcutManager:
-    def __init__(self, parent, library=None):
+    def __init__(self, parent, library=None, save_settings=None):
         self.parent = parent
         self.library = library
+        self._save_settings = save_settings
         self._shortcuts = {}
 
     def add(self, name: str, default: str, callback):
@@ -42,14 +43,20 @@ class ShortcutManager:
                 )
         shortcut, _default = self._shortcuts[name]
         shortcut.setKey(QKeySequence(normalized))
-        if self.library:
+        if self._save_settings is not None:
+            self._save_settings({f'shortcut.{name}': normalized})
+        elif self.library:
             self.library.set_setting(f"shortcut.{name}", normalized)
 
     def reset_all(self):
+        values = {}
         for name, (shortcut, default) in self._shortcuts.items():
             shortcut.setKey(QKeySequence(default))
-            if self.library:
+            values[f'shortcut.{name}'] = default
+            if self.library and self._save_settings is None:
                 self.library.set_setting(f"shortcut.{name}", default)
+        if self._save_settings is not None:
+            self._save_settings(values)
 
     def default(self, name: str) -> str:
         return self._shortcuts[name][1]

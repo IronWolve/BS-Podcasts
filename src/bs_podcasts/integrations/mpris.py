@@ -2,6 +2,14 @@
 
 from PySide6.QtCore import ClassInfo, Property, QObject, Slot
 from PySide6.QtDBus import QDBusAbstractAdaptor, QDBusConnection, QDBusMessage, QDBusObjectPath
+from hashlib import sha256
+
+
+def track_path(snapshot):
+    if not snapshot.source:
+        return '/org/mpris/MediaPlayer2/TrackList/NoTrack'
+    key = f'{snapshot.episode_id}:{snapshot.source}'.encode()
+    return '/com/bspodcasts/track/' + sha256(key).hexdigest()
 
 
 @ClassInfo({"D-Bus Interface": "org.mpris.MediaPlayer2"})
@@ -63,9 +71,8 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
     @Property("QVariantMap")
     def Metadata(self):
         snapshot = self.host.playback.snapshot
-        track = snapshot.episode_id or 0
         return {
-            "mpris:trackid": QDBusObjectPath(f"/org/mpris/MediaPlayer2/track/{track}"),
+            "mpris:trackid": QDBusObjectPath(track_path(snapshot)),
             "mpris:length": int(snapshot.duration * 1_000_000),
             "xesam:title": snapshot.title,
             "xesam:album": snapshot.show_title,
@@ -137,12 +144,19 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
 
     @Slot("qlonglong")
     def Seek(self, offset):
-        position = self.host.playback.snapshot.position + offset / 1_000_000
-        self._command("seek", position)
+        playback = self.host.playback
+        snapshot = playback.snapshot
+        identity = (snapshot.episode_id, snapshot.source, playback._load_generation)
+        self._command("seek_current", identity, offset / 1_000_000, True)
 
     @Slot(QDBusObjectPath, "qlonglong")
-    def SetPosition(self, _track, position):
-        self._command("seek", position / 1_000_000)
+    def SetPosition(self, track, position):
+        playback = self.host.playback
+        snapshot = playback.snapshot
+        if track.path() != track_path(snapshot) or not snapshot.source:
+            return
+        identity = (snapshot.episode_id, snapshot.source, playback._load_generation)
+        self._command("seek_current", identity, position / 1_000_000)
 
 
 class MprisController(QObject):

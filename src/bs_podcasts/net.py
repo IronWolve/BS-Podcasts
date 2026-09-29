@@ -70,7 +70,7 @@ class SessionSlot:
         setattr(instance, self._attr, value)
 
 
-def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_retries: bool = True, max_redirects: int = 8, total_timeout: float = 60, max_response_bytes=20 * 1024 * 1024):
+def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_retries: bool = True, max_redirects: int = 8, total_timeout: float = 60, max_response_bytes=20 * 1024 * 1024, foreground=False):
     """A Session safe to share across the job pool.
 
     `retries` covers connection errors and 429/5xx responses with backoff;
@@ -82,7 +82,7 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
     from urllib3.util.retry import Retry
 
     from requests.exceptions import Timeout
-    from .netlimits import Deadline, NetworkDeadline, bounded_call, bounded_chunks, abort_response
+    from .netlimits import Deadline, NetworkDeadline, bounded_call, bounded_chunks, abort_response, is_foreground
 
     class DeadlineRetry(Retry):
         def increment(self, *args, **kwargs):
@@ -108,7 +108,7 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
         def request(self, method, url, **kwargs):
             streaming = kwargs.pop("stream", False)
             budget = float(kwargs.pop("total_timeout", total_timeout))
-            state = Deadline(min(budget, 45), kwargs.pop("cancel_event", None))
+            state = Deadline(min(budget, 45), kwargs.pop("cancel_event", None), foreground=foreground or is_foreground())
             def work():
                 _request_context.state = state
                 try:

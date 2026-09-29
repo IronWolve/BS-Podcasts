@@ -2,15 +2,18 @@
 import ipaddress
 import socket
 
-from .netlimits import bounded_call, Deadline, DNS
+from .netlimits import bounded_call, Deadline, DNS, PLAYBACK_DNS
 from .urlguard import UnsafeUrl, _blocked_reason, ensure_web_url
 
 
 def connect_checked(host, port, timeout=None, source_address=None, socket_options=None, deadline=None):
     if deadline is not None:
         deadline.remaining()
-    answers = bounded_call(
-        lambda: socket.getaddrinfo(host, port, type=socket.SOCK_STREAM), Deadline(8), gate=DNS)
+    dns_deadline = Deadline(min(8, deadline.remaining()) if deadline else 8,
+                            deadline.cancelled if deadline else None,
+                            foreground=deadline.foreground if deadline else None)
+    answers = bounded_call(lambda: socket.getaddrinfo(host, port, type=socket.SOCK_STREAM),
+                           dns_deadline, gate=PLAYBACK_DNS if dns_deadline.foreground else DNS)
     if not answers:
         raise UnsafeUrl("The server has no usable network address.")
     # Validate every answer before any socket exists; mixed public/private-

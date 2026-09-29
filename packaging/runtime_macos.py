@@ -1,4 +1,4 @@
-"""Let Finder-launched builds locate Homebrew's libmpv on macOS."""
+"""Bind Finder-launched builds to their bundled native player."""
 
 import ctypes.util
 from pathlib import Path

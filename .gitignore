@@ -32,6 +32,7 @@
 
 # Approved source, tests, assets/licenses and reproducible build metadata.
 !/.gitignore
+!/.gitattributes
 !/packaging/THIRD-PARTY-NOTICES.txt
 !/packaging/branding/bs-podcasts-icon-master.png
 !/packaging/bs-podcasts.desktop
@@ -39,10 +40,12 @@
 !/packaging/bs-podcasts.spec
 !/packaging/build-libmpv-lgpl.sh
 !/packaging/build-libmpv-linux.sh
+!/packaging/build-libmpv-macos.sh
 !/packaging/build-macos.sh
 !/packaging/build-windows.ps1
 !/packaging/build_manifest.py
 !/packaging/check_dependencies.py
+!/packaging/check_frozen.py
 !/packaging/deploy.py
 !/packaging/install-desktop.sh
 !/packaging/launch.sh
@@ -69,6 +72,7 @@
 !/packaging/render-desktop.py
 !/packaging/release_archives.py
 !/packaging/requirements-linux.lock
+!/packaging/requirements-macos.lock
 !/packaging/requirements-windows.lock
 !/packaging/runtime_macos.py
 !/packaging/runtime_linux.py
@@ -164,6 +168,7 @@
 !/src/bs_podcasts/selfcheck.py
 !/src/bs_podcasts/services/__init__.py
 !/src/bs_podcasts/services/library.py
+!/src/bs_podcasts/services/preview_cache.py
 !/src/bs_podcasts/services/listening.py
 !/src/bs_podcasts/services/updates.py
 !/src/bs_podcasts/smoke.py
@@ -193,6 +198,9 @@
 !/tools/make_ui_reference.py
 !/tools/migrate_data_dir.py
 !/tools/smoke_artwork_async.py
+!/tools/smoke_final_correctness.py
+!/tools/smoke_final_network.py
+!/tools/smoke_final_lifecycle.py
 !/tools/smoke_artwork_lifecycle.py
 !/tools/smoke_audit_regressions.py
 !/tools/smoke_button_matrix.py
@@ -242,6 +250,7 @@
 !/tools/smoke_redirect_rescue.py
 !/tools/smoke_release_hardening.py
 !/tools/smoke_release_archives.py
+!/tools/smoke_release_provenance.py
 !/tools/smoke_removal_safety.py
 !/tools/smoke_runtime_cseries.py
 !/tools/smoke_security_boundaries.py
@@ -262,3 +271,12 @@
 !/tools/smoke_view_restore.py
 !/tools/smoke_window_flash.py
 !/tools/smoke_windows_release.py
+!/packaging/bs-podcasts-macos.spec
+!/packaging/build_macos.py
+!/packaging/native-sources-macos.json
+!/packaging/third-party-sources.json
+!/packaging/requirements-macos-native.lock
+!/packaging/licenses/Qt-6.11.2-third-party.txt
+!/packaging/licenses/Python-bundled-third-party.txt
+!/packaging/licenses/Native-bundled-third-party.txt
+!/packaging/licenses/LIBRARY-REPLACEMENT.txt

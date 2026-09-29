@@ -16,10 +16,12 @@ def digest(path):
         return hashlib.file_digest(stream,'sha256').hexdigest()
 
 
-def prepare(source, cache, only=None):
+def prepare(source, cache, only=None, macos=False):
     source.mkdir(parents=True,exist_ok=True)
     cache.mkdir(parents=True,exist_ok=True)
     entries=json.loads(Path(__file__).with_name('native-sources.json').read_text())
+    if macos:
+        entries += json.loads(Path(__file__).with_name('native-sources-macos.json').read_text())
     if only:
         entries=[entry for entry in entries if entry['name']==only]
         if not entries:
@@ -80,12 +82,19 @@ def sanitize(header, root):
 def record(artifact):
     lock=Path(__file__).with_name('native-sources.json')
     receipt={'format':1,'artifact':artifact.name,'sha256':digest(artifact),'inputs_sha256':digest(lock)}
+    if artifact.name == 'libmpv-2.dll':
+        receipt.update(platform='windows', architecture='x86_64',
+                       recipe_sha256=digest(lock.with_name('build-libmpv-lgpl.sh')))
     if artifact.name == 'libmpv.so.2':
         versions = subprocess.check_output(['readelf','--version-info',str(artifact)],text=True,timeout=10)
         glibc = {tuple(map(int,value.split('.'))) for value in re.findall(r'GLIBC_([0-9.]+)',versions)}
         receipt.update(platform='linux', architecture=platform.machine(),
                        minimum_glibc='.'.join(map(str,max(glibc))),
                        recipe_sha256=digest(lock.with_name('build-libmpv-linux.sh')))
+    if artifact.name == 'libmpv.2.dylib':
+        receipt.update(platform='darwin', architecture=platform.machine(), minimum_macos='14.0',
+                       extra_inputs_sha256=digest(lock.with_name('native-sources-macos.json')),
+                       recipe_sha256=digest(lock.with_name('build-libmpv-macos.sh')))
     target=artifact.with_name('native-build.json')
     with tempfile.NamedTemporaryFile(dir=target.parent,delete=False) as stream:
         temporary=Path(stream.name)
@@ -102,12 +111,13 @@ if __name__=='__main__':
     parser.add_argument('--root',type=Path)
     parser.add_argument('--only')
     parser.add_argument('--record',type=Path)
+    parser.add_argument('--macos',action='store_true')
     args=parser.parse_args()
     if args.record:
         record(args.record)
     elif args.sanitize:
         sanitize(args.sanitize,args.root)
     elif args.source and args.cache:
-        prepare(args.source,args.cache,args.only)
+        prepare(args.source,args.cache,args.only,args.macos)
     else:
         parser.error('Provide --source/--cache or --sanitize/--root.')

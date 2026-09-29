@@ -1583,6 +1583,7 @@ class SeekSlider(QSlider):
     """Click-to-seek slider with hover time readout and chapter markers."""
 
     hover_time = Signal(float)
+    user_step = Signal()
 
     TRACK_HEIGHT = 6
     HANDLE = 14
@@ -1608,6 +1609,18 @@ class SeekSlider(QSlider):
             return
         self._markers = markers
         self.update()
+
+    def keyPressEvent(self, event):
+        before = self.value()
+        super().keyPressEvent(event)
+        if self.value() != before:
+            self.user_step.emit()
+
+    def wheelEvent(self, event):
+        before = self.value()
+        super().wheelEvent(event)
+        if self.value() != before:
+            self.user_step.emit()
 
     def set_ab(self, start_fraction, end_fraction):
         markers = (start_fraction, end_fraction)
@@ -1888,7 +1901,7 @@ class ContextPanel(QFrame):
     queue_episode_requested = Signal(int)
     dequeue_requested = Signal(int)
     download_episode_requested = Signal(int)
-    seek_requested = Signal(float)
+    seek_requested = Signal(int, float)
     transcript_search_requested = Signal(int, str)
     play_latest_requested = Signal(int)
     open_show_requested = Signal(int)
@@ -2221,6 +2234,7 @@ class ContextPanel(QFrame):
         for bookmark in bookmarks:
             item = QListWidgetItem(f"{self._time(bookmark.position_seconds)}   {bookmark.title or 'Bookmark'}")
             item.setData(Qt.ItemDataRole.UserRole, bookmark.position_seconds)
+            item.setData(Qt.ItemDataRole.UserRole + 1, bookmark.id)
             self.bookmark_list.addItem(item)
         if not bookmarks:
             placeholder = QListWidgetItem("No bookmarks yet")
@@ -2574,8 +2588,8 @@ class ContextPanel(QFrame):
 
     def _seek_item(self, item):
         position = item.data(Qt.ItemDataRole.UserRole)
-        if position is not None:
-            self.seek_requested.emit(float(position))
+        if position is not None and self._episode_id:
+            self.seek_requested.emit(self._episode_id, float(position))
 
     def _search_transcript(self):
         if self._episode_id:
@@ -3222,6 +3236,7 @@ class PlayerBar(QFrame):
         self.slider.setValue(0)
         self.slider.sliderPressed.connect(self._capture_drag_duration)
         self.slider.sliderReleased.connect(self._seek_from_slider)
+        self.slider.user_step.connect(self._seek_from_slider)
         self.remaining = PlainTextLabel("−0:00")
         self.remaining.setObjectName("timeLabel")
         timeline.addWidget(self.elapsed)

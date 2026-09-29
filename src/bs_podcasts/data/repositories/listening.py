@@ -99,6 +99,11 @@ class ListeningRepository:
         with self.database.connect() as connection:
             connection.execute("DELETE FROM bookmarks WHERE id=?", (bookmark_id,))
 
+    def delete_bookmarks(self, bookmark_ids):
+        with self.database.connect() as connection:
+            return connection.executemany('DELETE FROM bookmarks WHERE id=?',
+                ((value,) for value in dict.fromkeys(bookmark_ids))).rowcount
+
     def rename_bookmark(self, bookmark_id: int, title: str):
         with self.database.connect() as connection:
             connection.execute("UPDATE bookmarks SET title=? WHERE id=?", (title.strip(), bookmark_id))
@@ -198,7 +203,7 @@ class ListeningRepository:
                 "INSERT OR IGNORE INTO folders(name, created_at) VALUES (?, ?)",
                 (name.strip(), time.time()),
             )
-            row = connection.execute("SELECT id FROM folders WHERE name=?", (name.strip(),)).fetchone()
+            row = connection.execute("SELECT id FROM folders WHERE name=? COLLATE NOCASE", (name.strip(),)).fetchone()
         return row["id"]
 
     def assign_show(self, folder_id: int, show_id: int):
@@ -215,7 +220,7 @@ class ListeningRepository:
                 (name.strip(), time.time()),
             )
             row = connection.execute(
-                "SELECT id FROM saved_playlists WHERE name=?", (name.strip(),)
+                "SELECT id FROM saved_playlists WHERE name=? COLLATE NOCASE", (name.strip(),)
             ).fetchone()
         return row["id"]
 

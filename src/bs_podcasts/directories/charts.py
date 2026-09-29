@@ -4,6 +4,7 @@ from html import unescape
 import json
 import re
 import time
+from threading import Lock
 
 from ..net import SessionSlot, describe_network_error
 
@@ -29,24 +30,35 @@ class DirectoryCharts:
         self.session = session
         self.cache_seconds = cache_seconds
         self._cache = {}
+        self._revision = 0
+        self._cache_guard = Lock()
         self._developer_token = ""
 
     def invalidate(self):
-        self._cache.clear()
+        with self._cache_guard:
+            self._revision += 1
+            self._cache.clear()
+
+    def _store(self, key, results, revision):
+        with self._cache_guard:
+            if revision == self._revision:
+                self._cache[key] = (time.time(), results)
 
     def chart(self, chart_type: str, category: str = ""):
         if chart_type not in CHART_TITLES:
             raise DirectoryError("Unknown directory chart type.")
         chart_category = category if chart_type in {"top_shows", "trending"} else ""
         key = (chart_type, chart_category)
-        cached = self._cache.get(key)
+        with self._cache_guard:
+            cached = self._cache.get(key)
+            revision = self._revision
         if cached and time.time() - cached[0] < self.cache_seconds:
             return cached[1]
 
         try:
             results = self._full_chart(chart_type, chart_category)
             if results:
-                self._cache[key] = (time.time(), results)
+                self._store(key, results, revision)
                 return results
         except DirectoryError:
             pass
@@ -92,7 +104,7 @@ class DirectoryCharts:
             for position, item in enumerate(shelf.get("items", []), start=1)
             if (candidate := self._safe_candidate(self._candidate, item, chart_type, position)) is not None
         ]
-        self._cache[key] = (time.time(), results)
+        self._store(key, results, revision)
         return results
 
     @staticmethod

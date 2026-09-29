@@ -1,6 +1,7 @@
 """Resumable, cancellable downloads with atomic completion."""
 
 from dataclasses import dataclass, replace
+from contextlib import contextmanager
 from pathlib import Path
 from ..data.files import open_private
 from threading import Event, Lock, Thread
@@ -150,6 +151,8 @@ class DownloadService:
         self._cancellations: dict[int, Event] = {}
         self._queued: dict[int, Event] = {}
         self._started: dict[int, float] = {}
+        self._retiring_shows = set()
+        self._retiring_episodes = set()
         self._listeners = []
         self._lock = Lock()
 
@@ -169,6 +172,8 @@ class DownloadService:
     def queue(self, episode_id: int):
         """Register intent before a worker slot is available, without I/O."""
         with self._lock:
+            if episode_id in self._retiring_episodes:
+                return None
             active, queued = self._cancellations.get(episode_id), self._queued.get(episode_id)
             if (active is not None and not active.is_set()) or (queued is not None and not queued.is_set()):
                 return None
@@ -201,7 +206,10 @@ class DownloadService:
             raise
         with self._lock:
             stale = ticket is not None and self._queued.get(episode_id) is not ticket
-            if stale or episode_id in self._cancellations:
+            retiring = episode.show_id in self._retiring_shows
+            if retiring and (ticket is None or self._queued.get(episode_id) is ticket):
+                self._queued.pop(episode_id, None)
+            if stale or retiring or episode_id in self._cancellations:
                 cancellation = None
             else:
                 cancellation = self._queued.pop(episode_id, None) or Event()
@@ -280,6 +288,40 @@ class DownloadService:
                     self._started.pop(episode_id, None)
 
     CANCEL_UNWIND_TIMEOUT = 5.0
+
+    @contextmanager
+    def removing_show(self, show_id):
+        """Keep writers retired until their records/files have been removed."""
+        with self._lock:
+            if show_id in self._retiring_shows:
+                raise DownloadError('This podcast is already being removed.')
+            self._retiring_shows.add(show_id)
+        ids = set()
+        try:
+            with self.library.database.connect() as connection:
+                ids = {row[0] for row in connection.execute('SELECT id FROM episodes WHERE show_id=?', (show_id,))}
+            with self._lock:
+                self._retiring_episodes.update(ids)
+                for episode_id in ids:
+                    queued = self._queued.pop(episode_id, None)
+                    active = self._cancellations.get(episode_id)
+                    for event in (queued, active):
+                        if event is not None:
+                            event.set()
+            deadline = time.monotonic() + self.CANCEL_UNWIND_TIMEOUT
+            while True:
+                with self._lock:
+                    busy = bool(ids.intersection(self._cancellations))
+                if not busy:
+                    break
+                if time.monotonic() >= deadline:
+                    raise DownloadError('Downloads are still stopping; retry removal shortly. No subscription was removed.')
+                time.sleep(.02)
+            yield
+        finally:
+            with self._lock:
+                self._retiring_shows.discard(show_id)
+                self._retiring_episodes.difference_update(ids)
 
     def _await_cancelled(self, episode_id: int):
         """Wait out a transfer that is cancelling before starting a new one.

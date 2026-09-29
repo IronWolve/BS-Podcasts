@@ -85,6 +85,7 @@ class PlaybackService:
         self._lock = RLock()
         self._last_saved_position = -10.0
         self._sleep_timer: Timer | None = None
+        self._sleep_token = 0
         self._load_watchdog: Timer | None = None
         self._load_token = 0
         # Redirect rescue (see _start_redirect_rescue): which source already
@@ -484,6 +485,31 @@ class PlaybackService:
             else:
                 self.engine.seek_absolute(seconds)
 
+    def seek_episode(self, episode_id: int, seconds: float, *, cancelled=None):
+        with self._lock:
+            if cancelled is not None and cancelled():
+                return
+            if self.snapshot.episode_id == episode_id and self.snapshot.source:
+                self.seek(seconds)
+            else:
+                self.load_episode(episode_id, start_position=seconds, autoplay=True, cancelled=cancelled)
+
+    def seek_current(self, identity, seconds: float, relative: bool = False):
+        """Native-control seeks retain the track identity through command queuing."""
+        with self._lock:
+            current = (self.snapshot.episode_id, self.snapshot.source, self._load_generation)
+            if (tuple(identity) != current or not self.snapshot.source or self._dead
+                    or not self.engine.capabilities.seek):
+                return
+            if relative:
+                seconds = max(0.0, self.snapshot.position + seconds)
+                if self.snapshot.duration and seconds > self.snapshot.duration:
+                    self.next()
+                    return
+            elif not 0 <= seconds <= self.snapshot.duration:
+                return
+            self.seek(seconds)
+
     def skip_back(self):
         self._guard()
         show = self.repository.get_show(self.snapshot.show_id) if self.snapshot.show_id else None
@@ -567,7 +593,7 @@ class PlaybackService:
                 return
             deadline = time.time() + seconds
             self.snapshot = replace(self.snapshot, sleep_deadline=deadline)
-            self._sleep_timer = Timer(seconds, self._sleep_expired)
+            self._sleep_timer = Timer(seconds, self._sleep_expired, args=(self._sleep_token,))
             self._sleep_timer.daemon = True
             self._sleep_timer.start()
             self._emit()
@@ -581,6 +607,7 @@ class PlaybackService:
 
     def cancel_sleep_timer(self):
         with self._lock:
+            self._sleep_token += 1
             if self._sleep_timer:
                 self._sleep_timer.cancel()
                 self._sleep_timer = None
@@ -729,10 +756,12 @@ class PlaybackService:
         ).start()
 
     def _resolve_then_load(self, source: str, position: float, autoplay: bool, generation=None, tracker=True):
+        from ..netlimits import request_scope
         final, error = "", ""
         try:
             # DNS screening belongs off the GUI thread, for every web source.
-            final = ensure_fetchable(source, "Episode media URL")
+            with request_scope(foreground=True):
+                final = ensure_fetchable(source, "Episode media URL")
             if tracker:
                 final = self._resolve_final(final)
                 if not final:
@@ -757,14 +786,14 @@ class PlaybackService:
         """Final URL after following the redirect chain with the app's own
         HTTP stack (every hop re-checked by the session's redirect guard)."""
         from ..net import make_session
+        from ..netlimits import request_scope
 
         try:
-            source = ensure_fetchable(source, "Episode media URL")
-            response = make_session(max_redirects=20).get(source, stream=True, timeout=(8, 15), allow_redirects=True)
-            try:
-                return str(response.url) if response.status_code < 400 else ""
-            finally:
-                response.close()
+            with request_scope(foreground=True):
+                source = ensure_fetchable(source, "Episode media URL")
+                with make_session(max_redirects=20, foreground=True) as session:
+                    with session.get(source, stream=True, timeout=(8, 15), allow_redirects=True) as response:
+                        return str(response.url) if response.status_code < 400 else ""
         except Exception:
             return ""
 
@@ -843,14 +872,16 @@ class PlaybackService:
             try:
                 self.load_episode(queue[0].id, autoplay=True)
                 return
-            except Exception:
-                # The next queued episode may have been deleted, or have no
-                # playable source. Falling through finalises the episode that
-                # just finished; aborting here left current_playback pointing
-                # at it in a non-idle state, which the next launch then tried
-                # to resume. This runs on the engine's event thread, where an
-                # escaping exception is only warned about, never surfaced.
-                pass
+            except Exception as exc:
+                from ..privacy import redact
+                self._cancel_load_watchdog()
+                self._load_autoplay = False
+                self._resolving = False
+                self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR,
+                                        message="Could not play the next episode: " + redact(exc))
+                self._set_current_playback(self.snapshot.episode_id, PlaybackState.ERROR.value)
+                self._emit()
+                return
         self.snapshot = replace(self.snapshot, state=PlaybackState.IDLE)
         self._set_current_playback(episode_id, PlaybackState.IDLE.value)
         self._emit()
@@ -924,11 +955,11 @@ class PlaybackService:
             else:
                 listening.add_listening(show_id, seconds)
 
-    def _sleep_expired(self):
+    def _sleep_expired(self, token):
         with self._lock:
-            self._sleep_timer = None
-            if self._dead:
+            if self._dead or token != self._sleep_token:
                 return
+            self._sleep_timer = None
             try:
                 self.pause()
             except Exception:

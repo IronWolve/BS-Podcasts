@@ -1,6 +1,7 @@
 """Public podcast-directory adapter; no authentication required."""
 
 from ..net import SessionSlot, describe_network_error
+from threading import Lock
 
 from ..domain import DirectoryCandidate
 from .base import DirectoryError
@@ -82,6 +83,8 @@ class PublicDirectory:
     def __init__(self, session=None):
         self.session = session
         self._browse_cache = {}
+        self._cache_revision = 0
+        self._cache_guard = Lock()
         from .charts import DirectoryCharts
 
         self.charts = DirectoryCharts(session)
@@ -100,9 +103,14 @@ class PublicDirectory:
         )
 
     def browse(self, category: str = "", limit: int = 30) -> list[DirectoryCandidate]:
+        from ..netlimits import Deadline
+        check = Deadline(600)
         cache_key = category or "__all__"
-        if cache_key in self._browse_cache:
-            return self._browse_cache[cache_key][:limit]
+        with self._cache_guard:
+            revision = self._cache_revision
+            cached = self._browse_cache.get(cache_key)
+        if cached is not None:
+            return cached[:limit]
         terms = CATEGORY_EXPANSION_TERMS.get(
             category,
             ("podcast", "new podcasts", "popular podcasts", "independent podcasts"),
@@ -111,6 +119,7 @@ class PublicDirectory:
         result_sets = []
         errors = []
         for term in terms:
+            check.remaining()
             params = {
                 "term": term,
                 "media": "podcast",
@@ -138,7 +147,10 @@ class PublicDirectory:
                     continue
                 seen.add(candidate.feed_url)
                 merged.append(candidate)
-        self._browse_cache[cache_key] = merged
+        check.remaining()
+        with self._cache_guard:
+            if revision == self._cache_revision:
+                self._browse_cache[cache_key] = merged
         return merged[:limit]
 
     def topic(
@@ -165,7 +177,9 @@ class PublicDirectory:
         so Refresh cleared the UI cache, re-asked this layer, and got the
         same stale list straight back — an explicit rescan that could not
         actually rescan."""
-        self._browse_cache.clear()
+        with self._cache_guard:
+            self._cache_revision += 1
+            self._browse_cache.clear()
         self.charts.invalidate()
 
     def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:

@@ -1,11 +1,14 @@
 """Assemble versioned source/Windows/Linux archives from verified exact inputs."""
 import argparse
+import hashlib
 import io
 import json
 import os
 import platform
-from pathlib import Path
+import posixpath
+from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -65,7 +68,80 @@ def tar_files(path, files, prefix, executable=()):
                 raise ValueError('Linux archive integrity check failed.')
 
 
-def build(output):
+def third_party_files():
+    files={}
+    for lock,cache in (('native-sources.json','native-sources'),
+                       ('native-sources-macos.json','native-sources'),
+                       ('third-party-sources.json','third-party-sources')):
+        lock_path=ROOT/'packaging'/lock
+        files['packaging/'+lock]=lock_path.read_bytes()
+        for entry in json.loads(lock_path.read_text()):
+            name=entry['archive']
+            if Path(name).name!=name or '\\' in name: raise ValueError('Unsafe source archive name.')
+            path=ROOT.parent/'.cache'/cache/name
+            if path.is_symlink() or file_digest(path)!=entry['sha256']:
+                raise ValueError('Third-party source differs from its lock: '+name)
+            files['archives/'+name]=path.read_bytes()
+    for name in ('build-libmpv-lgpl.sh','build-libmpv-linux.sh','build-libmpv-macos.sh',
+                 'native_sources.py','requirements-macos-native.lock','licenses/LIBRARY-REPLACEMENT.txt'):
+        files['packaging/'+name]=(ROOT/'packaging'/name).read_bytes()
+    files['README.txt']=(
+        'Corresponding sources for this BS Podcasts release. Preserve and publish this archive beside the binaries.\n'
+        'Checksums and upstream locations are in packaging/*sources*.json. Upstream archives are unchanged.\n'
+        'For native rebuilding, unpack the matching application Source.zip into a project repo/ directory.\n'
+        'Copy the applicable archives/ files into that project .cache/native-sources/ and run its native recipe.\n'
+        'Prepare the documented project-local Python/compiler tools first; recipes never install tools globally.\n'
+        'Windows uses MinGW GCC; Linux uses GCC plus ALSA/PulseAudio development libraries; macOS uses Xcode,\n'
+        'pkgconf 2.5.1 and packaging/requirements-macos-native.lock in the local Mac build environment.\n'
+        'Recipes disable GPL/nonfree features and remap generated build-path strings; upstream code is unmodified.\n'
+        'Qt/Qt for Python archives include upstream build instructions and all original license texts.\n'
+        'See packaging/licenses/LIBRARY-REPLACEMENT.txt for replacement and signature instructions.\n').encode()
+    return files
+
+
+def verify_macos(folder, version, origin):
+    record=json.loads((folder/'BS-Podcasts-macOS-arm64.manifest.json').read_text())
+    if record['version']!=version or record['source']!=origin:
+        raise ValueError('macOS build is stale, dirty or from a different commit.')
+    native=record['runtime']['native']
+    if (native['recipe_sha256']!=file_digest(ROOT/'packaging/build-libmpv-macos.sh')
+            or native['extra_inputs_sha256']!=file_digest(ROOT/'packaging/native-sources-macos.json')
+            or native['inputs']!=json.loads((ROOT/'packaging/native-sources.json').read_text())
+            or native['extra_inputs']!=json.loads((ROOT/'packaging/native-sources-macos.json').read_text())):
+        raise ValueError('macOS native provenance mismatch.')
+    name=f'BS-Podcasts-{version}-macOS-arm64.zip'
+    archive=folder/name
+    if (record['archive']['name']!=name or record['archive']['sha256']!=file_digest(archive)
+            or record['archive']['bytes']!=archive.stat().st_size):
+        raise ValueError('macOS archive differs from its manifest.')
+    records={r['path']:r for r in record['artifact']['files']}
+    if len(records)!=len(record['artifact']['files']): raise ValueError('Duplicate macOS artifact path.')
+    with zipfile.ZipFile(archive) as bundle:
+        entries=bundle.infolist()
+        if len({e.filename for e in entries})!=len(entries): raise ValueError('Duplicate ZIP member.')
+        actual=set()
+        for entry in entries:
+            path=PurePosixPath(entry.filename)
+            if path.is_absolute() or '..' in path.parts or '\\' in entry.filename or ':' in entry.filename:
+                raise ValueError('Unsafe macOS ZIP path.')
+            if entry.is_dir() or entry.filename.startswith('__MACOSX/'): continue
+            prefix=record['artifact']['name']+'/'
+            if not entry.filename.startswith(prefix): raise ValueError('Unexpected macOS ZIP member.')
+            relative=entry.filename[len(prefix):]
+            if relative not in records: raise ValueError('Unmanifested macOS ZIP member: '+relative)
+            actual.add(relative); expected=records[relative]; data=bundle.read(entry)
+            if 'symlink' in expected:
+                if data.decode()!=expected['symlink']: raise ValueError('Changed macOS link.')
+                resolved=posixpath.normpath(posixpath.join(posixpath.dirname(relative),expected['symlink']))
+                if resolved.startswith('../') or resolved.startswith('/'): raise ValueError('Escaping macOS link.')
+            elif len(data)!=expected['bytes'] or hashlib.sha256(data).hexdigest()!=expected['sha256']:
+                raise ValueError('Changed macOS archive member.')
+        if actual!=set(records): raise ValueError('Missing macOS artifact files.')
+    if records[native['file']]['sha256']!=native['sha256']: raise ValueError('Mac native artifact hash mismatch.')
+    return record,archive
+
+
+def build(output, macos=None):
     check()
     names, runtime = inventory()
     def git(*args):
@@ -99,6 +175,8 @@ def build(output):
     if win_record['version'] != version or win_record['source'] != {'commit': commit, 'dirty': False, 'sha256': fingerprint}:
         raise ValueError('Windows build is stale, dirty or from a different commit.')
     windows_files = verify_files(windows/'BS Podcasts', win_record['artifact']['files'])
+    if win_record['runtime']['native'].get('recipe_sha256') != file_digest(ROOT/'packaging/build-libmpv-lgpl.sh'):
+        raise ValueError('Windows native recipe provenance is missing or stale; rebuild the native library.')
     scan_inputs(windows_files, tokens)
 
     linux = ROOT.parent / 'dists/linux'
@@ -131,19 +209,28 @@ def build(output):
         'Data, configuration, logs, caches and downloads stay beside the app by default.\n'
         'Do not include those private files when redistributing or updating the application.\n').encode()
     scan_inputs(linux_files, tokens)
+    dependencies=third_party_files()
+    mac_record,mac_archive=verify_macos(macos,version,{'commit':commit,'dirty':False,'sha256':fingerprint}) if macos else (None,None)
     output.parent.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='.release-', dir=output.parent))
     zip_files(work/f'BS-Podcasts-{version}-Source.zip', source_files, f'BS-Podcasts-{version}-Source', source_executable)
     zip_files(work/f'BS-Podcasts-{version}-Windows-x64.zip', windows_files, 'BS Podcasts')
+    zip_files(work/f'BS-Podcasts-{version}-Third-Party-Sources.zip',dependencies,f'BS-Podcasts-{version}-Third-Party-Sources')
     linux_name = f'BS-Podcasts-{version}-Linux-{platform.machine()}'
     tar_files(work/(linux_name+'.tar.gz'), linux_files, linux_name,
               ('start.sh', 'stop.sh', 'setup.sh', 'dists/linux/start.sh', 'dists/linux/stop.sh'))
     (work/'Windows.manifest.json').write_text(json.dumps(win_record, indent=2)+'\n')
+    if mac_record:
+        shutil.copy2(mac_archive,work/mac_archive.name)
+        (work/'macOS.manifest.json').write_text(json.dumps(mac_record,indent=2)+'\n')
     report = {'version': version, 'source': {'commit': commit, 'sha256': fingerprint},
               'windows_signed': False, 'linux_runtime_dependencies': 'Python >=3.14.7 and compatible ALSA/PulseAudio/desktop libraries; run setup.sh',
               'linux_architecture':platform.machine(), 'linux_native':linux_record['native'],
               'source_files': len(source_files), 'windows_files': len(windows_files),
               'linux_files': len(linux_files), 'archives': {}}
+    if mac_record:
+        report.update(macos_architecture='arm64', macos_minimum=mac_record['runtime']['native']['minimum_macos'],
+                      macos_signing=mac_record['runtime']['signing'], macos_notarized=mac_record['runtime']['notarized'])
     for path in sorted(work.iterdir()):
         report['archives'][path.name] = {'bytes': path.stat().st_size, 'sha256': file_digest(path)}
     (work/'release.json').write_text(json.dumps(report, indent=2)+'\n')
@@ -159,4 +246,6 @@ def build(output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path)
-    build(parser.parse_args().output)
+    parser.add_argument('--macos', type=Path, help='Verified Mac ZIP and manifest downloaded from the build host')
+    args=parser.parse_args()
+    build(args.output,args.macos)

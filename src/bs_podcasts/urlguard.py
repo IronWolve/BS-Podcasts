@@ -75,8 +75,10 @@ def _blocked_reason(ip) -> str:
 
 def _addresses(host: str) -> list:
     try:
-        from .netlimits import bounded_call, Deadline, DNS
-        infos = bounded_call(lambda: socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP), Deadline(8), gate=DNS)
+        from .netlimits import bounded_call, Deadline, DNS, PLAYBACK_DNS
+        deadline = Deadline(8)
+        infos = bounded_call(lambda: socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP),
+                             deadline, gate=PLAYBACK_DNS if deadline.foreground else DNS)
     except (OSError, UnicodeError) as exc:
         raise UnsafeUrl(f"Could not resolve {host} safely: {exc}") from exc
     found = []

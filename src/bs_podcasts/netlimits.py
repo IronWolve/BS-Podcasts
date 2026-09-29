@@ -3,10 +3,33 @@ import queue
 import socket
 import threading
 import time
+from contextlib import contextmanager
 
 HEADERS = threading.BoundedSemaphore(12)
 DNS = threading.BoundedSemaphore(16)
 BODIES = threading.BoundedSemaphore(12)
+PLAYBACK_HEADERS = threading.BoundedSemaphore(2)
+PLAYBACK_DNS = threading.BoundedSemaphore(2)
+PLAYBACK_BODIES = threading.BoundedSemaphore(2)
+_context = threading.local()
+
+
+@contextmanager
+def request_scope(cancel_event=None, foreground=False):
+    previous = (getattr(_context, 'cancel', None), getattr(_context, 'foreground', False))
+    _context.cancel, _context.foreground = cancel_event, foreground
+    try:
+        yield
+    finally:
+        _context.cancel, _context.foreground = previous
+
+
+def current_cancel():
+    return getattr(_context, 'cancel', None)
+
+
+def is_foreground():
+    return getattr(_context, 'foreground', False)
 
 
 class NetworkDeadline(TimeoutError):
@@ -14,11 +37,12 @@ class NetworkDeadline(TimeoutError):
 
 
 class Deadline:
-    def __init__(self, seconds, user_cancel=None):
+    def __init__(self, seconds, user_cancel=None, foreground=None):
         self.started = time.monotonic()
         self.expires = self.started + seconds
         self.cancelled = threading.Event()
-        self.user_cancel = user_cancel
+        self.user_cancel = user_cancel if user_cancel is not None else current_cancel()
+        self.foreground = is_foreground() if foreground is None else foreground
 
     def remaining(self):
         if self.cancelled.is_set() or (self.user_cancel is not None and self.user_cancel.is_set()):
@@ -44,7 +68,8 @@ def abort_response(response):
         pass
 
 
-def bounded_call(work, deadline, gate=HEADERS, dispose=None):
+def bounded_call(work, deadline, gate=None, dispose=None):
+    gate = gate if gate is not None else (PLAYBACK_HEADERS if deadline.foreground else HEADERS)
     if not gate.acquire(blocking=False):
         raise NetworkDeadline("Network workers are busy; retry shortly.")
     results = queue.Queue(1)
@@ -92,7 +117,8 @@ def bounded_call(work, deadline, gate=HEADERS, dispose=None):
 
 
 def bounded_chunks(response, original, deadline, maximum, chunk_size, decode_unicode=False):
-    if not BODIES.acquire(blocking=False):
+    gate = PLAYBACK_BODIES if deadline.foreground else BODIES
+    if not gate.acquire(blocking=False):
         abort_response(response)
         raise NetworkDeadline("Network readers are busy; retry shortly.")
     results = queue.Queue(4)
@@ -121,7 +147,7 @@ def bounded_chunks(response, original, deadline, maximum, chunk_size, decode_uni
             except NetworkDeadline:
                 pass
         finally:
-            BODIES.release()
+            gate.release()
 
     threading.Thread(target=read, name="bs-http-body", daemon=True).start()
     finished = False
