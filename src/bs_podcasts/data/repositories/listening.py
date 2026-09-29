@@ -11,8 +11,13 @@ class ListeningRepository:
     def __init__(self, database: Database):
         self.database = database
 
-    def replace_chapters(self, episode_id: int, chapters):
+    def replace_chapters(self, episode_id: int, chapters, *, source_url=None):
         with self.database.connect() as connection:
+            if source_url is not None:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute("SELECT chapters_url FROM episodes WHERE id=?", (episode_id,)).fetchone()
+                if row is None or row[0] != source_url:
+                    return False
             connection.execute("DELETE FROM chapters WHERE episode_id=?", (episode_id,))
             for index, chapter in enumerate(chapters):
                 start, end = media_interval(chapter[0], chapter[1])
@@ -32,6 +37,8 @@ class ListeningRepository:
                     ),
                 )
 
+        return True
+
     def chapters(self, episode_id: int) -> list[Chapter]:
         with self.database.connect() as connection:
             rows = connection.execute(
@@ -50,8 +57,13 @@ class ListeningRepository:
             for row in rows if media_seconds(row["start_seconds"]) is not None
         ]
 
-    def replace_transcript(self, episode_id: int, segments):
+    def replace_transcript(self, episode_id: int, segments, *, source_url=None, source_type=""):
         with self.database.connect() as connection:
+            if source_url is not None:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute("SELECT transcript_url, transcript_type FROM episodes WHERE id=?", (episode_id,)).fetchone()
+                if row is None or tuple(row) != (source_url, source_type):
+                    return False
             connection.execute(
                 "DELETE FROM transcript_segments WHERE episode_id=?", (episode_id,)
             )
@@ -63,6 +75,8 @@ class ListeningRepository:
                        VALUES (?, ?, ?, ?, ?)""",
                     (episode_id, index, start, end, segment[2]),
                 )
+
+        return True
 
     def transcript(self, episode_id: int, query: str = "") -> list[TranscriptSegment]:
         sql = "SELECT * FROM transcript_segments WHERE episode_id=?"
@@ -93,7 +107,7 @@ class ListeningRepository:
                 (episode_id, max(0.0, position), title, time.time()),
             )
             bookmark_id = cursor.lastrowid
-        return next(bookmark for bookmark in self.bookmarks() if bookmark.id == bookmark_id)
+        return self.bookmarks(bookmark_id=bookmark_id)[0]
 
     def delete_bookmark(self, bookmark_id: int):
         with self.database.connect() as connection:
@@ -108,14 +122,17 @@ class ListeningRepository:
         with self.database.connect() as connection:
             connection.execute("UPDATE bookmarks SET title=? WHERE id=?", (title.strip(), bookmark_id))
 
-    def bookmarks(self, episode_id: int | None = None) -> list[Bookmark]:
+    def bookmarks(self, episode_id: int | None = None, *, bookmark_id=None) -> list[Bookmark]:
         sql = (
             "SELECT b.*, e.title AS episode_title, s.title AS show_title "
             "FROM bookmarks b JOIN episodes e ON e.id=b.episode_id "
             "JOIN shows s ON s.id=e.show_id"
         )
         params = ()
-        if episode_id is not None:
+        if bookmark_id is not None:
+            sql += " WHERE b.id=?"
+            params = (bookmark_id,)
+        elif episode_id is not None:
             sql += " WHERE b.episode_id=?"
             params = (episode_id,)
         sql += " ORDER BY b.created_at DESC"

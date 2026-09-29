@@ -1067,7 +1067,7 @@ class Toast(QFrame):
 
     MAX_QUEUE = 3
 
-    def show_message(self, message: str, tone: str = "info", action: str = "", callback=None, duration_ms: int = 3200, on_close=None):
+    def show_message(self, message: str, tone: str = "info", action: str = "", callback=None, duration_ms: int = 3200, on_close=None, owner=None):
         """duration_ms=0 keeps the toast up until dismissed; on_close runs
         only when the person clicks the X, never on programmatic dismissal
         — a sticky progress toast uses it as its cancel affordance."""
@@ -1080,7 +1080,7 @@ class Toast(QFrame):
                 if callback is not None and self.text.text() == message:
                     self._callback = callback
                 return
-            self._queue.append((message, tone, action, callback, duration_ms, on_close))
+            self._queue.append((message, tone, action, callback, duration_ms, on_close, owner))
             del self._queue[:-self.MAX_QUEUE]
             return
         glyph = {"success": "check", "error": "warning", "info": "info", "loading": "refresh"}.get(tone, "info")
@@ -1096,6 +1096,7 @@ class Toast(QFrame):
         self.action.setVisible(bool(action))
         self._callback = callback
         self._on_close = on_close
+        self._owner = owner
         self._closing = False
         self.adjustSize()
         self.reposition()
@@ -1114,14 +1115,26 @@ class Toast(QFrame):
         else:
             self._timer.stop()
 
-    def update_message(self, message: str):
+    def update_message(self, message: str, owner=None):
         """Refresh a visible toast's text in place (progress ticks)."""
+        if owner is not None and getattr(self, "_owner", None) != owner:
+            for index, queued in enumerate(self._queue):
+                if queued[6] == owner:
+                    self._queue[index] = (message, *queued[1:])
+                    return True
+            return False
         if not self.isVisible() or self._closing:
-            return
+            return False
         self.text.setText(message)
         self.setAccessibleName(message)
         self.adjustSize()
         self.reposition()
+        return True
+
+    def dismiss_owner(self, owner):
+        self._queue[:] = [queued for queued in self._queue if queued[6] != owner]
+        if getattr(self, "_owner", None) == owner:
+            self.dismiss()
 
     def reposition(self):
         parent = self.parentWidget()
@@ -1182,7 +1195,7 @@ class Toast(QFrame):
         self._closing = False
         self.hide()
         if self._queue:
-            QTimer.singleShot(120, self, lambda: self.show_message(*self._queue.pop(0)))
+            QTimer.singleShot(120, self, lambda: self.show_message(*self._queue.pop(0)) if self._queue else None)
 
     def _action(self):
         callback = self._callback
@@ -1875,6 +1888,19 @@ class SleepPopover(Popover):
         cancel.setObjectName("textButton")
         cancel.clicked.connect(lambda: self._choose(0))
         layout.addWidget(cancel, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._deadline, self._at_end = None, False
+        self._countdown = QTimer(self)
+        self._countdown.setInterval(1000)
+        self._countdown.timeout.connect(lambda: self.set_deadline(self._deadline, self._at_end))
+
+    def showEvent(self, event):
+        self.set_deadline(self._deadline, self._at_end)
+        self._countdown.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._countdown.stop()
+        super().hideEvent(event)
 
     def _choose(self, minutes: int):
         # -1 means "at the end of this episode"
@@ -1882,6 +1908,7 @@ class SleepPopover(Popover):
         self.hide()
 
     def set_deadline(self, deadline, at_end: bool = False):
+        self._deadline, self._at_end = deadline, at_end
         if at_end:
             self.remaining.setText("Stops at the end of this episode")
             return
@@ -2155,6 +2182,7 @@ class ContextPanel(QFrame):
         self.queue_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.queue_view.doubleClicked.connect(self._queue_activated)
         self.queue_view.activated.connect(self._queue_activated)
+        self.queue_view.clicked.connect(self._queue_clicked)
         queue_layout.addWidget(self.queue_view, 1)
         self.queue_empty = EmptyState("Nothing queued", "Add episodes to Up Next and they play in this order.", glyph="queue")
         queue_layout.addWidget(self.queue_empty, 1)
@@ -2193,9 +2221,21 @@ class ContextPanel(QFrame):
     def mode(self) -> int:
         return self.stack.currentIndex()
 
+    def _queue_clicked(self, index):
+        from PySide6.QtGui import QCursor
+        position = self.queue_view.viewport().mapFromGlobal(QCursor.pos())
+        if index.isValid() and self.queue_view.itemDelegate().play_rect(self.queue_view.visualRect(index)).contains(position):
+            self._queue_activated(index)
+
     def _queue_activated(self, index):
         item = index.data(Qt.ItemDataRole.UserRole + 1)
         if item is not None and item.episode_id:
+            import time
+            now = time.monotonic()
+            last_id, last_time = getattr(self, "_last_queue_activation", (None, 0))
+            if last_id == item.episode_id and now - last_time < 0.25:
+                return
+            self._last_queue_activation = (item.episode_id, now)
             self.play_episode_requested.emit(item.episode_id)
 
     # -- details -------------------------------------------------------------
@@ -2485,6 +2525,9 @@ class ContextPanel(QFrame):
         self._current_item = item
         self.info_button.setEnabled(self.mode() == 0 and item is not None)
         if changed:
+            self.set_chapters([])
+            self.set_transcript([])
+            self.set_bookmarks([])
             self.tabs.setCurrentIndex(0)
             QTimer.singleShot(
                 0, self, lambda: self.selected_scroll.verticalScrollBar().setValue(0)
@@ -2849,6 +2892,16 @@ class NowPlayingView(QFrame):
         self.stats.setVisible(bool(rows))
         self._fit_artwork()
 
+    def prepare_episode(self, episode_id):
+        if getattr(self, "_episode_id", 0) != episode_id:
+            self._episode_id = 0
+            self.chapter_list.clear()
+            self.bookmark_list.clear()
+            self.transcript.clear()
+            self._chapters, self._segments = [], []
+            self._chapter_starts, self._segment_starts = [], []
+            self._current_chapter = self._current_segment = -1
+
     def set_episode(self, snapshot, description: str, chapters, segments, bookmarks, accent: str):
         self._episode_id = snapshot.episode_id or 0
         self._show_id = snapshot.show_id or 0
@@ -2926,7 +2979,7 @@ class NowPlayingView(QFrame):
 
     def _seek_item(self, item):
         position = item.data(Qt.ItemDataRole.UserRole)
-        if position is not None:
+        if position is not None and self._episode_id:
             self.seek_requested.emit(float(position))
 
 
@@ -2948,7 +3001,7 @@ class SearchOverlay(QFrame):
         outer.setContentsMargins(SPACE["xxl"] * 2, SPACE["xxl"], SPACE["xxl"] * 2, SPACE["xxl"])
         self.card = QFrame()
         self.card.setObjectName("popover")
-        self.card.setMinimumWidth(scaled_px(640))
+        self.card.setMinimumWidth(0)
         self.card.setMaximumWidth(scaled_px(760))
         card_layout = QVBoxLayout(self.card)
         card_layout.setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
@@ -2974,7 +3027,8 @@ class SearchOverlay(QFrame):
         card_layout.addWidget(self.results, 1)
         # Say what Enter does per result kind: mixed lists made one bare
         # "open" ambiguous between opening a podcast and playing an episode.
-        self.hint = PlainTextLabel("↑↓ to move  ·  Enter opens podcasts, plays episodes  ·  Esc to close")
+        self.hint = PlainTextLabel("↑↓ to move  ·  Enter opens details  ·  Esc to close")
+        self.hint.setWordWrap(True)
         self.hint.setObjectName("settingHint")
         card_layout.addWidget(self.hint)
         outer.addWidget(self.card, 0, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
@@ -2988,7 +3042,7 @@ class SearchOverlay(QFrame):
 
     def apply_metrics(self):
         self.layout().setContentsMargins(SPACE["xxl"] * 2, SPACE["xxl"], SPACE["xxl"] * 2, SPACE["xxl"])
-        self.card.setMinimumWidth(scaled_px(640))
+        self.card.setMinimumWidth(0)
         self.card.setMaximumWidth(scaled_px(760))
         self.card.layout().setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
         self.card.layout().setSpacing(SPACE["md"])
@@ -3000,6 +3054,15 @@ class SearchOverlay(QFrame):
             if payload and payload[0] in heights:
                 item.setSizeHint(QSize(0, scaled_px(heights[payload[0]])))
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        margin = min(SPACE["xl"], max(4, self.width() // 20))
+        self.layout().setContentsMargins(margin, margin, margin, margin)
+        self.card.setMinimumWidth(0)
+        self.card.setFixedWidth(max(1, min(scaled_px(760), self.width() - 2 * margin)))
+        self.results.setMinimumHeight(0)
+        self.results.setMaximumHeight(max(40, self.height() - scaled_px(170)))
+
     def open(self):
         self.show()
         self.raise_()
@@ -3009,9 +3072,12 @@ class SearchOverlay(QFrame):
             self.set_results([], [], self.field.text().strip())
 
     def _debounce(self, _text):
+        self.results.clear()
+        self._result_query = None
         self._timer.start()
 
     def set_results(self, podcasts, episodes, query: str):
+        self._result_query = query
         self.results.clear()
         if podcasts:
             self._section("PODCASTS")
@@ -3056,6 +3122,8 @@ class SearchOverlay(QFrame):
             self._activate(item)
 
     def _activate(self, item):
+        if getattr(self, "_result_query", None) != self.field.text().strip():
+            return
         payload = item.data(Qt.ItemDataRole.UserRole)
         if not payload:
             return

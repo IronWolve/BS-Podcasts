@@ -103,6 +103,7 @@ def plain_snippet(text: str, limit: int = 240) -> str:
     """One-line plain-text preview of possibly-HTML show notes."""
     if not text:
         return ""
+    text = text[:16384]
     # Strip, unescape, strip again: feeds double-escape markup often enough
     # that unescaping reveals fresh tags ("&lt;b&gt;bold&lt;/b&gt;"), which a
     # single pre-unescape strip left visible as literal angle brackets.
@@ -260,7 +261,7 @@ class EpisodeModel(QAbstractListModel):
         if role == Qt.ItemDataRole.ToolTipRole:
             if not item_tooltips_enabled():
                 return None
-            return _tooltip_html(item.title, item.show, plain_snippet(item.description, 180))
+            return "\n".join(part for part in (item.title, item.show, plain_snippet(item.description, 180)) if part)
         if role == ItemRoles.ITEM:
             return item
         return None
@@ -293,6 +294,23 @@ class EpisodeModel(QAbstractListModel):
     def dropMimeData(self, data, action, row, column, parent):
         if action != Qt.DropAction.MoveAction:
             return False
+        if data.hasFormat(self.IDS_MIME):
+            try:
+                ids = {int(value) for value in bytes(data.data(self.IDS_MIME)).decode("ascii").split(",") if value}
+            except (ValueError, UnicodeError):
+                return False
+            selected = [item for item in self._items if item.episode_id in ids]
+            if selected:
+                destination = row if row >= 0 else parent.row()
+                destination = len(self._items) if destination < 0 else min(destination, len(self._items))
+                before = sum(item.episode_id in ids for item in self._items[:destination])
+                rest = [item for item in self._items if item.episode_id not in ids]
+                insertion = destination - before
+                self.beginResetModel()
+                self._items = rest[:insertion] + selected + rest[insertion:]
+                self.endResetModel()
+                self.order_changed.emit([item.episode_id for item in self._items])
+                return True
         try:
             source = int(bytes(data.data("application/x-bs-podcasts-episode-row")))
         except (TypeError, ValueError):
@@ -739,10 +757,12 @@ class EpisodeDelegate(QStyledItemDelegate):
         # part of the cache key so a settings change doesn't serve stale
         # short snippets.
         limit = max(240, self.SNIPPET_LINES * 130)
-        key = (item.episode_id or id(item), limit, item.description)
+        from hashlib import blake2b
+        bounded = item.description[:16384]
+        key = (item.episode_id or id(item), limit, blake2b(bounded.encode("utf-8"), digest_size=16).digest())
         cached = self._snippets.get(key)
         if cached is None:
-            cached = plain_snippet(item.description, limit)
+            cached = plain_snippet(bounded, limit)
             if item.episode_id:
                 self._snippets[key] = cached
                 if len(self._snippets) > 5000:

@@ -1,5 +1,10 @@
 {
   "format": 1,
+  "public_urls": [
+    "https://github.com/IronWolve/BS-Podcasts",
+    "https://github.com/IronWolve/BS-Podcasts/releases",
+    "https://api.github.com/repos/IronWolve/BS-Podcasts/releases/latest"
+  ],
   "files": [
     ".gitattributes",
     ".gitignore",
@@ -107,6 +112,7 @@
     "src/bs_podcasts/data/migrations/020_observed_duration.sql",
     "src/bs_podcasts/data/migrations/021_latest_episode_delete.sql",
     "src/bs_podcasts/data/migrations/022_finite_listening_times.sql",
+    "src/bs_podcasts/data/migrations/023_cache_sources_latest.sql",
     "src/bs_podcasts/data/repositories/__init__.py",
     "src/bs_podcasts/data/repositories/downloads.py",
     "src/bs_podcasts/data/repositories/library.py",
@@ -226,6 +232,7 @@
     "src/bs_podcasts/data/migrations/020_observed_duration.sql": "app/bs_podcasts/data/migrations/020_observed_duration.sql",
     "src/bs_podcasts/data/migrations/021_latest_episode_delete.sql": "app/bs_podcasts/data/migrations/021_latest_episode_delete.sql",
     "src/bs_podcasts/data/migrations/022_finite_listening_times.sql": "app/bs_podcasts/data/migrations/022_finite_listening_times.sql",
+    "src/bs_podcasts/data/migrations/023_cache_sources_latest.sql": "app/bs_podcasts/data/migrations/023_cache_sources_latest.sql",
     "src/bs_podcasts/data/repositories/__init__.py": "app/bs_podcasts/data/repositories/__init__.py",
     "src/bs_podcasts/data/repositories/downloads.py": "app/bs_podcasts/data/repositories/downloads.py",
     "src/bs_podcasts/data/repositories/library.py": "app/bs_podcasts/data/repositories/library.py",

@@ -29,6 +29,10 @@ if [[ ! -x "$BS_RUNTIME/.venv/bin/python" ]]; then
     printf 'The local environment is incomplete. Preserve/rename dists/linux/.venv and rerun setup.\n' >&2
     exit 1
 fi
+if ! "$BS_RUNTIME/.venv/bin/python" -B -c 'import sys; raise SystemExit(sys.version_info[:3] < (3, 14, 7))'; then
+    printf 'The existing venv uses an older Python. Preserve/rename dists/linux/.venv and rerun setup with Python 3.14.7+.\n' >&2
+    exit 1
+fi
 "$BS_RUNTIME/.venv/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: \
     -r "$BS_RUNTIME/requirements-linux.lock"
 "$BS_RUNTIME/.venv/bin/python" -m pip check

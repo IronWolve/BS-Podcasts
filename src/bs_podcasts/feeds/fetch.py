@@ -28,8 +28,11 @@ class _FeedLinkParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.href = ""
+        self.base = ""
 
     def handle_starttag(self, tag, attrs):
+        if tag.lower() == "base" and not self.base:
+            self.base = dict(attrs).get("href", "") or ""
         if self.href or tag.lower() != "link":
             return
         values = {key.lower(): value for key, value in attrs if value is not None}
@@ -154,7 +157,7 @@ class FeedFetcher:
                     raise FeedFetchError("Feed response exceeds the size limit.")
             content_type = response.headers.get("Content-Type", "").lower()
             discovered = ""
-            head = bytes(body[:512]).lstrip().lower()
+            head = bytes(body[:512]).removeprefix(b"\xef\xbb\xbf").lstrip().lower()
             # Many hosts serve RSS with a text/html Content-Type; a body that
             # is actually XML must parse as a feed, not fail HTML discovery.
             looks_like_xml = head.startswith((b"<?xml", b"<rss", b"<feed", b"<rdf"))
@@ -165,7 +168,7 @@ class FeedFetcher:
                 parser.feed(bytes(body).decode(response.encoding or "utf-8", "replace"))
                 if not parser.href:
                     raise FeedFetchError("HTML page does not advertise a podcast feed.")
-                discovered = urljoin(response.url, parser.href)
+                discovered = urljoin(urljoin(response.url, parser.base), parser.href)
             result = FeedResponse(
                 content=bytes(body),
                 final_url=response.url,

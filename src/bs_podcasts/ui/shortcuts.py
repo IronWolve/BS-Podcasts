@@ -66,3 +66,8 @@ class ShortcutManager:
             name: shortcut.key().toString()
             for name, (shortcut, _default) in self._shortcuts.items()
         }
+
+    def format_hint(self, text: str) -> str:
+        import re
+        choices = {default: shortcut.key().toString() for shortcut, default in self._shortcuts.values()}
+        return re.sub(r"Ctrl\+(?:Shift\+)?[A-Za-z0-9]+", lambda match: choices.get(match.group(), match.group()), text)

@@ -93,6 +93,11 @@ def build(workspace):
         '--archive',archive,'--output',manifest)
     if source_digest(ROOT)!=source_digest(snapshot): raise RuntimeError('Source changed during build.')
     target=workspace/'dists/macos'; target.mkdir(parents=True,exist_ok=True)
+    executable=target/app.name/'Contents/MacOS/BS Podcasts'
+    if executable.exists():
+        opened=subprocess.run(['/usr/sbin/lsof','-t',str(executable)],capture_output=True,text=True)
+        if opened.returncode not in (0,1) or opened.stdout.strip():
+            raise RuntimeError('Close the target Mac application before replacing it. The completed build remains at '+str(app))
     previous=workspace/'.cache/previous-deployments'/work.name; previous.mkdir(parents=True)
     paths=[(app,target/app.name),(archive,target/archive.name),(manifest,target/manifest.name)]
     retired=[]; published=[]

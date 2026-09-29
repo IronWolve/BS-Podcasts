@@ -108,7 +108,7 @@ class RefreshService:
 
             feed = parse_feed(response.content, base_url=response.final_url)
             imported = self.repository.import_feed(show_id, feed)
-            health = Health.OK if feed.episodes else Health.PARTIAL
+            health = Health.OK if feed.episodes and not feed.truncated else Health.PARTIAL
             self.repository.record_refresh_success(
                 show_id,
                 health,
@@ -119,9 +119,11 @@ class RefreshService:
 
             artwork_path = self._refresh_artwork(show_id, feed.artwork_url, show.artwork_path)
             message = ""
+            if feed.truncated:
+                message = "This large feed was limited to 5,000 episodes; older episodes may be unavailable."
             if health == Health.PARTIAL and feed.skipped_video:
                 n = feed.skipped_video
-                message = f"{n} episode{'s are' if n != 1 else ' is'} video-only and {'were' if n != 1 else 'was'} skipped; this app plays audio."
+                message += (" " if message else "") + f"{n} episode{'s are' if n != 1 else ' is'} video-only and {'were' if n != 1 else 'was'} skipped; this app plays audio."
             return RefreshReport(show_id, health, imported=imported, message=message, artwork_path=artwork_path)
         except (FeedFetchError, FeedParseError) as exc:
             health = self.repository.record_refresh_failure(show_id)

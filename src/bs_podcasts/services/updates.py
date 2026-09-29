@@ -5,6 +5,7 @@ import re
 
 from ..config import RELEASES_API_URL
 from ..net import make_session
+from ..urlguard import ensure_web_url
 
 
 @dataclass(frozen=True)
@@ -23,19 +24,27 @@ def _version_key(value: str):
 def check_for_update(installed: str, session=None) -> UpdateResult:
     if not RELEASES_API_URL:
         raise RuntimeError("No release service is configured for this distribution.")
-    response = (session or make_session()).get(RELEASES_API_URL, timeout=(5, 12))
-    if response.status_code == 404:
-        # GitHub's latest-release API returns 404 both for "no release
-        # published yet" and "repository not public". Either way there is
-        # nothing to update to — that is an answer, not an error, and must
-        # not surface as a raw "404 Client Error" or point users at a 404
-        # release page.
-        return UpdateResult(installed, "", False, "", "")
-    response.raise_for_status()
-    payload = response.json()
+    owned = session is None
+    client = session if session is not None else make_session(max_response_bytes=1024 * 1024, total_timeout=20)
+    response = None
+    try:
+        response = client.get(RELEASES_API_URL, timeout=(5, 12))
+        if response.status_code == 404:
+            return UpdateResult(installed, "", False, "", "")
+        response.raise_for_status()
+        payload = response.json()
+    finally:
+        if response is not None:
+            response.close()
+        if owned:
+            client.close()
+    if not isinstance(payload, dict):
+        raise RuntimeError("The release service returned an invalid response.")
     available = str(payload.get("tag_name") or payload.get("name") or "").lstrip("v")
-    if not available:
-        raise RuntimeError("The latest release has no version number.")
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", available):
+        raise RuntimeError("The latest release has no valid version number.")
     notes = str(payload.get("body") or "").strip()
     url = str(payload.get("html_url") or "")
+    if url:
+        url = ensure_web_url(url, "Release page")
     return UpdateResult(installed, available, _version_key(available) > _version_key(installed), notes, url)

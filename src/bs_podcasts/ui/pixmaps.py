@@ -264,11 +264,12 @@ def _target_reader(path: str, width: int, height: int) -> QImageReader:
     reader.setAutoTransform(True)
     source_size = reader.size()
     if source_size.isValid() and source_size.width() > 0 and source_size.height() > 0:
-        factor = max(width / source_size.width(), height / source_size.height())
+        factor = min(max(width / source_size.width(), height / source_size.height()),
+                     2048 / max(source_size.width(), source_size.height()), 1.0)
         reader.setScaledSize(
             QSize(
-                max(width, math.ceil(source_size.width() * factor)),
-                max(height, math.ceil(source_size.height() * factor)),
+                max(1, math.ceil(source_size.width() * factor)),
+                max(1, math.ceil(source_size.height() * factor)),
             )
         )
     return reader
@@ -276,7 +277,13 @@ def _target_reader(path: str, width: int, height: int) -> QImageReader:
 
 def _read_image(path: str, width: int, height: int) -> QImage:
     """Decode near the painted size. Safe on any thread (QImage, not QPixmap)."""
-    return _target_reader(path, width, height).read()
+    image = _target_reader(path, width, height).read()
+    if image.isNull():
+        return image
+    crop_w = min(image.width(), max(1, round(image.height() * width / max(1, height))))
+    crop_h = min(image.height(), max(1, round(image.width() * height / max(1, width))))
+    image = image.copy((image.width() - crop_w) // 2, (image.height() - crop_h) // 2, crop_w, crop_h)
+    return image.scaled(width, height, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
 
 # --- asynchronous decode -----------------------------------------------------

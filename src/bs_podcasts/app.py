@@ -6,7 +6,7 @@ import sys
 import threading
 import sqlite3
 
-from PySide6.QtCore import QCoreApplication, QTimer
+from PySide6.QtCore import QCoreApplication, QTimer, Qt
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 import getpass
 from PySide6.QtGui import QIcon
@@ -24,7 +24,7 @@ from .feeds import FeedFetcher, RefreshService
 from .jobs import JobRunner
 from .jobs.commands import CommandQueue
 from .logging_setup import configure_logging
-from .playback import ExternalPlayerEngine, LazyMpvEngine, PlaybackService
+from .playback import LazyMpvEngine, PlaybackService
 from .services import LibraryService, ListeningService
 from .ui.shell import MainWindow
 from .ui.theme import app_font, apply_app_stylesheet, apply_theme, apply_typography, load_fonts, resolve_theme
@@ -312,11 +312,7 @@ def main() -> int:
     )
     directory = DirectoryService([PublicDirectory()])
     logger = logging.getLogger("bs_podcasts")
-    try:
-        engine = LazyMpvEngine()
-    except Exception as exc:
-        logger.warning("Internal playback unavailable; using external player: %s", exc)
-        engine = ExternalPlayerEngine()
+    engine = LazyMpvEngine()
     listening_repository = ListeningRepository(database)
     listening = ListeningService(listening_repository)
     playback = PlaybackService(repository, engine, listening=listening_repository)
@@ -421,7 +417,8 @@ def main() -> int:
             socket.deleteLater()
         window = state["window"]
         if window is not None:
-            window.showNormal()
+            window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
+            window.show()
             window.raise_()
             window.activateWindow()
 

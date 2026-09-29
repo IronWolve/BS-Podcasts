@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+from functools import lru_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -64,6 +65,33 @@ def source_digest(root=ROOT):
     return hashlib.sha256(json.dumps(records,separators=(',',':')).encode()).hexdigest()
 
 
+@lru_cache(maxsize=4)
+def _public_url_patterns(root):
+    from urllib.parse import urlsplit
+    urls = json.loads((Path(root) / 'source-manifest.json').read_text()).get('public_urls', [])
+    if not isinstance(urls, list) or any(not isinstance(url, str) for url in urls):
+        raise ValueError('Public URL approvals must be an explicit list.')
+    patterns = []
+    for url in sorted(urls, key=len, reverse=True):
+        parts = urlsplit(url)
+        if (parts.scheme != 'https' or parts.netloc not in {'github.com', 'api.github.com'}
+                or parts.query or parts.fragment or '..' in parts.path.split('/')):
+            raise ValueError('Public URL approvals must be canonical HTTPS GitHub project links.')
+        for encoding in ('utf-8', 'utf-16-le', 'utf-16-be'):
+            ending = b'|'.join(re.escape(c.encode(encoding)) for c in (' ', '\n', '\r', '\t', '"', "'", ')', ']', '}', ',', ';', '\0'))
+            needle = url.encode(encoding)
+            patterns.append((needle, re.compile(re.escape(needle) + b'(?=$|' + ending + b')')))
+    return patterns
+
+
+def privacy_scan_bytes(raw, root=ROOT):
+    """Exclude only approved complete public URLs, never bare account names."""
+    for needle, pattern in _public_url_patterns(str(root)):
+        if needle in raw:
+            raw = pattern.sub(b'[approved-public-project]', raw)
+    return raw
+
+
 def check(root=ROOT):
     root = Path(root).resolve()
     files, _ = inventory(root)
@@ -73,7 +101,8 @@ def check(root=ROOT):
     failures = []
     for name in files:
         raw = (root/name).read_bytes()
-        if any(value.encode() in raw for value in denied):
+        private_view = privacy_scan_bytes(raw, root)
+        if any(value.encode() in private_view for value in denied):
             failures.append(name)
             continue
         text = raw.decode('utf-8', 'replace')

@@ -27,6 +27,19 @@ if not stat.S_ISREG(os.fstat(fd).st_mode):
 try:
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
+    from PySide6.QtCore import QCoreApplication
+    from PySide6.QtNetwork import QLocalSocket
+    import getpass
+    sys.path.insert(0, os.path.dirname(runner)+"/app")
+    from bs_podcasts.config import APP_ID
+    app = QCoreApplication([])
+    socket = QLocalSocket()
+    socket.connectToServer(APP_ID+"-"+getpass.getuser())
+    if socket.waitForConnected(1000):
+        socket.write(b"raise")
+        socket.waitForBytesWritten(1000)
+        socket.disconnectFromServer()
+        raise SystemExit(0)
     raise SystemExit("BS Podcasts is running or deployment is busy; use --status or retry.")
 os.set_inheritable(fd, True)
 os.environ["BS_PODCASTS_RUNTIME_LOCK_FD"] = str(fd)

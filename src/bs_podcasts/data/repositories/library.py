@@ -29,6 +29,7 @@ class LibraryRepository:
         self.database = database
         self._settings_cache: dict[str, str] | None = None
         self._settings_lock = threading.Lock()
+        self._settings_write_lock = threading.Lock()
         self._settings_pending = {}
         self._settings_revision = 0
 
@@ -541,20 +542,17 @@ class LibraryRepository:
                 (show_id,),
             )
 
-    def set_artwork_path(self, show_id: int, path: str):
+    def set_artwork_path(self, show_id: int, path: str, *, expected_url=None):
         with self.database.connect() as connection:
-            connection.execute("UPDATE shows SET artwork_path=? WHERE id=?", (path, show_id))
+            if expected_url is None:
+                cursor = connection.execute("UPDATE shows SET artwork_path=? WHERE id=?", (path, show_id))
+            else:
+                cursor = connection.execute("UPDATE shows SET artwork_path=? WHERE id=? AND artwork_url=?", (path, show_id, expected_url))
+            return bool(cursor.rowcount)
 
     def set_setting(self, key: str, value: str):
-        with self.database.connect() as connection:
-            connection.execute(
-                "INSERT INTO settings(key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, value),
-            )
-        with self._settings_lock:
-            if self._settings_cache is not None:
-                self._settings_cache[key] = value
+        values = {key: value}
+        self.persist_settings(values, self.stage_settings(values))
 
     def invalidate_settings_cache(self):
         """Drop the cache after anything replaces the database file (repair)."""
@@ -570,16 +568,21 @@ class LibraryRepository:
             return {key: revision for key in values}
 
     def persist_settings(self, values, revisions=None):
-        with self.database.connect() as connection:
-            connection.executemany(
-                "INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                values.items())
-        with self._settings_lock:
-            if self._settings_cache is not None:
-                self._settings_cache.update(values)
-            for key, value in values.items():
-                if revisions is not None and self._settings_pending.get(key) == (revisions.get(key), value):
-                    self._settings_pending.pop(key, None)
+        with self._settings_write_lock:
+            with self._settings_lock:
+                if revisions is not None:
+                    values = {key: value for key, value in values.items()
+                              if self._settings_pending.get(key) == (revisions.get(key), value)}
+            with self.database.connect() as connection:
+                connection.executemany(
+                    "INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    values.items())
+            with self._settings_lock:
+                if self._settings_cache is not None:
+                    self._settings_cache.update(values)
+                for key, value in values.items():
+                    if revisions is not None and self._settings_pending.get(key) == (revisions.get(key), value):
+                        self._settings_pending.pop(key, None)
 
     def get_setting(self, key: str, default: str = "") -> str:
         # Settings are read on hot paths (startup wiring, every scheduler tick);
@@ -625,12 +628,14 @@ class LibraryRepository:
 
     def reorder_queue(self, episode_ids: list[int]):
         with self.database.connect() as connection:
-            existing = {
+            existing = [
                 row["episode_id"]
-                for row in connection.execute("SELECT episode_id FROM queue").fetchall()
-            }
-            requested = [episode_id for episode_id in episode_ids if episode_id in existing]
-            requested.extend(sorted(existing - set(requested)))
+                for row in connection.execute("SELECT episode_id FROM queue ORDER BY position").fetchall()
+            ]
+            requested = list(dict.fromkeys(episode_id for episode_id in episode_ids if episode_id in existing))
+            visible = set(requested)
+            reordered = iter(requested)
+            requested = [next(reordered) if episode_id in visible else episode_id for episode_id in existing]
             for position, episode_id in enumerate(requested, start=1):
                 connection.execute(
                     "UPDATE queue SET position=? WHERE episode_id=?",
@@ -721,6 +726,10 @@ class LibraryRepository:
         self.reorder_queue([episode_id] + ids)
 
     _PLAYED_FIELDS = ("played", "is_new", "position_seconds", "last_played")
+
+    def new_episode_ids(self):
+        with self.database.connect() as connection:
+            return [row[0] for row in connection.execute("SELECT id FROM episodes WHERE is_new=1")]
 
     def mark_played_with_undo(self, episode_ids, played: bool = True, show_id=None):
         """Change and snapshot in one transaction; Undo never guesses old state."""
