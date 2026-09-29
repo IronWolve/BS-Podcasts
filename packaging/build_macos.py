@@ -66,6 +66,9 @@ def build(workspace):
     run(sys.executable,'-B','-m','PyInstaller','--noconfirm','--clean','--distpath',work/'bundle',
         '--workpath',work/'work',snapshot/'packaging/bs-podcasts-macos.spec',cwd=work)
     app=work/'bundle/BS Podcasts.app'
+    for path in app.rglob('*'):
+        if path.is_symlink() and (not path.exists() or not path.resolve().is_relative_to(app.resolve())):
+            raise RuntimeError('Broken or escaping bundle link: '+str(path.relative_to(app)))
     run('codesign','--verify','--deep','--strict',app)
     run(sys.executable,'-B',snapshot/'packaging/check_frozen.py',app,'--private-root',workspace)
     for path in app.rglob('*'):
