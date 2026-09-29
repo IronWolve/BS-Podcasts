@@ -376,6 +376,7 @@ class MainWindow(QMainWindow):
 
         self.player = PlayerBar()
         self.player.context_requested.connect(self._toggle_queue)
+        self.player.minimize_to_tray_requested.connect(self._minimize_to_tray)
         self.player.now_playing_requested.connect(self._show_now_playing)
         self.player.podcast_requested.connect(self._open_playing_podcast)
         self.player.information_requested.connect(self._show_playing_information)
@@ -6210,6 +6211,23 @@ class MainWindow(QMainWindow):
         super().moveEvent(event)
         self._layout_save_timer.start()
 
+    def _tray_is_available(self):
+        controller = getattr(self, "tray", None)
+        available = bool(controller is not None and controller.available)
+        self.player.set_tray_available(available)
+        return available
+
+    def _minimize_to_tray(self):
+        if not self._tray_is_available():
+            self._notify("No system tray is available. Use the normal minimize button instead.", "info")
+            return
+        for popover in (self.player.speed_popover, self.player.sleep_popover, self.player.volume_popover):
+            popover.hide()
+        self.hide()
+        if not self._close_to_tray_notice_shown:
+            self._close_to_tray_notice_shown = True
+            self.tray.notify(APP_NAME, "Still running. Click the tray icon or choose Show BS Podcasts to return.")
+
     def _request_quit(self):
         """Explicit Quit (shortcut, tray, MPRIS) exits even when window-close
         is configured to hide to the tray."""
@@ -6222,13 +6240,10 @@ class MainWindow(QMainWindow):
             and not self._keep_services
             and self.library is not None
             and self.library.setting("ui.close_to_tray", "0") == "1"
-            and getattr(getattr(self, "tray", None), "tray", None) is not None
+            and self._tray_is_available()
         ):
             event.ignore()
-            self.hide()
-            if not self._close_to_tray_notice_shown:
-                self._close_to_tray_notice_shown = True
-                self.tray.notify(APP_NAME, "Still running in the tray. Choose Quit there to exit.")
+            self._minimize_to_tray()
             return
         if not self._keep_services and self.commands is not None:
             if not getattr(self, "_quit_drain_started", 0):

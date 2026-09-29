@@ -364,6 +364,7 @@ def main() -> int:
             from .integrations import TrayController
 
             window.tray = TrayController(window, playback)
+            window.player.set_tray_available(window.tray.available)
             _mark("tray")
             from .integrations import MprisController
 

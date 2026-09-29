@@ -3172,6 +3172,7 @@ class SearchOverlay(QFrame):
 
 class PlayerBar(QFrame):
     context_requested = Signal()
+    minimize_to_tray_requested = Signal()
     now_playing_requested = Signal()
     podcast_requested = Signal()  # the show name was clicked: open its episode list
     play_pause_requested = Signal()
@@ -3360,9 +3361,16 @@ class PlayerBar(QFrame):
         self.volume_popover.volume_changed.connect(self.volume_requested)
         self.volume.clicked.connect(self._show_volume)
         self.volume.installEventFilter(self)
+        self.tray_button = icon_button("minimize-tray", "Minimize to tray — keep playing")
+        self.tray_button.setAccessibleName("Minimize to tray")
+        self.tray_button.clicked.connect(self.minimize_to_tray_requested)
+        self.set_tray_available(False)
         tools.addStretch(1)
         for widget in (self.speed, self.bookmark, self.ab, self.trim, self.sleep, self.queue, self.volume):
             tools.addWidget(widget)
+        tools.addSpacing(SPACE["sm"])
+        self._tray_gap = tools.itemAt(tools.count() - 1).spacerItem()
+        tools.addWidget(self.tray_button)
         tools.setContentsMargins(0, 0, 0, 0)
         tools_wrap = QWidget()
         tools_wrap.setLayout(tools)
@@ -3373,6 +3381,13 @@ class PlayerBar(QFrame):
         self._refresh_chrome()
 
     # -- configuration -----------------------------------------------------
+    def set_tray_available(self, available: bool):
+        self.tray_button.setEnabled(available)
+        hint = ("Minimize to tray — keep playing" if available
+                else "Minimize to tray unavailable — no system tray")
+        self.tray_button.setToolTip(hint)
+        self.tray_button.setAccessibleDescription(hint)
+
     def set_skip_values(self, back: int, forward: int):
         self._skip_back = int(back)
         self._skip_forward = int(forward)
@@ -3574,8 +3589,10 @@ class PlayerBar(QFrame):
         self.forward.setIconSize(QSize(skip, skip))
         play = scaled_px(22)
         self.play.setIconSize(QSize(play, play))
-        for button in (self.next, self.bookmark, self.ab, self.trim, self.sleep, self.queue, self.volume):
+        for button in (self.next, self.bookmark, self.ab, self.trim, self.sleep, self.queue, self.volume, self.tray_button):
             button.setIconSize(QSize(skip, skip))
+        self._tray_gap.changeSize(SPACE["sm"], 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+        self.tools_wrap.layout().invalidate()
         self.volume_popover.apply_metrics()
 
     def set_capabilities(self, capabilities):

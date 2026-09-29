@@ -66,7 +66,7 @@ class TrayController:
         menu.addSeparator()
         menu.addAction(quit_action)
         tray.setContextMenu(menu)
-        tray.activated.connect(lambda _reason: self._show_window())
+        tray.activated.connect(self._activated)
         tray.messageClicked.connect(self._message_clicked)
         tray.show()
         self.tray = tray
@@ -76,6 +76,14 @@ class TrayController:
             self._connected = True
         if playback is not None:
             self._playback_changed(playback.snapshot)
+
+    @property
+    def available(self):
+        return self.tray is not None and self.tray.isVisible() and QSystemTrayIcon.isSystemTrayAvailable()
+
+    def _activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self._show_window()
 
     def _playback_changed(self, snapshot):
         if self.tray is None:
