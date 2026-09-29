@@ -23,8 +23,11 @@ function Publish-Application {
         New-Item -ItemType Directory -Path $incoming | Out-Null
         Copy-Item -LiteralPath $Application -Destination (Join-Path $incoming $names[0]) -Recurse
         Copy-Item -LiteralPath $Manifest -Destination (Join-Path $incoming $names[1])
-        if (Get-Process -Name "BS Podcasts" -ErrorAction SilentlyContinue) {
-            throw "Close BS Podcasts before replacing it. The verified new build is retained at $incoming."
+        $applicationPath = (Join-Path $Target "BS Podcasts") + "\"
+        foreach ($process in (Get-Process -Name "BS Podcasts" -ErrorAction SilentlyContinue)) {
+            if (-not $process.Path -or $process.Path.StartsWith($applicationPath, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Close this copy of BS Podcasts before replacing it. The verified new build is retained at $incoming."
+            }
         }
         New-Item -ItemType Directory -Path $previous | Out-Null
         try {
@@ -72,8 +75,8 @@ if (-not $CheckRoot) {
         $privateBuild = Join-Path $workspace ".config\build.json"
         if (Test-Path -LiteralPath $privateBuild) {
             $configured = Get-Content -LiteralPath $privateBuild -Raw | ConvertFrom-Json
-            if ($configured.windows_copy_destination) {
-                $CheckRoot = Join-Path $configured.windows_copy_destination "audit-tmp"
+            if ($configured.windows_check_root) {
+                $CheckRoot = $configured.windows_check_root
             }
         }
     } else {
@@ -81,7 +84,7 @@ if (-not $CheckRoot) {
     }
 }
 if (-not $CheckRoot -or $CheckRoot -notmatch '^[A-Za-z]:[\\/]') {
-    throw "Use -CheckRoot on your local Windows project drive; SQLite checks cannot use a WSL/network share."
+    throw "Set an explicitly approved -CheckRoot or private windows_check_root on a local Windows drive; it is never inferred from the app-copy destination."
 }
 
 if (-not $LibMpvDll) {

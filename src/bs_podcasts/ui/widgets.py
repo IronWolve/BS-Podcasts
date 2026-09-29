@@ -1,6 +1,7 @@
 """Reusable shell components."""
 
 from bisect import bisect_right
+from dataclasses import replace
 from functools import lru_cache
 from html import escape as html_escape, unescape as html_unescape
 from html.parser import HTMLParser
@@ -53,6 +54,7 @@ from ..assets import icon_path
 from ..domain.times import media_seconds
 from ..urlguard import is_web_url
 from . import icons
+from .models import Podcast
 from .pixmaps import cover, initials
 from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, play_button_size, scaled_px, theme_name
 
@@ -2242,6 +2244,18 @@ class ContextPanel(QFrame):
             self.bookmark_list.addItem(placeholder)
         self.tabs.setTabToolTip(3, f"{len(bookmarks)} bookmark{'s' if len(bookmarks) != 1 else ''}")
 
+    def update_podcast_artwork(self, podcast):
+        current = self._current_item
+        if not isinstance(current, Podcast) or (
+            current.show_id, current.feed_url, current.title
+        ) != (podcast.show_id, podcast.feed_url, podcast.title):
+            return
+        self._set_current_item(replace(
+            current, artwork_path=podcast.artwork_path,
+            artwork_url=podcast.artwork_url, accent=podcast.accent,
+        ))
+        self.art.set_artwork(podcast.artwork_path, initials(podcast.author if podcast.is_episode else podcast.title), podcast.accent)
+
     def show_podcast(self, podcast):
         self._set_current_item(podcast)
         self.set_mode(0)
@@ -3521,7 +3535,9 @@ class PlayerBar(QFrame):
         loading = getattr(self, "_loading", False)
         buffering = getattr(self, "_buffering", None)
         streaming = getattr(self, "_streaming", False)
-        if loading:
+        if getattr(self, '_download_wait', False):
+            text = "Downloading before playing…" if loading else "Download playback paused"
+        elif loading:
             text = "Opening stream…" if streaming else "Opening…"
         elif buffering is not None:
             text = f"Buffering {int(buffering)}%" if buffering else "Buffering…"
@@ -3644,6 +3660,7 @@ class PlayerBar(QFrame):
             snapshot.ab_end, snapshot.trim_level, snapshot.sleep_deadline,
             snapshot.artwork_path, snapshot.message, snapshot.buffering, snapshot.duration,
             getattr(snapshot, "sleep_at_end", False),
+            getattr(snapshot, "download_request", 0),
         )
         if chrome_key == getattr(self, "_chrome_key", None):
             position = media_seconds(snapshot.position) or 0.0
@@ -3655,6 +3672,7 @@ class PlayerBar(QFrame):
             self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
             return
         self._chrome_key = chrome_key
+        self._download_wait = bool(getattr(snapshot, 'download_request', 0))
         # Identifies the loaded track for the seek-drag guard. Source is part
         # of it because a directory preview has no durable episode id.
         self._track_key = (snapshot.episode_id, snapshot.source)
