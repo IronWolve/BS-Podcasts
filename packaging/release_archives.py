@@ -83,7 +83,7 @@ def third_party_files():
                 raise ValueError('Third-party source differs from its lock: '+name)
             files['archives/'+name]=path.read_bytes()
     for name in ('build-libmpv-lgpl.sh','build-libmpv-linux.sh','build-libmpv-macos.sh',
-                 'native_sources.py','requirements-macos-native.lock','licenses/LIBRARY-REPLACEMENT.txt'):
+                 'native_sources.py','mpv-coreaudio-only.patch','requirements-macos-native.lock','licenses/LIBRARY-REPLACEMENT.txt'):
         files['packaging/'+name]=(ROOT/'packaging'/name).read_bytes()
     files['README.txt']=(
         'Corresponding sources for this BS Podcasts release. Preserve and publish this archive beside the binaries.\n'
@@ -93,7 +93,8 @@ def third_party_files():
         'Prepare the documented project-local Python/compiler tools first; recipes never install tools globally.\n'
         'Windows uses MinGW GCC; Linux uses GCC plus ALSA/PulseAudio development libraries; macOS uses Xcode,\n'
         'pkgconf 2.5.1 and packaging/requirements-macos-native.lock in the local Mac build environment.\n'
-        'Recipes disable GPL/nonfree features and remap generated build-path strings; upstream code is unmodified.\n'
+        'Recipes disable GPL/nonfree features and remap generated build-path strings.\n'
+        'The Mac recipe applies the included mpv-coreaudio-only.patch to meson.build (change dated 2026-09-28); other upstream code is unmodified.\n'
         'Qt/Qt for Python archives include upstream build instructions and all original license texts.\n'
         'See packaging/licenses/LIBRARY-REPLACEMENT.txt for replacement and signature instructions.\n').encode()
     return files
@@ -105,6 +106,7 @@ def verify_macos(folder, version, origin):
         raise ValueError('macOS build is stale, dirty or from a different commit.')
     native=record['runtime']['native']
     if (native['recipe_sha256']!=file_digest(ROOT/'packaging/build-libmpv-macos.sh')
+            or native.get('patch_sha256')!=file_digest(ROOT/'packaging/mpv-coreaudio-only.patch')
             or native['extra_inputs_sha256']!=file_digest(ROOT/'packaging/native-sources-macos.json')
             or native['inputs']!=json.loads((ROOT/'packaging/native-sources.json').read_text())
             or native['extra_inputs']!=json.loads((ROOT/'packaging/native-sources-macos.json').read_text())):

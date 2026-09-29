@@ -21,6 +21,7 @@ trap 'rm -f -- "$BS_LIST"' EXIT
 printf '.build-origin.json\0' >> "$BS_LIST"
 printf 'Syncing approved source to %s:%s/repo\n' "${BS_REMOTE[0]}" "${BS_REMOTE[1]}"
 ssh "${BS_REMOTE[0]}" "mkdir -p -- ${BS_REMOTE[2]}"
-rsync -a --protect-args --from0 --files-from="$BS_LIST" --itemize-changes \
-    "$BS_SNAPSHOT/source/" "${BS_REMOTE[0]}:${BS_REMOTE[1]}/repo/"
+# Both GNU tar and macOS bsdtar support this manifest-only archive stream.
+tar -C "$BS_SNAPSHOT/source" --null -T "$BS_LIST" -cf - | \
+    ssh "${BS_REMOTE[0]}" "tar -C ${BS_REMOTE[2]} -xf -"
 printf 'Source synced. No remote build or service was started.\n'

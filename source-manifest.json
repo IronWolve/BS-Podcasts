@@ -41,6 +41,7 @@
     "packaging/macos-entitlements.plist",
     "packaging/native-sources-macos.json",
     "packaging/native-sources.json",
+    "packaging/mpv-coreaudio-only.patch",
     "packaging/native_sources.py",
     "packaging/project-build.sh",
     "packaging/project-start.sh",

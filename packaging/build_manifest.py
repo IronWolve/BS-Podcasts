@@ -110,6 +110,7 @@ def create_manifest(artifact, archive=None, require_clean=False):
         if (receipt['sha256']!=digest(receipt_path.with_name('libmpv.2.dylib'))
                 or receipt['inputs_sha256']!=digest(lock)
                 or receipt.get('extra_inputs_sha256')!=digest(ROOT/'packaging/native-sources-macos.json')
+                or receipt.get('patch_sha256')!=digest(ROOT/'packaging/mpv-coreaudio-only.patch')
                 or receipt['recipe_sha256']!=digest(ROOT/'packaging/build-libmpv-macos.sh')):
             raise ValueError('macOS native build receipt mismatch.')
         # PyInstaller rewrites Mach-O install names and signatures during bundling.
@@ -117,6 +118,7 @@ def create_manifest(artifact, archive=None, require_clean=False):
             'sha256':digest(native),'input_sha256':receipt['sha256'],'inputs':json.loads(lock.read_text()),
             'recipe_sha256':receipt['recipe_sha256'],'minimum_macos':receipt['minimum_macos'],
             'extra_inputs':json.loads((ROOT/'packaging/native-sources-macos.json').read_text()),
+            'patch_sha256':receipt['patch_sha256'],
             'extra_inputs_sha256':receipt['extra_inputs_sha256']}
         result['runtime']['signing']='Developer ID' if os.environ.get('BS_PODCASTS_SIGN_IDENTITY') else 'ad-hoc'
         result['runtime']['notarized']=False

@@ -39,6 +39,7 @@ def main():
         with zipfile.ZipFile(archive,'w') as bundle:
             bundle.writestr('BS Podcasts.app/'+native_file,payload)
         native={'file':native_file,'sha256':digest,'recipe_sha256':source_manifest.file_digest(ROOT/'packaging/build-libmpv-macos.sh'),
+                'patch_sha256':source_manifest.file_digest(ROOT/'packaging/mpv-coreaudio-only.patch'),
                 'extra_inputs_sha256':source_manifest.file_digest(ROOT/'packaging/native-sources-macos.json'),
                 'inputs':json.loads((ROOT/'packaging/native-sources.json').read_text()),
                 'extra_inputs':json.loads((ROOT/'packaging/native-sources-macos.json').read_text())}
