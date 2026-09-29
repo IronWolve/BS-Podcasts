@@ -33,6 +33,7 @@
 # Approved source, tests, assets/licenses and reproducible build metadata.
 !/.gitignore
 !/.gitattributes
+!/README.md
 !/packaging/THIRD-PARTY-NOTICES.txt
 !/packaging/branding/bs-podcasts-icon-master.png
 !/packaging/bs-podcasts.desktop

@@ -3,6 +3,7 @@
   "files": [
     ".gitattributes",
     ".gitignore",
+    "README.md",
     "packaging/THIRD-PARTY-NOTICES.txt",
     "packaging/branding/bs-podcasts-icon-master.png",
     "packaging/bs-podcasts-macos.spec",
