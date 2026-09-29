@@ -243,6 +243,7 @@ class LibraryRepository:
                        transcript_url=excluded.transcript_url,
                        transcript_type=excluded.transcript_type,
                        chapters_url=excluded.chapters_url,
+                       episode_artwork_path=CASE WHEN episodes.artwork_url!=excluded.artwork_url THEN '' ELSE episodes.episode_artwork_path END,
                        artwork_url=excluded.artwork_url,
                        website_url=excluded.website_url,
                        author=excluded.author,
@@ -660,9 +661,12 @@ class LibraryRepository:
                 "UPDATE episodes SET observed_duration_seconds=? WHERE id=?",
                 (max(1, round(seconds)), episode_id))
 
-    def set_episode_artwork_path(self, episode_id: int, path: str):
+    def set_episode_artwork_path(self, episode_id: int, path: str, expected_url: str | None = None):
         with self.database.connect() as connection:
-            connection.execute("UPDATE episodes SET episode_artwork_path=? WHERE id=?", (path, episode_id))
+            if expected_url is None:
+                return connection.execute("UPDATE episodes SET episode_artwork_path=? WHERE id=?", (path, episode_id)).rowcount
+            return connection.execute("UPDATE episodes SET episode_artwork_path=? WHERE id=? AND artwork_url=?",
+                                      (path, episode_id, expected_url)).rowcount
 
     def set_favorite(self, episode_id: int, favorite: bool = True) -> bool:
         with self.database.connect() as connection:

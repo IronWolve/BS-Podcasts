@@ -23,13 +23,14 @@ your player.
 
 ![BS Podcasts showing episodes, details and paused playback controls](media/screenshots/episodes.png)
 
-*Screenshots show the app with an example library.*
+*Screenshots show an isolated example library using real comedy/humor audio
+feeds and public-domain cover art from [LibriVox](https://librivox.org/pages/public-domain/).*
 
 ## Features
 
 - **Your subscriptions:** add podcast feeds or import and export OPML.
 - **Listen your way:** stream episodes or download them for offline listening.
-- **Keep things organized:** Up Next, playlists, folders and favorites.
+- **Keep things organized:** Up Next and favorites.
 - **Stay in control:** playback speed, skip controls and a sleep timer.
 - **Find your place:** listening history, saved progress and bookmarks.
 - **Go deeper:** chapters and transcripts when the podcast provides them.
@@ -39,7 +40,7 @@ your player.
 ## Download and run
 
 Choose the package for your operating system from the repository's **Releases**
-page. Current version: **0.9.10**.
+page. Current version: **0.9.11**.
 
 | Platform | Getting started |
 | --- | --- |

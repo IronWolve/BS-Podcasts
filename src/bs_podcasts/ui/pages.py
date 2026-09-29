@@ -69,6 +69,7 @@ class DiscoverModeTabs(QTabBar):
 
 class BasePage(QWidget):
     context_changed = Signal(object)
+    context_updated = Signal(object, object)
 
     def __init__(self, title: str, subtitle: str, action: str = "", show_search: bool = True, parent=None):
         super().__init__(parent)
@@ -158,6 +159,7 @@ class _ListPageMixin:
     def _selected(self, current, previous):
         item = current.data(ItemRoles.ITEM) if current.isValid() else None
         if item is not None:
+            self._context_item = item
             self.context_changed.emit(item)
 
     def _activated(self, index):
@@ -212,13 +214,19 @@ class _ListPageMixin:
             # Unsubscribed previews all share episode_id 0; without a real
             # key, selection snaps to row 0 after every filter/refresh.
             return ("preview", item.media_url or item.external_id or item.title)
-        return ("show", item.show_id, item.feed_url)
+        return ("show", 0 if item.feed_url else item.show_id, item.feed_url)
 
     def _restore_selection(self, key, preserve_scroll: bool, selected_keys=()):
+        def normalized(value):
+            # Older saved view states used the mutable subscription ID.
+            if value and len(value) == 3 and value[0] == "show" and value[2]:
+                return ("show", 0, value[2])
+            return value
+        key = normalized(key)
         scrollbar = self.view.verticalScrollBar()
         scroll_value = scrollbar.value()
         target = None
-        wanted = set(selected_keys or ())
+        wanted = {normalized(value) for value in (selected_keys or ())}
         rows = []
         for row, item in enumerate(self.model._items):
             row_key = self._key(item)
@@ -226,6 +234,10 @@ class _ListPageMixin:
                 target = row
             if row_key in wanted:
                 rows.append(row)
+        # A new Discover category may share no selections with the old one.
+        # Keep removal/multi-select semantics unchanged for library lists.
+        if wanted and not rows and getattr(self, "discover", False):
+            wanted.clear()
         if self.model.rowCount():
             if wanted:
                 selection = self.view.selectionModel()
@@ -243,6 +255,11 @@ class _ListPageMixin:
         if preserve_scroll:
             # Context-object overload: Qt drops the shot if the page is destroyed first.
             QTimer.singleShot(0, self, lambda value=scroll_value: scrollbar.setValue(value))
+        item = self.view.currentIndex().data(ItemRoles.ITEM)
+        previous = getattr(self, "_context_item", None)
+        if previous != item:
+            self._context_item = item
+            self.context_updated.emit(previous, item)
         self._update_empty()
 
     def _update_empty(self, query: str = ""):
@@ -530,6 +547,8 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             items.sort(key=lambda item: item.latest_sort_key or "", reverse=True)
         self.model.replace(items)
         self._restore_selection(restore_key, preserve_scroll, selected)
+        if self.discover and not items:
+            self.context_changed.emit(None)
         self._update_empty(query if not self.discover else "")
         self._layout_cards()
 

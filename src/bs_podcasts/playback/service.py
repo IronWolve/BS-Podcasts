@@ -67,6 +67,7 @@ class PlaybackSnapshot:
     # connection can be handed an older snapshot after a newer one arrived
     # directly on the UI thread; comparing this lets them drop it.
     revision: int = 0
+    download_request: int = 0
 
 
 logger = logging.getLogger("bs_podcasts")
@@ -165,7 +166,7 @@ class PlaybackService:
                 pass
         self._emit()
 
-    def load_episode(self, episode_id: int, autoplay: bool = True, *, cancelled=None, start_position=None):
+    def load_episode(self, episode_id: int, autoplay: bool = True, *, cancelled=None, start_position=None, force_stream=False):
         with self._lock:
             self._guard()
             if cancelled is not None and cancelled():
@@ -244,9 +245,45 @@ class PlaybackService:
                 self.engine.set_silence_trim(self.snapshot.trim_level)
             self._rescued_source = ""
             self._load_autoplay = autoplay
+            if (not force_stream and not local and is_web_url(source)
+                    and self.repository.get_setting("playback.download_first", "0") == "1"):
+                # All entrypoints (Play, resume, bookmarks, Next and EOF) share
+                # this policy. The UI starts a bounded download, not a stream.
+                self._deferred_episode_id = episode.id
+                self.snapshot = replace(self.snapshot, download_request=self._load_generation,
+                                        message="Downloading before playing…",
+                                        state=PlaybackState.LOADING if autoplay else PlaybackState.PAUSED)
+                self._emit()
+                return
             self._load_source(source, start, autoplay)
             if self.snapshot.state == PlaybackState.LOADING:
                 self._arm_load_watchdog(episode.id, source)
+            self._emit()
+
+    def complete_download(self, episode_id: int, request: int):
+        with self._lock:
+            if self._dead or not request or (self.snapshot.episode_id, self.snapshot.download_request) != (episode_id, request):
+                return
+            if not self._load_autoplay:
+                self._resolving = False
+                self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED, download_request=0, message="")
+                self._emit()
+                return
+            self.load_episode(episode_id, autoplay=True, start_position=self._desired_position)
+
+    def update_preview_artwork(self, source: str, path: str):
+        with self._lock:
+            if not self._dead and self.snapshot.episode_id is None and self.snapshot.source == source:
+                self.snapshot = replace(self.snapshot, artwork_path=path)
+                self._emit()
+
+    def download_failed(self, episode_id: int, request: int, message: str):
+        with self._lock:
+            if not request or (self.snapshot.episode_id, self.snapshot.download_request) != (episode_id, request):
+                return
+            self._resolving = False
+            self._load_autoplay = False
+            self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR, download_request=0, message=message)
             self._emit()
 
     def load_stream(
@@ -267,6 +304,8 @@ class PlaybackService:
         source = (source or "").strip()
         if not source:
             raise PlaybackUnavailable("Episode has no playable media URL.")
+        if self.repository.get_setting("playback.download_first", "0") == "1":
+            raise PlaybackUnavailable("Download before playing is enabled. Subscribe and download this episode, or turn that setting off to stream previews.")
         # A Discover preview is untrusted directory/feed content end to end.
         try:
             source = ensure_web_url(source, "Stream URL")
@@ -364,6 +403,12 @@ class PlaybackService:
         with self._lock:
             self._guard()
             self.intent_revision += 1
+            if self.snapshot.download_request:
+                if self._load_autoplay:
+                    self.pause()
+                else:
+                    self.load_episode(self.snapshot.episode_id, autoplay=True, start_position=self._desired_position)
+                return
             if self._materialize(autoplay=True):
                 return
             if self.snapshot.state == PlaybackState.LOADING:
@@ -421,6 +466,8 @@ class PlaybackService:
             self._guard()
             self.intent_revision += 1
             self._load_autoplay = False
+            if self.snapshot.download_request:
+                self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED)
             if self.snapshot.source and not self._resolving:
                 self.engine.pause()
             self._emit()
