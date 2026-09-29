@@ -5,6 +5,8 @@
 *
 
 # Traversable source directories; their other contents remain ignored.
+!/media/
+!/media/screenshots/
 !/packaging/
 !/packaging/branding/
 !/packaging/licenses/
@@ -34,6 +36,8 @@
 !/.gitignore
 !/.gitattributes
 !/README.md
+!/media/screenshots/library.png
+!/media/screenshots/episodes.png
 !/packaging/THIRD-PARTY-NOTICES.txt
 !/packaging/branding/bs-podcasts-icon-master.png
 !/packaging/bs-podcasts.desktop

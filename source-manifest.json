@@ -4,6 +4,8 @@
     ".gitattributes",
     ".gitignore",
     "README.md",
+    "media/screenshots/episodes.png",
+    "media/screenshots/library.png",
     "packaging/THIRD-PARTY-NOTICES.txt",
     "packaging/branding/bs-podcasts-icon-master.png",
     "packaging/bs-podcasts-macos.spec",
