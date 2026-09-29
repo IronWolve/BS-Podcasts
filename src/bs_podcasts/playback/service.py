@@ -3,7 +3,7 @@
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from threading import RLock, Timer
+from threading import Event, RLock, Timer
 import logging
 import time
 
@@ -55,6 +55,7 @@ class PlaybackSnapshot:
     speed: float = 1.0
     volume: float = 100.0
     sleep_deadline: float | None = None
+    sleep_expired_count: int = 0
     sleep_at_end: bool = False  # pause when the current episode finishes
     message: str = ""
     ab_start: float | None = None
@@ -94,6 +95,7 @@ class PlaybackService:
         self._rescued_source = ""
         self._load_autoplay = False
         self._load_generation = 0
+        self._resolve_cancel = Event()
         self.intent_revision = 0
         self._last_write_stamp = 0.0
         self._engine_generation = None
@@ -475,6 +477,7 @@ class PlaybackService:
     def stop(self):
         """Unload the current episode: pause, persist position, go idle."""
         with self._lock:
+            self._resolve_cancel.set()
             self.intent_revision += 1
             self._deferred_episode_id = None
             self._load_generation += 1
@@ -540,6 +543,16 @@ class PlaybackService:
                 self.seek(seconds)
             else:
                 self.load_episode(episode_id, start_position=seconds, autoplay=True, cancelled=cancelled)
+
+    def current_identity(self):
+        with self._lock:
+            return (self.snapshot.episode_id, self.snapshot.source, self._load_generation)
+
+    def update_artwork(self, episode_id, path):
+        with self._lock:
+            if episode_id == self.snapshot.episode_id and path != self.snapshot.artwork_path:
+                self.snapshot = replace(self.snapshot, artwork_path=path)
+                self._emit()
 
     def seek_current(self, identity, seconds: float, relative: bool = False):
         """Native-control seeks retain the track identity through command queuing."""
@@ -663,6 +676,7 @@ class PlaybackService:
                 self._emit()
 
     def shutdown(self):
+        self._resolve_cancel.set()
         with self._lock:
             if self._dead:
                 return
@@ -748,7 +762,14 @@ class PlaybackService:
                 pass
             elif event.kind == "eof":
                 self._engine_loaded = False
-                self._finish_and_advance()
+                try:
+                    self._finish_and_advance()
+                except Exception:
+                    logger.exception("Could not save episode completion")
+                    self._cancel_load_watchdog()
+                    self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR,
+                                            message="Playback ended, but saving completion failed. Check library storage and retry.", buffering=None)
+                    self._emit()
                 return
             elif event.kind == "external_ready":
                 self._cancel_load_watchdog()
@@ -774,6 +795,8 @@ class PlaybackService:
             self._emit()
 
     def _begin_load(self, position: float, autoplay: bool):
+        self._resolve_cancel.set()
+        self._resolve_cancel = Event()
         self._cancel_load_watchdog()
         self._load_generation += 1
         self._resolving = True
@@ -798,19 +821,19 @@ class PlaybackService:
             self._rescued_source = source
         threading.Thread(
             target=self._resolve_then_load,
-            args=(source, position, autoplay, self._load_generation, tracker),
+            args=(source, position, autoplay, self._load_generation, tracker, self._resolve_cancel),
             daemon=True, name="playback-resolve",
         ).start()
 
-    def _resolve_then_load(self, source: str, position: float, autoplay: bool, generation=None, tracker=True):
+    def _resolve_then_load(self, source: str, position: float, autoplay: bool, generation=None, tracker=True, cancel=None):
         from ..netlimits import request_scope
         final, error = "", ""
         try:
             # DNS screening belongs off the GUI thread, for every web source.
-            with request_scope(foreground=True):
+            with request_scope(cancel, foreground=True):
                 final = ensure_fetchable(source, "Episode media URL")
             if tracker:
-                final = self._resolve_final(final)
+                final = self._resolve_final(final, cancel)
                 if not final:
                     raise PlaybackUnavailable("Could not safely resolve the episode stream.")
         except Exception as exc:
@@ -829,14 +852,14 @@ class PlaybackService:
                 self._emit()
 
     @staticmethod
-    def _resolve_final(source: str) -> str:
+    def _resolve_final(source: str, cancel=None) -> str:
         """Final URL after following the redirect chain with the app's own
         HTTP stack (every hop re-checked by the session's redirect guard)."""
         from ..net import make_session
         from ..netlimits import request_scope
 
         try:
-            with request_scope(foreground=True):
+            with request_scope(cancel, foreground=True):
                 source = ensure_fetchable(source, "Episode media URL")
                 with make_session(max_redirects=20, foreground=True) as session:
                     with session.get(source, stream=True, timeout=(8, 15), allow_redirects=True) as response:
@@ -864,15 +887,15 @@ class PlaybackService:
         self._arm_load_watchdog(self.snapshot.episode_id, source)
         thread = threading.Thread(
             target=self._rescue_redirects,
-            args=(source, self.snapshot.position, self._load_autoplay, self._load_generation),
+            args=(source, self.snapshot.position, self._load_autoplay, self._load_generation, self._resolve_cancel),
             daemon=True,
             name="playback-redirect-rescue",
         )
         thread.start()
         return True
 
-    def _rescue_redirects(self, source: str, position: float, autoplay: bool, generation=None):
-        final = self._resolve_final(source)
+    def _rescue_redirects(self, source: str, position: float, autoplay: bool, generation=None, cancel=None):
+        final = self._resolve_final(source, cancel)
         with self._lock:
             if self._dead or self.snapshot.source != source or generation != self._load_generation:
                 return
@@ -1012,7 +1035,8 @@ class PlaybackService:
             except Exception:
                 pass  # nothing loaded, or the engine is gone — sleep just ends
             finally:
-                self.snapshot = replace(self.snapshot, sleep_deadline=None)
+                self.snapshot = replace(self.snapshot, sleep_deadline=None,
+                                        sleep_expired_count=self.snapshot.sleep_expired_count + 1)
                 self._emit()
 
     def _emit(self):

@@ -8,10 +8,10 @@ import sys
 APP_NAME = "BS Podcasts"
 APP_ID = "bs-podcasts"
 APP_TAGLINE = "A desktop player for the podcasts you already have."
-# Distribution identity is local configuration, never a maintainer's account.
-GITHUB_URL = os.environ.get("BS_PODCASTS_GITHUB_URL", "")
-RELEASES_URL = os.environ.get("BS_PODCASTS_RELEASES_URL", "")
-RELEASES_API_URL = os.environ.get("BS_PODCASTS_RELEASES_API_URL", "")
+# Approved public project identity; explicit environment overrides still apply.
+GITHUB_URL = os.environ.get("BS_PODCASTS_GITHUB_URL", "https://github.com/IronWolve/BS-Podcasts")
+RELEASES_URL = os.environ.get("BS_PODCASTS_RELEASES_URL", "https://github.com/IronWolve/BS-Podcasts/releases")
+RELEASES_API_URL = os.environ.get("BS_PODCASTS_RELEASES_API_URL", "https://api.github.com/repos/IronWolve/BS-Podcasts/releases/latest")
 
 
 def app_version() -> str:

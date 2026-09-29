@@ -28,6 +28,12 @@ class DirectoryProvider(Protocol):
 
 
 class DirectoryService:
+    def invalidate(self):
+        for provider in self.providers:
+            invalidate = getattr(provider, "invalidate", None)
+            if invalidate is not None:
+                invalidate()
+
     def __init__(self, providers: list[DirectoryProvider]):
         self.providers = list(providers)
 

@@ -284,8 +284,10 @@ class Database:
             connection.close()
 
     def _backup_before_migration(self):
-        """Keep one recoverable snapshot of the database before schema changes."""
+        """Never replace the original recovery snapshot on an upgrade retry."""
         target = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
+        if target.exists():
+            target = self.path.with_suffix(self.path.suffix + ".pre-migration-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".bak")
         descriptor, name = tempfile.mkstemp(prefix=".library-backup-", suffix=".tmp", dir=target.parent)
         os.close(descriptor)
         temporary = Path(name)

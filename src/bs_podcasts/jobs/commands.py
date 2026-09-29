@@ -37,6 +37,14 @@ class CommandQueue:
             future.add_done_callback(self._finished)
             return future
 
+    def retained(self, future):
+        with self._lock:
+            return self._pending.get(future, False)
+
+    def retained_pending(self):
+        with self._lock:
+            return any(keep and not future.done() for future, keep in self._pending.items())
+
     def _finished(self, future):
         with self._lock:
             self._pending.pop(future, None)

@@ -4,10 +4,22 @@ set -euo pipefail
 BS_PROJECT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 BS_PYTHON="$BS_PROJECT/dists/linux/.venv/bin/python"
 BS_INPUTS_SHA="$(sha256sum "$BS_PROJECT/repo/packaging/native-sources.json" | cut -d ' ' -f 1)"
+BS_RECIPE_SHA="$(sha256sum "$BS_PROJECT/repo/packaging/build-libmpv-linux.sh" | cut -d ' ' -f 1)"
+BS_HELPER_SHA="$(sha256sum "$BS_PROJECT/repo/packaging/native_sources.py" | cut -d ' ' -f 1)"
+BS_BUILD_SHA="$("$BS_PYTHON" -B -c '
+import hashlib, json, os, pathlib, shlex, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+files = ["build-libmpv-linux.sh", "native_sources.py", "native-sources.json"]
+identity = {name: hashlib.sha256((root/name).read_bytes()).hexdigest() for name in files}
+identity["environment"] = {name: os.environ.get(name, "") for name in ("CC", "CXX", "LDFLAGS", "CPPFLAGS", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "PATH")}
+identity["tools"] = {name: subprocess.check_output(shlex.split(command)+["--version"]).decode(errors="replace") for name, command in (("cc",os.environ.get("CC","cc")),("cxx",os.environ.get("CXX","c++")),("meson","meson"),("ninja","ninja"),("pkg-config","pkg-config"))}
+print(hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest())
+' "$BS_PROJECT/repo/packaging")"
 if [[ -n "${BS_NATIVE_RESUME:-}" ]]; then
     BS_NATIVE_ROOT="$(cd -- "$BS_NATIVE_RESUME" && pwd -P)"
     [[ "$BS_NATIVE_ROOT" == "$BS_PROJECT"/tmp/linux-native.* ]] || { printf 'Resume only an owned project native build.\n' >&2; exit 1; }
     [[ -f "$BS_NATIVE_ROOT/inputs.sha256" && "$(< "$BS_NATIVE_ROOT/inputs.sha256")" == "$BS_INPUTS_SHA" ]] || { printf 'Native inputs changed; start a fresh build.\n' >&2; exit 1; }
+    [[ -f "$BS_NATIVE_ROOT/build-identity.sha256" && "$(< "$BS_NATIVE_ROOT/build-identity.sha256")" == "$BS_BUILD_SHA" ]] || { printf 'Native recipe, helper, toolchain or environment changed; start a fresh build.\n' >&2; exit 1; }
 else
     BS_NATIVE_ROOT="$(mktemp -d "$BS_PROJECT/tmp/linux-native.XXXXXX")"
 fi
@@ -26,6 +38,7 @@ printf 'Native work/log directory: %s\n' "$BS_NATIVE_ROOT"
 if [[ -z "${BS_NATIVE_RESUME:-}" ]]; then
     "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --source "$BS_SRC" --cache "$BS_PROJECT/.cache/native-sources"
     printf '%s\n' "$BS_INPUTS_SHA" > "$BS_NATIVE_ROOT/inputs.sha256"
+    printf '%s\n' "$BS_BUILD_SHA" > "$BS_NATIVE_ROOT/build-identity.sha256"
 fi
 build_static() {
     local source="$1"; shift
@@ -73,6 +86,7 @@ if readelf -d "$BS_NATIVE_ROOT/out/libmpv.so.2" | grep -Eq 'NEEDED.*lib(avcodec|
     printf 'The native player unexpectedly depends on system FFmpeg.\n' >&2
     exit 1
 fi
+[[ "$BS_RECIPE_SHA" == "$(sha256sum "$BS_PROJECT/repo/packaging/build-libmpv-linux.sh" | cut -d ' ' -f 1)" && "$BS_HELPER_SHA" == "$(sha256sum "$BS_PROJECT/repo/packaging/native_sources.py" | cut -d ' ' -f 1)" && "$BS_INPUTS_SHA" == "$(sha256sum "$BS_PROJECT/repo/packaging/native-sources.json" | cut -d ' ' -f 1)" ]] || { printf 'Native build inputs changed during compilation; refusing provenance.\n' >&2; exit 1; }
 "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --record "$BS_NATIVE_ROOT/out/libmpv.so.2"
 BS_CACHE="$BS_PROJECT/.cache/linux-build/libmpv-lgpl"
 mkdir -p "$BS_PROJECT/.cache/linux-build"

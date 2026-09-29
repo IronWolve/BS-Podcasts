@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path, PureWindowsPath
 from types import CodeType
 from PyInstaller.archive.readers import CArchiveReader
+from source_manifest import privacy_scan_bytes
 
 
 def check(root, private_root=None):
@@ -20,7 +21,7 @@ def check(root, private_root=None):
         relative=path.relative_to(root)
         if set(relative.parts)&forbidden or path.suffix.casefold() in {'.db','.sqlite','.sqlite3','.log','.pcap'}:
             raise ValueError('Private bundle file: '+relative.as_posix())
-        raw=path.read_bytes()
+        raw=privacy_scan_bytes(path.read_bytes())
         normalized=raw.replace(b'\\',b'/').lower()
         if any(v in normalized for v in narrow) or any(v in raw for v in wide):
             raise ValueError('Known private reference in '+relative.as_posix())
@@ -36,8 +37,10 @@ def check(root, private_root=None):
             raise ValueError('Absolute application code filename.')
         for constant in code.co_consts:
             if isinstance(constant,CodeType): code_check(constant)
-            elif isinstance(constant,str) and any(v in constant.replace('\\','/').casefold().encode() for v in narrow):
-                raise ValueError('Private application constant.')
+            elif isinstance(constant,str):
+                checked = privacy_scan_bytes(constant.encode()).decode('utf-8').replace('\\','/').casefold().encode()
+                if any(v in checked for v in narrow):
+                    raise ValueError('Private application constant.')
     count=0
     for name in pyz.toc:
         if name=='bs_podcasts' or name.startswith('bs_podcasts.'):

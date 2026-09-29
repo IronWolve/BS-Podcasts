@@ -510,17 +510,7 @@ class LazyMpvEngine:
                         mpv = mpv_module
                     engine = MpvEngine(**self._options)
                 except Exception as exc:
-                    # Same fallback the old eager construction had: a machine
-                    # where the core cannot initialize still gets playback via
-                    # the system player instead of an error on every Play.
-                    import logging
-
-                    from .external import ExternalPlayerEngine
-
-                    logging.getLogger("bs_podcasts").warning(
-                        "Internal playback unavailable; using external player: %s", exc
-                    )
-                    engine = ExternalPlayerEngine()
+                    raise PlaybackUnavailable("Internal playback is unavailable. Retry, or explicitly open the episode in an external player.") from exc
                 engine.set_event_handler(self._handler)
                 self._engine = engine
         return self._engine

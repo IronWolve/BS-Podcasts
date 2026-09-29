@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 
 from PySide6.QtCore import QPoint, QTimer, QUrl, Qt, qVersion
-from PySide6.QtGui import QColor, QDesktopServices, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QKeySequence
 
 from ..urlguard import is_web_url
 
@@ -49,7 +49,30 @@ from ..config import APP_NAME, APP_TAGLINE, GITHUB_URL, app_version
 from . import icons
 from .pixmaps import cover, initials
 from .theme import COLORS, SPACE, scaled_px
-from .widgets import PlainTextLabel, fit_combo_width, safe_feed_html
+from .widgets import PlainTextLabel as _PlainTextLabel, fit_combo_width, safe_feed_html
+
+
+class PlainTextLabel(_PlainTextLabel):
+    def _copy_selection(self):
+        QApplication.clipboard().setText(self.selectedText().replace("\u200b", ""))
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Copy) and self.hasSelectedText():
+            self._copy_selection()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event):
+        if self.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse:
+            from PySide6.QtWidgets import QMenu
+            menu = QMenu(self)
+            action = menu.addAction("Copy", self._copy_selection)
+            action.setEnabled(self.hasSelectedText())
+            menu.addAction("Select all", lambda: self.setSelection(0, len(self.text())))
+            menu.exec(event.globalPos())
+        else:
+            super().contextMenuEvent(event)
 
 
 SHADOW_MARGIN = 24
@@ -270,6 +293,19 @@ class StyledDialog(QDialog):
             self.adjustSize()
             centre = window.mapToGlobal(window.rect().center())
             screen = window.screen().availableGeometry()
+            available = max(100, screen.height() - 24)
+            if self.height() > available and not hasattr(self, "_overflow_scroll"):
+                self.layout().removeWidget(self.card)
+                self._overflow_scroll = QScrollArea(self)
+                self._overflow_scroll.setWidgetResizable(True)
+                self._overflow_scroll.setFrameShape(QFrame.Shape.NoFrame)
+                self.card.setMinimumHeight(self.card.sizeHint().height())
+                self._overflow_scroll.setWidget(self.card)
+                self.layout().addWidget(self._overflow_scroll)
+            self.setMaximumHeight(available)
+            if self.width() > screen.width() - 24:
+                self.setFixedWidth(max(100, screen.width() - 24))
+            self.resize(self.width(), min(self.height(), available))
             x = max(screen.left(), min(centre.x() - self.width() // 2, screen.right() - self.width() + 1))
             y = max(screen.top(), min(centre.y() - self.height() // 2, screen.bottom() - self.height() + 1))
             self.move(x, y)
@@ -451,9 +487,10 @@ class PodcastSettingsDialog(StyledDialog):
         selected = self.auto_download.findData(auto_download_override)
         self.auto_download.setCurrentIndex(max(0, selected))
         self.auto_download_limit = QSpinBox()
-        self.auto_download_limit.setRange(1, 20)
+        self.auto_download_limit.setRange(0, 20)
+        self.auto_download_limit.setSpecialValueText("Use global limit")
         self.auto_download_limit.setSuffix(" new episodes")
-        self.auto_download_limit.setValue(auto_download_limit or 3)
+        self.auto_download_limit.setValue(auto_download_limit or 0)
         self.retention_keep = QSpinBox()
         self.retention_keep.setRange(0, 1000)
         self.retention_keep.setSpecialValueText("No limit")
@@ -490,7 +527,7 @@ class PodcastSettingsDialog(StyledDialog):
             "auto_continue": self.auto_continue.isChecked(),
             "trim_level": self.TRIM_LEVELS[self.trim.currentIndex()],
             "auto_download_override": self.auto_download.currentData(),
-            "auto_download_limit": self.auto_download_limit.value(),
+            "auto_download_limit": self.auto_download_limit.value() or None,
             "retention_keep": self.retention_keep.value() or None,
             "retention_days": self.retention_days.value() or None,
         }

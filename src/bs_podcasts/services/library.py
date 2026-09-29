@@ -2,6 +2,7 @@
 
 from urllib.parse import urlparse
 from contextlib import nullcontext
+from threading import RLock
 
 from ..data.repositories import LibraryRepository
 from ..domain import FeedData
@@ -14,16 +15,19 @@ class LibraryService:
         self.repository = repository
         self.downloads = None
         self.playback = None
+        self._subscription_lock = RLock()
 
     @staticmethod
     def normalize_feed_url(url: str) -> str:
         """Key used to spot the same feed behind http/https, www, trailing slashes."""
         parsed = urlparse(url.strip())
-        host = parsed.netloc.lower()
+        credentials, separator, host = parsed.netloc.rpartition("@")
+        host = host.lower()
         if host.startswith("www."):
             host = host[4:]
         path = parsed.path.rstrip("/") or "/"
-        return f"{host}{path}" + (f"?{parsed.query}" if parsed.query else "")
+        authority = (credentials + separator if separator else "") + host
+        return f"{authority}{path}" + (f"?{parsed.query}" if parsed.query else "")
 
     def find_subscription(self, feed_url: str):
         key = self.normalize_feed_url(feed_url)
@@ -33,6 +37,10 @@ class LibraryService:
         return None
 
     def add_subscription(self, feed_url: str, title: str = ""):
+        with self._subscription_lock:
+            return self._add_subscription(feed_url, title)
+
+    def _add_subscription(self, feed_url: str, title: str):
         feed_url = ensure_web_url(feed_url, 'Feed URL')
         parsed = urlparse(feed_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:

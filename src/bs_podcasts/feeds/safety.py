@@ -16,7 +16,10 @@ def contains_dtd(content: bytes) -> bool:
     interleaved-null form. `bytes.upper()` only folds ASCII bytes, which is
     exactly what the interleaved form still contains.
     """
-    upper = content.upper()
+    import re
+    # Ignore declaration-like text inside lexical comments and CDATA only.
+    upper = content.replace(b"\x00", b"")
+    upper = re.sub(rb"<!--.*?-->|<!\[CDATA\[.*?\]\]>", b"", upper, flags=re.S).upper()
     for token in _DTD_TOKENS:
         for encoding in _ENCODINGS:
             try:

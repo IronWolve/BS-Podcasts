@@ -33,6 +33,10 @@ class _TruncatedDownload(DownloadError):
     """The transfer ended before the expected Content-Length; safe to retry."""
 
 
+class _RangeContinuation(DownloadError):
+    """A complete range leg; request the next leg without spending a retry."""
+
+
 class _StaleResume(DownloadError):
     """The partial no longer matches what the server serves; discard and retry."""
 
@@ -153,6 +157,7 @@ class DownloadService:
         self._started: dict[int, float] = {}
         self._retiring_shows = set()
         self._retiring_episodes = set()
+        self._deleting_episodes = set()
         self._listeners = []
         self._lock = Lock()
 
@@ -172,7 +177,7 @@ class DownloadService:
     def queue(self, episode_id: int):
         """Register intent before a worker slot is available, without I/O."""
         with self._lock:
-            if episode_id in self._retiring_episodes:
+            if episode_id in self._retiring_episodes or episode_id in self._deleting_episodes:
                 return None
             active, queued = self._cancellations.get(episode_id), self._queued.get(episode_id)
             if (active is not None and not active.is_set()) or (queued is not None and not queued.is_set()):
@@ -206,7 +211,7 @@ class DownloadService:
             raise
         with self._lock:
             stale = ticket is not None and self._queued.get(episode_id) is not ticket
-            retiring = episode.show_id in self._retiring_shows
+            retiring = episode.show_id in self._retiring_shows or episode_id in self._deleting_episodes
             if retiring and (ticket is None or self._queued.get(episode_id) is ticket):
                 self._queued.pop(episode_id, None)
             if stale or retiring or episode_id in self._cancellations:
@@ -255,7 +260,14 @@ class DownloadService:
                     self._emit(episode_id, DownloadState.PAUSED, done, total)
                     return self.downloads.get(episode_id)
                 try:
-                    return self._download_once(episode_id, cancellation)
+                    for _leg in range(4096):
+                        if time.monotonic() - self._started[episode_id] > self.MAX_TRANSFER_SECONDS:
+                            raise DownloadError("Transfer took too long; retry to resume.")
+                        try:
+                            return self._download_once(episode_id, cancellation)
+                        except _RangeContinuation:
+                            continue
+                    raise DownloadError("Server supplied too many tiny ranges; retry to resume.")
                 except (_TruncatedDownload, _StaleResume, requests.RequestException) as exc:
                     last_error = exc
                 record = self.downloads.get(episode_id)
@@ -394,6 +406,22 @@ class DownloadService:
         return fixed
 
     def discard(self, episode_id: int) -> None:
+        with self._retire_episode(episode_id):
+            return self._discard_retired(episode_id)
+
+    @contextmanager
+    def _retire_episode(self, episode_id):
+        with self._lock:
+            if episode_id in self._deleting_episodes:
+                raise DownloadError("This download is already being removed.")
+            self._deleting_episodes.add(episode_id)
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._deleting_episodes.discard(episode_id)
+
+    def _discard_retired(self, episode_id):
         self.cancel(episode_id)
         with self._lock:
             self._queued.pop(episode_id, None)
@@ -626,6 +654,8 @@ class DownloadService:
             if not done:
                 raise DownloadError("Server returned empty audio.")
             if total and done < total:
+                if response.status_code == 206 and done == end + 1:
+                    raise _RangeContinuation()
                 raise _TruncatedDownload("Download ended before the expected size.")
             if authoritative_total and done != total:
                 raise DownloadError("Download size does not match the response.")
@@ -645,6 +675,10 @@ class DownloadService:
             self.downloads.complete(episode_id, str(target), done)
             self._emit(episode_id, DownloadState.COMPLETE, done, done)
             return self.downloads.get(episode_id)
+        except _RangeContinuation:
+            if cancellation.is_set():
+                return self._park(episode_id, partial)
+            raise
         except _StaleResume:
             # Not the user's problem and not an error state: drop the partial
             # so the retry starts clean.
@@ -742,6 +776,10 @@ class DownloadService:
         return previews
 
     def delete(self, episode_id: int) -> int:
+        with self._retire_episode(episode_id):
+            return self._delete_retired(episode_id)
+
+    def _delete_retired(self, episode_id: int) -> int:
         """Cancel if active, unlink the files, forget the record. Returns bytes freed.
 
         Bytes count only after a successful unlink, and a record whose file
@@ -773,6 +811,7 @@ class DownloadService:
                 episode_id, DownloadState.ERROR, record.bytes_done, record.bytes_total,
                 "File could not be deleted: " + "; ".join(failures),
             )
+            raise DownloadError("File could not be deleted: " + "; ".join(failures))
         else:
             self.downloads.remove(episode_id)
         return freed

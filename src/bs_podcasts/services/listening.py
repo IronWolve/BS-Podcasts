@@ -19,20 +19,20 @@ class ListeningService:
             try:
                 chapters = fetch_chapters(episode.chapters_url, session)
                 if chapters:
-                    self.repository.replace_chapters(
-                        episode.id, [(c.start_seconds, c.end_seconds, c.title, c.artwork_url) for c in chapters]
+                    result["chapters"] = self.repository.replace_chapters(
+                        episode.id, [(c.start_seconds, c.end_seconds, c.title, c.artwork_url) for c in chapters],
+                        source_url=episode.chapters_url,
                     )
-                    result["chapters"] = True
             except (ListeningFetchError, OSError, Exception) as exc:
                 result["error"] = f"Chapters: {exc}"
         if episode.transcript_url and not self.repository.transcript(episode.id):
             try:
                 segments = fetch_transcript(episode.transcript_url, episode.transcript_type, session)
                 if segments:
-                    self.repository.replace_transcript(
-                        episode.id, [(s.start_seconds, s.end_seconds, s.text) for s in segments]
+                    result["transcript"] = self.repository.replace_transcript(
+                        episode.id, [(s.start_seconds, s.end_seconds, s.text) for s in segments],
+                        source_url=episode.transcript_url, source_type=episode.transcript_type,
                     )
-                    result["transcript"] = True
             except (ListeningFetchError, OSError, Exception) as exc:
                 result["error"] = (result["error"] + "  " if result["error"] else "") + f"Transcript: {exc}"
         return result

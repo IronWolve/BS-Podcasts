@@ -1,6 +1,7 @@
 """Pages built from reusable, model-backed components."""
 
 from datetime import datetime
+from pathlib import Path
 import time
 
 from PySide6.QtCore import QEvent, QItemSelectionModel, QModelIndex, QTimer, Signal, Qt
@@ -1213,7 +1214,8 @@ class HomePage(BasePage, _ListPageMixin):
         if event.type() == QEvent.Type.ContextMenu:
             index = view.indexAt(event.pos())
             if index.isValid():
-                view.setCurrentIndex(index)
+                if not view.selectionModel().isSelected(index):
+                    view.setCurrentIndex(index)
                 self.menu_requested.emit(index.data(ItemRoles.ITEM), view.viewport().mapToGlobal(event.pos()))
             return True
         if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
@@ -1268,6 +1270,7 @@ class SettingsPage(BasePage):
     shortcut_changed = Signal(str, str)
     reset_shortcuts_requested = Signal()
     open_data_requested = Signal()
+    open_backups_requested = Signal()
     refresh_storage_requested = Signal()
     import_opml_requested = Signal()
     export_opml_requested = Signal()
@@ -1512,13 +1515,14 @@ class SettingsPage(BasePage):
         storage_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.data_root = PlainTextLabel("—")
         self.library_path = PlainTextLabel("—")
+        self.backup_path = PlainTextLabel("—")
         self.download_path = PlainTextLabel("—")
         self.download_usage = PlainTextLabel("—")
         self.artwork_path = PlainTextLabel("—")
         self.artwork_usage = PlainTextLabel("—")
         self.temp_path = PlainTextLabel("—")
         self.log_path = PlainTextLabel("—")
-        for label in (self.data_root, self.library_path, self.download_path, self.artwork_path, self.temp_path, self.log_path):
+        for label in (self.data_root, self.library_path, self.backup_path, self.download_path, self.artwork_path, self.temp_path, self.log_path):
             label.setObjectName("meta")
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             label.setWordWrap(True)
@@ -1528,6 +1532,22 @@ class SettingsPage(BasePage):
         self.artwork_usage.setObjectName("meta")
         storage_layout.addRow("Application data", self.data_root)
         storage_layout.addRow("Library database", self.library_path)
+        backup_row = QWidget()
+        backup_layout = QHBoxLayout(backup_row)
+        backup_layout.setContentsMargins(0, 0, 0, 0)
+        backup_layout.setSpacing(SPACE["sm"])
+        backup_layout.addWidget(self.backup_path, 1)
+        open_backups = QPushButton("Open backups")
+        open_backups.setObjectName("textButton")
+        open_backups.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_backups.setToolTip("Open saved library backups; if none exist yet, open the data folder")
+        open_backups.clicked.connect(self.open_backups_requested)
+        backup_layout.addWidget(open_backups, 0, Qt.AlignmentFlag.AlignTop)
+        storage_layout.addRow("Library backups", backup_row)
+        backup_hint = PlainTextLabel("Upgrade backups may also be beside the database. Close BS Podcasts before restoring files; keep a copy of the current data first.")
+        backup_hint.setObjectName("settingHint")
+        backup_hint.setWordWrap(True)
+        storage_layout.addRow("", backup_hint)
         download_row = QWidget()
         download_row_layout = QHBoxLayout(download_row)
         download_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -1859,10 +1879,11 @@ class SettingsPage(BasePage):
         self.log_path.setText(log_path or "—")
         self.data_root.setText(data_root)
         self.library_path.setText(library_path)
+        self.backup_path.setText(str(Path(library_path).parent / "backups") if library_path else "—")
         self.download_path.setText(download_path)
         self.download_usage.setText(downloads)
         self.artwork_path.setText(artwork_path)
         self.artwork_usage.setText(artwork)
         self.temp_path.setText(temp_path)
-        for label in (self.data_root, self.library_path, self.download_path, self.artwork_path, self.temp_path):
+        for label in (self.data_root, self.library_path, self.backup_path, self.download_path, self.artwork_path, self.temp_path):
             label.setToolTip(label.text())

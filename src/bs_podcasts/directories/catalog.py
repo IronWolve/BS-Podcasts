@@ -105,12 +105,14 @@ class PublicDirectory:
     def browse(self, category: str = "", limit: int = 30) -> list[DirectoryCandidate]:
         from ..netlimits import Deadline
         check = Deadline(600)
-        cache_key = category or "__all__"
+        import time
+        fast = limit <= 50
+        cache_key = (category or "__all__", fast)
         with self._cache_guard:
             revision = self._cache_revision
             cached = self._browse_cache.get(cache_key)
-        if cached is not None:
-            return cached[:limit]
+        if cached is not None and time.monotonic() - cached[0] < 900:
+            return cached[1][:limit]
         terms = CATEGORY_EXPANSION_TERMS.get(
             category,
             ("podcast", "new podcasts", "popular podcasts", "independent podcasts"),
@@ -118,13 +120,13 @@ class PublicDirectory:
         genre_id = CATEGORY_IDS.get(category)
         result_sets = []
         errors = []
-        for term in terms:
+        for term in (terms[:1] if fast else terms):
             check.remaining()
             params = {
                 "term": term,
                 "media": "podcast",
                 "entity": "podcast",
-                "limit": 200,
+                "limit": 50 if fast else 200,
             }
             if genre_id:
                 params["genreId"] = genre_id
@@ -150,7 +152,7 @@ class PublicDirectory:
         check.remaining()
         with self._cache_guard:
             if revision == self._cache_revision:
-                self._browse_cache[cache_key] = merged
+                self._browse_cache[cache_key] = (time.monotonic(), merged)
         return merged[:limit]
 
     def topic(
@@ -185,19 +187,11 @@ class PublicDirectory:
     def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:
         excluded = {show.feed_url for show in shows}
         categories = []
-        for show in list(shows)[:3]:
-            matches = self.search(show.title, 10)
-            match = next(
-                (
-                    candidate
-                    for candidate in matches
-                    if candidate.feed_url == show.feed_url
-                    or candidate.title.casefold() == show.title.casefold()
-                ),
-                matches[0] if matches else None,
-            )
-            if match and match.genre in CATEGORY_IDS and match.genre not in categories:
-                categories.append(match.genre)
+        for show in shows:
+            for category in show.categories.split(","):
+                category = category.strip()
+                if category in CATEGORY_IDS and category not in categories:
+                    categories.append(category)
             if len(categories) >= 2:
                 # Each category browse fans out to ~4 expansion-term
                 # requests; two categories already fill the page, and the
@@ -216,7 +210,7 @@ class PublicDirectory:
         per_category = max(
             10, (limit + len(categories) - 1) // len(categories) + len(excluded)
         )
-        for category in categories:
+        for category in categories[:2]:
             for candidate in self.browse(category, per_category):
                 if candidate.feed_url in seen:
                     continue

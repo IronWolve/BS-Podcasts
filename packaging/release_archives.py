@@ -15,7 +15,7 @@ import tempfile
 import tomllib
 import zipfile
 
-from source_manifest import ROOT, check, file_digest, inventory, source_digest
+from source_manifest import ROOT, check, file_digest, inventory, source_digest, privacy_scan_bytes
 from build_manifest import artifact_inventory
 
 
@@ -37,7 +37,8 @@ def scan_inputs(files, tokens):
         path = Path(name)
         if path.is_absolute() or '..' in path.parts or any(part.lower() in forbidden for part in path.parts):
             raise ValueError('Private or unsafe release path: ' + name)
-        if any(token in data for token in tokens):
+        checked = privacy_scan_bytes(data)
+        if any(token in checked for token in tokens):
             raise ValueError('Known private reference in release input: ' + name)
 
 
@@ -203,7 +204,7 @@ def build(output, macos=None):
         'Requires Python 3.14.7+ and compatible native desktop/audio libraries.\n'
         'Requires glibc '+linux_record['native']['minimum_glibc']+' or newer.\n'
         'Bundles libmpv 0.41.0 with FFmpeg 9.0.2; the launcher never falls back to system libmpv.\n'
-        'Built and tested on Ubuntu 26.04 '+platform.machine()+'. Other Linux distributions need ABI validation.\n'
+        'Target: Linux '+linux_record['native']['architecture']+'. Distribution compatibility and desktop/audio acceptance require separate validation.\n'
         'Run bash setup.sh to create the project-local environment and install locked packages.\n'
         'Then bash start.sh --check --plain; bash start.sh launches the GUI.\n'
         'This is not a self-contained Linux binary. No developer checkout is required.\n'

@@ -160,7 +160,13 @@ class ArtworkCache:
             entry[1] += 1
             return entry[0]
 
-    def fetch(self, url: str) -> Path:
+    def _fresh(self, path):
+        try:
+            return time.time() - path.stat().st_mtime < 86400 and self.valid_file(path)
+        except OSError:
+            return False
+
+    def fetch(self, url: str, *, force: bool = False) -> Path:
         if not url:
             raise ArtworkError("Artwork URL is empty.")
         # artwork_url is feed- and directory-supplied, and this is the last
@@ -171,7 +177,7 @@ class ArtworkCache:
         except UnsafeUrl as exc:
             raise ArtworkError(str(exc)) from exc
         target = self.path_for(url)
-        if self.valid_file(target) and self._touch(target):
+        if not force and self._fresh(target) and self._touch(target):
             return target
         # Two workers asking for the same image must not race on the .part
         # file. The map entry is refcounted: dropping it while a waiter still
@@ -183,11 +189,13 @@ class ArtworkCache:
         try:
             while not acquired:
                 acquired = lock.acquire(timeout=min(.05, deadline.remaining()))
-            if self.valid_file(target) and self._touch(target):
+            if not force and self._fresh(target) and self._touch(target):
                 return target
             with self._locks_guard:
                 retry = self._retry_after.get(url, 0)
-            if retry > time.monotonic():
+            if not force and retry > time.monotonic():
+                if self.valid_file(target):
+                    return target
                 raise ArtworkError('Artwork is temporarily unavailable; retry shortly.')
             try:
                 deadline.remaining()
@@ -201,6 +209,8 @@ class ArtworkCache:
                         self._retry_after.move_to_end(url)
                         while len(self._retry_after) > 1024:
                             self._retry_after.popitem(last=False)
+                if not force and self.valid_file(target):
+                    return target
                 raise
             with self._locks_guard:
                 self._retry_after.pop(url, None)
@@ -231,7 +241,7 @@ class ArtworkCache:
             response = self.session.get(url, timeout=(8, 20), stream=True)
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "").lower()
-            if content_type and not content_type.startswith("image/"):
+            if content_type and not content_type.startswith("image/") and content_type.split(";", 1)[0].strip() != "application/octet-stream":
                 raise ArtworkError("Artwork response is not an image.")
             size = 0
             head = b""

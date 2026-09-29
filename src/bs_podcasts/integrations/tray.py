@@ -74,6 +74,8 @@ class TrayController:
         if bridge is not None:
             bridge.playback_event.connect(self._playback_changed)
             self._connected = True
+        if playback is not None:
+            self._playback_changed(playback.snapshot)
 
     def _playback_changed(self, snapshot):
         if self.tray is None:
@@ -98,7 +100,8 @@ class TrayController:
         self.toggle.setText(texts[2])
 
     def _show_window(self):
-        self.window.showNormal()
+        self.window.setWindowState(self.window.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.window.show()
         self.window.raise_()
         self.window.activateWindow()
 
@@ -133,6 +136,4 @@ class TrayController:
             self.tray = None
 
     def _quit(self):
-        self.window._force_quit = True
-        self.window.close()
-        QApplication.instance().quit()
+        self.window._request_quit()

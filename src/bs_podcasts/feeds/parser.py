@@ -198,12 +198,6 @@ def _rss_enclosure(item) -> tuple[str, str, int]:
         if not url:
             continue
         length = attributes.get("length", "").strip()
-        if length:
-            try:
-                if 0 < int(length) < MIN_ENCLOSURE_BYTES:
-                    continue
-            except ValueError:
-                pass
         mime = attributes.get("type", "").split(";", 1)[0].strip().lower()
         if mime and not mime.startswith("audio/") and mime not in BINARY_AUDIO_TYPES:
             if mime.startswith("video/"):
@@ -312,6 +306,7 @@ def _parse_rss(root) -> FeedData:
         artwork_url=_artwork(channel),
         categories=_categories(channel),
         episodes=tuple(_cap_newest(episodes)),
+        truncated=len(episodes) > MAX_EPISODES,
         skipped_video=_SKIPPED.take(),
     )
 
@@ -385,6 +380,7 @@ def _parse_atom(root) -> FeedData:
         artwork_url=_text(root, "logo", "icon"),
         categories=_categories(root),
         episodes=tuple(_cap_newest(episodes)),
+        truncated=len(episodes) > MAX_EPISODES,
         skipped_video=_SKIPPED.take(),
     )
 
@@ -412,24 +408,35 @@ def _apply_xml_base(root, document_base: str):
     # `under` is True once any ancestor (or the element itself) declared
     # xml:base — inheritance is the whole point. Elements not under one are
     # left for resolve_feed_urls, exactly as before.
-    stack = [(root, document_base, False)]
+    stack = [(root, document_base, False, 0)]
+    budget = 0
+    def bounded(value):
+        nonlocal budget
+        budget += len(value)
+        if len(value) > 8192 or budget > 8 * 1024 * 1024:
+            raise FeedParseError("Feed URL expansion exceeds the safety limit.")
+        return value
     while stack:
-        element, base, under = stack.pop()
+        element, base, under, depth = stack.pop()
+        if depth > 128:
+            raise FeedParseError("Feed nesting exceeds the safety limit.")
         own = element.attrib.get(XML_BASE, "").strip()
         if own:
-            base = urljoin(base, own) if base else own
+            if len(own) > 8192:
+                raise FeedParseError("Feed base URL exceeds the safety limit.")
+            base = bounded(urljoin(base, own) if base else own)
             under = True
         if under and base:
             for name in _URL_ATTRIBUTES:
                 value = (element.attrib.get(name) or "").strip()
                 if _is_relative(value):
-                    element.set(name, urljoin(base, value))
+                    element.set(name, bounded(urljoin(base, value)))
             if _local(element.tag) in _URL_TEXT_TAGS:
                 text = (element.text or "").strip()
                 if _is_relative(text):
-                    element.text = urljoin(base, text)
+                    element.text = bounded(urljoin(base, text))
         for child in element:
-            stack.append((child, base, under))
+            stack.append((child, base, under, depth + 1))
 
 
 def resolve_feed_urls(feed: FeedData, base_url: str) -> FeedData:
