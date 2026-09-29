@@ -17,8 +17,10 @@ Qt / PySide6 / Shiboken (The Qt Company)
 
 mpv / libmpv (Windows libmpv-2.dll; Linux libmpv.so.2; macOS libmpv.2.dylib)
   License: GNU Lesser General Public License v2.1 or later
-  (licenses/LGPL-2.1.txt). This copy of libmpv was built from unmodified mpv
-  sources configured in LGPL mode (-Dgpl=false).
+  (licenses/LGPL-2.1.txt). This copy is configured in LGPL mode (-Dgpl=false).
+  The macOS build includes mpv-coreaudio-only.patch, supplied with the matching
+  sources (build-file change dated 2026-09-28), which adds an existing upstream utility file to the CoreAudio-only
+  build. Other mpv source code is unmodified.
   https://mpv.io / https://github.com/mpv-player/mpv
 
 FFmpeg (statically linked into the bundled libmpv on each platform)

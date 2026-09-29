@@ -20,6 +20,7 @@ export CXXFLAGS="$CFLAGS"
 command -v meson ninja pkg-config >/dev/null
 printf 'Native work/log directory: %s\n' "$BS_WORK"
 "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --source "$BS_SRC" --cache "$BS_PROJECT/.cache/native-sources" --macos
+patch -d "$BS_SRC/mpv-0.41.0" -p1 -F 0 < "$BS_PROJECT/repo/packaging/mpv-coreaudio-only.patch"
 build_static() {
     local source="$1"; shift
     meson setup "$BS_WORK/build-$source" "$BS_SRC/$source" --prefix "$BS_PREFIX" --libdir lib \
@@ -47,7 +48,7 @@ build_static libplacebo-7.360.1 -Dvulkan=disabled -Dopengl=disabled -Dd3d11=disa
 meson setup "$BS_WORK/build-mpv" "$BS_SRC/mpv-0.41.0" --prefix "$BS_PREFIX" --libdir lib \
     --buildtype release --prefer-static --default-library shared --wrap-mode=nodownload --auto-features=disabled \
     --sysconfdir=/bs-native/etc --datadir=/bs-native/share \
-    -Dgpl=false -Dlibmpv=true -Dcplayer=false -Dtests=false -Dgl=disabled -Dcoreaudio=enabled -Dcocoa=enabled \
+    -Dgpl=false -Dlibmpv=true -Dcplayer=false -Dtests=false -Dgl=disabled -Dcoreaudio=enabled \
     "-Dc_link_args=['-lc++','-mmacosx-version-min=14.0']" >> "$BS_WORK/build.log" 2>&1
 "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --sanitize "$BS_WORK/build-mpv/config.h" --root "$BS_WORK"
 ninja -C "$BS_WORK/build-mpv" -j "$BS_JOBS" >> "$BS_WORK/build.log" 2>&1

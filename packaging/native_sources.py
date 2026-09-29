@@ -94,6 +94,7 @@ def record(artifact):
     if artifact.name == 'libmpv.2.dylib':
         receipt.update(platform='darwin', architecture=platform.machine(), minimum_macos='14.0',
                        extra_inputs_sha256=digest(lock.with_name('native-sources-macos.json')),
+                       patch_sha256=digest(lock.with_name('mpv-coreaudio-only.patch')),
                        recipe_sha256=digest(lock.with_name('build-libmpv-macos.sh')))
     target=artifact.with_name('native-build.json')
     with tempfile.NamedTemporaryFile(dir=target.parent,delete=False) as stream:

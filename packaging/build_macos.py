@@ -48,6 +48,7 @@ def build(workspace):
     if (receipt['sha256']!=file_digest(native)
             or receipt['inputs_sha256']!=file_digest(snapshot/'packaging/native-sources.json')
             or receipt.get('extra_inputs_sha256')!=file_digest(snapshot/'packaging/native-sources-macos.json')
+            or receipt.get('patch_sha256')!=file_digest(snapshot/'packaging/mpv-coreaudio-only.patch')
             or receipt['recipe_sha256']!=file_digest(snapshot/'packaging/build-libmpv-macos.sh')):
         raise RuntimeError('Native receipt mismatch; rebuild the pinned LGPL player first.')
     iconset=work/'BS-Podcasts.iconset'; iconset.mkdir()

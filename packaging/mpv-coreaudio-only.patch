@@ -1,0 +1,12 @@
+--- a/meson.build
++++ b/meson.build
+@@ -829,6 +829,9 @@
+ if features['coreaudio']
+     dependencies += coreaudio
+     sources += files('audio/out/ao_coreaudio.c',
+                      'audio/out/ao_coreaudio_exclusive.c',
+                      'audio/out/ao_coreaudio_properties.c')
++    if not features['cocoa']
++        sources += files('osdep/utils-mac.c')
++    endif
+ endif
