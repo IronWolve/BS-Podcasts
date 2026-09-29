@@ -1,6 +1,7 @@
 """Application-facing library operations."""
 
 from urllib.parse import urlparse
+from contextlib import nullcontext
 
 from ..data.repositories import LibraryRepository
 from ..domain import FeedData
@@ -11,6 +12,8 @@ from ..urlguard import ensure_web_url
 class LibraryService:
     def __init__(self, repository: LibraryRepository):
         self.repository = repository
+        self.downloads = None
+        self.playback = None
 
     @staticmethod
     def normalize_feed_url(url: str) -> str:
@@ -153,7 +156,10 @@ class LibraryService:
         return self.repository.removal_preview(show_id)
 
     def remove_subscription(self, show_id: int, delete_files: bool = True) -> dict:
-        return self.repository.remove_show(show_id, delete_files)
+        with self.downloads.removing_show(show_id) if self.downloads is not None else nullcontext():
+            if self.playback is not None and self.playback.snapshot.show_id == show_id:
+                self.playback.stop()
+            return self.repository.remove_show(show_id, delete_files)
 
     def rearm(self, show_id: int):
         self.repository.rearm_show(show_id)

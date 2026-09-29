@@ -12,10 +12,10 @@ for size in 32 64 128 256 512; do
   mkdir -p "$ICONS/${size}x${size}/apps"
   cp "$BRANDING/bs-podcasts-icon-$size.png" "$ICONS/${size}x${size}/apps/bs-podcasts.png"
 done
-# Use the repository-owned launcher, not an assumed script above the checkout.
+# Point at deployed code; the checkout is not a runtime dependency.
 # Render Exec with desktop-entry quoting (including literal percent signs).
 "$WORKSPACE/dists/linux/.venv/bin/python" -B "$HERE/render-desktop.py" \
-    "$HERE/bs-podcasts.desktop" "$HERE/launch.sh" "$APPS/bs-podcasts.desktop"
+    "$HERE/bs-podcasts.desktop" "$WORKSPACE/dists/linux/start.sh" "$APPS/bs-podcasts.desktop"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS" || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q "$ICONS" || true
 echo "Installed launcher to $APPS/bs-podcasts.desktop"

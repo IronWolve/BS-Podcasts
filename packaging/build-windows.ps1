@@ -122,8 +122,9 @@ if (-not (Test-Path -LiteralPath $nativeReceiptPath)) { throw "Native input rece
 $nativeReceipt = Get-Content -LiteralPath $nativeReceiptPath -Raw | ConvertFrom-Json
 $nativeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:BS_PODCASTS_LIBMPV_DLL).Hash.ToLowerInvariant()
 $nativeLockHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stageRoot "packaging\native-sources.json")).Hash.ToLowerInvariant()
-if ($nativeReceipt.sha256 -ne $nativeHash -or $nativeReceipt.inputs_sha256 -ne $nativeLockHash) {
-    throw "Native DLL or dependency inputs differ from the recorded build"
+$nativeRecipeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stageRoot "packaging\build-libmpv-lgpl.sh")).Hash.ToLowerInvariant()
+if ($nativeReceipt.sha256 -ne $nativeHash -or $nativeReceipt.inputs_sha256 -ne $nativeLockHash -or $nativeReceipt.recipe_sha256 -ne $nativeRecipeHash) {
+    throw "Native DLL, inputs or recipe differ from the recorded build; rebuild the native library. Legacy receipts cannot be relabeled as verified."
 }
 $env:BS_PODCASTS_NATIVE_RECEIPT = $nativeReceiptPath
 $spec = Join-Path $stageRoot "packaging\bs-podcasts.spec"
@@ -172,6 +173,8 @@ if (-not $checked.passed) { throw "Packaged dependency/storage/asset check faile
 Write-Output "Packaged self-check passed (no GUI, real profile or audio device)."
 
 # Complete notices and provenance before replacing any previous artifact.
+& $python -B (Join-Path $stageRoot "packaging\check_frozen.py") $sourceDir --private-root $workspace
+if ($LASTEXITCODE -ne 0) { throw "Frozen privacy check failed; previous application unchanged" }
 $notices = Join-Path $sourceDir "_internal\THIRD-PARTY-NOTICES.txt"
 if (Test-Path -LiteralPath $notices) {
     Copy-Item -LiteralPath $notices -Destination (Join-Path $sourceDir "THIRD-PARTY-NOTICES.txt")

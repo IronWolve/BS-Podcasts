@@ -109,6 +109,12 @@ def stage(destination, root=ROOT):
     if source_digest(destination) != expected or source_digest(root) != expected:
         raise ValueError('Source changed while staging; build cancelled before compilation.')
     origin={'commit':None,'dirty':True,'sha256':expected}
+    inherited = root/'.build-origin.json'
+    if inherited.is_file():
+        previous=json.loads(inherited.read_text())
+        if previous.get('sha256') != expected:
+            raise ValueError('Imported source origin does not match its exact files.')
+        origin.update(commit=previous.get('commit'), dirty=previous.get('dirty',True))
     try:
         top = subprocess.run(['git','-C',str(root),'rev-parse','--show-toplevel'],capture_output=True,text=True,timeout=5)
         if top.returncode==0 and Path(top.stdout.strip()).resolve()==root:

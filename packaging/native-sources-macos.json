@@ -1,0 +1,3 @@
+[
+  {"name":"fast_float","version":"97b54ca9e75f5303507699d27c6b4f4efe4641a1","url":"https://github.com/fastfloat/fast_float/archive/97b54ca9e75f5303507699d27c6b4f4efe4641a1.tar.gz","sha256":"2b132274539286e41f37857cac22aa8441d21bd86d55de825a3342b149f66801","archive":"fast_float-97b54ca9e75f5303507699d27c6b4f4efe4641a1.tar.gz","destination":"libplacebo-7.360.1/3rdparty/fast_float"}
+]

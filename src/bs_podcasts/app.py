@@ -31,31 +31,29 @@ from .ui.theme import app_font, apply_app_stylesheet, apply_theme, apply_typogra
 
 
 def _write_crash_file(text: str):
-    """Crash reports land in the OS temp directory (%TEMP%/%TMP% on Windows)."""
+    """All diagnostic sinks share redaction and private project storage."""
     import tempfile
-    import time
+    from .logging_setup import log_path
+    from .privacy import redact
 
     try:
-        path = os.path.join(
-            tempfile.gettempdir(),
-            f"bs-podcasts-crash-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}.log",
-        )
-        # "x": refuse a path that already exists. The name is predictable and
-        # the directory may be shared, so appending through a pre-planted
-        # symlink would write the crash text into an arbitrary user file.
-        with open(path, "x", encoding="utf-8") as handle:
-            handle.write(f"BS Podcasts {app_version()}\n{text}\n")
+        directory = log_path().parent
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor, _path = tempfile.mkstemp(prefix='bs-podcasts-crash-', suffix='.log', dir=directory)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(f"BS Podcasts {app_version()}\n{redact(text)}\n")
     except OSError:
         pass
 
 
 def _install_excepthook():
+    from .privacy import redact
     logger = logging.getLogger("bs_podcasts")
 
     def hook(exc_type, exc_value, exc_traceback):
         import traceback
 
-        text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        text = redact("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
         logger.error("Unhandled exception:\n%s", text)
         _write_crash_file(text)
         if sys.__stderr__ is not None:
@@ -70,7 +68,7 @@ def _install_excepthook():
             return
         import traceback
 
-        text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+        text = redact("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
         logger.error("Unhandled exception in thread %s:\n%s", getattr(args.thread, "name", "?"), text)
         _write_crash_file(f"[thread {getattr(args.thread, 'name', '?')}]\n{text}")
 
@@ -305,7 +303,8 @@ def main() -> int:
     # chapter/transcript fetches) has its own pool too: four directory scans
     # on the general pool made the library reload the page was waiting for
     # queue behind them.
-    network_jobs = JobRunner(max_workers=2)
+    network_jobs = JobRunner(max_workers=2, max_pending=32)
+    artwork_jobs = JobRunner(max_workers=2, max_pending=4)
     refresh = RefreshService(
         repository,
         fetcher=FeedFetcher(),
@@ -348,6 +347,7 @@ def main() -> int:
             download_jobs=download_jobs,
             refresh_jobs=refresh_jobs,
             network_jobs=network_jobs,
+            artwork_jobs=artwork_jobs,
             view_state=view_state,
             commands=commands,
         )
@@ -448,7 +448,7 @@ def main() -> int:
     # up to 12 s while background work drained.
     deadline = _time.monotonic() + 3.0
     busy = commands.join(max(0.0, deadline - _time.monotonic()))
-    for pool in (jobs, download_jobs, refresh_jobs, network_jobs):
+    for pool in (jobs, download_jobs, refresh_jobs, network_jobs, artwork_jobs):
         busy += pool.join(max(0.0, deadline - _time.monotonic()))
     from .ui.pixmaps import shutdown_decodes
     busy += shutdown_decodes(max(0.0, deadline - _time.monotonic()))

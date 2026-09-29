@@ -672,6 +672,11 @@ class LibraryRepository:
             ).rowcount
         return bool(changed)
 
+    def set_favorites(self, episode_ids, favorite):
+        with self.database.connect() as connection:
+            return connection.executemany('UPDATE episodes SET favorite=? WHERE id=?',
+                ((int(favorite), value) for value in dict.fromkeys(episode_ids))).rowcount
+
     def mark_show_seen(self, show_id: int) -> int:
         """Opening a show clears its new-episode badge."""
         with self.database.connect() as connection:
@@ -849,27 +854,24 @@ class LibraryRepository:
         retention_keep: int | None | object = ...,
         retention_days: int | None | object = ...,
     ):
-        show = self.get_show(show_id)
-        if show is None:
+        values = {key: value for key, value in {
+            "playback_speed": speed, "skip_back": skip_back,
+            "skip_forward": skip_forward, "trim_level": trim_level,
+            "auto_continue": None if auto_continue is None else int(auto_continue),
+        }.items() if value is not None}
+        for key, value in {
+            "auto_download_override": auto_download_override,
+            "auto_download_limit": auto_download_limit,
+            "retention_keep": retention_keep, "retention_days": retention_days,
+        }.items():
+            if value is not ...:
+                values[key] = int(value) if key == "auto_download_override" and value is not None else value
+        if not values:
             return
         with self.database.connect() as connection:
             connection.execute(
-                """UPDATE shows SET playback_speed=?, skip_back=?,
-                   skip_forward=?, auto_continue=?, trim_level=?,
-                   auto_download_override=?, auto_download_limit=?,
-                   retention_keep=?, retention_days=? WHERE id=?""",
-                (
-                    speed if speed is not None else show.playback_speed,
-                    skip_back if skip_back is not None else show.skip_back,
-                    skip_forward if skip_forward is not None else show.skip_forward,
-                    int(auto_continue if auto_continue is not None else show.auto_continue),
-                    trim_level if trim_level is not None else show.trim_level,
-                    show.auto_download_override if auto_download_override is ... else (None if auto_download_override is None else int(auto_download_override)),
-                    show.auto_download_limit if auto_download_limit is ... else auto_download_limit,
-                    show.retention_keep if retention_keep is ... else retention_keep,
-                    show.retention_days if retention_days is ... else retention_days,
-                    show_id,
-                ),
+                "UPDATE shows SET " + ", ".join(key + "=?" for key in values) + " WHERE id=?",
+                (*values.values(), show_id),
             )
 
     def search(self, query: str, limit: int = 100) -> tuple[list[Show], list[Episode]]:

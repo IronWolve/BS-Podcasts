@@ -78,7 +78,7 @@ class TrayController:
     def _playback_changed(self, snapshot):
         if self.tray is None:
             return
-        if snapshot.episode_id is None:
+        if not snapshot.source:
             texts = ("Nothing playing", APP_TITLE, "Play / Pause")
         else:
             title = snapshot.title if len(snapshot.title) <= 60 else snapshot.title[:57] + "…"

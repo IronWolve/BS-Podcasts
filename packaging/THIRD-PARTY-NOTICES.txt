@@ -4,7 +4,9 @@ BS Podcasts — Third-party software notices
 This application bundles the following third-party components. Where a
 component's entry names a file under "licenses/", that text is included in the
 "licenses" folder next to this file (inside the application's _internal
-directory); component source code is available from the projects listed below.
+directory on Windows, Contents/Resources on macOS, and the Linux runtime root).
+The matching Third-Party-Sources archive accompanies the release binaries;
+see licenses/LIBRARY-REPLACEMENT.txt for source and replacement instructions.
 
 Qt / PySide6 / Shiboken (The Qt Company)
   License: GNU Lesser General Public License v3.0 (licenses/LGPL-3.0.txt,
@@ -13,13 +15,13 @@ Qt / PySide6 / Shiboken (The Qt Company)
   The Qt libraries ship as separate, replaceable DLL files; you may replace
   them with your own builds as provided for by the LGPL.
 
-mpv / libmpv (Windows libmpv-2.dll; Linux native/libmpv.so.2)
+mpv / libmpv (Windows libmpv-2.dll; Linux libmpv.so.2; macOS libmpv.2.dylib)
   License: GNU Lesser General Public License v2.1 or later
   (licenses/LGPL-2.1.txt). This copy of libmpv was built from unmodified mpv
   sources configured in LGPL mode (-Dgpl=false).
   https://mpv.io / https://github.com/mpv-player/mpv
 
-FFmpeg (statically linked into the bundled Windows/Linux libmpv)
+FFmpeg (statically linked into the bundled libmpv on each platform)
   License: GNU Lesser General Public License v2.1 or later
   (licenses/LGPL-2.1.txt), built from unmodified sources in the default LGPL
   configuration (no --enable-gpl, no --enable-nonfree).
@@ -75,7 +77,23 @@ Inter font family
   bundled assets/fonts folder)
   https://github.com/rsms/inter
 
-Corresponding source for the LGPL components (mpv, FFmpeg, libplacebo,
-Fribidi, python-mpv, Qt) is available from the project pages above; the
-libmpv build recipe used for this application is available from the
-application's distributor on request.
+Additional bundled/transitive software
+  Qt 6.11.2 third-party copyright and license texts:
+  licenses/Qt-6.11.2-third-party.txt
+  Pillow 12.3.0 and its native image libraries; setuptools 84.0.0 and its
+  vendored runtime modules; packaging 26.3; PyInstaller 6.22.3 bootloader
+  exception and Apache runtime hooks; macOS macholib 1.16.4; related notices:
+  licenses/Python-bundled-third-party.txt
+  Native player, FreeType internals, MIT fast_float on macOS, and Windows
+  MinGW/GCC runtime exception: licenses/Native-bundled-third-party.txt
+
+FFmpeg uses code from the Independent JPEG Group. This software is based in
+part on the work of the Independent JPEG Group. The relevant JPEG source
+files are unmodified. Native generated configuration/build-path strings are
+remapped to remove development-machine paths; build recipes record that step.
+
+The Qt and compiler source notice inventories retain optional/build-time
+notices too. Their inclusion does not mean that every optional source file
+is linked into this application or change the license of its original code.
+Original application code remains all rights reserved by its owner; that
+restriction does not override any third-party license or granted LGPL rights.

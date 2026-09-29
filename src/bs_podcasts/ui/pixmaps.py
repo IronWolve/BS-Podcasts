@@ -1,5 +1,6 @@
 """Cached, cover-cropped, rounded artwork pixmaps shared by widgets and delegates."""
 
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
@@ -8,23 +9,71 @@ import os
 import threading
 import time
 import weakref
+from itertools import count
 
 from PySide6.QtCore import QObject, QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPainterPath, QPixmap, QPixmapCache
+from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPainterPath, QPixmap
 
 from . import icons
 from .theme import COLORS, app_font
 from ..data.files import atomic_write
 
 
-QPixmapCache.setCacheLimit(96 * 1024)  # 96 MB of decoded artwork
+class _ArtworkCache:
+    """GUI-thread LRU with one byte budget for decoded and painted thumbnails.
+
+    Qt ignores cache configuration before QApplication exists and may retire
+    unused shared-cache entries later. Own these pixmaps so scrolling back does
+    not turn already-loaded covers into placeholders merely because Qt evicts.
+    """
+
+    def __init__(self, limit_bytes=96 * 1024 * 1024, max_entries=4096):
+        self.limit_bytes = limit_bytes
+        self.max_entries = max_entries
+        self.bytes = 0
+        self._items = OrderedDict()
+
+    def find(self, key):
+        entry = self._items.get(key)
+        if entry is None:
+            return None
+        self._items.move_to_end(key)
+        return QPixmap(entry[0])
+
+    def insert(self, key, pixmap):
+        cost = pixmap.width() * pixmap.height() * max(1, (pixmap.depth() + 7) // 8)
+        cost += len(key) * 2 + 160
+        old = self._items.pop(key, None)
+        if old is not None:
+            self.bytes -= old[1]
+        if pixmap.isNull() or cost > self.limit_bytes or self.max_entries < 1:
+            return
+        while self._items and (
+            self.bytes + cost > self.limit_bytes or len(self._items) >= self.max_entries
+        ):
+            _, (_, retired_cost) = self._items.popitem(last=False)
+            self.bytes -= retired_cost
+        self._items[key] = (QPixmap(pixmap), cost)
+        self.bytes += cost
 
 
-_dominant: dict[str, str] = {}
+_artwork_cache = _ArtworkCache()
+
+
+_dominant = OrderedDict()
 _dominant_mtime: dict[str, float] = {}
 _disk_loaded = False
 _disk_lock = threading.Lock()
+_disk_write_lock = threading.Lock()
 _SAMPLE_SIZE = 24
+MAX_METADATA = 4096
+MAX_ACCENT_FILE = 2 * 1024 * 1024
+
+
+def _bound_accents():
+    while len(_dominant) > MAX_METADATA:
+        path, _ = _dominant.popitem(last=False)
+        _dominant_mtime.pop(path, None)
 
 
 def _cache_file() -> Path:
@@ -42,15 +91,20 @@ def _load_disk() -> None:
         if _disk_loaded:
             return
         _disk_loaded = True
-        try:
-            payload = json.loads(_cache_file().read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError):
+    try:
+        with _cache_file().open('rb') as stream:
+            raw = stream.read(MAX_ACCENT_FILE + 1)
+        if len(raw) > MAX_ACCENT_FILE:
             return
-        items = payload.get("items") if isinstance(payload, dict) else None
-        if not isinstance(items, dict):
-            return
+        payload = json.loads(raw)
+    except (OSError, ValueError, RecursionError):
+        return
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, dict):
+        return
+    with _disk_lock:
         for path, record in items.items():
-            if not isinstance(record, dict):
+            if path in _dominant or not isinstance(record, dict):
                 continue
             color = record.get("color")
             mtime = record.get("mtime")
@@ -58,21 +112,26 @@ def _load_disk() -> None:
                 continue
             _dominant[path] = color
             _dominant_mtime[path] = float(mtime)
+        _bound_accents()
 
 
 def _save_disk() -> None:
     target = _cache_file()
-    with _disk_lock:
-        # Snapshot under the lock: the Discover artwork pool and the accent
-        # priming job can both be inserting while this runs.
-        items = {
-            path: {"mtime": _dominant_mtime.get(path, 0.0), "color": color}
-            for path, color in _dominant.items()
-        }
-        payload = {"version": 1, "items": items}
+    with _disk_write_lock:
+        # Serialize writers, but never hold the GUI lookup lock during I/O.
+        with _disk_lock:
+            items = {
+                path: {"mtime": _dominant_mtime.get(path, 0.0), "color": color}
+                for path, color in _dominant.items()
+            }
+        payload = json.dumps({"version": 1, "items": items}).encode('utf-8')
+        while len(payload) > MAX_ACCENT_FILE and items:
+            for path in list(items)[:max(1, len(items)//2)]:
+                items.pop(path)
+            payload = json.dumps({"version": 1, "items": items}).encode('utf-8')
         try:
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            atomic_write(target, json.dumps(payload).encode('utf-8'))
+            atomic_write(target, payload)
         except OSError:
             pass
 
@@ -82,9 +141,9 @@ def _fresh(path: str) -> bool:
     if cached_mtime is None:
         return path in _dominant
     try:
-        return abs(os.path.getmtime(path) - cached_mtime) < 1.0
+        return os.path.getmtime(path) == cached_mtime
     except OSError:
-        return True
+        return False
 
 
 def _sample(path: str) -> str:
@@ -127,21 +186,27 @@ def dominant_color(path: str, fallback: str = "", compute: bool = True) -> str:
     if not path:
         return fallback
     _load_disk()
-    if path in _dominant and _fresh(path):
-        return _dominant[path] or fallback
+    with _disk_lock:
+        cached = _dominant.get(path)
+        if cached is not None:
+            _dominant.move_to_end(path)
+    if cached is not None and _fresh(path):
+        return cached or fallback
     if not compute:
         return fallback
     result = _sample(path)
     try:
         stamp = os.path.getmtime(path)
     except OSError:
-        stamp = 0.0
+        return result or fallback
     # One atomic write for the colour/mtime pair: workers write these while
     # the Qt thread reads, and a reader landing between the two assignments
     # saw a colour whose freshness stamp belonged to the previous file.
     with _disk_lock:
         _dominant[path] = result
         _dominant_mtime[path] = stamp
+        _dominant.move_to_end(path)
+        _bound_accents()
     return result or fallback
 
 
@@ -172,6 +237,19 @@ def sample_accents(paths) -> int:
 
 def save_accents() -> None:
     """Persist tints sampled outside `sample_accents` (Discover workers)."""
+    _save_disk()
+
+
+def prune_accents():
+    """Worker-only disk checks; keep deleted artwork out of persisted metadata."""
+    with _disk_lock:
+        paths = list(_dominant)
+    missing = [path for path in paths if not os.path.isfile(path)]
+    with _disk_lock:
+        for path in missing:
+            _dominant.pop(path, None)
+            _dominant_mtime.pop(path, None)
+        _bound_accents()
     _save_disk()
 
 
@@ -211,12 +289,40 @@ _decoder: ThreadPoolExecutor | None = None
 _decode_lock = threading.Lock()
 _inflight: set[str] = set()
 _failed: dict[str, float] = {}
-_watchers: dict[str, weakref.WeakSet] = {}
+_watchers = OrderedDict()
 _waiting = weakref.WeakSet()
-_revisions: dict[str, int] = {}
+_revisions = OrderedDict()
+_revision_ids = count(1)
 _decode_stopped = False
 MAX_PENDING_DECODES = 64
 _bridge = None
+
+
+def _revision_for(path):
+    if not path:
+        return 0
+    if path not in _revisions:
+        _revisions[path] = next(_revision_ids)
+    _revisions.move_to_end(path)
+    while len(_revisions) > MAX_METADATA:
+        _revisions.popitem(last=False)
+    return _revisions[path]
+
+
+def _watch(path, widget):
+    if not path or widget is None:
+        return
+    _watchers.setdefault(path, weakref.WeakSet()).add(widget)
+    _watchers.move_to_end(path)
+    while len(_watchers) > MAX_METADATA:
+        _watchers.popitem(last=False)
+
+
+def prune_watchers():
+    """GUI-thread cleanup; weak values alone do not retire path keys."""
+    for path, widgets in list(_watchers.items()):
+        if not widgets:
+            _watchers.pop(path, None)
 
 
 def _remember_failed(key: str):
@@ -241,8 +347,8 @@ class _DecodeBridge(QObject):
                 _remember_failed(key)
         if _decode_stopped:
             return
-        if not image.isNull():
-            QPixmapCache.insert(key, QPixmap.fromImage(image))
+        if not image.isNull() and key.endswith(f':v{_revisions.get(path, -1)}'):
+            _artwork_cache.insert(key, QPixmap.fromImage(image))
         watchers = list(_watchers.get(path, ())) + list(_waiting)
         _waiting.clear()
         for widget in watchers:
@@ -265,8 +371,7 @@ def _decode_job(key: str, path: str, width: int, height: int, bridge: _DecodeBri
 
 def _schedule_decode(key: str, path: str, width: int, height: int, notify) -> None:
     global _decoder, _bridge
-    if notify is not None:
-        _watchers.setdefault(path, weakref.WeakSet()).add(notify)
+    _watch(path, notify)
     with _decode_lock:
         if _decode_stopped:
             return
@@ -288,7 +393,11 @@ def _schedule_decode(key: str, path: str, width: int, height: int, notify) -> No
 
 def invalidate_artwork(path: str):
     """Called on the GUI thread when a producer publishes/replaces an image."""
-    _revisions[path] = _revisions.get(path, 0) + 1
+    _revisions[path] = next(_revision_ids)
+    _revision_for(path)
+    with _disk_lock:
+        _dominant.pop(path, None)
+        _dominant_mtime.pop(path, None)
     prefix = f"src:{path}:"
     with _decode_lock:
         for key in list(_failed):
@@ -327,15 +436,15 @@ def pending_decodes() -> int:
 
 
 def _source(path: str, width: int, height: int, sync: bool = False, notify=None) -> QPixmap | None:
-    """Artwork decoded near its painted size, from QPixmapCache.
+    """Artwork decoded near its painted size, from the bounded artwork cache.
 
     Returns None when the image is not ready yet (a decode has been scheduled
     and `notify` will be repainted when it lands) or cannot be decoded. With
     `sync=True` the caller waits for the decode on its own thread — for one-off
     surfaces such as dialogs, never for delegates.
     """
-    key = f"src:{path}:{width}x{height}:v{_revisions.get(path, 0)}"
-    cached = QPixmapCache.find(key)
+    key = f"src:{path}:{width}x{height}:v{_revision_for(path)}"
+    cached = _artwork_cache.find(key)
     if cached is not None and not cached.isNull():
         return cached
     if key in _failed:
@@ -349,7 +458,7 @@ def _source(path: str, width: int, height: int, sync: bool = False, notify=None)
                 _remember_failed(key)
             return None
         pixmap = QPixmap.fromImage(image)
-        QPixmapCache.insert(key, pixmap)
+        _artwork_cache.insert(key, pixmap)
         return pixmap
     _schedule_decode(key, path, width, height, notify)
     return None
@@ -375,7 +484,7 @@ def cover(
     `sync=True` decodes on the calling thread instead.
     """
     # The fallback branches below read the live COLORS dict, which apply_theme
-    # mutates in place — and rebuilding the window does not clear QPixmapCache.
+    # mutates in place — and rebuilding the window does not clear artwork.
     # Keying only on the arguments meant a placeholder rendered before a theme
     # switch was served back afterwards in the old theme's colours, for as long
     # as the cache kept it. Bake the resolved colours into the key.
@@ -383,10 +492,9 @@ def cover(
         f":{fallback_color or COLORS['surface_soft']}:{COLORS['muted']}"
         f":{COLORS['surface_raised']}:{COLORS['border']}"
     )
-    if path and notify is not None:
-        _watchers.setdefault(path, weakref.WeakSet()).add(notify)
-    key = f"cover:{path}:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}:v{_revisions.get(path, 0)}"
-    cached = QPixmapCache.find(key)
+    _watch(path, notify)
+    key = f"cover:{path}:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}:v{_revision_for(path)}"
+    cached = _artwork_cache.find(key)
     if cached is not None and not cached.isNull():
         return cached
     physical_w = max(1, int(round(width * scale)))
@@ -396,7 +504,7 @@ def cover(
         # Still decoding: draw the placeholder under its own key so the real
         # cover is built (and cached under `key`) on the repaint that follows.
         key = f"coverpending:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}"
-        cached = QPixmapCache.find(key)
+        cached = _artwork_cache.find(key)
         if cached is not None and not cached.isNull():
             return cached
     result = QPixmap(physical_w, physical_h)
@@ -429,5 +537,5 @@ def cover(
         icons.paint(painter, "podcasts", COLORS["border"], QRect((physical_w - glyph) // 2, (physical_h - glyph) // 2, glyph, glyph))
     painter.end()
     result.setDevicePixelRatio(scale)
-    QPixmapCache.insert(key, result)
+    _artwork_cache.insert(key, result)
     return result

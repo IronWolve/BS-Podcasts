@@ -1,0 +1,4 @@
+# Preserve upstream license text formatting without whitespace-only diagnostics.
+packaging/licenses/Native-bundled-third-party.txt -whitespace
+packaging/licenses/Python-bundled-third-party.txt -whitespace
+packaging/licenses/Qt-6.11.2-third-party.txt -whitespace

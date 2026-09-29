@@ -1,0 +1,5 @@
+# Build-only tools. pkgconf 2.5.1 is built from third-party-sources.json.
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+meson==1.10.1
+ninja==1.13.0

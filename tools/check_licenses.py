@@ -36,6 +36,10 @@ EXPECTED = {
     "FreeType": ("FTL.txt", "docs/FTL.TXT in the freetype source tree"),
     "idna": ("BSD-3-Clause-idna.txt", "LICENSE.md in the idna sdist"),
     "Python Software Foundation License": ("PSF.txt", "LICENSE in the CPython distribution"),
+    "Additional bundled/transitive software": ("Qt-6.11.2-third-party.txt", "pinned Qt and PySide source license inventories"),
+    "Pillow 12.3.0": ("Python-bundled-third-party.txt", "exact Windows and macOS wheel license texts"),
+    "MinGW/GCC runtime exception": ("Native-bundled-third-party.txt", "native source and toolchain copyright files"),
+    "Third-Party-Sources": ("LIBRARY-REPLACEMENT.txt", "source delivery and library replacement instructions"),
 }
 
 

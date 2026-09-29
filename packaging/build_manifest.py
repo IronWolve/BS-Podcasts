@@ -96,10 +96,30 @@ def create_manifest(artifact, archive=None, require_clean=False):
         receipt=json.loads(Path(os.environ['BS_PODCASTS_NATIVE_RECEIPT']).read_text())
         native=artifact/'_internal/libmpv-2.dll'
         lock=ROOT/'packaging/native-sources.json'
-        if receipt['sha256']!=digest(native) or receipt['inputs_sha256']!=digest(lock):
+        recipe = ROOT/'packaging/build-libmpv-lgpl.sh'
+        if (receipt['sha256']!=digest(native) or receipt['inputs_sha256']!=digest(lock)
+                or receipt.get('recipe_sha256') != digest(recipe)):
             raise ValueError('Native artifact does not match its approved inputs.')
         result['runtime']['native']={'file':'_internal/libmpv-2.dll','sha256':receipt['sha256'],
-                                    'inputs':json.loads(lock.read_text())}
+                                    'inputs':json.loads(lock.read_text()), 'recipe_sha256':receipt['recipe_sha256']}
+    if sys.platform == 'darwin' and os.environ.get('BS_PODCASTS_NATIVE_RECEIPT'):
+        receipt_path=Path(os.environ['BS_PODCASTS_NATIVE_RECEIPT'])
+        receipt=json.loads(receipt_path.read_text())
+        native=artifact/'Contents/Frameworks/libmpv.2.dylib'
+        lock=ROOT/'packaging/native-sources.json'
+        if (receipt['sha256']!=digest(receipt_path.with_name('libmpv.2.dylib'))
+                or receipt['inputs_sha256']!=digest(lock)
+                or receipt.get('extra_inputs_sha256')!=digest(ROOT/'packaging/native-sources-macos.json')
+                or receipt['recipe_sha256']!=digest(ROOT/'packaging/build-libmpv-macos.sh')):
+            raise ValueError('macOS native build receipt mismatch.')
+        # PyInstaller rewrites Mach-O install names and signatures during bundling.
+        result['runtime']['native']={'file':'Contents/Frameworks/libmpv.2.dylib',
+            'sha256':digest(native),'input_sha256':receipt['sha256'],'inputs':json.loads(lock.read_text()),
+            'recipe_sha256':receipt['recipe_sha256'],'minimum_macos':receipt['minimum_macos'],
+            'extra_inputs':json.loads((ROOT/'packaging/native-sources-macos.json').read_text()),
+            'extra_inputs_sha256':receipt['extra_inputs_sha256']}
+        result['runtime']['signing']='Developer ID' if os.environ.get('BS_PODCASTS_SIGN_IDENTITY') else 'ad-hoc'
+        result['runtime']['notarized']=False
     return result
 
 

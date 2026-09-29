@@ -13,11 +13,14 @@ assert PurePosixPath(root).is_absolute() and root!="/"
 print(host); print(root); print(shlex.quote(root+"/repo"))
 ' "$BS_CONFIG")
 [[ ${#BS_REMOTE[@]} -eq 3 ]] || { printf 'Invalid private sync configuration.\n' >&2; exit 1; }
+BS_SNAPSHOT="$(mktemp -d "$BS_PROJECT/tmp/mac-sync.XXXXXX")"
+"$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/source_manifest.py" stage --destination "$BS_SNAPSHOT/source"
 BS_LIST="$(mktemp "$BS_PROJECT/tmp/sync-inputs.XXXXXX")"
 trap 'rm -f -- "$BS_LIST"' EXIT
-"$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/source_manifest.py" list > "$BS_LIST"
+"$BS_PYTHON" -B "$BS_SNAPSHOT/source/packaging/source_manifest.py" list > "$BS_LIST"
+printf '.build-origin.json\0' >> "$BS_LIST"
 printf 'Syncing approved source to %s:%s/repo\n' "${BS_REMOTE[0]}" "${BS_REMOTE[1]}"
 ssh "${BS_REMOTE[0]}" "mkdir -p -- ${BS_REMOTE[2]}"
 rsync -a --protect-args --from0 --files-from="$BS_LIST" --itemize-changes \
-    "$BS_PROJECT/repo/" "${BS_REMOTE[0]}:${BS_REMOTE[1]}/repo/"
+    "$BS_SNAPSHOT/source/" "${BS_REMOTE[0]}:${BS_REMOTE[1]}/repo/"
 printf 'Source synced. No remote build or service was started.\n'

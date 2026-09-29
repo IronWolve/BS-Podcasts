@@ -81,8 +81,11 @@ def check_a_removed_row_leaves_the_selection():
         QApplication.processEvents()
         selection = page.view.selectionModel()
         selection.clearSelection()
-        for row in (0, 1, 2):
+        for episode_id in (1, 2, 3):
+            row = page.model.row_for_episode(episode_id)
             selection.select(page.model.index(row, 0), QItemSelectionModel.SelectionFlag.Select)
+        check('intended episode IDs selected regardless of current sort',
+              {item.episode_id for item in page.selected_items()} == {1, 2, 3})
 
         # Episode 2 finishes and drops out of the list entirely.
         page.set_items([episode(i, f"Episode {i}") for i in (1, 3, 4, 5)])

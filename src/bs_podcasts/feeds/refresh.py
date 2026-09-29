@@ -17,6 +17,7 @@ class RefreshReport:
     imported: int = 0
     message: str = ""
     not_modified: bool = False
+    artwork_path: str = ""
 
 
 class RefreshService:
@@ -47,6 +48,24 @@ class RefreshService:
     def refresh(self, show_id: int) -> RefreshReport:
         with self._lock_for(show_id):
             return self._refresh_locked(show_id)
+
+    def _refresh_artwork(self, show_id, url, previous_path):
+        if self.artwork is None or not url:
+            return ''
+        from pathlib import Path
+        def stamp(path):
+            try:
+                info = Path(path).stat()
+                return info.st_size, info.st_mtime_ns
+            except (OSError, ValueError):
+                return None
+        before = stamp(previous_path) if previous_path else None
+        try:
+            path = str(self.artwork.fetch(url))
+            self.repository.set_artwork_path(show_id, path)
+            return path if path != previous_path or stamp(path) != before else ''
+        except ArtworkError:
+            return ''
 
     def _refresh_locked(self, show_id: int) -> RefreshReport:
         show = self.repository.get_show(show_id)
@@ -84,7 +103,8 @@ class RefreshService:
                     response.last_modified,
                     response.final_url,
                 )
-                return RefreshReport(show_id, health, not_modified=True)
+                artwork_path = self._refresh_artwork(show_id, show.artwork_url, show.artwork_path)
+                return RefreshReport(show_id, health, not_modified=True, artwork_path=artwork_path)
 
             feed = parse_feed(response.content, base_url=response.final_url)
             imported = self.repository.import_feed(show_id, feed)
@@ -97,17 +117,12 @@ class RefreshService:
                 response.final_url,
             )
 
-            if self.artwork and feed.artwork_url:
-                try:
-                    path = self.artwork.fetch(feed.artwork_url)
-                    self.repository.set_artwork_path(show_id, str(path))
-                except ArtworkError:
-                    pass
+            artwork_path = self._refresh_artwork(show_id, feed.artwork_url, show.artwork_path)
             message = ""
             if health == Health.PARTIAL and feed.skipped_video:
                 n = feed.skipped_video
                 message = f"{n} episode{'s are' if n != 1 else ' is'} video-only and {'were' if n != 1 else 'was'} skipped; this app plays audio."
-            return RefreshReport(show_id, health, imported=imported, message=message)
+            return RefreshReport(show_id, health, imported=imported, message=message, artwork_path=artwork_path)
         except (FeedFetchError, FeedParseError) as exc:
             health = self.repository.record_refresh_failure(show_id)
             return RefreshReport(show_id, health, message=str(exc))

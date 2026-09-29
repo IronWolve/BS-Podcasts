@@ -1,0 +1,47 @@
+BS Podcasts — corresponding source and replaceable libraries
+
+The original application and third-party components have separate ownership.
+No application restriction limits the rights granted by the accompanying
+third-party licenses, including modifying LGPL libraries and reverse engineering
+for debugging those modifications. Preserve all third-party notices.
+
+Distribute the matching BS-Podcasts-VERSION-Third-Party-Sources.zip alongside
+the binary archives, with equally accessible download links. It contains the
+exact pinned mpv/FFmpeg/FreeType/FriBidi/HarfBuzz/libass/libplacebo inputs, Qt
+and Qt for Python 6.11.2 source, python-mpv 1.0.8 and certifi source, additional
+dependency sources, checksums, and the actual native build scripts. The separate
+application Source.zip contains the matching application and packaging source.
+Do not publish only the binary archives or substitute unrelated source versions.
+
+The mpv library is dynamically loaded by the application. Its FFmpeg, libass,
+FreeType, HarfBuzz, FriBidi and libplacebo dependencies are compiled into that
+library. Modify/rebuild the library with the included matching platform recipe;
+retain the public libmpv ABI. No original application object file is needed to
+rebuild or replace this dynamically loaded library. Build tools are separate
+prerequisites, not automatically installed by the recipes.
+
+Native library locations:
+  Windows: BS Podcasts/_internal/libmpv-2.dll
+  macOS: BS Podcasts.app/Contents/Frameworks/libmpv.2.dylib
+  Linux: dists/linux/native/libmpv.so.2
+
+Qt/PySide/Shiboken libraries are separate DLLs/frameworks/shared objects in the
+bundle, or installed in the Linux environment. Replace compatible versions as
+permitted by their licenses. Python-only LGPL wrapper code can be changed in
+the corresponding-source package and the application rebuilt with the supplied
+packaging scripts. All build and dependency inputs must match the target ABI.
+
+On macOS, replacing a library invalidates the app signature. Re-sign your local
+modified app with an ad-hoc signature, for example:
+  codesign --force --deep --sign - 'BS Podcasts.app'
+This does not make it Developer-ID signed or notarized. Use your own signing
+credentials for distribution where needed; the original distributor's keys are
+not required to make and run a local modified copy.
+
+Linux launchers verify native integrity. For a local replacement, rebuild its
+receipt with the included native_sources.py --record command and update the
+deployment manifest by rebuilding. Do not present a custom build as an unchanged
+original. The packaged source and scripts allow this without a remote service.
+
+Full applicable LGPL, GPL incorporated terms, permissive licenses and component
+copyrights accompany these instructions. These instructions do not replace them.

@@ -71,6 +71,7 @@ class MpvEngine:
             "cache_secs": 60,
         }
         defaults.update(options)
+        self._local_cache_policy = defaults['cache']
         if os.environ.get("BS_PODCASTS_SILENT") == "1":
             # Documented for the smoke sweep, previously read by nothing
             #: route audio to the null device.
@@ -204,7 +205,10 @@ class MpvEngine:
                 native_source = 'bshttp://' + uuid.uuid4().hex
                 with self._http_lock:
                     self._http_sources[native_source] = source
-            self._player.loadfile(native_source, "replace", pause="yes")
+            cache = 'yes' if is_web_url(source) else self._local_cache_policy
+            if isinstance(cache, bool):
+                cache = 'yes' if cache else 'no'
+            self._player.loadfile(native_source, "replace", pause="yes", cache=cache)
             entries = self._player.playlist
             if len(entries) != 1 or "id" not in entries[0]:
                 raise PlaybackUnavailable("Could not identify the native playback entry.")
