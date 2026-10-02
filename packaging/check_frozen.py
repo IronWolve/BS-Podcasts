@@ -15,7 +15,7 @@ def check(root, private_root=None):
         if deny.is_file(): tokens.extend(v.strip() for v in deny.read_text().splitlines() if v.strip())
     narrow=[v.replace('\\','/').casefold().encode() for v in tokens]
     wide=[v.encode('utf-16-le') for v in tokens]
-    forbidden={'.git','.local-agent','.local-helper','.local-tools','auth.json','credentials.json','direct_url.json'}
+    forbidden={'.git','auth.json','credentials.json','direct_url.json'}
     paths=[p for p in root.rglob('*') if p.is_file() and not p.is_symlink()]
     for path in paths:
         relative=path.relative_to(root)

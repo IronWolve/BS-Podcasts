@@ -19,10 +19,8 @@ MAX_ROW_TEXT_PX = 880
 
 
 def _repaint_target(option):
-    """The viewport a delegate paints into: repainted when a cover decode lands."""
-    widget = getattr(option, "widget", None)
-    viewport = getattr(widget, "viewport", None)
-    return viewport() if callable(viewport) else widget
+    """Watch the owning view, not a temporary Python wrapper for its viewport."""
+    return getattr(option, "widget", None)
 
 
 @dataclass(frozen=True)
@@ -64,6 +62,7 @@ class Episode:
     show_id: int = 0
     description: str = ""
     artwork_path: str = ""
+    episode_artwork_path: str = ""
     duration_seconds: int = 0
     detail: str = ""
     media_url: str = ""
@@ -233,6 +232,18 @@ class EpisodeModel(QAbstractListModel):
         self.beginResetModel()
         self._items = items
         self.endResetModel()
+
+    def update_artwork(self, episode_id, artwork_url, path, own_path, accent):
+        from dataclasses import replace
+        rows = []
+        for row, item in enumerate(self._items):
+            if item.episode_id == episode_id and item.artwork_url == artwork_url:
+                updated = replace(item, artwork_path=path, episode_artwork_path=own_path, accent=accent)
+                if updated != item:
+                    self._items[row] = updated
+                    rows.append(row)
+        for row in rows:
+            self.dataChanged.emit(self.index(row, 0), self.index(row, 0))
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._items)

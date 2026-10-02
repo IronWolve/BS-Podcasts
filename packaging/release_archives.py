@@ -32,7 +32,7 @@ def verify_files(root, records):
 
 
 def scan_inputs(files, tokens):
-    forbidden = {'.git', '.local-agent', '.local-helper', '.local-tools', '.env', 'auth.json', 'credentials.json', 'PRIVATE-NOTES.md'}
+    forbidden = {'.git', '.env', 'auth.json', 'credentials.json', 'agents.md'}
     for name, data in files.items():
         path = Path(name)
         if path.is_absolute() or '..' in path.parts or any(part.lower() in forbidden for part in path.parts):

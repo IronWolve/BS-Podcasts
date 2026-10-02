@@ -17,6 +17,7 @@ from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPainte
 from . import icons
 from .theme import COLORS, app_font
 from ..data.files import atomic_write
+from ..artwork import previews
 
 
 class _ArtworkCache:
@@ -40,6 +41,19 @@ class _ArtworkCache:
         self._items.move_to_end(key)
         return QPixmap(entry[0])
 
+    def nearest_source(self, path, width, height, revision):
+        prefix, suffix = f"src:{path}:", f":v{revision}"
+        closest, distance = None, float("inf")
+        for key, (pixmap, _) in self._items.items():
+            if not key.startswith(prefix) or not key.endswith(suffix):
+                continue
+            if pixmap.width() * height != pixmap.height() * width:
+                continue  # Decoded sources are already cropped to their aspect ratio.
+            delta = abs(pixmap.width() - width) + abs(pixmap.height() - height)
+            if delta < distance:
+                closest, distance = key, delta
+        return self.find(closest) if closest is not None else None
+
     def insert(self, key, pixmap):
         cost = pixmap.width() * pixmap.height() * max(1, (pixmap.depth() + 7) // 8)
         cost += len(key) * 2 + 160
@@ -58,6 +72,8 @@ class _ArtworkCache:
 
 
 _artwork_cache = _ArtworkCache()
+# Large/high-DPI renditions must not evict every usable image of a show.
+_preview_cache = _ArtworkCache(limit_bytes=32 * 1024 * 1024, max_entries=512)
 
 
 _dominant = OrderedDict()
@@ -229,10 +245,14 @@ def sample_accents(paths) -> int:
     pending = missing_accents(paths)
     if not pending:
         return 0
+    changed = 0
     for path in pending:
         dominant_color(path, compute=True)
-    _save_disk()
-    return len(pending)
+        with _disk_lock:
+            changed += path in _dominant and _fresh(path)
+    if changed:
+        _save_disk()
+    return changed
 
 
 def save_accents() -> None:
@@ -286,6 +306,43 @@ def _read_image(path: str, width: int, height: int) -> QImage:
     return image.scaled(width, height, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
 
+def prepare_previews(paths, limit=480):
+    """Worker-only startup seed, bounded below the independent RAM budget."""
+    result = {}
+    for index, path in enumerate(dict.fromkeys(path for path in paths if path)):
+        if index >= limit:
+            break
+        image = previews.load(path, _read_image)
+        if not image.isNull():
+            result[path] = image
+    return result
+
+
+def install_previews(images):
+    """GUI-thread handoff before the library's first model/paint."""
+    for path, image in images.items():
+        if _preview_cache.find(path) is None and not image.isNull():
+            _preview_cache.insert(path, QPixmap.fromImage(image))
+
+
+def prefetch_artwork(paths, notify):
+    """GUI-thread request for a bounded strip of upcoming cards; no file I/O."""
+    for index, path in enumerate(dict.fromkeys(path for path in paths if path)):
+        if index >= 48:
+            break
+        if _preview_cache.find(path) is None:
+            ready = _source(path, previews.SIDE, previews.SIDE, notify=notify)
+            if ready is not None:
+                _preview_cache.insert(path, ready)
+
+
+def _retain_preview(path, image):
+    if image.width() == image.height() and not image.isNull():
+        _preview_cache.insert(path, QPixmap.fromImage(image.scaled(
+            previews.SIDE, previews.SIDE, Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation)))
+
+
 # --- asynchronous decode -----------------------------------------------------
 # paint() used to call QImageReader.read() inline: 5-7 ms per cold cover, and
 # a grid scroll that revealed twenty new covers froze for 180-320 ms (audit
@@ -295,6 +352,7 @@ def _read_image(path: str, width: int, height: int) -> QImage:
 _decoder: ThreadPoolExecutor | None = None
 _decode_lock = threading.Lock()
 _inflight: set[str] = set()
+_decoding_paths: set[str] = set()
 _failed: dict[str, float] = {}
 _watchers = OrderedDict()
 _waiting = weakref.WeakSet()
@@ -332,6 +390,16 @@ def prune_watchers():
             _watchers.pop(path, None)
 
 
+def _repaint(widget):
+    try:
+        # Views have a stable owner; resolve their Qt-created viewport only when
+        # notifying, so a weakly watched viewport wrapper cannot lose the update.
+        viewport = getattr(widget, "viewport", None)
+        (viewport() if callable(viewport) else widget).update()
+    except RuntimeError:
+        pass  # Qt has already destroyed the widget.
+
+
 def _remember_failed(key: str):
     _failed[key] = time.monotonic()
     while len(_failed) > 2048:
@@ -350,24 +418,26 @@ class _DecodeBridge(QObject):
     def _on_decoded(self, key: str, path: str, image: QImage):
         with _decode_lock:
             _inflight.discard(key)
+            _decoding_paths.discard(path)
             if image.isNull():
                 _remember_failed(key)
         if _decode_stopped:
             return
         if not image.isNull() and key.endswith(f':v{_revisions.get(path, -1)}'):
             _artwork_cache.insert(key, QPixmap.fromImage(image))
+            _retain_preview(path, image)
         watchers = list(_watchers.get(path, ())) + list(_waiting)
         _waiting.clear()
         for widget in watchers:
-            try:
-                widget.update()
-            except RuntimeError:
-                pass  # the C++ widget is gone; the WeakSet drops it
+            _repaint(widget)
 
 
 def _decode_job(key: str, path: str, width: int, height: int, bridge: _DecodeBridge):
     try:
-        image = _read_image(path, width, height)
+        stamp = previews.signature(path)
+        image = (previews.load(path, _read_image) if width == height == previews.SIDE
+                 else _read_image(path, width, height))
+        previews.save(path, image, stamp)
     except Exception:
         image = QImage()
     try:
@@ -382,13 +452,16 @@ def _schedule_decode(key: str, path: str, width: int, height: int, notify) -> No
     with _decode_lock:
         if _decode_stopped:
             return
+        # A completion repaints every consumer, which requests its current size.
+        # Do not queue all the intermediate sizes from a window/splitter drag.
+        if path in _decoding_paths or key in _failed:
+            return
         if len(_inflight) >= MAX_PENDING_DECODES:
             if notify is not None:
                 _waiting.add(notify)
             return
-        if key in _inflight or key in _failed:
-            return
         _inflight.add(key)
+        _decoding_paths.add(path)
         if _bridge is None:
             _bridge = _DecodeBridge()
         if _decoder is None:
@@ -411,10 +484,7 @@ def invalidate_artwork(path: str):
             if key.startswith(prefix):
                 _failed.pop(key, None)
     for widget in list(_watchers.get(path, ())):
-        try:
-            widget.update()
-        except RuntimeError:
-            pass
+        _repaint(widget)
 
 
 def shutdown_decodes(grace_seconds: float = 0.0) -> int:
@@ -466,6 +536,7 @@ def _source(path: str, width: int, height: int, sync: bool = False, notify=None)
             return None
         pixmap = QPixmap.fromImage(image)
         _artwork_cache.insert(key, pixmap)
+        _retain_preview(path, image)
         return pixmap
     _schedule_decode(key, path, width, height, notify)
     return None
@@ -486,8 +557,8 @@ def cover(
 
     When the file is missing the placeholder tile is drawn with `fallback_text`
     initials on `fallback_color` so both branches share identical geometry.
-    The same placeholder is returned while the real image is still decoding on
-    the worker thread; `notify` (a widget) is repainted when it is ready.
+    A retained preview is used while the sharp image decodes; only unseen or
+    unavailable artwork needs initials. `notify` is repainted when it is ready.
     `sync=True` decodes on the calling thread instead.
     """
     # The fallback branches below read the live COLORS dict, which apply_theme
@@ -507,6 +578,12 @@ def cover(
     physical_w = max(1, int(round(width * scale)))
     physical_h = max(1, int(round(height * scale)))
     source = _source(path, physical_w, physical_h, sync, notify) if path else None
+    interim = False
+    if path and source is None:
+        source = _artwork_cache.nearest_source(path, physical_w, physical_h, _revision_for(path))
+        if source is None and physical_w == physical_h:
+            source = _preview_cache.find(path)
+        interim = source is not None
     if path and source is None:
         # Still decoding: draw the placeholder under its own key so the real
         # cover is built (and cached under `key`) on the repaint that follows.
@@ -544,5 +621,6 @@ def cover(
         icons.paint(painter, "podcasts", COLORS["border"], QRect((physical_w - glyph) // 2, (physical_h - glyph) // 2, glyph, glyph))
     painter.end()
     result.setDevicePixelRatio(scale)
-    _artwork_cache.insert(key, result)
+    if not interim:
+        _artwork_cache.insert(key, result)
     return result

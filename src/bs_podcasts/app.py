@@ -33,9 +33,11 @@ from .ui.theme import app_font, apply_app_stylesheet, apply_theme, apply_typogra
 def _write_crash_file(text: str):
     """All diagnostic sinks share redaction and private project storage."""
     import tempfile
-    from .logging_setup import log_path
+    from .logging_setup import file_logging_enabled, log_path
     from .privacy import redact
 
+    if not file_logging_enabled():
+        return
     try:
         directory = log_path().parent
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -289,6 +291,8 @@ def main() -> int:
         notice.deleteLater()
     repository = LibraryRepository(database)
     library = LibraryService(repository)
+    from .logging_setup import set_file_logging
+    set_file_logging(library.setting("diagnostics.file_logging", "1") == "1")
     apply_theme(resolve_theme(library.setting("ui.theme", "system")))
     apply_typography(library.setting("ui.text_size", "comfortable"), library.setting("ui.font", "Inter"))
     app.setFont(app_font())

@@ -9,6 +9,7 @@ import time
 
 from ..data.repositories import LibraryRepository
 from ..urlguard import UnsafeUrl, ensure_media_source, ensure_web_url, ensure_fetchable, is_web_url
+from ..privacy import redact
 from .engine import EngineEvent, PlaybackUnavailable
 
 # Enclosure hosts that are redirect trackers: their chains routinely exceed
@@ -90,6 +91,7 @@ class PlaybackService:
         self._sleep_token = 0
         self._load_watchdog: Timer | None = None
         self._load_token = 0
+        self._buffering_started_at: float | None = None
         # Redirect rescue (see _start_redirect_rescue): which source already
         # got its one retry, and whether the current load wanted autoplay.
         self._rescued_source = ""
@@ -160,6 +162,10 @@ class PlaybackService:
                 message="Couldn’t open the stream (timed out). Check the connection or download the episode.",
                 buffering=None,
             )
+            logger.warning("Playback load timed out: generation=%s source=%s position=%.1fs",
+                           self._engine_generation,
+                           "network" if is_web_url(self.snapshot.source) else "local",
+                           self.snapshot.position)
             # If the stream opens after all, it must arrive paused — never as
             # surprise audio under an error banner.
             try:
@@ -466,6 +472,9 @@ class PlaybackService:
     def pause(self):
         with self._lock:
             self._guard()
+            if self.snapshot.source:
+                logger.info("Playback pause requested: state=%s position=%.1fs",
+                            self.snapshot.state.value, self.snapshot.position)
             self.intent_revision += 1
             self._load_autoplay = False
             if self.snapshot.download_request:
@@ -486,6 +495,8 @@ class PlaybackService:
             self._load_autoplay = False
             if not self.snapshot.source:
                 return
+            logger.info("Playback stop requested: state=%s position=%.1fs",
+                        self.snapshot.state.value, self.snapshot.position)
             episode_id = self.snapshot.episode_id
             try:
                 self.engine.pause()
@@ -720,6 +731,25 @@ class PlaybackService:
                 return
             if event.generation is not None and event.generation != self._engine_generation:
                 return
+            source_kind = "network" if is_web_url(self.snapshot.source) else "local"
+            if event.kind == "eof":
+                logger.info("Playback reached end: generation=%s position=%.1fs duration=%.1fs",
+                            self._engine_generation, self.snapshot.position, self.snapshot.duration)
+            elif event.kind == "stopped":
+                logger.warning("Native playback stopped: generation=%s source=%s reason=%s state=%s position=%.1fs",
+                               self._engine_generation, source_kind, event.value,
+                               self.snapshot.state.value, self.snapshot.position)
+            elif event.kind == "shutdown":
+                logger.error("Native playback engine shut down during playback: generation=%s source=%s state=%s",
+                             self._engine_generation, source_kind, self.snapshot.state.value)
+            elif event.kind == "error":
+                detail = str(event.value or "Unknown playback error")
+                if is_web_url(self.snapshot.source):
+                    detail = redact(detail)[:320]
+                else:
+                    detail = "local media or native player error"
+                logger.error("Playback failed: generation=%s source=%s position=%.1fs detail=%s",
+                             self._engine_generation, source_kind, self.snapshot.position, detail)
             if event.kind == "position":
                 position = max(0.0, float(event.value))
                 self._measure_silence(position, deferred)
@@ -748,15 +778,30 @@ class PlaybackService:
                     episode_id = self.snapshot.episode_id
                     self._set_current_playback(episode_id, state.value, deferred)
             elif event.kind == "file_loaded":
+                logger.info("Playback source loaded: generation=%s source=%s autoplay=%s",
+                            self._engine_generation, source_kind, self._load_autoplay)
                 self._engine_loaded = True
                 self._cancel_load_watchdog()
                 self._last_metric_time = time.monotonic()
                 self._last_metric_position = self.snapshot.position
+                self._buffering_started_at = None
                 self.snapshot = replace(self.snapshot, buffering=None)
                 if self.snapshot.state in {PlaybackState.LOADING, PlaybackState.ERROR}:
                     # A load that beat the watchdog after all is ready, paused.
                     self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED, message="")
             elif event.kind == "buffering":
+                previous_buffer = self.snapshot.buffering
+                if event.value is not None and previous_buffer is None:
+                    self._buffering_started_at = time.monotonic()
+                    logger.info("Playback buffering started: generation=%s percent=%s",
+                                self._engine_generation, event.value)
+                elif event.value is None and previous_buffer is not None:
+                    started = self._buffering_started_at
+                    elapsed = time.monotonic() - started if started is not None else 0.0
+                    if elapsed >= 1.0:
+                        logger.info("Playback buffering ended: generation=%s seconds=%.1f",
+                                    self._engine_generation, elapsed)
+                    self._buffering_started_at = None
                 self.snapshot = replace(self.snapshot, buffering=event.value)
             elif event.kind == "loading":
                 pass
@@ -776,9 +821,25 @@ class PlaybackService:
                 self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED)
             elif event.kind == "external":
                 self.snapshot = replace(self.snapshot, state=PlaybackState.EXTERNAL)
-            elif event.kind in {"stopped", "shutdown"}:
+            elif event.kind == "stopped":
                 self._engine_loaded = False
+                self._cancel_load_watchdog()
                 self._persist_position(force=True, deferred=deferred)
+                self.snapshot = replace(
+                    self.snapshot, state=PlaybackState.ERROR,
+                    message="Playback stopped unexpectedly. Check the connection and retry.",
+                    buffering=None,
+                )
+                if self.snapshot.episode_id is not None:
+                    self._set_current_playback(self.snapshot.episode_id, PlaybackState.ERROR.value, deferred)
+            elif event.kind == "shutdown":
+                self._engine_loaded = False
+                self._cancel_load_watchdog()
+                self.snapshot = replace(
+                    self.snapshot, state=PlaybackState.ERROR,
+                    message="The audio player closed unexpectedly. Try Play to resume.",
+                    buffering=None,
+                )
             elif event.kind == "error":
                 self._cancel_load_watchdog()
                 if self._start_redirect_rescue():

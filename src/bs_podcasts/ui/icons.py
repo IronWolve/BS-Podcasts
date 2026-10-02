@@ -202,7 +202,11 @@ def icon_file(name: str, color: str, size: int) -> str:
 
 def resolve_stylesheet(qss: str) -> str:
     """Replace `{icon:name:color:size}` placeholders with cached file URLs."""
-    return _PLACEHOLDER.sub(
-        lambda match: icon_file(match.group(1), match.group(2), int(match.group(3))),
-        qss,
-    )
+    def quoted_path(match):
+        path = icon_file(match.group(1), match.group(2), int(match.group(3)))
+        path = path.replace("\\", "\\\\").replace('"', '\\"')
+        for character, escaped in (("\n", "\\a "), ("\r", "\\d "), ("\f", "\\c ")):
+            path = path.replace(character, escaped)
+        return f'"{path}"'
+
+    return _PLACEHOLDER.sub(quoted_path, qss)

@@ -11,6 +11,7 @@ from .privacy import redact
 
 
 LOGGER_NAME = "bs_podcasts"
+_file_logging_enabled = True
 
 
 class _PrivateFormatter(logging.Formatter):
@@ -42,20 +43,53 @@ def configure_logging(level: int = logging.INFO) -> logging.Logger:
         console = logging.StreamHandler()
         console.setFormatter(formatter)
         logger.addHandler(console)
-        try:
-            path = log_path()
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            file_handler = _PrivateLog(path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
-            file_handler.setFormatter(formatter)
-            logger.addHandler(file_handler)
-        except OSError:
-            logger.warning("Log file is unavailable; logging to console only.")
-        # urllib3 emits retry warnings outside our logger. Route those through
-        # the same redacting handlers rather than the unsanitized lastResort.
+    if _file_logging_enabled and not any(isinstance(handler, _PrivateLog) for handler in logger.handlers):
+        _add_file_handler(logger)
+    for name in ("urllib3", "requests"):
+        dependency = logging.getLogger(name)
+        dependency.propagate = False
+        for handler in logger.handlers:
+            if handler not in dependency.handlers:
+                dependency.addHandler(handler)
+    return logger
+
+
+def _add_file_handler(logger):
+    try:
+        path = log_path()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        handler = _PrivateLog(path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+        handler.setFormatter(_PrivateFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        logger.addHandler(handler)
         for name in ("urllib3", "requests"):
             dependency = logging.getLogger(name)
             dependency.propagate = False
-            for handler in logger.handlers:
-                if handler not in dependency.handlers:
-                    dependency.addHandler(handler)
-    return logger
+            dependency.addHandler(handler)
+        return True
+    except OSError:
+        logger.warning("Log file is unavailable; logging to console only.")
+        return False
+
+
+def set_file_logging(enabled: bool) -> bool:
+    """Turn the private rotating file log on/off immediately; console remains."""
+    global _file_logging_enabled
+    _file_logging_enabled = bool(enabled)
+    logger = logging.getLogger(LOGGER_NAME)
+    if not logger.handlers:
+        configure_logging()
+    handlers = [handler for handler in logger.handlers if isinstance(handler, _PrivateLog)]
+    if _file_logging_enabled:
+        if handlers:
+            return True
+        return _add_file_handler(logger)
+    for handler in handlers:
+        logger.removeHandler(handler)
+        for name in ("urllib3", "requests"):
+            logging.getLogger(name).removeHandler(handler)
+        handler.close()
+    return True
+
+
+def file_logging_enabled() -> bool:
+    return _file_logging_enabled

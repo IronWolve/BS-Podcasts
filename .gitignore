@@ -1,7 +1,7 @@
 # Deny by default: application source, required release inputs, README and its images only.
 # Audit/test/capture utilities belong in the private project devtools/ directory, not Git.
 # Add only exact necessary files to source-manifest.json and this allowlist.
-# Private/agent state (.local-agent, .local-tools, .local-helper, PRIVATE-NOTES.md), .env files, keys,
+# Private/agent state (AGENTS.md), .env files, keys,
 # profiles, databases, logs, captures, caches, environments and builds stay out.
 # These rules do not scrub already-tracked files or historical Git objects.
 *
@@ -92,6 +92,7 @@
 !/src/bs_podcasts/app.py
 !/src/bs_podcasts/artwork/__init__.py
 !/src/bs_podcasts/artwork/cache.py
+!/src/bs_podcasts/artwork/previews.py
 !/src/bs_podcasts/assets.py
 !/src/bs_podcasts/assets/branding/bs-podcasts-icon-128.png
 !/src/bs_podcasts/assets/branding/bs-podcasts-icon-256.png

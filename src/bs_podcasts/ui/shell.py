@@ -88,7 +88,7 @@ ShortcutsDialog = _lazy_dialog("ShortcutsDialog")
 TextInputDialog = _lazy_dialog("TextInputDialog")
 episode_information_text = _lazy_dialog("episode_information_text")
 from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast as UiPodcast, plain_snippet, set_item_tooltips
-from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials
+from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, prepare_previews, install_previews
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
 from .shortcuts import ShortcutManager
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
@@ -149,7 +149,8 @@ class MainWindow(QMainWindow):
     _BUSINESS_STATE = ('_pending_jobs', '_download_tickets', '_play_after_download',
         '_play_after_download_intent', '_play_after_download_request', '_refresh_batch', '_refresh_generation',
         '_refresh_failed', '_refresh_waiting', '_refresh_in_flight',
-        '_manual_refresh_in_flight', '_refresh_quiet', '_details_fetched', '_artwork_fetched')
+        '_manual_refresh_in_flight', '_refresh_quiet', '_details_fetched', '_artwork_fetched',
+        '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved')
 
     def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None):
         super().__init__(parent)
@@ -241,6 +242,11 @@ class MainWindow(QMainWindow):
         self._hero_website = ""
         self._details_fetched = set()
         self._artwork_fetched = set()
+        self._episode_artwork_waiting = OrderedDict()
+        self._episode_artwork_active = {}
+        self._episode_artwork_attempts = OrderedDict()
+        self._episode_artwork_resolved = OrderedDict()
+        self._episode_artwork_page = None
         self._last_playback_error = ""
         self._last_sleep_deadline = None
         self._download_samples = {}
@@ -462,6 +468,7 @@ class MainWindow(QMainWindow):
             self.discover_page, self.bookmark_page, self.history_page, self.settings_page,
         )
         for page in pages:
+            page.episode_artwork_requested.connect(lambda items, source=page: self._queue_visible_artwork(source, items))
             if hasattr(page, "context_changed"):
                 # Only the visible page drives the details pane; hidden pages
                 # restoring their selection after a reload must not hijack it.
@@ -601,6 +608,7 @@ class MainWindow(QMainWindow):
             self.library.setting("notifications.enabled", "1") == "1",
             self.library.setting("ui.close_to_tray", "0") == "1",
             self.library.setting("updates.enabled", "1") == "1",
+            self.library.setting("diagnostics.file_logging", "1") == "1",
         )
         self.navigation.set_background_paused(self._background_paused())
         self.settings_page.statistics_requested.connect(self._refresh_statistics)
@@ -1012,6 +1020,8 @@ class MainWindow(QMainWindow):
         def work():
             result = cache.prune(repository.artwork_paths() | live, 400 * 1024 * 1024)
             prune_accents()
+            from ..artwork.previews import prune
+            prune()
             return result
 
         future = self.jobs.submit(work)
@@ -1696,7 +1706,10 @@ class MainWindow(QMainWindow):
     def _save_setting(self, key: str, value: str):
         if self.library is not None:
             self._persist_ui_settings({key: value})
-            if key in {"playback.skip_back", "playback.skip_forward"}:
+            if key == "diagnostics.file_logging":
+                from ..logging_setup import set_file_logging
+                set_file_logging(value == "1")
+            elif key in {"playback.skip_back", "playback.skip_forward"}:
                 self._apply_skip_settings()
             elif key == "refresh.interval_minutes":
                 self._arm_refresh_timer()
@@ -1887,6 +1900,13 @@ class MainWindow(QMainWindow):
             detail_episodes = self._ui_episodes(self.library.episodes(show_id=detail_show_id, limit=None), records) if detail_show_id else []
         return {
             "detail_show_id": detail_show_id,
+            "artwork_previews": prepare_previews([
+                *(show.artwork_path for show in stored_shows[:32]),
+                *(item.artwork_path for item in detail_episodes[:48]),
+                *(episode.artwork_path for episode in stored_episodes[:48]),
+                *(show.artwork_path for show in stored_shows[32:]),
+            ])
+            if self.jobs is not None and not getattr(self, '_artwork_prepared', False) else {},
             "detail_episodes": detail_episodes,
             "stored_shows": stored_shows,
             "episode_total": episode_total,
@@ -2252,6 +2272,12 @@ class MainWindow(QMainWindow):
         if self.library is None:
             return
         data = data or self._read_library()
+        data = dict(data)
+        install_previews(data.pop('artwork_previews', {}))
+        self._artwork_prepared = True
+        for key in ('episodes', 'detail_episodes', 'in_progress', 'queued', 'history'):
+            if key in data:
+                data[key] = [self._resolved_episode_artwork(item) for item in data[key]]
         self._last_library_data = data
         stored_shows = data["stored_shows"]
         episode_total = data.get("episode_total", 0)
@@ -2716,7 +2742,7 @@ class MainWindow(QMainWindow):
             return
         self.episode_page.banner.clear()
         self._show_hero(podcast, episode_count=len(episodes))
-        self.episode_page.set_items(episodes, preserve_scroll=preserve_scroll)
+        self.episode_page.set_items([self._resolved_episode_artwork(item) for item in episodes], preserve_scroll=preserve_scroll)
         if select_episode_id:
             row = self.episode_page.model.row_for_episode(select_episode_id)
             if row >= 0:
@@ -3198,37 +3224,147 @@ class MainWindow(QMainWindow):
         key = f"artwork-retry-{episode_id}-{show_id}-{feed_url}-{hinted_url}"
         self._run_read(work, apply, key, pool=self.artwork_jobs)
 
-    def _ensure_episode_artwork(self, episode):
-        if self.refresh is None or self.refresh.artwork is None or self.jobs is None or self._background_paused():
+    def _queue_visible_artwork(self, page, items):
+        if self._closed or self.library is None or self.refresh is None or self.refresh.artwork is None or self.jobs is None:
             return
-        if not episode.artwork_url or episode.id in self._artwork_fetched:
+        if self.pages.currentWidget() is not page:
+            if self._episode_artwork_page is not page:
+                return
+            items = []
+        self._episode_artwork_page = page
+        self._read_tokens['visible-artwork'] = self._read_tokens.get('visible-artwork', 0) + 1
+        important = {self._playing_episode_id, self.context._episode_id}
+        wanted = {(item.episode_id, item.artwork_url) for item in items if item.episode_id and item.artwork_url}
+        for key in list(self._episode_artwork_waiting):
+            if key not in wanted and key[0] not in important:
+                self._episode_artwork_waiting.pop(key)
+        for key, cancel in self._episode_artwork_active.items():
+            if key not in wanted and key[0] not in important:
+                cancel.set()
+        if self._background_paused():
             return
-        self._artwork_fetched.add(episode.id)
-        cache = self.refresh.artwork
+        now = time.monotonic()
+        keys = [(item.episode_id, item.artwork_url) for item in items
+                if item.episode_id and item.artwork_url
+                and self._episode_artwork_attempts.get((item.episode_id, item.artwork_url), 0) <= now
+                and item.episode_id not in self._artwork_fetched]
+        if not keys:
+            retry = [self._episode_artwork_attempts.get((item.episode_id, item.artwork_url), 0)
+                     for item in items if item.artwork_url and not item.episode_artwork_path]
+            retry = [deadline for deadline in retry if deadline > now]
+            if retry and hasattr(page, '_episode_artwork_timer'):
+                page._episode_artwork_timer.start(max(1000, int((min(retry) - now) * 1000)))
+            return
         repository = self.library.repository
+        def apply(records):
+            if self.pages.currentWidget() is not page:
+                return
+            for key in keys:
+                episode = records.get(key[0])
+                if episode is not None and episode.artwork_url == key[1]:
+                    self._episode_artwork_waiting[key] = episode
+            while len(self._episode_artwork_waiting) > 64:
+                self._episode_artwork_waiting.popitem(last=True)
+            self._pump_episode_artwork()
+        self._run_read(lambda: repository.episodes_by_ids(key[0] for key in keys), apply, 'visible-artwork')
 
-        def work():
-            old_path = episode.episode_artwork_path
-            before = cache.signature(Path(old_path)) if old_path else None
-            if old_path and not cache.valid_file(old_path):
-                repository.set_episode_artwork_path(episode.id, "", expected_url=episode.artwork_url)
-            path = str(cache.fetch(episode.artwork_url))
-            if not repository.set_episode_artwork_path(episode.id, path, expected_url=episode.artwork_url):
+    def _ensure_episode_artwork(self, episode):
+        if not episode.artwork_url or self._closed:
+            return
+        key = (episode.id, episode.artwork_url)
+        if self._episode_artwork_attempts.get(key, 0) > time.monotonic():
+            return
+        self._episode_artwork_waiting[key] = episode
+        self._episode_artwork_waiting.move_to_end(key, last=False)
+        while len(self._episode_artwork_waiting) > 64:
+            self._episode_artwork_waiting.popitem(last=True)
+        self._pump_episode_artwork()
+
+    def _pump_episode_artwork(self):
+        if (self._closed or self.refresh is None or self.refresh.artwork is None
+                or self.artwork_jobs is None or self._background_paused()):
+            return
+        while self._episode_artwork_waiting and len(self._episode_artwork_active) < 2:
+            key, episode = self._episode_artwork_waiting.popitem(last=False)
+            if episode.id in self._artwork_fetched:
+                continue
+            if self._episode_artwork_attempts.get(key, 0) > time.monotonic():
+                continue
+            cancel = threading.Event()
+            self._episode_artwork_active[key] = cancel
+            self._artwork_fetched.add(episode.id)
+            future = self.artwork_jobs.submit(self._fetch_episode_artwork, episode, cancel)
+            self._pending_jobs.add(future)
+            def finished(completed, identity=key):
+                self._pending_jobs.discard(completed)
+                try:
+                    result = completed.result()
+                except Exception as exc:
+                    result = JobResult(JobStatus.ERROR, message=str(exc))
+                self._emit_completed(('artwork', identity, result))
+            future.add_done_callback(finished)
+
+    def _fetch_episode_artwork(self, episode, cancel):
+        from ..netlimits import request_scope
+        cache, repository = self.refresh.artwork, self.library.repository
+        old_path = episode.episode_artwork_path
+        before = cache.signature(Path(old_path)) if old_path else None
+        with request_scope(cancel):
+            if cancel.is_set():
                 return None
-            return path, path != old_path or before != cache.signature(Path(path))
-
-        future = self.network_jobs.submit(work)
-        self._pending_jobs.add(future)
-
-        def finished(completed):
-            self._pending_jobs.discard(completed)
+            if old_path and not cache.valid_file(old_path):
+                repository.set_episode_artwork_path(episode.id, '', expected_url=episode.artwork_url)
             try:
-                result = completed.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._emit_completed(("artwork", episode.id, result))
+                path = str(cache.fetch(episode.artwork_url))
+            except Exception:
+                if cancel.is_set():
+                    return None
+                updated = repository.get_episode(episode.id)
+                if updated is None or updated.artwork_url != episode.artwork_url:
+                    return None
+                return self._ui_episode(updated), False, {}, True
+            if cancel.is_set() or not repository.set_episode_artwork_path(episode.id, path, expected_url=episode.artwork_url):
+                return None
+            updated = repository.get_episode(episode.id)
+            if updated is None or updated.artwork_url != episode.artwork_url:
+                return None
+            item = self._ui_episode(updated)
+            item = replace_item(item, accent=dominant_color(path, item.accent))
+            return item, path != old_path or before != cache.signature(Path(path)), prepare_previews([path], 1), False
 
-        future.add_done_callback(finished)
+    def _resolved_episode_artwork(self, item):
+        known = self._episode_artwork_resolved.get((item.episode_id, item.artwork_url))
+        if known is not None and known[1] and not item.episode_artwork_path:
+            return replace_item(item, artwork_path=known[0], episode_artwork_path=known[1], accent=known[2])
+        return item
+
+    def _apply_episode_artwork(self, item):
+        key = (item.episode_id, item.artwork_url)
+        self._episode_artwork_resolved[key] = (item.artwork_path, item.episode_artwork_path, item.accent)
+        self._episode_artwork_resolved.move_to_end(key)
+        while len(self._episode_artwork_resolved) > 2048:
+            self._episode_artwork_resolved.popitem(last=False)
+        def update(current):
+            if (current.episode_id, current.artwork_url) != key:
+                return current
+            return replace_item(current, artwork_path=item.artwork_path,
+                                episode_artwork_path=item.episode_artwork_path, accent=item.accent)
+        for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.bookmark_page, self.history_page):
+            page._all_items = [update(current) for current in page._all_items]
+            page.model.update_artwork(*key, item.artwork_path, item.episode_artwork_path, item.accent)
+        queue_model = self.context.queue_view.model()
+        if queue_model is not None:
+            queue_model.update_artwork(*key, item.artwork_path, item.episode_artwork_path, item.accent)
+        self._all_episode_items = [update(current) for current in self._all_episode_items]
+        self._history_items_shown = [update(current) for current in self._history_items_shown]
+        if self._last_library_data is not None:
+            for name in ('episodes', 'detail_episodes', 'in_progress', 'queued', 'history'):
+                self._last_library_data[name] = [update(current) for current in self._last_library_data.get(name, ())]
+        with self._convert_lock:
+            self._ui_episode_cache.pop(item.episode_id, None)
+        current = self.context._current_item
+        if isinstance(current, UiEpisode) and (current.episode_id, current.artwork_url) == key:
+            self._refresh_context_item(current, update(current))
 
     def _delete_played_quietly(self, episode_ids=None):
         """Auto-delete downloads for episodes that JUST became played.
@@ -5000,21 +5136,29 @@ class MainWindow(QMainWindow):
                 self.context.show_details_error(outcome["error"])
         return
     def _on_artwork(self, kind, identifier, result):
-        self._artwork_fetched.discard(identifier)
-        if result.status == JobStatus.OK and result.value:
-            if self.playback is not None and self._playing_episode_id == identifier:
+        episode_id, artwork_url = identifier
+        cancel = self._episode_artwork_active.pop(identifier, None)
+        self._artwork_fetched.discard(episode_id)
+        cancelled = cancel is not None and cancel.is_set()
+        failed = result.status != JobStatus.OK or (result.value and result.value[3])
+        if not cancelled:
+            delay = 1 if result.message == 'Background requests are busy; retry shortly.' else (60 if failed else 300)
+            self._episode_artwork_attempts[identifier] = time.monotonic() + delay
+            self._episode_artwork_attempts.move_to_end(identifier)
+            while len(self._episode_artwork_attempts) > 2048:
+                self._episode_artwork_attempts.popitem(last=False)
+        if result.status == JobStatus.OK and result.value and not cancelled:
+            item, changed, images, _failed = result.value
+            if changed:
+                invalidate_artwork(item.artwork_path)
+            install_previews(images)
+            self._apply_episode_artwork(item)
+            if self.playback is not None and self._playing_episode_id == episode_id:
                 self._read_playback_metadata(self.playback.snapshot, follow=False)
-            path, changed = result.value
-            if not changed:
-                return
-            invalidate_artwork(path)
-            self._request_reload()
-            if self.context._episode_id == identifier:
-                episode = self.library.episode(identifier)
-                if episode is not None:
-                    self._refresh_context_item(self.context._current_item, self._ui_episode_live(episode))
-        elif result.status == JobStatus.ERROR:
-            self._request_reload()  # Invalid stored paths were cleared on the worker.
+        self._pump_episode_artwork()
+        page = self.pages.currentWidget()
+        if hasattr(page, '_episode_artwork_timer'):
+            page._episode_artwork_timer.start(60)
         return
     def _on_preview(self, kind, identifier, result):
         self._preview_pending.discard(identifier)
@@ -5090,11 +5234,15 @@ class MainWindow(QMainWindow):
             self._native_notify(APP_NAME, result.message or "Download failed", lambda: self.navigation.select(PAGE_DOWNLOADS))
         return
     def _on_refresh(self, kind, identifier, result):
+        identifier, batch_refresh, generation = identifier if isinstance(identifier, tuple) else (identifier, False, 0)
+        if not batch_refresh:
+            for item in self.episode_page.model._items:
+                if item.show_id == identifier:
+                    self._episode_artwork_attempts.pop((item.episode_id, item.artwork_url), None)
         if self.playback is not None and self.playback.snapshot.show_id == identifier:
             self._read_playback_metadata(self.playback.snapshot, follow=False)
         if result.status == JobStatus.OK and getattr(result.value, 'artwork_path', ''):
             invalidate_artwork(result.value.artwork_path)
-        identifier, batch_refresh, generation = identifier if isinstance(identifier, tuple) else (identifier, False, 0)
         if result.status == JobStatus.OK and getattr(result.value, "imported", 0):
             # Before any stale-generation exit: episodes imported by a
             # superseded batch would otherwise never auto-download (later
@@ -5945,6 +6093,7 @@ class MainWindow(QMainWindow):
             key = episode
             hit = cache.get(episode.id)
             item = hit[1] if hit and hit[0] == key else self._ui_episode(episode)
+            item = self._resolved_episode_artwork(item)
             accent = dominant_color(episode.artwork_path, item.accent, compute=False)
             if accent != item.accent:
                 item = replace_item(item, accent=accent)
@@ -6066,6 +6215,7 @@ class MainWindow(QMainWindow):
             show_id=episode.show_id,
             description=episode.description,
             artwork_path=episode.artwork_path,
+            episode_artwork_path=episode.episode_artwork_path,
             duration_seconds=episode.duration_seconds,
             position_seconds=episode.position_seconds,
             media_url=episode.media_url,
@@ -6262,6 +6412,9 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(100, self, self.close)
                 return
         self._closed = True
+        self._episode_artwork_waiting.clear()
+        for cancel in self._episode_artwork_active.values():
+            cancel.set()
         self._directory_cancel.set()
         self._directory_waiting = None
         self._directory_artwork_waiting.clear()

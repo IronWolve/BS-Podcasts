@@ -3,6 +3,7 @@
 from pathlib import Path
 import json
 import logging
+import stat
 import threading
 import time
 
@@ -365,7 +366,7 @@ class LibraryRepository:
 
     ORPHAN_SETTING = "storage.orphans"
     ORPHAN_OWNER = "storage.orphans.owner"
-    MAX_ORPHANS = 200
+    MAX_ORPHANS_PER_SWEEP = 16
 
     def orphaned_files(self) -> list[str]:
         """Paths a previous removal could not unlink."""
@@ -406,8 +407,14 @@ class LibraryRepository:
         self.invalidate_settings_cache()
 
     def sweep_orphans(self) -> list[str]:
-        """Check live references under the same write transaction as retirement."""
-        cleared, remaining = [], []
+        """Retry a bounded batch while protecting concurrent live references.
+
+        The write transaction deliberately spans filesystem checks/unlinks: a
+        refresh can reattach a cached artwork path, and must not race deletion.
+        Limiting each pass bounds the amount of filesystem work under SQLite's
+        writer lock without discarding retry records.
+        """
+        cleared = []
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             owner = connection.execute("SELECT value FROM settings WHERE key=?", (self.ORPHAN_OWNER,)).fetchone()
@@ -422,11 +429,14 @@ class LibraryRepository:
                 paths = []
             if not isinstance(paths, list):
                 paths = []
+            pending = paths[:self.MAX_ORPHANS_PER_SWEEP]
+            deferred = [path for path in paths[self.MAX_ORPHANS_PER_SWEEP:] if isinstance(path, str)]
+            failed_paths = []
             referenced = {row[0] for row in connection.execute(
                 "SELECT artwork_path FROM shows UNION SELECT episode_artwork_path FROM episodes "
                 "UNION SELECT downloaded_path FROM episodes UNION SELECT target_path FROM downloads "
                 "UNION SELECT partial_path FROM downloads") if row[0]}
-            for path in paths:
+            for path in pending:
                 if not isinstance(path, str):
                     continue
                 if path in referenced:
@@ -434,15 +444,20 @@ class LibraryRepository:
                     continue
                 try:
                     candidate = Path(path)
-                    if candidate.is_file():
+                    if stat.S_ISREG(candidate.stat().st_mode):
                         candidate.unlink()
                     cleared.append(path)
+                except FileNotFoundError:
+                    cleared.append(path)
                 except OSError:
-                    remaining.append(path)
-            if cleared:
+                    failed_paths.append(path)
+            # Failed entries rotate behind untouched ones, so one persistently
+            # locked file cannot starve cleanup of every later record.
+            remaining = deferred + failed_paths
+            if cleared or failed_paths:
                 connection.execute("UPDATE settings SET value=? WHERE key=?",
                                    (json.dumps(remaining), self.ORPHAN_SETTING))
-        if cleared:
+        if cleared or failed_paths:
             self.invalidate_settings_cache()
         return cleared
 

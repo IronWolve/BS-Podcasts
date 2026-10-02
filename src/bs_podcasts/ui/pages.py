@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import time
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QModelIndex, QTimer, Signal, Qt
+from PySide6.QtCore import QEvent, QItemSelectionModel, QModelIndex, QPoint, QTimer, Signal, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -71,6 +71,7 @@ class DiscoverModeTabs(QTabBar):
 class BasePage(QWidget):
     context_changed = Signal(object)
     context_updated = Signal(object, object)
+    episode_artwork_requested = Signal(object)
 
     def __init__(self, title: str, subtitle: str, action: str = "", show_search: bool = True, parent=None):
         super().__init__(parent)
@@ -133,13 +134,35 @@ class _ListPageMixin:
         self.view.doubleClicked.connect(self._activated_once)
         self.view.viewport().installEventFilter(self)
         self._tooltip_target = None
+        if isinstance(model, EpisodeModel):
+            self._episode_artwork_timer = QTimer(self)
+            self._episode_artwork_timer.setSingleShot(True)
+            self._episode_artwork_timer.timeout.connect(self._request_visible_artwork)
+            for signal in (view.verticalScrollBar().valueChanged, model.modelReset, model.dataChanged):
+                signal.connect(lambda *_: self._episode_artwork_timer.start(60))
         delete = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.view)
         delete.setContext(Qt.ShortcutContext.WidgetShortcut)
         delete.activated.connect(self._remove_selected)
 
+    def _request_visible_artwork(self):
+        items = []
+        if self.isVisible() and self.view.isVisible() and self.model.rowCount():
+            row_height = max(1, self.view.sizeHintForRow(0))
+            first = self.view.indexAt(QPoint(2, 2))
+            start = first.row() if first.isValid() else self.view.verticalScrollBar().value() // row_height
+            start = min(start, self.model.rowCount() - 1)
+            visible = max(1, self.view.viewport().height() // row_height + 1)
+            end = min(self.model.rowCount(), start + min(48, visible * 2))
+            items = self.model._items[start:end]
+            from .pixmaps import prefetch_artwork
+            prefetch_artwork((item.artwork_path for item in items), self.view)
+        self.episode_artwork_requested.emit(items)
+
     def _track_item_tooltip(self, view: QListView, event):
         """Dismiss a native item tooltip as soon as its hover target is gone."""
         event_type = event.type()
+        if hasattr(self, '_episode_artwork_timer') and event_type in {QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.Resize}:
+            self._episode_artwork_timer.start(60)
         if event_type == QEvent.Type.MouseMove:
             index = view.indexAt(event.position().toPoint())
             target = (id(view), index.row() if index.isValid() else -1)
@@ -453,6 +476,10 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         self.delegate = PodcastDelegate(view)
         view.setItemDelegate(self.delegate)
         self._init_list(view, PodcastModel(()), EmptyState(*self._empty_text, glyph="discover" if discover else "podcasts"))
+        self._artwork_prefetch_timer = QTimer(self)
+        self._artwork_prefetch_timer.setSingleShot(True)
+        self._artwork_prefetch_timer.timeout.connect(self._prefetch_artwork)
+        view.verticalScrollBar().valueChanged.connect(lambda _: self._artwork_prefetch_timer.start(0))
         self.skeleton = SkeletonGrid()
         self.stack.addWidget(self.skeleton)
         self.view.verticalScrollBar().valueChanged.connect(self._check_near_end)
@@ -485,6 +512,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(0, self, self._layout_cards)
+        self._artwork_prefetch_timer.start(0)
 
     def set_density(self, compact: bool):
         self._compact = compact
@@ -503,6 +531,18 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         self.delegate.set_card_width(width)
         self.view.setGridSize(self.delegate.sizeHint(None, None))
         self.view.doItemsLayout()
+        self._artwork_prefetch_timer.start(0)
+
+    def _prefetch_artwork(self):
+        if not self.isVisible() or not self.model.rowCount():
+            return
+        from .pixmaps import prefetch_artwork
+        grid = self.view.gridSize()
+        columns = max(1, self.view.viewport().width() // max(1, grid.width()))
+        first = self.view.verticalScrollBar().value() // max(1, grid.height()) * columns
+        rows = self.view.viewport().height() // max(1, grid.height()) + 3
+        start, end = max(0, first - columns), min(self.model.rowCount(), first + rows * columns)
+        prefetch_artwork((item.artwork_path for item in self.model._items[start:end]), self.view)
 
     def set_items(self, items, preserve_scroll: bool = False):
         key = self._current_key()
@@ -552,6 +592,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.context_changed.emit(None)
         self._update_empty(query if not self.discover else "")
         self._layout_cards()
+        self._artwork_prefetch_timer.start(0)
 
     DISCOVER_SORTS = (("rank", "Chart order"), ("newest", "Newest episode"), ("title", "Title A–Z"))
     discover_sort_changed = Signal(str)
@@ -1421,11 +1462,14 @@ class SettingsPage(BasePage):
         desktop_card, desktop_form = self._card("Desktop", "Small, optional desktop conveniences.")
         self.notifications = QCheckBox("Show native notifications")
         self.close_to_tray = QCheckBox("Keep running in the tray when the window closes")
+        self.file_logging = QCheckBox("Write a private diagnostic log file")
         desktop_form.addRow("Notifications", self.notifications)
         desktop_form.addRow("Window close", self.close_to_tray)
+        desktop_form.addRow("Diagnostics", self.file_logging)
         self.settings_content.addWidget(desktop_card)
         self.notifications.toggled.connect(lambda value: self.setting_changed.emit("notifications.enabled", "1" if value else "0"))
         self.close_to_tray.toggled.connect(lambda value: self.setting_changed.emit("ui.close_to_tray", "1" if value else "0"))
+        self.file_logging.toggled.connect(lambda value: self.setting_changed.emit("diagnostics.file_logging", "1" if value else "0"))
 
         # Listening statistics -------------------------------------------------
         stats_card, stats_form = self._card("Listening statistics", "Stored only in your local library.")
@@ -1709,12 +1753,13 @@ class SettingsPage(BasePage):
         self.refresh_interval.setValue(minutes)
         self.refresh_interval.blockSignals(False)
 
-    def load_desktop_options(self, background_paused: bool, notifications: bool, close_to_tray: bool, update_checks: bool):
+    def load_desktop_options(self, background_paused: bool, notifications: bool, close_to_tray: bool, update_checks: bool, file_logging: bool = True):
         for control, value in (
             (self.background_paused, background_paused),
             (self.notifications, notifications),
             (self.close_to_tray, close_to_tray),
             (self.update_checks, update_checks),
+            (self.file_logging, file_logging),
         ):
             control.blockSignals(True)
             control.setChecked(value)

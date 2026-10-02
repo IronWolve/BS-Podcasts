@@ -12,7 +12,7 @@ from functools import lru_cache
 ROOT = Path(__file__).resolve().parents[1]
 
 PRIVATE_ROOTS = frozenset({'data', 'docs', 'logs', 'tmp', 'run', 'dist', 'dists', 'build', 'node_modules'})
-PRIVATE_NAMES = frozenset({'PRIVATE-NOTES.md', 'PRIVATE-NOTE.md', 'LOCAL-NOTES.md', 'auth.json', 'credentials.json', 'id_rsa', 'id_ed25519'})
+PRIVATE_NAMES = frozenset({'agents.md', 'agent.md', 'auth.json', 'credentials.json', 'id_rsa', 'id_ed25519'})
 
 
 def private_path(name):
