@@ -35,6 +35,18 @@ class _ArtworkCache:
         self._items = OrderedDict()
         self._sources = {}
         self._source_keys = {}
+        self._protected = set()
+
+    def protect(self, keys):
+        reserved = 0
+        protected = set()
+        for key in dict.fromkeys(keys):
+            cost = previews.SIDE ** 2 * 4 + len(key) * 2 + 160
+            if len(protected) >= 256 or reserved + cost > self.limit_bytes // 2:
+                break
+            protected.add(key)
+            reserved += cost
+        self._protected = protected
 
     def find(self, key):
         entry = self._items.get(key)
@@ -90,7 +102,8 @@ class _ArtworkCache:
         while self._items and (
             self.bytes + cost > self.limit_bytes or len(self._items) >= self.max_entries
         ):
-            retired_key, (_, retired_cost) = self._items.popitem(last=False)
+            retired_key = next((entry for entry in self._items if entry not in self._protected), next(iter(self._items)))
+            _, retired_cost = self._items.pop(retired_key)
             self.bytes -= retired_cost
             self._unindex(retired_key)
         self._items[key] = (QPixmap(pixmap), cost)
@@ -101,10 +114,20 @@ class _ArtworkCache:
 _artwork_cache = _ArtworkCache()
 # Large/high-DPI renditions must not evict every usable image of a show.
 _preview_cache = _ArtworkCache(limit_bytes=32 * 1024 * 1024, max_entries=512)
+_preview_library_paths = ()
+_preview_visible_paths = ()
+
+
+def protect_artwork_previews(paths):
+    """GUI-thread bounded library cohort; visible previews take priority."""
+    global _preview_library_paths
+    _preview_library_paths = tuple(dict.fromkeys(path for path in paths if path))[:256]
+    _preview_cache.protect((*_preview_visible_paths, *_preview_library_paths))
 
 
 _dominant = OrderedDict()
 _dominant_mtime: dict[str, float] = {}
+_dominant_signatures = {}
 _disk_loaded = False
 _disk_lock = threading.Lock()
 _disk_write_lock = threading.Lock()
@@ -117,6 +140,7 @@ def _bound_accents():
     while len(_dominant) > MAX_METADATA:
         path, _ = _dominant.popitem(last=False)
         _dominant_mtime.pop(path, None)
+        _dominant_signatures.pop(path, None)
 
 
 def _cache_file() -> Path:
@@ -155,6 +179,9 @@ def _load_disk() -> None:
                 continue
             _dominant[path] = color
             _dominant_mtime[path] = float(mtime)
+            signature = record.get('signature')
+            if isinstance(signature, str):
+                _dominant_signatures[path] = signature
         _bound_accents()
 
 
@@ -164,7 +191,8 @@ def _save_disk() -> None:
         # Serialize writers, but never hold the GUI lookup lock during I/O.
         with _disk_lock:
             items = {
-                path: {"mtime": _dominant_mtime.get(path, 0.0), "color": color}
+                path: {"mtime": _dominant_mtime.get(path, 0.0), "color": color,
+                       "signature": _dominant_signatures.get(path)}
                 for path, color in _dominant.items()
             }
         payload = json.dumps({"version": 1, "items": items}).encode('utf-8')
@@ -182,8 +210,11 @@ def _save_disk() -> None:
 def _fresh(path: str) -> bool:
     with _disk_lock:
         cached_mtime = _dominant_mtime.get(path)
+        signature = _dominant_signatures.get(path)
         if cached_mtime is None:
             return path in _dominant
+    if signature is not None:
+        return previews.signature(path) == signature
     try:
         return os.path.getmtime(path) == cached_mtime
     except OSError:
@@ -239,7 +270,10 @@ def dominant_color(path: str, fallback: str = "", compute: bool = True) -> str:
         return cached or fallback
     if cached is not None and _fresh(path):
         return cached or fallback
+    signature = previews.signature(path)
     result = _sample(path)
+    if signature is None or previews.signature(path) != signature:
+        return result or fallback
     try:
         stamp = os.path.getmtime(path)
     except OSError:
@@ -250,9 +284,17 @@ def dominant_color(path: str, fallback: str = "", compute: bool = True) -> str:
     with _disk_lock:
         _dominant[path] = result
         _dominant_mtime[path] = stamp
+        _dominant_signatures[path] = signature
         _dominant.move_to_end(path)
         _bound_accents()
     return result or fallback
+
+
+def artwork_accent_token(path):
+    """Worker-to-GUI token for an accent sampled from one source revision."""
+    with _disk_lock:
+        signature = _dominant_signatures.get(path)
+        return (_dominant[path], signature) if path in _dominant and signature is not None else None
 
 
 def missing_accents(paths) -> list[str]:
@@ -297,6 +339,7 @@ def prune_accents():
         for path in missing:
             _dominant.pop(path, None)
             _dominant_mtime.pop(path, None)
+            _dominant_signatures.pop(path, None)
         _bound_accents()
     _save_disk()
 
@@ -346,6 +389,22 @@ def prepare_previews(paths, limit=480):
     return result
 
 
+def prepare_saved_previews(paths, limit=32, budget_ms=100):
+    """Worker startup seed: saved PNGs only, bounded between individual reads."""
+    result, seen = {}, set()
+    deadline = time.monotonic() + max(0, min(100, budget_ms)) / 1000
+    for path in paths:
+        if not path or path in seen:
+            continue
+        if len(seen) >= max(0, min(48, limit)) or time.monotonic() >= deadline:
+            break
+        seen.add(path)
+        image = previews.load_saved(path)
+        if not image.isNull():
+            result[path] = image
+    return result
+
+
 def install_previews(images):
     """GUI-thread handoff before the library's first model/paint."""
     for path, image in images.items():
@@ -355,9 +414,11 @@ def install_previews(images):
 
 def prefetch_artwork(paths, notify):
     """GUI-thread request for a bounded strip of upcoming cards; no file I/O."""
-    for index, path in enumerate(dict.fromkeys(path for path in paths if path)):
-        if index >= 48:
-            break
+    global _preview_visible_paths
+    paths = tuple(dict.fromkeys(path for path in paths if path))[:48]
+    _preview_visible_paths = paths
+    _preview_cache.protect((*paths, *_preview_library_paths))
+    for path in paths:
         if _preview_cache.find(path) is None:
             ready = _source(path, previews.SIDE, previews.SIDE, notify=notify)
             if ready is not None:
@@ -366,6 +427,8 @@ def prefetch_artwork(paths, notify):
 
 def _retain_preview(path, image):
     if image.width() == image.height() and not image.isNull():
+        if image.width() < previews.SIDE and _preview_cache.find(path) is not None:
+            return
         _preview_cache.insert(path, QPixmap.fromImage(image.scaled(
             previews.SIDE, previews.SIDE, Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.SmoothTransformation)))
@@ -461,20 +524,20 @@ class _DecodeBridge(QObject):
 
 
 def _decode_job(key: str, path: str, width: int, height: int, bridge: _DecodeBridge):
+    stamp = None
     try:
+        stamp = previews.signature(path)
         if width == height == previews.SIDE:
-            # load already validates or creates the saved preview.
-            image = previews.load(path, _read_image)
+            image = previews.load(path, _read_image, persist=False)
         else:
-            stamp = previews.signature(path)
             image = _read_image(path, width, height)
-            previews.save(path, image, stamp)
     except Exception:
         image = QImage()
     try:
         bridge.decoded.emit(key, path, image)
     except RuntimeError:
         pass  # application teardown has destroyed the Qt bridge
+    previews.queue_save(path, image, stamp)
 
 
 def _schedule_decode(key: str, path: str, width: int, height: int, notify) -> None:
@@ -502,13 +565,16 @@ def _schedule_decode(key: str, path: str, width: int, height: int, notify) -> No
 
 
 
-def invalidate_artwork(path: str):
+def invalidate_artwork(path: str, *, accent_token=None):
     """Called on the GUI thread when a producer publishes/replaces an image."""
     _revisions[path] = next(_revision_ids)
     _revision_for(path)
     with _disk_lock:
-        _dominant.pop(path, None)
-        _dominant_mtime.pop(path, None)
+        current = (_dominant.get(path), _dominant_signatures.get(path))
+        if accent_token is None or current != accent_token or current[1] is None:
+            _dominant.pop(path, None)
+            _dominant_mtime.pop(path, None)
+            _dominant_signatures.pop(path, None)
     prefix = f"src:{path}:"
     with _decode_lock:
         for key in list(_failed):
@@ -525,13 +591,13 @@ def shutdown_decodes(grace_seconds: float = 0.0) -> int:
         _decode_stopped = True
         executor = _decoder
     if executor is None:
-        return 0
+        return previews.shutdown(grace_seconds)
     executor.shutdown(wait=False, cancel_futures=True)
     deadline = time.monotonic() + max(0.0, grace_seconds)
     threads = tuple(getattr(executor, "_threads", ()))
     for thread in threads:
         thread.join(max(0.0, deadline - time.monotonic()))
-    return sum(thread.is_alive() for thread in threads)
+    return sum(thread.is_alive() for thread in threads) + previews.shutdown(max(0, deadline - time.monotonic()))
 
 def _sync_forced() -> bool:
     return os.environ.get("BS_PODCASTS_SYNC_ARTWORK") == "1"

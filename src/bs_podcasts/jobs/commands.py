@@ -11,6 +11,7 @@ class CommandQueue:
         self._lock = RLock()
         self._revision = 0
         self._pending = {}
+        self._latest = {}
         self.closing = False
 
     def supersede(self):
@@ -28,13 +29,44 @@ class CommandQueue:
 
     def submit(self, work, keep=False):
         with self._lock:
+            # Ordinary commands are FIFO boundaries for replaceable settings.
+            self._latest.clear()
+            return self._submit_locked(work, keep)
+
+    def _submit_locked(self, work, keep):
+        if self.closing:
+            result = Future()
+            result.set_result(JobResult(JobStatus.ERROR, message='Application is closing.'))
+            return result
+        future = self.runner.submit(work)
+        self._pending[future] = keep
+        future.add_done_callback(self._finished)
+        return future
+
+    def submit_latest(self, key, work, keep=True):
+        """Replace a pending setting without moving it across another command.
+
+        Replacements return the same Future; callers should attach completion
+        handling only once to that future.
+        """
+        with self._lock:
             if self.closing:
-                result = Future()
-                result.set_result(JobResult(JobStatus.ERROR, message='Application is closing.'))
-                return result
-            future = self.runner.submit(work)
-            self._pending[future] = keep
-            future.add_done_callback(self._finished)
+                return self._submit_locked(work, keep)
+            previous = self._latest.get(key)
+            if previous is not None:
+                future, slot = previous
+                if not future.running() and not future.done():
+                    slot[0] = work
+                    self._pending[future] = self._pending[future] or keep
+                    return future
+            slot = [work]
+            def run():
+                with self._lock:
+                    current = slot[0]
+                return current()
+            future = self._submit_locked(run, keep)
+            if not future.done():
+                self._latest[key] = (future, slot)
             return future
 
     def retained(self, future):
@@ -48,6 +80,9 @@ class CommandQueue:
     def _finished(self, future):
         with self._lock:
             self._pending.pop(future, None)
+            for key, (pending, _slot) in tuple(self._latest.items()):
+                if pending is future:
+                    self._latest.pop(key, None)
 
     def finish(self, finalizer=None):
         with self._lock:

@@ -171,6 +171,7 @@
 !/src/bs_podcasts/playback/external.py
 !/src/bs_podcasts/playback/http_stream.py
 !/src/bs_podcasts/playback/service.py
+!/src/bs_podcasts/playback/persistence.py
 !/src/bs_podcasts/selfcheck.py
 !/src/bs_podcasts/services/__init__.py
 !/src/bs_podcasts/services/library.py

@@ -183,3 +183,5 @@ class DownloadRecord:
     etag: str = ""
     last_modified: str = ""
     expected_total: int = 0
+    created_at: float = 0.0
+    updated_at: float = 0.0

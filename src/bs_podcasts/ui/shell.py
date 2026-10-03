@@ -53,6 +53,7 @@ from ..urlguard import is_web_url
 from ..privacy import feed_label
 from ..data.database import DatabaseIntegrityError
 from . import icons
+from .models import ItemRoles
 
 
 class _lazy_dialog:
@@ -90,6 +91,7 @@ TextInputDialog = _lazy_dialog("TextInputDialog")
 episode_information_text = _lazy_dialog("episode_information_text")
 from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast as UiPodcast, plain_snippet, set_item_tooltips
 from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, prepare_previews, install_previews
+from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_accent_token
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
 from .shortcuts import ShortcutManager
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
@@ -150,7 +152,7 @@ class MainWindow(QMainWindow):
     _BUSINESS_STATE = ('_pending_jobs', '_download_tickets', '_play_after_download',
         '_play_after_download_intent', '_play_after_download_request', '_refresh_batch', '_refresh_generation',
         '_refresh_failed', '_refresh_waiting', '_refresh_in_flight',
-        '_manual_refresh_in_flight', '_refresh_quiet', '_details_fetched', '_artwork_fetched',
+        '_manual_refresh_in_flight', '_refresh_quiet', '_refresh_changed', '_details_fetched', '_artwork_fetched',
         '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved')
 
     def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None):
@@ -193,6 +195,7 @@ class MainWindow(QMainWindow):
         self._refresh_batch = [0, 0, 0]  # total, done, new episodes
         self._refresh_generation = 0
         self._refresh_failed = []
+        self._refresh_changed = False
         self._refresh_waiting = []
         self._refresh_in_flight = set()
         # Manual "Refresh now" submissions, tracked separately from the batch
@@ -1169,8 +1172,10 @@ class MainWindow(QMainWindow):
         if self.library is None or self._refresh_batch[0] or getattr(self.refresh, "refresh", None) is None or self._background_paused():
             return
 
+        cutoff = time.time() - int(self.library.setting("refresh.interval_minutes", "60")) * 60
         def read_all():
-            return [show for show in self.library.shows() if show.source != "local" and not show.suspended]
+            return [show for show in self.library.shows() if show.source != "local" and not show.suspended
+                    and (show.last_refresh is None or show.last_refresh < cutoff)]
 
         self._run_read(read_all, self._start_quiet_refresh, "scheduled-refresh")
 
@@ -1182,6 +1187,7 @@ class MainWindow(QMainWindow):
         self._refresh_generation += 1
         self._refresh_batch = [len(shows), 0, 0]
         self._refresh_failed = []
+        self._refresh_changed = False
         self._refresh_waiting = [show.id for show in shows]
         self._refresh_in_flight.clear()
         if not quiet:
@@ -1209,7 +1215,7 @@ class MainWindow(QMainWindow):
         elif new_episodes:
             self._notify("  ·  ".join(parts), "success", "Show", self._show_new_episodes)
             self._native_notify(APP_NAME, "  ·  ".join(parts), self._show_new_episodes)
-        else:
+        elif not self._refresh_quiet:
             self._notify(parts[0])
 
     def _show_problem_podcasts(self):
@@ -1925,7 +1931,20 @@ class MainWindow(QMainWindow):
         episodes = self._ui_episodes(stored_episodes, records)
         detail_show_id = self._hero_show_id
         detail_episodes = self._ui_episodes(self.library.episodes(show_id=detail_show_id, limit=None), records) if detail_show_id else []
+        previews = {}
+        if self.jobs is not None and not getattr(self, '_artwork_prepared', False):
+            paths = [getattr(getattr(self.playback, 'snapshot', None), 'artwork_path', '')]
+            if self.library.setting('ui.page', '0') == str(PAGE_PODCASTS):
+                ordered = stored_shows
+                if self.library.setting('ui.podcast_sort', 'name') == 'date':
+                    ordered = sorted(ordered, key=lambda show: show.latest_episode_published_at or '', reverse=True)
+                paths.extend(show.artwork_path for show in ordered[:32])
+            else:
+                paths.extend(episode.artwork_path for episode in in_progress[:3])
+                paths.extend(item.artwork_path for item in (detail_episodes or episodes)[:32])
+            previews = prepare_saved_previews(paths, limit=32, budget_ms=100)
         return {
+            "artwork_previews": previews,
             "detail_show_id": detail_show_id,
             "detail_episodes": detail_episodes,
             "stored_shows": stored_shows,
@@ -2320,7 +2339,9 @@ class MainWindow(QMainWindow):
             return
         data = data or self._read_library()
         data = dict(data)
-        install_previews(data.pop('artwork_previews', {}))
+        protect_artwork_previews(show.artwork_path for show in data['stored_shows'])
+        preview_images = data.pop('artwork_previews', {})
+        install_previews(preview_images)
         self._artwork_prepared = True
         for key in ('episodes', 'detail_episodes', 'in_progress', 'queued', 'history'):
             if key in data:
@@ -2390,10 +2411,28 @@ class MainWindow(QMainWindow):
         )
         self._apply_playing_marker()
         self._prime_accents(show.artwork_path for show in stored_shows)
+        if self.jobs is not None and not getattr(self, '_preview_warm_started', False):
+            self._preview_warm_started = True
+            paths = list(dict.fromkeys(show.artwork_path for show in stored_shows
+                                       if show.artwork_path and show.artwork_path not in preview_images))[:256]
+            self._later(50, lambda: self._warm_library_artwork(paths))
         if not getattr(self, "_stale_check_done", True):
             # First successful load: the window has its data, so the heavy
             # stale-feed sweep can start without competing with first paint.
             self._later(250, self._refresh_if_stale)
+
+    def _warm_library_artwork(self, paths):
+        """Warm the bounded library cohort after first paint, in small batches."""
+        if self._closed or not paths:
+            return
+        batch, remaining = paths[:32], paths[32:]
+        def apply(images):
+            install_previews(images)
+            self.podcast_page.view.viewport().update()
+            if remaining:
+                self._later(50, lambda: self._warm_library_artwork(remaining))
+        self._run_read(lambda: prepare_saved_previews(batch, limit=32, budget_ms=40),
+                       apply, 'preview-warm')
 
     def _request_reload(self, callback=None):
         """Coalesce bursts (batch refresh, imports); read+convert run off the main thread."""
@@ -2435,17 +2474,32 @@ class MainWindow(QMainWindow):
         if self.library is None:
             return
         dialog = AddPodcastDialog(self)
-        while dialog.exec() == QDialog.DialogCode.Accepted:
-            try:
-                show = self.library.add_subscription(dialog.feed_url)
-            except ValueError as exc:
-                dialog.show_error(str(exc))
-                continue
-            self.navigation.select(PAGE_PODCASTS)
-            self.podcast_page.banner.show_state("loading", f"Added {show.title or 'podcast'} — fetching episodes…")
-            self._request_reload(lambda: self.podcast_page.select_show(show.id))
-            self._submit_refresh(show.id)
-            return
+        library = self.library
+        def submit(url):
+            dialog.set_busy(True)
+            def work():
+                try:
+                    return library.add_subscription(url), ''
+                except Exception as exc:
+                    return None, str(exc)
+            def apply(outcome):
+                show, error = outcome
+                if show is None:
+                    if dialog.isVisible():
+                        dialog.show_error(error)
+                    else:
+                        self._notify(error, 'error')
+                    return
+                visible = dialog.isVisible()
+                dialog.accept()
+                if visible:
+                    self.navigation.select(PAGE_PODCASTS)
+                    self.podcast_page.banner.show_state('loading', f'Added {show.title or "podcast"} — fetching episodes…')
+                self._request_reload((lambda: self.podcast_page.select_show(show.id)) if visible else None)
+                self._submit_refresh(show.id)
+            self._run_read(work, apply, 'add-subscription', pool=self.commands, coalesce=False)
+        dialog.submit_requested.connect(submit)
+        dialog.exec()
 
     def _show_library_menu(self):
         button = self.podcast_page.header.action
@@ -3237,12 +3291,13 @@ class MainWindow(QMainWindow):
             elif show is not None and show.artwork_url == url:
                 if not repository.set_artwork_path(show.id, path, expected_url=url):
                     raise ValueError("The podcast artwork source changed. Retry the current artwork.")
-            return url, path, dominant_color(path, compute=True)
+            accent = dominant_color(path, compute=True)
+            return url, path, accent, artwork_accent_token(path)
 
         def apply(result):
-            url, path, accent = result
+            url, path, accent, token = result
             self._on_directory_artwork("artwork-retry", (generation, url),
-                JobResult(JobStatus.OK, value=(path, accent, True)))
+                JobResult(JobStatus.OK, value=(path, accent, True, token)))
             self._request_reload()
             current = self.context._current_item
             if isinstance(item, UiEpisode):
@@ -3368,7 +3423,7 @@ class MainWindow(QMainWindow):
                 updated = repository.get_episode(episode.id)
                 if updated is None or updated.artwork_url != episode.artwork_url:
                     return None
-                return self._ui_episode(updated), False, {}, True
+                return self._ui_episode(updated), False, {}, True, None
             if cancel.is_set() or not repository.set_episode_artwork_path(episode.id, path, expected_url=episode.artwork_url):
                 return None
             updated = repository.get_episode(episode.id)
@@ -3376,7 +3431,7 @@ class MainWindow(QMainWindow):
                 return None
             item = self._ui_episode(updated)
             item = replace_item(item, accent=dominant_color(path, item.accent))
-            return item, path != old_path or before != cache.signature(Path(path)), prepare_previews([path], 1), False
+            return item, path != old_path or before != cache.signature(Path(path)), prepare_previews([path], 1), False, artwork_accent_token(path)
 
     def _resolved_episode_artwork(self, item):
         known = self._episode_artwork_resolved.get((item.episode_id, item.artwork_url))
@@ -3773,7 +3828,18 @@ class MainWindow(QMainWindow):
 
     def _set_volume(self, volume: float):
         if self.playback is not None:
-            self._playback_command("set_volume", volume)
+            if self.commands is None:
+                self._playback_command('set_volume', volume)
+                return
+            future = self.commands.submit_latest('volume', lambda: self.playback.set_volume(volume), keep=True)
+            if future in self._pending_jobs:
+                return
+            self._pending_jobs.add(future)
+            def finished(done):
+                self._pending_jobs.discard(done)
+                if not done.cancelled():
+                    self._emit_completed(('command', None, done.result()))
+            future.add_done_callback(finished)
 
     def _set_sleep(self, seconds: int):
         if self.playback is None:
@@ -4856,7 +4922,8 @@ class MainWindow(QMainWindow):
                     before = cache.signature(cache.path_for(url))
                     path = str(cache.fetch(url))
                     changed = before != cache.signature(Path(path))
-                    return path, dominant_color(path, compute=True), changed
+                    accent = dominant_color(path, compute=True)
+                    return path, accent, changed, artwork_accent_token(path)
             future = self.artwork_jobs.submit(work)
             self._pending_jobs.add(future)
             def finished(completed, identity=identity):
@@ -4878,12 +4945,12 @@ class MainWindow(QMainWindow):
             else:
                 self._directory_artwork_completed.discard(url)
         if result.status == JobStatus.OK:
-            path, accent, changed = result.value
+            path, accent, changed, *tokens = result.value
             # A repaired file can retain its path and model values. Wake failed
             # decodes even if its request belonged to an earlier category;
             # unchanged cache hits must retain healthy decoded covers.
             if changed:
-                invalidate_artwork(path)
+                invalidate_artwork(path, accent_token=tokens[0] if tokens else None)
         if generation == self._directory_generation and result.status == JobStatus.OK:
             items = self.discover_page.update_artwork(url, path, accent)
             # In-place model updates do not emit currentChanged. Refresh only
@@ -5180,6 +5247,7 @@ class MainWindow(QMainWindow):
     def _on_database_repair(self, kind, identifier, result):
         if result.status == JobStatus.OK:
             self.library.repository.invalidate_settings_cache()
+            self._run_read(self.library.repository.reload_settings, lambda _: self._request_reload(), 'settings-reload')
             self.settings_page.set_database_status(
                 f"Repair complete · damaged original saved at {result.value}"
             )
@@ -5307,14 +5375,21 @@ class MainWindow(QMainWindow):
             with self._convert_lock:
                 self._ui_episode_cache.clear()  # later conversions pick up the tints
                 self._convert_revision += 1
-            # Sampling finishes seconds after launch; it used to trigger a
-            # FULL library reload (a 0.4 s worker read plus every model
-            # reset) just to recolour rows. The converted payload is still
-            # here — re-tint it and re-apply, no database involved.
+            def tint(item):
+                color = dominant_color(item.artwork_path, item.accent, compute=False)
+                return replace_item(item, accent=color) if color != item.accent else item
+            # Recolor current rows only; older payloads cannot replay queue or
+            # selection state after a newer user action.
+            for page in (self.home_page, self.podcast_page, self.discover_page, self.episode_page,
+                         self.playlist_page, self.history_page, self.download_page, self.bookmark_page):
+                page._all_items = [tint(item) for item in page._all_items]
+                page.model.replace([tint(item) for item in page.model._items])
+                page._context_item = page.view.currentIndex().data(ItemRoles.ITEM)
+            model = self.context.queue_view.model()
+            if model is not None:
+                model.replace([tint(item) for item in model._items])
             if self._last_library_data is not None:
-                self._reload_library(self._retinted(self._last_library_data))
-            else:
-                self._request_reload()
+                self._last_library_data = self._retinted(self._last_library_data)
         return
     def _on_details(self, kind, identifier, result):
         identity = identifier
@@ -5351,9 +5426,9 @@ class MainWindow(QMainWindow):
             while len(self._episode_artwork_attempts) > 2048:
                 self._episode_artwork_attempts.popitem(last=False)
         if result.status == JobStatus.OK and result.value and not cancelled:
-            item, changed, images, _failed = result.value
+            item, changed, images, _failed, *tokens = result.value
             if changed:
-                invalidate_artwork(item.artwork_path)
+                invalidate_artwork(item.artwork_path, accent_token=tokens[0] if tokens else None)
             install_previews(images)
             self._apply_episode_artwork(item)
             if self.playback is not None and self._playing_episode_id == episode_id:
@@ -5447,6 +5522,8 @@ class MainWindow(QMainWindow):
         return
     def _on_refresh(self, kind, identifier, result):
         identifier, batch_refresh, generation = identifier if isinstance(identifier, tuple) else (identifier, False, 0)
+        content_changed = result.status == JobStatus.OK and (
+            not getattr(result.value, 'not_modified', False) or bool(getattr(result.value, 'artwork_path', '')))
         if not batch_refresh:
             for item in self.episode_page.model._items:
                 if item.show_id == identifier:
@@ -5470,12 +5547,16 @@ class MainWindow(QMainWindow):
             self._refresh_in_flight.discard(identifier)
         else:
             self._manual_refresh_in_flight.discard(identifier)
-            self._request_reload()
+            if content_changed:
+                self._request_reload()
+            else:
+                self._refresh_show_summaries()
         total, done, new_episodes = self._refresh_batch
         if batch_refresh and not total:
             # The batch record was reset mid-flight; keep the views consistent.
             self._request_reload()
         if total and batch_refresh:
+            self._refresh_changed = self._refresh_changed or content_changed
             done += 1
             report = result.value if result.status == JobStatus.OK else None
             new_episodes += getattr(report, "imported", 0) or 0
@@ -5505,12 +5586,10 @@ class MainWindow(QMainWindow):
                     self.episode_page.banner.clear()
                     if self.episode_page.header.action:
                         self.episode_page.header.action.setEnabled(True)
-                self._request_reload()
-                # The global reload deliberately never replaces an open
-                # podcast page, so re-read just that show or its list stays
-                # stale until the user leaves and reopens it.
-                if self._hero_show_id and self.pages.currentIndex() == PAGE_EPISODES:
-                    self._reload_open_podcast_after_refresh(self._hero_show_id)
+                if self._refresh_changed:
+                    self._request_reload()  # Includes the open catalogue once.
+                else:
+                    self._refresh_show_summaries()
                 self._summarize_refresh(total, new_episodes, len(self._refresh_failed))
             # Batch: never one message per feed; problems are shown in place.
             return
@@ -5525,13 +5604,17 @@ class MainWindow(QMainWindow):
             if report.health in {Health.ERROR, Health.SUSPENDED}:
                 self.episode_page.banner.show_state(report.health.value, report.message, retry=True)
             else:
-                self._reload_open_podcast_after_refresh(
-                    identifier,
-                    "partial" if report.health == Health.PARTIAL else "",
-                    (report.message or "The podcast refreshed but did not contain playable episodes.")
-                    if report.health == Health.PARTIAL
-                    else "",
-                )
+                def show_status():
+                    if self._hero_show_id != identifier or self.pages.currentIndex() != PAGE_EPISODES:
+                        return
+                    if report.health == Health.PARTIAL:
+                        self.episode_page.banner.show_state('partial', report.message or 'The podcast refreshed but did not contain playable episodes.')
+                    else:
+                        self.episode_page.banner.clear()
+                if content_changed:
+                    self._request_reload(show_status)
+                else:
+                    show_status()
                 self._announce_refreshed_show(identifier)
             return
         if report.health in {Health.ERROR, Health.SUSPENDED}:
@@ -5542,6 +5625,22 @@ class MainWindow(QMainWindow):
             self.podcast_page.banner.clear()
             if self.pages.currentWidget() is not self.discover_page:
                 self._announce_refreshed_show(identifier)
+
+    def _refresh_show_summaries(self):
+        if self.library is None:
+            return
+        def work():
+            shows = self.library.shows()
+            return shows, [self._ui_podcast(show) for show in shows]
+        def apply(payload):
+            stored, shows = payload
+            self._stored_shows = stored
+            self._stored_shows_ready = True
+            self.podcast_page.set_items(shows, preserve_scroll=True)
+            if self._last_library_data is not None:
+                self._last_library_data.update(stored_shows=stored, shows=shows)
+            self._apply_new_badge(sum(show.new_count for show in stored))
+        self._run_read(work, apply, 'show-summaries')
 
     def _announce_refreshed_show(self, show_id):
         if self.library is None:

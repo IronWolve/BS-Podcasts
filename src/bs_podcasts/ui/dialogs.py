@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 import re
 
-from PySide6.QtCore import QPoint, QTimer, QUrl, Qt, qVersion
+from PySide6.QtCore import QPoint, QTimer, QUrl, Qt, Signal, qVersion
 from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QKeySequence
 
 from ..urlguard import is_web_url
@@ -47,9 +47,9 @@ import PySide6
 from ..assets import logo_path
 from ..config import APP_NAME, APP_TAGLINE, GITHUB_URL, app_version
 from . import icons
-from .pixmaps import cover, initials
+from .pixmaps import initials
 from .theme import COLORS, SPACE, scaled_px
-from .widgets import PlainTextLabel as _PlainTextLabel, fit_combo_width, safe_feed_html
+from .widgets import Artwork, PlainTextLabel as _PlainTextLabel, fit_combo_width, safe_feed_html
 
 
 class PlainTextLabel(_PlainTextLabel):
@@ -376,6 +376,8 @@ class StyledDialog(QDialog):
 
 
 class AddPodcastDialog(StyledDialog):
+    submit_requested = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add podcast")
@@ -422,11 +424,13 @@ class AddPodcastDialog(StyledDialog):
         self.add.setText("Adding…" if busy else "Add podcast")
 
     def _accept_if_valid(self):
+        if not self.add.isEnabled():
+            return
         value = self.feed_url
         if not value.startswith(("http://", "https://")):
             self.show_error("Enter a complete http:// or https:// URL.")
             return
-        self.accept()
+        self.submit_requested.emit(value)
 
 
 class PodcastSettingsDialog(StyledDialog):
@@ -762,15 +766,9 @@ class PodcastInfoDialog(StyledDialog):
 
         hero = QHBoxLayout()
         hero.setSpacing(SPACE["lg"])
-        artwork = PlainTextLabel()
         art_side = scaled_px(148)
-        artwork.setFixedSize(art_side, art_side)
-        artwork.setPixmap(
-            cover(
-                artwork_path, art_side, art_side, 14, initials(title),
-                getattr(podcast, "accent", ""), self.devicePixelRatioF(), sync=True,
-            )
-        )
+        artwork = Artwork(art_side, 14)
+        artwork.set_artwork(artwork_path, initials(title), getattr(podcast, "accent", ""))
         artwork.setAccessibleName(f"Artwork for {title}")
         hero.addWidget(artwork, 0, Qt.AlignmentFlag.AlignTop)
         summary = QVBoxLayout()

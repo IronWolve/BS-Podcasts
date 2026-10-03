@@ -33,6 +33,7 @@ class LibraryRepository:
         self._settings_write_lock = threading.Lock()
         self._settings_pending = {}
         self._settings_revision = 0
+        self._settings_generation = 0
 
     def add_show(self, feed_url: str, title: str = "", source: str = "rss") -> Show:
         now = time.time()
@@ -348,11 +349,22 @@ class LibraryRepository:
                 "SELECT COUNT(*) FROM bookmarks b JOIN episodes e ON e.id=b.episode_id WHERE e.show_id=?", (show_id,)
             ).fetchone()[0]
         files = []
+        seen = set()
         for row in rows:
             for candidate in (row["target_path"], row["partial_path"]):
                 path = Path(candidate) if candidate else None
-                if path is not None and path.is_file() and str(path) not in {f[0] for f in files}:
-                    files.append((str(path), path.stat().st_size))
+                if path is None or str(path) in seen:
+                    continue
+                seen.add(str(path))
+                try:
+                    info = path.stat()
+                except FileNotFoundError:
+                    if not stat.S_ISDIR(path.parent.stat().st_mode):
+                        raise OSError("A download folder is unavailable.")
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    raise OSError("A download path is not a regular file.")
+                files.append((str(path), info.st_size))
         # Artwork is shared cache data, not owned by this subscription. Leave
         # it to cache maintenance; a refresh may be about to attach a reference.
         return {
@@ -405,6 +417,7 @@ class LibraryRepository:
                                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                                (self.ORPHAN_OWNER, current_owner))
         self.invalidate_settings_cache()
+        self.reload_settings()
 
     def sweep_orphans(self) -> list[str]:
         """Retry a bounded batch while protecting concurrent live references.
@@ -429,13 +442,20 @@ class LibraryRepository:
                 paths = []
             if not isinstance(paths, list):
                 paths = []
+            paths = [path for path in paths if isinstance(path, str)]
             pending = paths[:self.MAX_ORPHANS_PER_SWEEP]
-            deferred = [path for path in paths[self.MAX_ORPHANS_PER_SWEEP:] if isinstance(path, str)]
+            if not pending:
+                return []
+            deferred = paths[self.MAX_ORPHANS_PER_SWEEP:]
             failed_paths = []
+            placeholders = ",".join("?" for _ in pending)
             referenced = {row[0] for row in connection.execute(
-                "SELECT artwork_path FROM shows UNION SELECT episode_artwork_path FROM episodes "
-                "UNION SELECT downloaded_path FROM episodes UNION SELECT target_path FROM downloads "
-                "UNION SELECT partial_path FROM downloads") if row[0]}
+                f"SELECT artwork_path FROM shows WHERE artwork_path IN ({placeholders}) "
+                f"UNION SELECT episode_artwork_path FROM episodes WHERE episode_artwork_path IN ({placeholders}) "
+                f"UNION SELECT downloaded_path FROM episodes WHERE downloaded_path IN ({placeholders}) "
+                f"UNION SELECT target_path FROM downloads WHERE target_path IN ({placeholders}) "
+                f"UNION SELECT partial_path FROM downloads WHERE partial_path IN ({placeholders})",
+                pending * 5) if row[0]}
             for path in pending:
                 if not isinstance(path, str):
                     continue
@@ -448,7 +468,14 @@ class LibraryRepository:
                         candidate.unlink()
                     cleared.append(path)
                 except FileNotFoundError:
-                    cleared.append(path)
+                    try:
+                        parent_present = stat.S_ISDIR(candidate.parent.stat().st_mode)
+                    except OSError:
+                        parent_present = False
+                    if parent_present:
+                        cleared.append(path)
+                    else:
+                        failed_paths.append(path)
                 except OSError:
                     failed_paths.append(path)
             # Failed entries rotate behind untouched ones, so one persistently
@@ -459,6 +486,7 @@ class LibraryRepository:
                                    (json.dumps(remaining), self.ORPHAN_SETTING))
         if cleared or failed_paths:
             self.invalidate_settings_cache()
+            self.reload_settings()
         return cleared
 
     def remove_show(self, show_id: int, delete_files: bool = True) -> dict:
@@ -482,7 +510,14 @@ class LibraryRepository:
                 try:
                     Path(path).unlink()
                 except FileNotFoundError:
-                    removed_files.append(path)  # already gone; nothing to keep
+                    try:
+                        parent_present = stat.S_ISDIR(Path(path).parent.stat().st_mode)
+                    except OSError:
+                        parent_present = False
+                    if parent_present:
+                        removed_files.append(path)
+                    else:
+                        failed_files.append(path)
                 except OSError as exc:
                     failed_files.append(path)
                     _log.warning("Could not remove %s while unsubscribing: %s", path, exc)
@@ -570,9 +605,23 @@ class LibraryRepository:
         self.persist_settings(values, self.stage_settings(values))
 
     def invalidate_settings_cache(self):
-        """Drop the cache after anything replaces the database file (repair)."""
+        """Retain the usable mirror until a worker publishes fresh settings."""
         with self._settings_lock:
-            self._settings_cache = None
+            self._settings_generation += 1
+
+    def reload_settings(self) -> bool:
+        """Read on a worker without holding the lock used by GUI lookups."""
+        with self._settings_write_lock:
+            with self._settings_lock:
+                generation = self._settings_generation
+            with self.database.connect() as connection:
+                values = {row["key"]: row["value"]
+                          for row in connection.execute("SELECT key, value FROM settings").fetchall()}
+            with self._settings_lock:
+                if generation != self._settings_generation:
+                    return False
+                self._settings_cache = values
+        return True
 
     def stage_settings(self, values):
         """Mirror accepted UI settings immediately, without doing disk I/O."""
@@ -605,13 +654,15 @@ class LibraryRepository:
         with self._settings_lock:
             if key in self._settings_pending:
                 return self._settings_pending[key][1]
-            if self._settings_cache is None:
-                with self.database.connect() as connection:
-                    self._settings_cache = {
-                        row["key"]: row["value"]
-                        for row in connection.execute("SELECT key, value FROM settings").fetchall()
-                    }
-            return self._settings_cache.get(key, default)
+            if self._settings_cache is not None:
+                return self._settings_cache.get(key, default)
+        # The first load precedes constructing the window. Later invalidations
+        # retain this snapshot and are explicitly refreshed on a worker.
+        self.reload_settings()
+        with self._settings_lock:
+            if key in self._settings_pending:
+                return self._settings_pending[key][1]
+            return (self._settings_cache or {}).get(key, default)
 
     def enqueue(self, episode_id: int):
         with self.database.connect() as connection:
@@ -658,11 +709,10 @@ class LibraryRepository:
                 )
 
     def update_position(self, episode_id: int, seconds: float, stamp: float | None = None):
-        # Position ticks come from the playback event thread while it holds
-        # the playback lock; blocking here for a whole VACUUM would freeze
-        # every playback control. Skipping a 5-second save is harmless.
+        # Let the playback writer retain this save for retry instead of
+        # waiting behind exclusive maintenance or claiming it was persisted.
         if self.database.maintenance_active:
-            return
+            return False
         stamp = time.time() if stamp is None else stamp
         # Starting an episode is what makes it "not new" everywhere in the UI.
         with self.database.connect() as connection:
@@ -671,6 +721,7 @@ class LibraryRepository:
                 "WHERE id=? AND position_updated_at<=?",
                 (max(0.0, float(seconds)), stamp, stamp, episode_id, stamp),
             )
+        return True
 
     def set_observed_duration(self, episode_id: int, seconds: float):
         import math
@@ -853,7 +904,7 @@ class LibraryRepository:
 
     def set_current_playback(self, episode_id: int | None, state: str, stamp: float | None = None):
         if self.database.maintenance_active:
-            return  # written again on the next state change
+            return False
         stamp = time.time() if stamp is None else stamp
         with self.database.connect() as connection:
             connection.execute(
@@ -861,6 +912,7 @@ class LibraryRepository:
                    WHERE singleton_id=1 AND updated_at<=?""",
                 (episode_id, state, stamp, stamp),
             )
+        return True
 
     def current_playback(self) -> tuple[int | None, str]:
         with self.database.connect() as connection:

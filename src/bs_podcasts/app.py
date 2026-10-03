@@ -311,6 +311,7 @@ def main() -> int:
     listening = ListeningService(listening_repository)
     playback = PlaybackService(repository, engine, listening=listening_repository)
     commands = CommandQueue()
+    playback.set_command_dispatcher(lambda work: commands.submit(work, keep=True))
     downloads = DownloadService(
         repository,
         DownloadRepository(database),
@@ -440,6 +441,7 @@ def main() -> int:
     # up to 12 s while background work drained.
     deadline = _time.monotonic() + 3.0
     busy = commands.join(max(0.0, deadline - _time.monotonic()))
+    busy += playback.join_persistence(max(0.0, deadline - _time.monotonic()))
     for pool in (jobs, download_jobs, refresh_jobs, network_jobs, artwork_jobs):
         busy += pool.join(max(0.0, deadline - _time.monotonic()))
     from .ui.pixmaps import shutdown_decodes

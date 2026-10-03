@@ -240,7 +240,17 @@ class _ListPageMixin:
             return ("preview", item.media_url or item.external_id or item.title)
         return ("show", 0 if item.feed_url else item.show_id, item.feed_url)
 
-    def _restore_selection(self, key, preserve_scroll: bool, selected_keys=()):
+    def _scroll_anchor(self):
+        if not self.model.rowCount():
+            return None
+        x = max(2, self.view.gridSize().width() // 2) if isinstance(self, PodcastGridPage) else 2
+        for y in range(2, min(40, self.view.viewport().height()), 6):
+            index = self.view.indexAt(QPoint(x, y))
+            if index.isValid():
+                return self._key(index.data(ItemRoles.ITEM)), self.view.visualRect(index).top()
+        return None
+
+    def _restore_selection(self, key, preserve_scroll: bool, selected_keys=(), anchor=None):
         def normalized(value):
             # Older saved view states used the mutable subscription ID.
             if value and len(value) == 3 and value[0] == "show" and value[2]:
@@ -249,6 +259,8 @@ class _ListPageMixin:
         key = normalized(key)
         scrollbar = self.view.verticalScrollBar()
         scroll_value = scrollbar.value()
+        self._scroll_restore_revision = getattr(self, '_scroll_restore_revision', 0) + 1
+        revision = self._scroll_restore_revision
         target = None
         wanted = {normalized(value) for value in (selected_keys or ())}
         rows = []
@@ -266,8 +278,8 @@ class _ListPageMixin:
             if wanted:
                 selection = self.view.selectionModel()
                 selection.clearSelection()
-                anchor = target if target in rows else (rows[0] if rows else None)
-                selection.setCurrentIndex(self.model.index(anchor, 0) if anchor is not None else QModelIndex(),
+                selection_anchor = target if target in rows else (rows[0] if rows else None)
+                selection.setCurrentIndex(self.model.index(selection_anchor, 0) if selection_anchor is not None else QModelIndex(),
                                           QItemSelectionModel.SelectionFlag.NoUpdate)
                 for row in rows:
                     selection.select(
@@ -277,8 +289,17 @@ class _ListPageMixin:
             else:
                 self.view.setCurrentIndex(self.model.index(target or 0, 0))
         if preserve_scroll:
-            # Context-object overload: Qt drops the shot if the page is destroyed first.
-            QTimer.singleShot(0, self, lambda value=scroll_value: scrollbar.setValue(value))
+            def restore():
+                if revision != self._scroll_restore_revision:
+                    return
+                if anchor is not None:
+                    for row, item in enumerate(self.model._items):
+                        if self._key(item) == anchor[0]:
+                            self.view.scrollTo(self.model.index(row, 0), QAbstractItemView.ScrollHint.PositionAtTop)
+                            scrollbar.setValue(scrollbar.value() - anchor[1])
+                            return
+                scrollbar.setValue(scroll_value)
+            QTimer.singleShot(0, self, restore)
         item = self.view.currentIndex().data(ItemRoles.ITEM)
         previous = getattr(self, "_context_item", None)
         if previous != item:
@@ -547,9 +568,10 @@ class PodcastGridPage(BasePage, _ListPageMixin):
     def set_items(self, items, preserve_scroll: bool = False):
         key = self._current_key()
         selected = self._selected_keys()
+        anchor = self._scroll_anchor() if preserve_scroll else None
         self._all_items = list(items)
         self._apply_filters(restore_key=key, preserve_scroll=preserve_scroll,
-                            selected_keys=selected)
+                            selected_keys=selected, anchor=anchor)
 
     def update_artwork(self, artwork_url, path, accent):
         """Artwork cannot change filtering/order; update matching cards only."""
@@ -575,7 +597,8 @@ class PodcastGridPage(BasePage, _ListPageMixin):
     def _connect_filter_box(self):
         _debounce_filter_box(self)
 
-    def _apply_filters(self, *_args, restore_key=None, preserve_scroll=False, selected_keys=None):
+    def _apply_filters(self, *_args, restore_key=None, preserve_scroll=False, selected_keys=None, anchor=None):
+        anchor = anchor or (self._scroll_anchor() if preserve_scroll else None)
         selected = list(selected_keys or ())
         if restore_key is None and not preserve_scroll:
             restore_key = self._current_key()
@@ -608,7 +631,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         elif self.discover and self._discover_sort == "newest":
             items.sort(key=lambda item: item.latest_sort_key or "", reverse=True)
         self.model.replace(items)
-        self._restore_selection(restore_key, preserve_scroll, selected)
+        self._restore_selection(restore_key, preserve_scroll, selected, anchor)
         if self.discover and not items:
             self.context_changed.emit(None)
         self._update_empty(query if not self.discover else "")
@@ -925,9 +948,10 @@ class EpisodeListPage(BasePage, _ListPageMixin):
     def set_items(self, items, preserve_scroll: bool = True):
         key = self._current_key()
         selected = self._selected_keys()
+        anchor = self._scroll_anchor() if preserve_scroll else None
         self._all_items = list(items)
         self._apply_filters(restore_key=key, preserve_scroll=preserve_scroll,
-                            selected_keys=selected)
+                            selected_keys=selected, anchor=anchor)
 
     def update_items(self, updates):
         """Apply download deltas without resetting selection or untouched rows."""
@@ -973,7 +997,8 @@ class EpisodeListPage(BasePage, _ListPageMixin):
     def _connect_filter_box(self):
         _debounce_filter_box(self)
 
-    def _apply_filters(self, *_args, restore_key=None, preserve_scroll=False, selected_keys=None):
+    def _apply_filters(self, *_args, restore_key=None, preserve_scroll=False, selected_keys=None, anchor=None):
+        anchor = anchor or (self._scroll_anchor() if preserve_scroll else None)
         selected = list(selected_keys or ())
         if restore_key is None and not preserve_scroll:
             restore_key = self._current_key()
@@ -1009,7 +1034,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             elif self._sort == "unplayed":
                 items.sort(key=lambda item: item.played)
         self.model.replace(items)
-        self._restore_selection(restore_key, preserve_scroll, selected)
+        self._restore_selection(restore_key, preserve_scroll, selected, anchor)
         self._update_empty(query)
         self._selection_changed()
         self._update_sort_button()
@@ -1224,6 +1249,7 @@ class HomePage(BasePage, _ListPageMixin):
     def set_sections(self, in_progress, latest):
         key = self._current_key()
         selected = self._selected_keys()
+        anchor = self._scroll_anchor()
         in_progress = list(in_progress)
         latest = list(latest)
         self._resume_lead = in_progress[: self.RESUME_ROWS]
@@ -1234,7 +1260,7 @@ class HomePage(BasePage, _ListPageMixin):
         else:
             self.latest_title.title.setText(self._latest_text)
             self.latest_title.set_count(len(latest))
-        self._restore_selection(key, True, selected)
+        self._restore_selection(key, True, selected, anchor)
 
     def set_items(self, items, heading: str | None = None):  # compatibility
         self.set_sections([], items)

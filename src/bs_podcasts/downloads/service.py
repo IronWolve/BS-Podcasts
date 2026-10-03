@@ -232,15 +232,20 @@ class DownloadService:
             # every later download of this episode.
             target = self._target(episode_id, episode.media_url)
             partial = target.with_suffix(target.suffix + ".part")
-            self.downloads.prepare(episode_id, episode.media_url, target, partial)
+            prepared = self.downloads.prepare(episode_id, episode.media_url, target, partial)
+            if prepared is None:
+                raise DownloadError("The download record is no longer available.")
+            target = Path(prepared.target_path)
+            partial = Path(prepared.partial_path) if prepared.partial_path else target.with_suffix(target.suffix + ".part")
             if cancellation.is_set():
                 return self._park(episode_id, partial)
             # Setup lives inside the guard: an unusable path (mkdir or
             # disk_usage raising) previously leaked a permanently "active"
             # episode until restart, with the record stuck at queued.
             try:
-                self.directory.mkdir(parents=True, exist_ok=True)
-                free = shutil.disk_usage(self.directory).free
+                target.parent.mkdir(parents=True, exist_ok=True)
+                partial.parent.mkdir(parents=True, exist_ok=True)
+                free = shutil.disk_usage(partial.parent).free
             except OSError as exc:
                 message = f"Downloads folder is unusable: {exc}"
                 self.downloads.progress(episode_id, DownloadState.ERROR, 0, 0, message)
@@ -412,9 +417,7 @@ class DownloadService:
                 # Access failures are not evidence that a saved file vanished.
                 continue
             if missing:
-                self.downloads.progress(record.episode_id, DownloadState.ERROR, 0, 0, self.MISSING_FILE_MESSAGE)
-                self.downloads.clear_downloaded_path(record.episode_id)
-                fixed += 1
+                fixed += self.downloads.mark_missing(record, self.MISSING_FILE_MESSAGE)
         return fixed
 
     def discard(self, episode_id: int) -> None:
@@ -447,7 +450,12 @@ class DownloadService:
         for candidate in (record.partial_path, record.target_path):
             if candidate:
                 try:
-                    Path(candidate).unlink(missing_ok=True)
+                    path = Path(candidate)
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        if not stat.S_ISDIR(path.parent.stat().st_mode):
+                            raise OSError("The download folder is unavailable.")
                 except OSError as exc:
                     failures.append(f"{candidate}: {exc}")
         if failures:
@@ -501,7 +509,8 @@ class DownloadService:
         else:
             target = self._target(episode_id, episode.media_url)
             partial = target.with_suffix(target.suffix + ".part")
-        self.directory.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial.parent.mkdir(parents=True, exist_ok=True)
         existing = partial.stat().st_size if partial.is_file() else 0
 
         validator = ""
@@ -810,11 +819,19 @@ class DownloadService:
         failures = []
         for candidate in (record.target_path, record.partial_path):
             path = Path(candidate) if candidate else None
-            if path is not None and path.is_file():
+            if path is not None:
                 try:
-                    size = path.stat().st_size
+                    try:
+                        info = path.stat()
+                    except FileNotFoundError:
+                        # An absent volume is not proof the file was deleted.
+                        if not stat.S_ISDIR(path.parent.stat().st_mode):
+                            raise OSError("The download folder is unavailable.")
+                        continue
+                    if not stat.S_ISREG(info.st_mode):
+                        raise OSError("The download path is not a regular file.")
                     path.unlink()
-                    freed += size
+                    freed += info.st_size
                 except OSError as exc:
                     # Keep every failure: the partial's error used to
                     # overwrite the target's, hiding the message that named

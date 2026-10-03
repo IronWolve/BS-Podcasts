@@ -15,13 +15,14 @@ _context = threading.local()
 
 
 @contextmanager
-def request_scope(cancel_event=None, foreground=False):
-    previous = (getattr(_context, 'cancel', None), getattr(_context, 'foreground', False))
-    _context.cancel, _context.foreground = cancel_event, foreground
+def request_scope(cancel_event=None, foreground=False, deadline=None):
+    previous = (getattr(_context, 'cancel', None), getattr(_context, 'foreground', False),
+                getattr(_context, 'deadline', None))
+    _context.cancel, _context.foreground, _context.deadline = cancel_event, foreground, deadline
     try:
         yield
     finally:
-        _context.cancel, _context.foreground = previous
+        _context.cancel, _context.foreground, _context.deadline = previous
 
 
 def current_cancel():
@@ -43,11 +44,14 @@ class Deadline:
         self.cancelled = threading.Event()
         self.user_cancel = user_cancel if user_cancel is not None else current_cancel()
         self.foreground = is_foreground() if foreground is None else foreground
+        self.parent = getattr(_context, 'deadline', None)
 
     def remaining(self):
         if self.cancelled.is_set() or (self.user_cancel is not None and self.user_cancel.is_set()):
             raise NetworkDeadline("Network operation cancelled.")
         remaining = self.expires - time.monotonic()
+        if self.parent is not None:
+            remaining = min(remaining, self.parent.remaining())
         if remaining <= 0:
             raise NetworkDeadline("Network operation exceeded its deadline.")
         return remaining

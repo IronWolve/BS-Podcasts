@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 import time
+import stat
 
 from ...domain import DownloadRecord, DownloadState
 from ..database import Database
@@ -37,15 +38,16 @@ class DownloadRepository:
                    last_modified=CASE WHEN source_url=excluded.source_url THEN last_modified ELSE '' END,
                    expected_total=CASE WHEN source_url=excluded.source_url THEN expected_total ELSE 0 END,
                    source_url=excluded.source_url,
-                   state='queued', error_message='', updated_at=excluded.updated_at""",
+                   state='queued', error_message='', updated_at=MAX(downloads.updated_at+0.000001, excluded.updated_at)""",
                 (episode_id, source_url, str(target), str(partial), now, now),
             )
         return self.get(episode_id)
 
     def response_metadata(self, episode_id: int, etag: str, last_modified: str, total: int):
         with self.database.connect() as connection:
-            connection.execute("UPDATE downloads SET etag=?, last_modified=?, expected_total=? WHERE episode_id=?",
-                               (etag, last_modified, max(0, total), episode_id))
+            connection.execute("UPDATE downloads SET etag=?, last_modified=?, expected_total=?, "
+                               "updated_at=MAX(updated_at+0.000001, ?) WHERE episode_id=?",
+                               (etag, last_modified, max(0, total), time.time(), episode_id))
 
     def get(self, episode_id: int) -> DownloadRecord | None:
         with self.database.connect() as connection:
@@ -68,7 +70,7 @@ class DownloadRepository:
         with self.database.connect() as connection:
             connection.execute(
                 """UPDATE downloads SET state=?, bytes_done=?, bytes_total=?,
-                   error_message=?, updated_at=? WHERE episode_id=?""",
+                   error_message=?, updated_at=MAX(updated_at+0.000001, ?) WHERE episode_id=?""",
                 (
                     state.value,
                     max(0, int(bytes_done)),
@@ -83,7 +85,7 @@ class DownloadRepository:
         with self.database.connect() as connection:
             changed = connection.execute(
                 """UPDATE downloads SET state='complete', target_path=?,
-                   bytes_done=?, bytes_total=?, error_message='', updated_at=?
+                   bytes_done=?, bytes_total=?, error_message='', updated_at=MAX(updated_at+0.000001, ?)
                    WHERE episode_id=?""",
                 (path, size, size, time.time(), episode_id),
             ).rowcount
@@ -97,6 +99,24 @@ class DownloadRepository:
     def clear_downloaded_path(self, episode_id: int):
         with self.database.connect() as connection:
             connection.execute("UPDATE episodes SET downloaded_path='' WHERE id=?", (episode_id,))
+
+    def mark_missing(self, record: DownloadRecord, message: str) -> bool:
+        """Demote only the exact completed record whose file was inspected."""
+        with self.database.connect() as connection:
+            changed = connection.execute(
+                """UPDATE downloads SET state='error', bytes_done=0, bytes_total=0,
+                   error_message=?, updated_at=MAX(updated_at+0.000001, ?)
+                   WHERE id=? AND episode_id=? AND created_at=? AND updated_at=?
+                     AND target_path=? AND state='complete'""",
+                (message, time.time(), record.id, record.episode_id, record.created_at,
+                 record.updated_at, record.target_path),
+            ).rowcount
+            if changed:
+                connection.execute(
+                    "UPDATE episodes SET downloaded_path='' WHERE id=? AND downloaded_path=?",
+                    (record.episode_id, record.target_path),
+                )
+        return bool(changed)
 
     def remove(self, episode_id: int):
         """Forget a download record and clear the episode's local path."""
@@ -117,7 +137,16 @@ class DownloadRepository:
         if record is None:
             return None
         path = Path(record.target_path if record.state == DownloadState.COMPLETE else record.partial_path)
-        size = path.stat().st_size if path.is_file() else 0
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            if not stat.S_ISDIR(path.parent.stat().st_mode):
+                raise OSError("The download folder is unavailable.")
+            size = 0
+        else:
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("The download path is not a regular file.")
+            size = info.st_size
         return DeletionPreview(episode_id, str(path), size)
 
     @staticmethod
@@ -143,4 +172,5 @@ class DownloadRepository:
             episode_title=row["episode_title"],
             show_title=row["show_title"],
             etag=row["etag"], last_modified=row["last_modified"], expected_total=row["expected_total"],
+            created_at=row["created_at"], updated_at=row["updated_at"],
         )

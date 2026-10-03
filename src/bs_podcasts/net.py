@@ -82,7 +82,7 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
     from urllib3.util.retry import Retry
 
     from requests.exceptions import Timeout
-    from .netlimits import Deadline, NetworkDeadline, bounded_call, bounded_chunks, abort_response, is_foreground
+    from .netlimits import Deadline, NetworkDeadline, bounded_call, bounded_chunks, abort_response, is_foreground, request_scope
 
     class DeadlineRetry(Retry):
         def increment(self, *args, **kwargs):
@@ -112,7 +112,10 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
             def work():
                 _request_context.state = state
                 try:
-                    return super(BoundedSession, self).request(method, url, stream=True, **kwargs)
+                    # Redirect screening runs here too, on the header worker;
+                    # inherit priority, cancellation and the remaining budget.
+                    with request_scope(state.cancelled, state.foreground, state):
+                        return super(BoundedSession, self).request(method, url, stream=True, **kwargs)
                 finally:
                     _request_context.state = None
             try:

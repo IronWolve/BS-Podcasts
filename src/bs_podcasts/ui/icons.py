@@ -11,9 +11,11 @@ from pathlib import Path
 import re
 import tempfile
 
-from PySide6.QtCore import QByteArray, QRectF, Qt
-from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF, Qt
+from PySide6.QtGui import QIcon, QImage, QImageReader, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
+
+from ..data.files import atomic_write
 
 
 _ATTRS = (
@@ -168,6 +170,7 @@ def paint(painter: QPainter, name: str, color: str, rect, scale: float = 1.0):
 
 _PLACEHOLDER = re.compile(r"\{icon:([a-z-]+):([^:}]+):(\d+)\}")
 _file_dir: Path | None = None
+_verified_files = {}
 
 
 def _cache_dir() -> Path:
@@ -195,8 +198,29 @@ def icon_file(name: str, color: str, size: int) -> str:
     # never reach them.
     digest = sha1(GLYPHS.get(name, "").encode("utf-8")).hexdigest()[:8]
     target = _cache_dir() / f"{name}-{safe_color}-{size}-{digest}.png"
-    if not target.exists():
-        pixmap(name, color, size, 1.0).save(str(target), "PNG")
+    if target not in _verified_files:
+        valid = False
+        try:
+            if not target.is_symlink() and 0 < target.stat().st_size <= 128 * 1024:
+                reader = QImageReader(str(target), b'png')
+                dimensions = reader.size()
+                valid = dimensions.width() == size and dimensions.height() == size and not reader.read().isNull()
+        except OSError:
+            pass
+        if not valid:
+            data = QByteArray()
+            buffer = QBuffer(data)
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            valid = pixmap(name, color, size, 1.0).save(buffer, 'PNG')
+            buffer.close()
+            if valid:
+                try:
+                    atomic_write(target, bytes(data))
+                except OSError:
+                    valid = False
+        if valid:
+            _verified_files[target] = True
+            _bound(_verified_files)
     return target.as_posix()
 
 

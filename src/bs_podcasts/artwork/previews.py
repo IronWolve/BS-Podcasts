@@ -3,6 +3,8 @@
 from hashlib import sha256
 from pathlib import Path
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PySide6.QtGui import QImage, QImageReader
@@ -16,6 +18,10 @@ MAX_DISK_BYTES = 128 * 1024 * 1024
 MAX_DISK_FILES = 4096
 _lock = threading.Lock()
 _writes = 0
+_pending_lock = threading.Lock()
+_pending = set()
+_writer = None
+_stopped = False
 
 
 def _directory():
@@ -79,14 +85,60 @@ def save(path, image, stamp):
             _prune_locked()
 
 
-def load(path, decode):
+def load(path, decode, *, persist=True):
     stamp = signature(path)
     image = _cached(_target(path), stamp)
     if not image.isNull() or stamp is None:
         return image
     image = decode(path, SIDE, SIDE)
-    save(path, image, stamp)
+    if persist:
+        save(path, image, stamp)
     return image
+
+
+def load_saved(path):
+    """Read only the small saved preview; normal decodes verify source freshness."""
+    return _cached(_target(path), None)
+
+
+def queue_save(path, image, stamp):
+    """Bounded best-effort persistence, separate from visible image decoding."""
+    global _writer
+    if not stamp or image.isNull() or image.width() != image.height() or image.width() < SIDE:
+        return
+    identity = (path, stamp)
+    with _pending_lock:
+        if _stopped or identity in _pending or len(_pending) >= 64:
+            return
+        _pending.add(identity)
+        if _writer is None:
+            _writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix='bs-preview-save')
+        image = image.scaled(SIDE, SIDE, Qt.AspectRatioMode.IgnoreAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+        try:
+            future = _writer.submit(save, path, image, stamp)
+        except RuntimeError:
+            _pending.discard(identity)
+            return
+    def finished(_future):
+        with _pending_lock:
+            _pending.discard(identity)
+    future.add_done_callback(finished)
+
+
+def shutdown(grace_seconds=0):
+    global _stopped
+    with _pending_lock:
+        _stopped = True
+        writer = _writer
+    if writer is None:
+        return 0
+    writer.shutdown(wait=False, cancel_futures=True)
+    deadline = time.monotonic() + max(0, grace_seconds)
+    threads = tuple(getattr(writer, '_threads', ()))
+    for thread in threads:
+        thread.join(max(0, deadline - time.monotonic()))
+    return sum(thread.is_alive() for thread in threads)
 
 
 def _prune_locked():

@@ -62,7 +62,8 @@ class RefreshService:
         before = stamp(previous_path) if previous_path else None
         try:
             path = str(self.artwork.fetch(url))
-            self.repository.set_artwork_path(show_id, path)
+            if path != previous_path:
+                self.repository.set_artwork_path(show_id, path, expected_url=url)
             return path if path != previous_path or stamp(path) != before else ''
         except ArtworkError:
             return ''

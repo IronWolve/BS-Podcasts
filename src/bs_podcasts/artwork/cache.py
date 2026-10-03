@@ -5,10 +5,11 @@ from pathlib import Path
 from threading import Lock
 from collections import OrderedDict
 import os
+import json
 import time
 
 from ..net import SessionSlot
-from ..data.files import open_private
+from ..data.files import atomic_write, open_private
 from ..urlguard import UnsafeUrl, ensure_fetchable, ensure_web_url
 from ..netlimits import Deadline, current_cancel
 
@@ -53,6 +54,7 @@ class ArtworkCache:
         self._validated = OrderedDict()
         self._retry_after = OrderedDict()
         self._recent = OrderedDict()
+        self._checked = OrderedDict()
         self._prune_lock = Lock()
 
     @staticmethod
@@ -143,9 +145,28 @@ class ArtworkCache:
                         path.unlink()
                 except OSError:
                     continue
+                try:
+                    path.with_suffix('.checked').unlink(missing_ok=True)
+                except OSError:
+                    pass
                 removed += 1
                 freed += stamp[1]
                 total -= stamp[1]
+            # Library removal may unlink originals outside this cache. Retire
+            # their disposable validation markers during normal maintenance.
+            retired = 0
+            for marker in self.directory.glob('*.checked'):
+                if len(marker.stem) != 64 or any(char not in '0123456789abcdef' for char in marker.stem):
+                    continue
+                try:
+                    if (not marker.is_symlink() and marker.stat().st_mtime < threshold
+                            and not marker.with_suffix('.img').exists()):
+                        marker.unlink()
+                        retired += 1
+                except OSError:
+                    continue
+                if retired >= 256:
+                    break
             return removed, freed
 
     def path_for(self, url: str) -> Path:
@@ -161,8 +182,64 @@ class ArtworkCache:
             return entry[0]
 
     def _fresh(self, path):
+        stamp = self.signature(path)
+        if stamp is None:
+            return False
+        now = time.time()
+        checked = stamp[2] / 1e9
+        with self._locks_guard:
+            known = self._checked.get(str(path))
+        if known is not None and known[0] == stamp:
+            checked = known[1]
+        elif now - checked >= 86400:
+            marker = path.with_suffix('.checked')
+            try:
+                if not marker.is_symlink():
+                    with marker.open('rb') as handle:
+                        record = json.loads(handle.read(2048))
+                    value = float(record['checked'])
+                    if tuple(record['signature']) == stamp and 0 <= now - value < 86400:
+                        checked = value
+                        self._remember_checked(path, stamp, checked)
+            except (OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError):
+                pass
+        return 0 <= now - checked < 86400 and self.valid_file(path)
+
+    def _remember_checked(self, path, stamp, checked):
+        with self._locks_guard:
+            self._checked[str(path)] = (stamp, checked)
+            self._checked.move_to_end(str(path))
+            while len(self._checked) > 4096:
+                self._checked.popitem(last=False)
+
+    def _record_checked(self, path):
+        stamp = self.signature(path)
+        if stamp is None:
+            return
+        checked = time.time()
+        self._remember_checked(path, stamp, checked)
         try:
-            return time.time() - path.stat().st_mtime < 86400 and self.valid_file(path)
+            atomic_write(path.with_suffix('.checked'), json.dumps(
+                {'signature': stamp, 'checked': checked}, separators=(',', ':')
+            ).encode('utf-8'))
+        except OSError:
+            pass  # Cache metadata is optional; retain the valid artwork.
+
+    def _matches_content(self, target, digest, size):
+        stamp = self.signature(target)
+        if stamp is None or stamp[1] != size:
+            return False
+        previous = sha256()
+        try:
+            with target.open('rb') as handle:
+                remaining = MAX_ARTWORK_BYTES + 1
+                while remaining:
+                    chunk = handle.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    previous.update(chunk)
+            return previous.digest() == digest and self.signature(target) == stamp
         except OSError:
             return False
 
@@ -244,6 +321,7 @@ class ArtworkCache:
             if content_type and not content_type.startswith("image/") and content_type.split(";", 1)[0].strip() != "application/octet-stream":
                 raise ArtworkError("Artwork response is not an image.")
             size = 0
+            digest = sha256()
             head = b""
             deadline = time.monotonic() + MAX_TRANSFER_SECONDS
             with open_private(partial, "wb") as handle:
@@ -251,6 +329,7 @@ class ArtworkCache:
                     if time.monotonic() > deadline:
                         raise ArtworkError("Artwork transfer took too long.")
                     size += len(chunk)
+                    digest.update(chunk)
                     if size > MAX_ARTWORK_BYTES:
                         raise ArtworkError("Artwork exceeds the size limit.")
                     if len(head) < 512:
@@ -267,7 +346,11 @@ class ArtworkCache:
                 raise ArtworkError("Artwork response is not an image.")
             if not self.valid_file(partial):
                 raise ArtworkError('Artwork could not be decoded; the previous cache file was preserved.')
-            os.replace(partial, target)
+            if self._matches_content(target, digest.digest(), size):
+                partial.unlink()
+            else:
+                os.replace(partial, target)
+            self._record_checked(target)
             return target
         except ArtworkError:
             partial.unlink(missing_ok=True)

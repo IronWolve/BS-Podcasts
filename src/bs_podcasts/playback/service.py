@@ -11,6 +11,7 @@ from ..data.repositories import LibraryRepository
 from ..urlguard import UnsafeUrl, ensure_media_source, ensure_web_url, ensure_fetchable, is_web_url
 from ..privacy import redact
 from .engine import EngineEvent, PlaybackUnavailable
+from .persistence import PlaybackPersistence
 
 # Enclosure hosts that are redirect trackers: their chains routinely exceed
 # FFmpeg's 8-redirect limit, so the first open failed and the rescue path
@@ -81,6 +82,9 @@ class PlaybackService:
         self.repository = repository
         self.engine = engine
         self.listening = listening
+        self._persistence = PlaybackPersistence()
+        self._command_dispatcher = None
+        self._event_commands = None
         self.engine.set_event_handler(self._engine_event)
         self._volume_applied = False
         self._revision = 0
@@ -121,6 +125,21 @@ class PlaybackService:
 
     def subscribe(self, listener):
         self._listeners.append(listener)
+
+    def set_command_dispatcher(self, dispatch):
+        """Send EOF finalization through the application's ordered commands."""
+        self._command_dispatcher = dispatch
+
+    def _flush_persistence(self):
+        if not self._persistence.flush(2.0):
+            raise PlaybackUnavailable('Library storage is busy saving playback; retry shortly.')
+
+    def join_persistence(self, grace_seconds=3.0):
+        deadline = time.monotonic() + max(0.0, grace_seconds)
+        busy = self._persistence.join(grace_seconds)
+        if self._event_commands is not None:
+            busy += self._event_commands.join(max(0.0, deadline - time.monotonic()))
+        return busy
 
     def unsubscribe(self, listener):
         try:
@@ -182,6 +201,7 @@ class PlaybackService:
                 return False
             self._flush_listening()
             self._persist_position(force=True)
+            self._flush_persistence()
             # Sleep is session-scoped: a new load's snapshot has no deadline,
             # so a still-armed timer would pause the NEXT episode unannounced.
             self.cancel_sleep_timer()
@@ -331,11 +351,11 @@ class PlaybackService:
             self._flush_listening()
             if self.snapshot.episode_id is not None:
                 self._persist_position(force=True)
-                self._set_current_playback(None, PlaybackState.IDLE.value)
+            self._flush_persistence()
             if cancelled is not None and cancelled():
-                if self.snapshot.episode_id is not None:
-                    self._set_current_playback(self.snapshot.episode_id, self.snapshot.state.value)
                 return False
+            if self.snapshot.episode_id is not None:
+                self._set_current_playback(None, PlaybackState.IDLE.value)
             self.cancel_sleep_timer()
             self._deferred_episode_id = None
             self._begin_load(0.0, autoplay)
@@ -372,7 +392,7 @@ class PlaybackService:
         The source is opened on the first play/seek/skip, so an offline launch
         never produces a stream error and startup does no media I/O.
         """
-        if self._engine_loaded or self.snapshot.state in {PlaybackState.PLAYING, PlaybackState.LOADING}:
+        if self._load_generation or self._engine_loaded or self.snapshot.state in {PlaybackState.PLAYING, PlaybackState.LOADING}:
             # A live session (e.g. the theme-change window rebuild re-wiring
             # playback) must not be overwritten with stale durable state.
             self._emit()
@@ -451,22 +471,23 @@ class PlaybackService:
                     self.engine.play()
                 self._emit()
 
-    def _replay_current(self):
+    def _replay_current(self, position=None, autoplay=True):
         """Restart the finished item (library episode or transient stream).
 
         Called with the lock held. load_episode restarts a completed
         episode from zero via its position≈duration rule."""
         if self.snapshot.episode_id is not None:
-            self.load_episode(self.snapshot.episode_id, autoplay=True)
+            self.load_episode(self.snapshot.episode_id, autoplay=autoplay, start_position=position)
             return
-        position = self.snapshot.position if self.snapshot.state == PlaybackState.ERROR else 0.0
-        self._begin_load(position, True)
+        if position is None:
+            position = self.snapshot.position if self.snapshot.state == PlaybackState.ERROR else 0.0
+        self._begin_load(position, autoplay)
         self.snapshot = replace(
             self.snapshot, state=PlaybackState.LOADING, position=position, buffering=None, message=""
         )
         self._rescued_source = ""
-        self._load_autoplay = True
-        self._load_source(self.snapshot.source, position, True)
+        self._load_autoplay = autoplay
+        self._load_source(self.snapshot.source, position, autoplay)
         self._arm_load_watchdog(None, self.snapshot.source)
         self._emit()
 
@@ -508,6 +529,9 @@ class PlaybackService:
             except Exception:
                 pass
             self._flush_listening()
+            # Removal callers rely on Stop finishing writes for the outgoing
+            # show before its rows (including listening statistics) are deleted.
+            self._flush_persistence()
             # Release the file and its cache inside the engine; a later Play
             # reloads from the saved position.
             unload = getattr(self.engine, "unload", None)
@@ -520,6 +544,7 @@ class PlaybackService:
             self.snapshot = PlaybackSnapshot(speed=self.snapshot.speed, volume=self.snapshot.volume)
             if episode_id is not None:
                 self._set_current_playback(None, PlaybackState.IDLE.value)
+            self._flush_persistence()
         self._emit()
 
     def next(self):
@@ -535,9 +560,12 @@ class PlaybackService:
     def previous(self):
         self.seek(0.0)
 
-    def seek(self, seconds: float):
+    def seek(self, seconds: float, *, autoplay=None):
         with self._lock:
             self._guard()
+            if self.snapshot.source and self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR}:
+                self._replay_current(position=max(0.0, float(seconds)), autoplay=bool(autoplay))
+                return
             self._materialize()
             self._ignore_metric_once = True
             if self._resolving:
@@ -552,7 +580,7 @@ class PlaybackService:
             if cancelled is not None and cancelled():
                 return
             if self.snapshot.episode_id == episode_id and self.snapshot.source:
-                self.seek(seconds)
+                self.seek(seconds, autoplay=True)
             else:
                 self.load_episode(episode_id, start_position=seconds, autoplay=True, cancelled=cancelled)
 
@@ -595,6 +623,9 @@ class PlaybackService:
     def skip(self, seconds: float):
         with self._lock:
             self._guard()
+            if self.snapshot.source and self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR}:
+                self.seek(max(0.0, self.snapshot.position + float(seconds)))
+                return
             self._materialize()
             self._ignore_metric_once = True
             if self._resolving:
@@ -655,7 +686,8 @@ class PlaybackService:
             volume = max(0.0, min(100.0, float(volume)))
             self.engine.set_volume(volume)
             self.snapshot = replace(self.snapshot, volume=volume)
-            self.repository.set_setting("playback.volume", f"{volume:g}")
+            self._persistence.submit('volume', lambda value: self.repository.set_setting('playback.volume', value),
+                                     f'{volume:g}', delay=0.25)
             self._emit()
 
     def set_sleep_timer(self, seconds: int):
@@ -694,7 +726,8 @@ class PlaybackService:
                 return
             self._persist_position(force=True)
             if self._unsaved_silence > 0 and self.listening:
-                self.listening.add_silence_saved(self._unsaved_silence)
+                self._persistence.submit('silence', self.listening.add_silence_saved,
+                                         self._unsaved_silence, additive=True)
                 self._unsaved_silence = 0.0
             self._flush_listening()
             self.cancel_sleep_timer()
@@ -707,22 +740,22 @@ class PlaybackService:
             self.snapshot = replace(self.snapshot, state=PlaybackState.SHUTDOWN)
         # Terminate mpv *outside* the lock: its event thread may be waiting in
         # _engine_event for this lock, and terminate() joins that thread.
-        self.engine.shutdown()
+        try:
+            self.engine.shutdown()
+        finally:
+            if self._event_commands is not None:
+                self._event_commands.finish()
+            self._persistence.close()
 
     def _engine_event(self, event: EngineEvent):
-        # Database writes made from mpv's event thread are collected while the
-        # lock is held and run after it is released: a busy database (10 s
-        # busy timeout, Optimize/Repair) used to hold the lock and with it the
-        # UI's play/pause path.
-        deferred: list = []
         try:
-            self._engine_event_locked(event, deferred)
-        finally:
-            for write in deferred:
-                try:
-                    write()
-                except Exception:
-                    logger.exception("deferred playback write failed")
+            self._engine_event_locked(event, [])
+        except Exception:
+            logger.exception('Could not accept playback state changes')
+            with self._lock:
+                if not self._dead:
+                    self.snapshot = replace(self.snapshot, message='Playback changes could not be saved; check library storage.')
+                    self._emit()
 
     def _engine_event_locked(self, event: EngineEvent, deferred: list):
         with self._lock:
@@ -761,7 +794,8 @@ class PlaybackService:
                 self.snapshot = replace(self.snapshot, duration=duration)
                 episode_id = self.snapshot.episode_id
                 if episode_id is not None:
-                    deferred.append(lambda: self.repository.set_observed_duration(episode_id, duration))
+                    self._persistence.submit(('duration', episode_id),
+                        lambda value: self.repository.set_observed_duration(episode_id, value), duration)
             elif event.kind == "paused":
                 # mpv can deliver a late pause notification after stop() has
                 # detached the episode (notably while removing a podcast).
@@ -808,14 +842,40 @@ class PlaybackService:
                 pass
             elif event.kind == "eof":
                 self._engine_loaded = False
-                try:
-                    self._finish_and_advance()
-                except Exception:
-                    logger.exception("Could not save episode completion")
-                    self._cancel_load_watchdog()
-                    self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR,
-                                            message="Playback ended, but saving completion failed. Check library storage and retry.", buffering=None)
-                    self._emit()
+                generation = self._load_generation
+                intent = self.intent_revision
+                finished_snapshot = self.snapshot
+                self._flush_listening()
+                self.snapshot = replace(self.snapshot, state=PlaybackState.IDLE,
+                                        position=self.snapshot.duration or self.snapshot.position, buffering=None)
+                self._emit()
+                def finish():
+                    with self._lock:
+                        if self._dead:
+                            return
+                        try:
+                            self._flush_persistence()
+                            if generation == self._load_generation:
+                                self._finish_and_advance(advance=intent == self.intent_revision)
+                            elif finished_snapshot.episode_id != self.snapshot.episode_id:
+                                # A later user load wins, but an already ended
+                                # outgoing episode still needs its completion.
+                                self._complete_episode(finished_snapshot)
+                        except Exception:
+                            logger.exception("Could not save episode completion")
+                            if generation == self._load_generation:
+                                self._cancel_load_watchdog()
+                            self.snapshot = replace(self.snapshot,
+                                state=PlaybackState.ERROR if generation == self._load_generation else self.snapshot.state,
+                                message="Playback ended, but saving completion failed. Check library storage and retry.", buffering=None)
+                            self._emit()
+                if self._command_dispatcher is not None:
+                    self._command_dispatcher(finish)
+                else:
+                    from ..jobs.commands import CommandQueue
+                    if self._event_commands is None:
+                        self._event_commands = CommandQueue()
+                    self._event_commands.submit(finish, keep=True)
                 return
             elif event.kind == "external_ready":
                 self._cancel_load_watchdog()
@@ -975,32 +1035,20 @@ class PlaybackService:
                                             message=str(exc), buffering=None)
             self._emit()
 
-    def _finish_and_advance(self):
+    def _finish_and_advance(self, *, advance=True):
         episode_id = self.snapshot.episode_id
         if episode_id is None:
             self.snapshot = replace(self.snapshot, state=PlaybackState.IDLE, position=self.snapshot.duration)
             self._emit()
             return
-        self.repository.set_observed_duration(episode_id, self.snapshot.duration or self.snapshot.position)
-        if self.snapshot.duration:
-            self.repository.update_position(episode_id, self.snapshot.duration)
-        elif self.snapshot.position:
-            # Duration was never reported (a malformed or very short stream).
-            # Record how far playback actually reached so the row is not left
-            # marked played at position zero.
-            self.repository.update_position(episode_id, self.snapshot.position)
-        self.repository.mark_played(episode_id, True)
-        if self.listening and self.snapshot.show_id:
-            self._flush_listening()
-            self.listening.increment_completed(self.snapshot.show_id)
-        self.repository.dequeue(episode_id)
+        self._complete_episode(self.snapshot)
         queue = self.repository.list_queue()
         show = self.repository.get_show(self.snapshot.show_id) if self.snapshot.show_id else None
         if self.snapshot.sleep_at_end:
             # The sleep timer was 'end of this episode': finish it, do not advance.
             self.snapshot = replace(self.snapshot, sleep_at_end=False)
             queue = []
-        if queue and (show is None or show.auto_continue):
+        if advance and queue and (show is None or show.auto_continue):
             try:
                 self.load_episode(queue[0].id, autoplay=True)
                 return
@@ -1018,31 +1066,43 @@ class PlaybackService:
         self._set_current_playback(episode_id, PlaybackState.IDLE.value)
         self._emit()
 
+    def _complete_episode(self, snapshot):
+        episode_id = snapshot.episode_id
+        if episode_id is None:
+            return
+        end = snapshot.duration or snapshot.position
+        self.repository.set_observed_duration(episode_id, end)
+        if end:
+            self.repository.update_position(episode_id, end)
+        self.repository.mark_played(episode_id, True)
+        if self.listening and snapshot.show_id:
+            self.listening.increment_completed(snapshot.show_id)
+        self.repository.dequeue(episode_id)
+
     def _write_stamp(self):
         self._last_write_stamp = max(time.time(), self._last_write_stamp + 0.000001)
         return self._last_write_stamp
 
     def _set_current_playback(self, episode_id, state, deferred=None):
         stamp = self._write_stamp()
-        write = lambda: self.repository.set_current_playback(episode_id, state, stamp=stamp)
-        if deferred is not None:
-            deferred.append(write)
-        else:
-            write()
+        self._persistence.submit('state', lambda value: self._require_saved(self.repository.set_current_playback(
+            value[0], value[1], stamp=value[2])), (episode_id, state, stamp))
+
+    @staticmethod
+    def _require_saved(result):
+        if result is False:
+            raise PlaybackUnavailable('Library maintenance is busy; playback changes will be retried.')
 
     def _persist_position(self, force: bool = False, deferred: list | None = None):
-        """Save the position (every 5 s or on demand). With `deferred`, the
-        write is queued for after the lock is released instead of run inline."""
+        """Keep the latest stamped position per episode on the bounded writer."""
         if self.snapshot.episode_id is None:
             return
         if force or abs(self.snapshot.position - self._last_saved_position) >= 5.0:
             episode_id, position = self.snapshot.episode_id, self.snapshot.position
-            self._last_saved_position = position
             stamp = self._write_stamp()
-            if deferred is not None:
-                deferred.append(lambda: self.repository.update_position(episode_id, position, stamp=stamp))
-            else:
-                self.repository.update_position(episode_id, position, stamp=stamp)
+            self._persistence.submit(('position', episode_id), lambda value:
+                self._require_saved(self.repository.update_position(episode_id, value[0], stamp=value[1])), (position, stamp))
+            self._last_saved_position = position
 
     def _measure_silence(self, position: float, deferred: list | None = None):
         now = time.monotonic()
@@ -1067,13 +1127,9 @@ class PlaybackService:
             self._unsaved_silence += max(0.0, media_delta - expected)
             if self._unsaved_silence >= 1.0 and self.listening:
                 delta, listening = self._unsaved_silence, self.listening
+                self._persistence.submit('silence', listening.add_silence_saved, delta, additive=True)
                 self._unsaved_silence = 0.0
-                if deferred is not None:
-                    deferred.append(lambda: listening.add_silence_saved(delta))
-                    saved = self.snapshot.silence_saved + delta
-                else:
-                    listening.add_silence_saved(delta)
-                    saved = listening.silence_saved()
+                saved = self.snapshot.silence_saved + delta
                 self.snapshot = replace(self.snapshot, silence_saved=saved)
         self._last_metric_time = now
         self._last_metric_position = position
@@ -1081,11 +1137,9 @@ class PlaybackService:
     def _flush_listening(self, deferred: list | None = None):
         if self._unsaved_listening > 0 and self.listening and self.snapshot.show_id:
             show_id, seconds, listening = self.snapshot.show_id, self._unsaved_listening, self.listening
+            self._persistence.submit(('listening', show_id), lambda value: listening.add_listening(show_id, value),
+                                     seconds, additive=True)
             self._unsaved_listening = 0.0
-            if deferred is not None:
-                deferred.append(lambda: listening.add_listening(show_id, seconds))
-            else:
-                listening.add_listening(show_id, seconds)
 
     def _sleep_expired(self, token):
         with self._lock:

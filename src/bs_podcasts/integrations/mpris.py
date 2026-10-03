@@ -146,7 +146,7 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
     def Seek(self, offset):
         playback = self.host.playback
         snapshot = playback.snapshot
-        identity = (snapshot.episode_id, snapshot.source, playback._load_generation)
+        identity = (snapshot.episode_id, snapshot.source, snapshot.load_generation)
         self._command("seek_current", identity, offset / 1_000_000, True)
 
     @Slot(QDBusObjectPath, "qlonglong")
@@ -155,7 +155,7 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
         snapshot = playback.snapshot
         if track.path() != track_path(snapshot) or not snapshot.source:
             return
-        identity = (snapshot.episode_id, snapshot.source, playback._load_generation)
+        identity = (snapshot.episode_id, snapshot.source, snapshot.load_generation)
         self._command("seek_current", identity, position / 1_000_000)
 
 
