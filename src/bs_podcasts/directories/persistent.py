@@ -77,9 +77,10 @@ class PersistentDirectoryCache:
                 artwork_path = ""
                 if artwork_cache is not None and candidate.artwork_url:
                     try:
-                        cached_path = artwork_cache.cached_path(candidate.artwork_url)
-                        if cached_path is not None:
-                            artwork_path = str(cached_path)
+                        # Derive the cache location without stat/decode work.
+                        # Visible-image workers validate it and the artwork pump
+                        # repairs misses after the metadata has reached the UI.
+                        artwork_path = str(artwork_cache.path_for(candidate.artwork_url))
                     except (OSError, ValueError, TypeError):
                         pass
                 candidates.append((candidate, artwork_path))

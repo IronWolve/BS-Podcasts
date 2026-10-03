@@ -70,6 +70,7 @@ class PlaybackSnapshot:
     # directly on the UI thread; comparing this lets them drop it.
     revision: int = 0
     download_request: int = 0
+    load_generation: int = 0
 
 
 logger = logging.getLogger("bs_podcasts")
@@ -1102,7 +1103,9 @@ class PlaybackService:
 
     def _emit(self):
         self._revision += 1
-        self.snapshot = replace(self.snapshot, revision=self._revision)
+        self.snapshot = replace(
+            self.snapshot, revision=self._revision, load_generation=self._load_generation
+        )
         for listener in tuple(self._listeners):
             try:
                 listener(self.snapshot)

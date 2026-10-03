@@ -11,6 +11,7 @@ from hashlib import sha256
 import logging
 import re
 import shutil
+import stat
 import time
 
 from ..artwork.cache import _looks_textual
@@ -393,13 +394,24 @@ class DownloadService:
             if record.state != DownloadState.COMPLETE or not record.target_path:
                 continue
             target = Path(record.target_path)
-            if not target.parent.is_dir():
+            try:
+                parent_present = stat.S_ISDIR(target.parent.stat().st_mode)
+            except OSError:
+                continue
+            if not parent_present:
                 # The whole folder is absent (external or network drive not
                 # mounted right now): that is "not here", not "deleted".
                 # Demoting every download and forgetting the paths would
                 # make the files re-download when the drive comes back.
                 continue
-            if not target.is_file():
+            try:
+                missing = not stat.S_ISREG(target.stat().st_mode)
+            except FileNotFoundError:
+                missing = True
+            except OSError:
+                # Access failures are not evidence that a saved file vanished.
+                continue
+            if missing:
                 self.downloads.progress(record.episode_id, DownloadState.ERROR, 0, 0, self.MISSING_FILE_MESSAGE)
                 self.downloads.clear_downloaded_path(record.episode_id)
                 fixed += 1
@@ -752,15 +764,17 @@ class DownloadService:
                     state=state, episode_title=episode.title, show_title=episode.show_title)
         return list(existing.values())
 
-    def storage(self, records=None) -> tuple[int, int, int]:
-        self.directory.mkdir(parents=True, exist_ok=True)
-        usage = shutil.disk_usage(self.directory)
+    def storage(self, records=None) -> tuple[int, int | None, int | None]:
         records = list(records) if records is not None else self.records()
         used_by_app = sum(
             record.bytes_done
             for record in records
             if record.state == DownloadState.COMPLETE
         )
+        try:
+            usage = shutil.disk_usage(self.directory)
+        except OSError:
+            return used_by_app, None, None
         return used_by_app, usage.free, usage.total
 
     def cleanup_preview(self, episode_id: int):

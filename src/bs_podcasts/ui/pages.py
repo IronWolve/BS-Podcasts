@@ -908,6 +908,15 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self._apply_filters(restore_key=key, preserve_scroll=preserve_scroll,
                             selected_keys=selected)
 
+    def update_items(self, updates):
+        """Apply download deltas without resetting selection or untouched rows."""
+        self._all_items = [updates.get(item.episode_id, item) for item in self._all_items]
+        if self._filter in {"All", "New", "Favorites", "Unplayed", "Played"}:
+            self.model.update_items(updates)
+        else:
+            self._apply_filters(restore_key=self._current_key(), preserve_scroll=True,
+                                selected_keys=self._selected_keys())
+
     def set_filter(self, value: str):
         self._filter = value
         self.chips.select(value)

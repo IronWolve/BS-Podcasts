@@ -245,6 +245,13 @@ class EpisodeModel(QAbstractListModel):
         for row in rows:
             self.dataChanged.emit(self.index(row, 0), self.index(row, 0))
 
+    def update_items(self, updates):
+        for row, item in enumerate(self._items):
+            updated = updates.get(item.episode_id)
+            if updated is not None and updated != item:
+                self._items[row] = updated
+                self.dataChanged.emit(self.index(row, 0), self.index(row, 0))
+
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._items)
 

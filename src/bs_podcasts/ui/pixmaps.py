@@ -153,9 +153,10 @@ def _save_disk() -> None:
 
 
 def _fresh(path: str) -> bool:
-    cached_mtime = _dominant_mtime.get(path)
-    if cached_mtime is None:
-        return path in _dominant
+    with _disk_lock:
+        cached_mtime = _dominant_mtime.get(path)
+        if cached_mtime is None:
+            return path in _dominant
     try:
         return os.path.getmtime(path) == cached_mtime
     except OSError:
@@ -201,15 +202,16 @@ def dominant_color(path: str, fallback: str = "", compute: bool = True) -> str:
     """
     if not path:
         return fallback
-    _load_disk()
+    if compute:
+        _load_disk()
     with _disk_lock:
         cached = _dominant.get(path)
         if cached is not None:
             _dominant.move_to_end(path)
+    if not compute:
+        return cached or fallback
     if cached is not None and _fresh(path):
         return cached or fallback
-    if not compute:
-        return fallback
     result = _sample(path)
     try:
         stamp = os.path.getmtime(path)
@@ -248,8 +250,7 @@ def sample_accents(paths) -> int:
     changed = 0
     for path in pending:
         dominant_color(path, compute=True)
-        with _disk_lock:
-            changed += path in _dominant and _fresh(path)
+        changed += _fresh(path)
     if changed:
         _save_disk()
     return changed
@@ -538,6 +539,11 @@ def _source(path: str, width: int, height: int, sync: bool = False, notify=None)
         _artwork_cache.insert(key, pixmap)
         _retain_preview(path, image)
         return pixmap
+    if width == height and width != previews.SIDE and _preview_cache.find(path) is None:
+        ready = _source(path, previews.SIDE, previews.SIDE, notify=notify)
+        if ready is None:
+            return None
+        _preview_cache.insert(path, ready)
     _schedule_decode(key, path, width, height, notify)
     return None
 
