@@ -4520,6 +4520,10 @@ class MainWindow(QMainWindow):
         ]
         self._save_discover_search_history()
 
+    def _clear_discover_search_history(self):
+        self._discover_search_history = []
+        self._save_discover_search_history()
+
     def _show_discover_search_history(self):
         menu = self._create_discover_search_history_menu()
         field = self.discover_page.header.search
@@ -4561,6 +4565,11 @@ class MainWindow(QMainWindow):
             layout.addWidget(remove)
             action.setDefaultWidget(row)
             menu.addAction(action)
+        if self._discover_search_history:
+            menu.addSeparator()
+            clear = menu.addAction("Clear all")
+            clear.setToolTip("Clear all recent searches")
+            clear.triggered.connect(self._clear_discover_search_history)
         field = self.discover_page.header.search
         menu.setMinimumWidth(max(240, field.width()))
         return menu
