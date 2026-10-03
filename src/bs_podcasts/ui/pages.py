@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import time
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QModelIndex, QPoint, QTimer, Signal, Qt
+from PySide6.QtCore import QEvent, QItemSelectionModel, QModelIndex, QObject, QPoint, QTimer, Signal, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -103,6 +103,24 @@ class BasePage(QWidget):
             view.viewport().update()
 
 
+class _ScrollInputGuard(QObject):
+    """New user input takes precedence over a queued refresh scroll restore."""
+
+    def __init__(self, view, cancel_restore):
+        super().__init__(view)
+        self._cancel_restore = cancel_restore
+        for target in (view, view.viewport(), view.verticalScrollBar()):
+            target.installEventFilter(self)
+        view.verticalScrollBar().sliderPressed.connect(cancel_restore)
+        view.verticalScrollBar().actionTriggered.connect(lambda _action: cancel_restore())
+
+    def eventFilter(self, watched, event):
+        if event.type() in {QEvent.Type.Wheel, QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress,
+                            QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate}:
+            self._cancel_restore()
+        return False
+
+
 class _ListPageMixin:
     """Shared list behaviours: preserved selection/scroll, empty state, keyboard.
 
@@ -128,6 +146,7 @@ class _ListPageMixin:
         self.view.setResizeMode(QListView.ResizeMode.Adjust)
         self.view.setUniformItemSizes(True)
         self.view.setModel(self.model)
+        self._scroll_input_guard = _ScrollInputGuard(self.view, self._cancel_scroll_restore)
         self.view.selectionModel().currentChanged.connect(self._selected)
         self._last_activation = (None, 0.0)
         self.view.activated.connect(self._activated_once)
@@ -239,6 +258,9 @@ class _ListPageMixin:
             # key, selection snaps to row 0 after every filter/refresh.
             return ("preview", item.media_url or item.external_id or item.title)
         return ("show", 0 if item.feed_url else item.show_id, item.feed_url)
+
+    def _cancel_scroll_restore(self):
+        self._scroll_restore_revision = getattr(self, '_scroll_restore_revision', 0) + 1
 
     def _scroll_anchor(self):
         if not self.model.rowCount():
