@@ -33,20 +33,23 @@ class _ArtworkCache:
         self.max_entries = max_entries
         self.bytes = 0
         self._items = OrderedDict()
+        self._sources = {}
+        self._source_keys = {}
 
     def find(self, key):
         entry = self._items.get(key)
         if entry is None:
             return None
         self._items.move_to_end(key)
+        group = self._source_keys.get(key)
+        if group is not None:
+            self._sources[group].move_to_end(key)
         return QPixmap(entry[0])
 
     def nearest_source(self, path, width, height, revision):
-        prefix, suffix = f"src:{path}:", f":v{revision}"
         closest, distance = None, float("inf")
-        for key, (pixmap, _) in self._items.items():
-            if not key.startswith(prefix) or not key.endswith(suffix):
-                continue
+        for key in self._sources.get((path, revision), ()):
+            pixmap = self._items[key][0]
             if pixmap.width() * height != pixmap.height() * width:
                 continue  # Decoded sources are already cropped to their aspect ratio.
             delta = abs(pixmap.width() - width) + abs(pixmap.height() - height)
@@ -54,21 +57,45 @@ class _ArtworkCache:
                 closest, distance = key, delta
         return self.find(closest) if closest is not None else None
 
+    def _unindex(self, key):
+        group = self._source_keys.pop(key, None)
+        if group is not None:
+            variants = self._sources[group]
+            variants.pop(key)
+            if not variants:
+                del self._sources[group]
+
+    def _index(self, key):
+        if not key.startswith('src:'):
+            return
+        try:
+            path, _size, version = key[4:].rsplit(':', 2)
+            if not version.startswith('v'):
+                return
+            group = (path, int(version[1:]))
+        except (ValueError, TypeError):
+            return
+        self._source_keys[key] = group
+        self._sources.setdefault(group, OrderedDict())[key] = None
+
     def insert(self, key, pixmap):
         cost = pixmap.width() * pixmap.height() * max(1, (pixmap.depth() + 7) // 8)
         cost += len(key) * 2 + 160
         old = self._items.pop(key, None)
         if old is not None:
             self.bytes -= old[1]
+            self._unindex(key)
         if pixmap.isNull() or cost > self.limit_bytes or self.max_entries < 1:
             return
         while self._items and (
             self.bytes + cost > self.limit_bytes or len(self._items) >= self.max_entries
         ):
-            _, (_, retired_cost) = self._items.popitem(last=False)
+            retired_key, (_, retired_cost) = self._items.popitem(last=False)
             self.bytes -= retired_cost
+            self._unindex(retired_key)
         self._items[key] = (QPixmap(pixmap), cost)
         self.bytes += cost
+        self._index(key)
 
 
 _artwork_cache = _ArtworkCache()
@@ -435,10 +462,13 @@ class _DecodeBridge(QObject):
 
 def _decode_job(key: str, path: str, width: int, height: int, bridge: _DecodeBridge):
     try:
-        stamp = previews.signature(path)
-        image = (previews.load(path, _read_image) if width == height == previews.SIDE
-                 else _read_image(path, width, height))
-        previews.save(path, image, stamp)
+        if width == height == previews.SIDE:
+            # load already validates or creates the saved preview.
+            image = previews.load(path, _read_image)
+        else:
+            stamp = previews.signature(path)
+            image = _read_image(path, width, height)
+            previews.save(path, image, stamp)
     except Exception:
         image = QImage()
     try:

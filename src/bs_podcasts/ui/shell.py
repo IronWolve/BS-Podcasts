@@ -4872,12 +4872,7 @@ class MainWindow(QMainWindow):
             if changed:
                 invalidate_artwork(path)
         if generation == self._directory_generation and result.status == JobStatus.OK:
-            items = [
-                replace_item(item, artwork_path=path, accent=accent or item.accent)
-                if item.artwork_url == url else item for item in self.discover_page._all_items
-            ]
-            if items != self.discover_page._all_items:
-                self.discover_page.set_items(items, preserve_scroll=True)
+            items = self.discover_page.update_artwork(url, path, accent)
             # In-place model updates do not emit currentChanged. Refresh only
             # this podcast's cover, preserving preview details and pane mode.
             for item in items:
@@ -4894,9 +4889,13 @@ class MainWindow(QMainWindow):
                                 episode.media_url == playing.source for episode in self.episode_page._all_items):
                             self._playback_command('update_preview_artwork', playing.source, path)
             for key, (stamp, limit, candidates) in list(self._discover_cache.items()):
-                self._discover_cache[key] = (stamp, limit, [
-                    (candidate, path if candidate.artwork_url == url else old_path)
-                    for candidate, old_path in candidates])
+                changed_rows = [index for index, (candidate, old_path) in enumerate(candidates)
+                                if candidate.artwork_url == url and old_path != path]
+                if changed_rows:
+                    updated = list(candidates)
+                    for index in changed_rows:
+                        updated[index] = (candidates[index][0], path)
+                    self._discover_cache[key] = (stamp, limit, updated)
         if kind != "artwork-retry":
             self._pump_directory_artwork()
         if not self._directory_artwork_active and not self._directory_artwork_waiting and self.jobs is not None:

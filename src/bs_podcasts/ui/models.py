@@ -150,6 +150,19 @@ def _same_rows(old, new, key) -> bool:
     return len(old) == len(new) and all(key(a) == key(b) for a, b in zip(old, new))
 
 
+def _notify_changed_rows(model, rows):
+    """Emit one notification per contiguous run of changed rows."""
+    if not rows:
+        return
+    first = last = rows[0]
+    for row in rows[1:]:
+        if row != last + 1:
+            model.dataChanged.emit(model.index(first, 0), model.index(last, 0))
+            first = row
+        last = row
+    model.dataChanged.emit(model.index(first, 0), model.index(last, 0))
+
+
 class PodcastModel(QAbstractListModel):
     def __init__(self, items=(), parent=None):
         super().__init__(parent)
@@ -161,14 +174,28 @@ class PodcastModel(QAbstractListModel):
 
     def replace(self, items):
         items = list(items)
+        if self._items == items:
+            return
         if self._items and _same_rows(self._items, items, self._key):
             # Same rows, possibly new data: update in place so selection and scroll survive.
+            changed = [row for row, (old, new) in enumerate(zip(self._items, items)) if old != new]
             self._items = items
-            self.dataChanged.emit(self.index(0, 0), self.index(len(items) - 1, 0))
+            _notify_changed_rows(self, changed)
             return
         self.beginResetModel()
         self._items = items
         self.endResetModel()
+
+    def update_artwork(self, artwork_url, path, accent):
+        from dataclasses import replace
+        changed = []
+        for row, item in enumerate(self._items):
+            if item.artwork_url == artwork_url:
+                updated = replace(item, artwork_path=path, accent=accent or item.accent)
+                if updated != item:
+                    self._items[row] = updated
+                    changed.append(row)
+        _notify_changed_rows(self, changed)
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._items)
@@ -225,9 +252,12 @@ class EpisodeModel(QAbstractListModel):
 
     def replace(self, items):
         items = list(items)
+        if self._items == items:
+            return
         if self._items and _same_rows(self._items, items, self._key):
+            changed = [row for row, (old, new) in enumerate(zip(self._items, items)) if old != new]
             self._items = items
-            self.dataChanged.emit(self.index(0, 0), self.index(len(items) - 1, 0))
+            _notify_changed_rows(self, changed)
             return
         self.beginResetModel()
         self._items = items

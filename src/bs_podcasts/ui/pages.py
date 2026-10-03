@@ -551,6 +551,27 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         self._apply_filters(restore_key=key, preserve_scroll=preserve_scroll,
                             selected_keys=selected)
 
+    def update_artwork(self, artwork_url, path, accent):
+        """Artwork cannot change filtering/order; update matching cards only."""
+        from dataclasses import replace
+        matching = []
+        changed = False
+        for row, item in enumerate(self._all_items):
+            if item.artwork_url != artwork_url:
+                continue
+            updated = replace(item, artwork_path=path, accent=accent or item.accent)
+            matching.append(updated)
+            if updated != item:
+                self._all_items[row] = updated
+                changed = True
+        if changed:
+            self.model.update_artwork(artwork_url, path, accent)
+            # The shell updates the selected pane's cover directly. Retain the
+            # new item here without rebuilding its details or changing focus.
+            self._context_item = self.view.currentIndex().data(ItemRoles.ITEM)
+            self._artwork_prefetch_timer.start(0)
+        return matching
+
     def _connect_filter_box(self):
         _debounce_filter_box(self)
 
