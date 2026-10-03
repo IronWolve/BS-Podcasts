@@ -30,30 +30,19 @@ class JobRunner:
     def submit(self, callable_: Callable, *args, **kwargs):
         if self._slots is None:
             return self._executor.submit(self._invoke, callable_, args, kwargs)
-        result = Future()
         if not self._slots.acquire(blocking=False):
+            result = Future()
             result.set_result(JobResult(JobStatus.ERROR, message='Background requests are busy; retry shortly.'))
             return result
-        def run():
-            if result.set_running_or_notify_cancel():
-                return self._invoke(callable_, args, kwargs)
         try:
-            queued = self._executor.submit(run)
+            future = self._executor.submit(self._invoke, callable_, args, kwargs)
         except BaseException:
             self._slots.release()
             raise
-        def finished(completed):
-            self._slots.release()
-            if not result.cancelled():
-                if completed.cancelled():
-                    result.cancel()
-                else:
-                    try:
-                        result.set_result(completed.result())
-                    except Exception as exc:
-                        result.set_exception(exc)
-        queued.add_done_callback(finished)
-        return result
+        # Cancelling the executor's own future releases queued capacity now;
+        # running work cannot be cancelled and retains its slot until done.
+        future.add_done_callback(lambda _completed: self._slots.release())
+        return future
 
     @staticmethod
     def _invoke(callable_: Callable, args: tuple, kwargs: dict) -> JobResult:

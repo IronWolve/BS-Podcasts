@@ -207,6 +207,7 @@ class MainWindow(QMainWindow):
         self._discover_snapshot_cache = PersistentDirectoryCache()
         self._directory_artwork_waiting = []
         self._directory_artwork_active = set()
+        self._directory_artwork_completed = set()
         self._discover_value = ""
         self._discover_limit = 30
         self._discover_initial_limit = 30
@@ -4558,6 +4559,7 @@ class MainWindow(QMainWindow):
         self._directory_generation += 1
         self._directory_waiting = None
         self._directory_artwork_waiting.clear()
+        self._directory_artwork_completed.clear()
         # Results from a previous newest-date scan may still arrive, but they
         # no longer belong to the new directory view.
         self._stop_discover_newest_workers()
@@ -4775,7 +4777,7 @@ class MainWindow(QMainWindow):
                 candidates = self._directory_request(*request)
                 if not cancel.is_set():
                     self._discover_snapshot_cache.save(
-                        request[0], request[1], candidates, request[2]
+                        request[0], request[1], candidates, request[2], previous=snapshot
                     )
                 return candidates
         future = self.network_jobs.submit(work)
@@ -4824,10 +4826,16 @@ class MainWindow(QMainWindow):
                 for candidate in candidates]
 
     def _queue_directory_artwork(self):
-        self._directory_artwork_waiting = [
-            (item.feed_url, item.artwork_url) for item in self.discover_page._all_items
-            if item.artwork_url
-            and (self._directory_generation, item.artwork_url) not in self._directory_artwork_active]
+        seen = self._directory_artwork_completed | {
+            url for generation, url in self._directory_artwork_active
+            if generation == self._directory_generation
+        }
+        waiting = []
+        for item in self.discover_page._all_items:
+            if item.artwork_url and item.artwork_url not in seen:
+                seen.add(item.artwork_url)
+                waiting.append((item.feed_url, item.artwork_url))
+        self._directory_artwork_waiting = waiting
         self._pump_directory_artwork()
 
     def _pump_directory_artwork(self):
@@ -4838,7 +4846,7 @@ class MainWindow(QMainWindow):
             feed, url = self._directory_artwork_waiting.pop(0)
             generation, cancel = self._directory_generation, self._directory_cancel
             identity = (generation, url)
-            if identity in self._directory_artwork_active:
+            if identity in self._directory_artwork_active or url in self._directory_artwork_completed:
                 continue
             self._directory_artwork_active.add(identity)
             def work(url=url, cancel=cancel):
@@ -4864,6 +4872,11 @@ class MainWindow(QMainWindow):
         if kind != "artwork-retry":
             self._directory_artwork_active.discard(identity)
         generation, url = identity
+        if generation == self._directory_generation:
+            if result.status == JobStatus.OK:
+                self._directory_artwork_completed.add(url)
+            else:
+                self._directory_artwork_completed.discard(url)
         if result.status == JobStatus.OK:
             path, accent, changed = result.value
             # A repaired file can retain its path and model values. Wake failed

@@ -2,6 +2,7 @@
 
 from hashlib import sha256
 import json
+import math
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
@@ -64,7 +65,7 @@ class PersistentDirectoryCache:
                 return None
             saved_at = float(payload.get("saved_at", 0))
             age = time.time() - saved_at
-            if age < -300 or age > MAX_CACHE_AGE:
+            if not math.isfinite(saved_at) or age < -300 or age > MAX_CACHE_AGE:
                 return None
             records = payload.get("candidates")
             if not isinstance(records, list) or len(records) > MAX_CANDIDATES:
@@ -99,8 +100,13 @@ class PersistentDirectoryCache:
             if not isinstance(value, str) or len(value) > maximum:
                 return None
             values[name] = value
-        parsed = urlsplit(values["feed_url"])
-        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        try:
+            parsed = urlsplit(values["feed_url"])
+            valid = parsed.scheme.lower() in {"http", "https"} and bool(parsed.hostname)
+            parsed.port  # Invalid ports make this record unusable too.
+        except ValueError:
+            return None
+        if not valid:
             return None
         try:
             rank = int(record.get("rank", 0))
@@ -109,33 +115,36 @@ class PersistentDirectoryCache:
         values["rank"] = max(0, min(1_000_000, rank))
         return DirectoryCandidate(**values)
 
-    def save(self, operation, value, results, limit):
+    def save(self, operation, value, results, limit, *, previous=None):
         key = self._key(operation, value)
         if key is None or not results:
             return False
         records = []
         try:
+            limit = min(MAX_CANDIDATES, max(0, int(limit)))
+            previous = previous if previous is not None else self.load(operation, value)
+            if previous and previous['candidates'] and previous['limit'] > limit:
+                # A small first page is not a replacement for the saved full
+                # view; keep it until the larger refresh succeeds.
+                return False
             for item in results[:MAX_CANDIDATES]:
                 candidate = item[0] if isinstance(item, tuple) else item
                 if not isinstance(candidate, DirectoryCandidate):
                     continue
                 record = {name: getattr(candidate, name) for name in _TEXT_LIMITS}
-                if any(not isinstance(text, str) or len(text) > _TEXT_LIMITS[name]
-                       for name, text in record.items()):
+                record['rank'] = candidate.rank
+                validated = self._candidate(record)
+                if validated is None:
                     continue
-                parsed = urlsplit(record["feed_url"])
-                if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-                    continue
-                try:
-                    record["rank"] = int(candidate.rank)
-                except (TypeError, ValueError, OverflowError):
-                    record["rank"] = 0
+                record['rank'] = validated.rank
                 records.append(record)
+            if not records:
+                return False
             raw = json.dumps({
                 "version": 1,
                 "key": key,
                 "saved_at": time.time(),
-                "limit": min(MAX_CANDIDATES, max(0, int(limit))),
+                "limit": limit,
                 "candidates": records,
             }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             if len(raw) > MAX_ENTRY_BYTES:
