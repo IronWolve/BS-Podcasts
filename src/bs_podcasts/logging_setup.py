@@ -4,6 +4,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import logging
 import os
+import threading
 
 from .config import data_dir
 from .data.files import private_file
@@ -12,6 +13,8 @@ from .privacy import redact
 
 LOGGER_NAME = "bs_podcasts"
 _file_logging_enabled = True
+_crash_handler_lock = threading.Lock()
+_MAX_CRASH_TEXT_CHARS = 200_000
 
 
 class _PrivateFormatter(logging.Formatter):
@@ -32,6 +35,32 @@ def log_path() -> Path:
     if configured:
         return Path(configured).expanduser() / "bs-podcasts.log"
     return data_dir() / "logs" / "bs-podcasts.log"
+
+
+def write_crash_file(text: str) -> bool:
+    """Write a bounded, rotating crash log without pruning older user logs."""
+    if not _file_logging_enabled:
+        return False
+    if len(text) > _MAX_CRASH_TEXT_CHARS:
+        half = _MAX_CRASH_TEXT_CHARS // 2
+        text = text[:half] + "\n... crash report truncated ...\n" + text[-half:]
+    try:
+        with _crash_handler_lock:
+            path = log_path().parent / "bs-podcasts-crash.log"
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            handler = _PrivateLog(path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+            handler.setFormatter(_PrivateFormatter("%(asctime)s %(levelname)s: %(message)s"))
+            record = logging.LogRecord(
+                "bs_podcasts.crash", logging.ERROR, "", 0, text, (), None
+            )
+            try:
+                handler.handle(record)
+                handler.flush()
+            finally:
+                handler.close()
+        return True
+    except OSError:
+        return False
 
 
 def configure_logging(level: int = logging.INFO) -> logging.Logger:

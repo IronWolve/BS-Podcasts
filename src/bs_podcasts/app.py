@@ -32,20 +32,10 @@ from .ui.theme import app_font, apply_app_stylesheet, apply_theme, apply_typogra
 
 def _write_crash_file(text: str):
     """All diagnostic sinks share redaction and private project storage."""
-    import tempfile
-    from .logging_setup import file_logging_enabled, log_path
+    from .logging_setup import write_crash_file
     from .privacy import redact
 
-    if not file_logging_enabled():
-        return
-    try:
-        directory = log_path().parent
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor, _path = tempfile.mkstemp(prefix='bs-podcasts-crash-', suffix='.log', dir=directory)
-        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
-            handle.write(f"BS Podcasts {app_version()}\n{redact(text)}\n")
-    except OSError:
-        pass
+    write_crash_file(f"BS Podcasts {app_version()}\n{redact(text)}\n")
 
 
 def _install_excepthook():

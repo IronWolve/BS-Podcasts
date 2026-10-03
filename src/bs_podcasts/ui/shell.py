@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 from ..config import APP_NAME, RELEASES_URL, RELEASES_API_URL, app_version
 from ..logging_setup import log_path
 from ..domain import DownloadState, FeedData, Health
+from ..directories.persistent import PersistentDirectoryCache
 
 
 class PeekFeed(FeedData):
@@ -203,6 +204,7 @@ class MainWindow(QMainWindow):
         self._directory_future = None
         self._directory_waiting = None
         self._directory_cancel = threading.Event()
+        self._discover_snapshot_cache = PersistentDirectoryCache()
         self._directory_artwork_waiting = []
         self._directory_artwork_active = set()
         self._discover_value = ""
@@ -4475,8 +4477,12 @@ class MainWindow(QMainWindow):
                 ("directory", (self._directory_generation, (operation, value, cached_limit), False), JobResult(JobStatus.OK, value=cached_value))
             )
             return
-        self.discover_page.set_items([])
-        self.discover_page.set_loading(True)
+        if not force:
+            self.discover_page.set_items([])
+            self.discover_page.set_loading(True)
+        else:
+            # Keep the current view visible while an explicit refresh runs.
+            self.discover_page.set_loading(False)
         self.discover_page.set_load_more_state(False, loading=True)
         self._submit_directory(operation, value, self._discover_limit)
 
@@ -4607,7 +4613,20 @@ class MainWindow(QMainWindow):
             from ..netlimits import request_scope, Deadline
             with request_scope(cancel):
                 Deadline(60).remaining()
-                return self._directory_request(*request)
+                snapshot = self._discover_snapshot_cache.load(
+                    request[0], request[1], getattr(self.refresh, "artwork", None)
+                )
+                if snapshot is not None and snapshot["candidates"]:
+                    self._emit_completed((
+                        "directory-cache", (generation, request),
+                        JobResult(JobStatus.OK, value=snapshot),
+                    ))
+                candidates = self._directory_request(*request)
+                if not cancel.is_set():
+                    self._discover_snapshot_cache.save(
+                        request[0], request[1], candidates, request[2]
+                    )
+                return candidates
         future = self.network_jobs.submit(work)
         self._directory_future = future
         self._pending_jobs.add(future)
@@ -4814,6 +4833,7 @@ class MainWindow(QMainWindow):
         return {
             'play-prepared': self._on_play_prepared,
             'directory-artwork': self._on_directory_artwork,
+            'directory-cache': self._on_directory_cache,
             'library-changed': lambda *_: self._request_reload(),
             'opml-import': self._on_opml_import,
             "command": self._on_command,
@@ -5045,6 +5065,17 @@ class MainWindow(QMainWindow):
             self._pump_directory_request()
         else:
             self._directory_finished(identifier, result)
+        return
+
+    def _on_directory_cache(self, kind, identifier, result):
+        generation, request = identifier
+        if (
+            generation == self._directory_generation
+            and self._directory_future is not None
+            and self._discover_loading
+            and result.status == JobStatus.OK
+        ):
+            self._directory_finished(request, result, cache_restore=True)
         return
     def _on_read(self, kind, identifier, result):
         key, token, apply, *owners = identifier
@@ -5366,14 +5397,15 @@ class MainWindow(QMainWindow):
 
         self._run_read(work, apply, "episodes")
 
-    def _directory_finished(self, request, result):
+    def _directory_finished(self, request, result, *, cache_restore=False):
         current = (self._discover_operation, self._discover_value, self._discover_limit)
         if request != current:
             # A scroll-triggered continuation can finish after the user has
             # switched category/topic/chart. Never let that stale result stop
             # the new spinner or replace the new collection.
             return
-        self._discover_loading = False
+        if not cache_restore:
+            self._discover_loading = False
         self.discover_page.set_loading(False)
         operation, value, requested_limit = request
         if result.status != JobStatus.OK:
@@ -5385,7 +5417,13 @@ class MainWindow(QMainWindow):
             else:
                 self.discover_page.banner.show_state("error", result.message or "Directory search failed.", retry=True)
             return
-        candidates = result.value or []
+        if cache_restore:
+            self.discover_page.banner.show_state("loading", "Showing saved podcasts while checking for updates…")
+        if cache_restore:
+            snapshot = result.value
+            candidates = snapshot["candidates"][:requested_limit]
+        else:
+            candidates = result.value or []
         podcasts = []
         seen_feeds = set()
         subscribed = {show.feed_url: show for show in self.library.shows()} if self.library is not None else {}
@@ -5425,9 +5463,15 @@ class MainWindow(QMainWindow):
             )
         podcasts = [self._with_preview(item, self._previews.get(item.feed_url)) for item in podcasts]
         result_count = len(podcasts)
-        self._discover_exhausted = requested_limit >= self._discover_maximum() or result_count <= self._discover_result_count
-        self._discover_result_count = result_count
-        self.discover_page.set_load_more_state(not self._discover_exhausted, loading=False)
+        if cache_restore:
+            self._discover_exhausted = False
+            # Keep the first fresh result eligible for normal auto-pagination;
+            # the snapshot is only a temporary display while that request runs.
+            self.discover_page.set_load_more_state(False, loading=True)
+        else:
+            self._discover_exhausted = requested_limit >= self._discover_maximum() or result_count <= self._discover_result_count
+            self._discover_result_count = result_count
+            self.discover_page.set_load_more_state(not self._discover_exhausted, loading=False)
         self.discover_page.set_items(
             podcasts,
             preserve_scroll=requested_limit > getattr(self, "_discover_initial_limit", 30),
@@ -5435,11 +5479,15 @@ class MainWindow(QMainWindow):
         self._queue_directory_artwork()
         cache_key = (operation, repr(value))
         stored = self._discover_cache.get(cache_key)
-        if stored is None or requested_limit >= stored[1]:
+        if cache_restore:
+            self._discover_cache[cache_key] = (
+                snapshot["saved_at"], min(snapshot["limit"], requested_limit), candidates
+            )
+        elif stored is None or requested_limit >= stored[1]:
             self._discover_cache[cache_key] = (time.time(), requested_limit, candidates)
             while len(self._discover_cache) > 24:
                 self._discover_cache.pop(next(iter(self._discover_cache)))
-        if not self._discover_exhausted and requested_limit < self._discover_autoload_target(operation):
+        if not cache_restore and not self._discover_exhausted and requested_limit < self._discover_autoload_target(operation):
             # No view stops at its first page: pull up to the configured
             # depth in the background while the user reads the first rows.
             # Beyond the depth, scrolling or Load more continues to the
@@ -5463,9 +5511,11 @@ class MainWindow(QMainWindow):
         else:
             description = f"results for “{value}”"
         if podcasts:
-            self.discover_page.banner.clear()
+            if not cache_restore:
+                self.discover_page.banner.clear()
             ending = "End of available results" if self._discover_exhausted else "Scroll for more"
-            self.discover_page.set_discover_summary(f"{len(podcasts)} {description}  ·  {ending}")
+            suffix = "  ·  saved while updating" if cache_restore else ""
+            self.discover_page.set_discover_summary(f"{len(podcasts)} {description}  ·  {ending}{suffix}")
         else:
             self.discover_page.banner.clear()
             # Name what came up empty: a bare "no podcasts matched" left the
