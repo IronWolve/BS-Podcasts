@@ -764,10 +764,14 @@ class LibraryRepository:
                 )
 
     def update_position(self, episode_id: int, seconds: float, stamp: float | None = None, *, finish: bool = False):
-        # Let the playback writer retain this save for retry instead of
-        # waiting behind exclusive maintenance or claiming it was persisted.
-        # A finished episode must land its end position even when a newer
-        # stamp already won, so mark_played does not run ahead of that write.
+        """Save a playback position ordered by `stamp`.
+
+        True: written. False: maintenance holds the database, so the playback
+        writer keeps the save and retries. None: nothing was written because
+        the episode is gone or a newer write already stands. A finished
+        episode lands its end position even past a newer stamp, so
+        mark_played does not run ahead of that write.
+        """
         if self.database.maintenance_active:
             return False
         stamp = time.time() if stamp is None else stamp
@@ -776,27 +780,43 @@ class LibraryRepository:
             if self._write_position(connection, episode_id, seconds, stamp):
                 return True
             if not finish:
-                return True
+                return None
             row = connection.execute(
                 "SELECT position_updated_at FROM episodes WHERE id=?",
                 (episode_id,),
             ).fetchone()
             if row is None:
-                return True
+                return None
             stored = float(row["position_updated_at"] or 0.0)
             if stored < stamp:
-                return True
-            return self._write_position(connection, episode_id, seconds, stored + 0.000001)
+                return None
+            return self._write_position(connection, episode_id, seconds, stored + 0.000001) or None
 
     @staticmethod
     def _write_position(connection, episode_id: int, seconds: float, stamp: float) -> bool:
         # Starting an episode is what makes it "not new" everywhere in the UI.
+        # History shows real time; the ordering stamp can run ahead of it.
         cursor = connection.execute(
             "UPDATE episodes SET position_seconds=?, last_played=?, is_new=0, position_updated_at=? "
             "WHERE id=? AND position_updated_at<=?",
-            (seconds, stamp, stamp, episode_id, stamp),
+            (seconds, time.time(), stamp, episode_id, stamp),
         )
         return cursor.rowcount > 0
+
+    def write_stamp_floor(self, episode_id: int | None = None) -> float:
+        """Newest stored write-order stamp of the playback row and one episode.
+
+        Stamps are wall-clock values kept across runs. A run must issue
+        stamps above them, or after the clock moves back every save to those
+        rows matches nothing until real time catches up.
+        """
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT MAX(COALESCE((SELECT position_updated_at FROM episodes WHERE id=?), 0), "
+                "COALESCE((SELECT updated_at FROM playback_state WHERE singleton_id=1), 0))",
+                (episode_id,),
+            ).fetchone()
+        return float(row[0] or 0.0)
 
     def set_observed_duration(self, episode_id: int, seconds: float):
         import math
@@ -843,7 +863,7 @@ class LibraryRepository:
     def mark_show_played(self, show_id: int, played: bool = True) -> int:
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=?, is_new=0 WHERE show_id=? AND played!=?",
+                "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=?, is_new=0 WHERE show_id=? AND played!=?",
                 (int(played), show_id, int(played)),
             )
             return cursor.rowcount
@@ -891,11 +911,11 @@ class LibraryRepository:
                     continue
                 if played:
                     connection.execute(
-                        "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=1, is_new=0 WHERE id=?",
+                        "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=1, is_new=0 WHERE id=?",
                         (episode_id,))
                 else:
                     connection.execute(
-                        "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=0, is_new=0, position_seconds=CASE "
+                        "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=0, is_new=0, position_seconds=CASE "
                         "WHEN COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds)>0 AND position_seconds>=COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds)-2 "
                         "THEN 0 ELSE position_seconds END WHERE id=?", (episode_id,))
                 after = connection.execute(
@@ -911,7 +931,7 @@ class LibraryRepository:
             for before, after in changes:
                 identity, values = before[:3], before[3:]
                 restored += connection.execute(
-                    "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=?, is_new=?, position_seconds=?, last_played=? "
+                    "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=?, is_new=?, position_seconds=?, last_played=? "
                     "WHERE id=? AND show_id=? AND external_id=? "
                     "AND played IS ? AND is_new IS ? AND position_seconds IS ? AND last_played IS ?",
                     (*values, *identity, *after)).rowcount
@@ -926,12 +946,12 @@ class LibraryRepository:
         with self.database.connect() as connection:
             if played:
                 connection.executemany(
-                    "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=1, is_new=0, last_played=? WHERE id=?",
+                    "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=1, is_new=0, last_played=? WHERE id=?",
                     [(time.time(), i) for i in ids],
                 )
             else:
                 connection.executemany(
-                    """UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=0, is_new=0,
+                    """UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=0, is_new=0,
                        position_seconds = CASE
                            WHEN COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds) > 0
                                 AND position_seconds >= COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds) - 2
@@ -960,7 +980,7 @@ class LibraryRepository:
         with self.database.connect() as connection:
             if played:
                 connection.execute(
-                    "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=1, is_new=0, last_played=? WHERE id=?",
+                    "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=1, is_new=0, last_played=? WHERE id=?",
                     (time.time(), episode_id),
                 )
             else:
@@ -969,7 +989,7 @@ class LibraryRepository:
                 # position that immediately re-reaches EOF. Genuine partial
                 # progress is preserved — only an at-the-end position resets.
                 connection.execute(
-                    """UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=0, is_new=0,
+                    """UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=0, is_new=0,
                        position_seconds = CASE
                            WHEN COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds) > 0
                                 AND position_seconds >= COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds) - 2
@@ -979,16 +999,17 @@ class LibraryRepository:
                 )
 
     def set_current_playback(self, episode_id: int | None, state: str, stamp: float | None = None):
+        """Same results as update_position: True, False (retry) or None."""
         if self.database.maintenance_active:
             return False
         stamp = time.time() if stamp is None else stamp
         with self.database.connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """UPDATE playback_state SET episode_id=?, state=?, updated_at=?
                    WHERE singleton_id=1 AND updated_at<=?""",
                 (episode_id, state, stamp, stamp),
             )
-        return True
+        return True if cursor.rowcount > 0 else None
 
     def current_playback(self) -> tuple[int | None, str]:
         with self.database.connect() as connection:

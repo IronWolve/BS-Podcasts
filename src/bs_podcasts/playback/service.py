@@ -219,6 +219,7 @@ class PlaybackService:
             if episode is None:
                 raise PlaybackUnavailable("Episode was not found.")
             show = self.repository.get_show(episode.show_id)
+            self._raise_write_floor(episode.id)
             source = episode.media_url
             local = False
             if episode.downloaded_path:
@@ -1210,6 +1211,13 @@ class PlaybackService:
         self._last_write_stamp = max(time.time(), self._last_write_stamp + 0.000001)
         return self._last_write_stamp
 
+    def _raise_write_floor(self, episode_id=None):
+        # Stored stamps survive restarts. Before writing a row, issue stamps
+        # above its stored one, so a clock that has moved back since the
+        # previous run cannot make every later save match no row.
+        self._last_write_stamp = max(self._last_write_stamp,
+                                     self.repository.write_stamp_floor(episode_id))
+
     def _set_current_playback(self, episode_id, state, deferred=None):
         stamp = self._write_stamp()
         self._persistence.submit('state', lambda value: self._require_saved(self.repository.set_current_playback(
@@ -1219,6 +1227,8 @@ class PlaybackService:
     def _require_saved(result):
         if result is False:
             raise PlaybackUnavailable('Library maintenance is busy; playback changes will be retried.')
+        if result is None:
+            logger.info('Playback save skipped: the item is gone or a newer save already stands')
 
     def _persist_position(self, force: bool = False, deferred: list | None = None):
         """Keep the latest stamped position per episode on the bounded writer."""
@@ -1295,6 +1305,7 @@ class PlaybackService:
 
     def _restore_snapshot(self):
         episode_id, _state = self.repository.current_playback()
+        self._raise_write_floor(episode_id)
         if episode_id is None:
             return
         episode = self.repository.get_episode(episode_id)
