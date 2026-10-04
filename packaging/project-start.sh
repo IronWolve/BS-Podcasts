@@ -44,7 +44,18 @@ except BlockingIOError:
         if socket.waitForReadyRead(1500) and socket.readAll().data().startswith(b"ok"):
             raise SystemExit(0)
         socket.abort()
-    raise SystemExit("BS Podcasts is running or deployment is busy; use --status or retry.")
+    # Nothing answered. A copy that is quitting stops listening before its
+    # final saves, so wait briefly for it to release the lock.
+    import time
+    deadline = time.monotonic() + 5
+    while True:
+        time.sleep(0.2)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise SystemExit("BS Podcasts is still running or closing, or the deployment is busy; use --status or retry.")
 os.set_inheritable(fd, True)
 os.environ["BS_PODCASTS_RUNTIME_LOCK_FD"] = str(fd)
 os.execv(sys.executable, [sys.executable, "-B", runner, *sys.argv[3:]])

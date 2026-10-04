@@ -279,27 +279,38 @@ def main() -> int:
     # An instance that is already listening owns the lease and answers here.
     if _probe_running_instance(name):
         return 0
+    from .data.lease import LibraryLease
+
     lease = None
-    server = None
-    try:
-        from .data.lease import LibraryLease
-        lease = LibraryLease(root / "library.db")
-    except OSError as exc:
-        if "Close BS Podcasts before migrating it." not in str(exc):
+    lease_wait_until = _time.monotonic() + 5.0
+    while lease is None:
+        try:
+            lease = LibraryLease(root / "library.db")
+        except OSError as exc:
             from .ui.dialogs import StartupErrorDialog
 
-            dialog = StartupErrorDialog(
-                "Library could not be opened",
-                "Close the app and inspect "
-                f"the library at {root / 'library.db'}.\n\n{exc}",
-            )
-            dialog.exec()
-            return 1
-        # Ordinary second launch: the peer holds the library. Do not present
-        # that as a migration failure. Close anything we bound, then raise them.
-        _close_local_server(server)
-        _probe_running_instance(name, timeout_ms=1500)
-        return 0
+            if "Close BS Podcasts before migrating it." not in str(exc):
+                dialog = StartupErrorDialog(
+                    "Library could not be opened",
+                    "Close the app and inspect "
+                    f"the library at {root / 'library.db'}.\n\n{exc}",
+                )
+                dialog.exec()
+                return 1
+            # Ordinary second launch: the peer holds the library and raises
+            # its window. A peer that no longer answers is finishing its quit
+            # (it stops listening first), so give its lease a moment to free.
+            if _probe_running_instance(name, timeout_ms=1500):
+                return 0
+            if _time.monotonic() >= lease_wait_until:
+                dialog = StartupErrorDialog(
+                    "BS Podcasts is still closing",
+                    "The library is still in use, most likely by a window that is "
+                    "finishing its shutdown. Try again in a moment.",
+                )
+                dialog.exec()
+                return 1
+            _time.sleep(0.25)
     server = _claim_single_instance(app)
     if server is None:
         _close_local_server(server)
@@ -482,6 +493,9 @@ def main() -> int:
         except (RuntimeError, TypeError):
             pass
     server.newConnection.connect(raise_existing)
+    # Stop answering before the final saves: a relaunch during that drain
+    # then sees no instance and waits for the lease instead of exiting.
+    app.aboutToQuit.connect(lambda: _close_local_server(server))
     app.aboutToQuit.connect(lambda: state["window"]._save_layout() if state["window"] is not None else None)
     # window.mpris is None until desktop integration ran.
     app.aboutToQuit.connect(
