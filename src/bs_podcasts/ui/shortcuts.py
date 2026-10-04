@@ -18,6 +18,11 @@ class ShortcutManager:
 
     def add(self, name: str, default: str, callback):
         sequence = self.library.setting(f"shortcut.{name}", default) if self.library else default
+        stored = _sequence(sequence)
+        if stored.toString(_PORTABLE) != _sequence(default).toString(_PORTABLE) and self._unmodified(stored):
+            # Bound before rebind() refused bare keys: a stored "Return" or
+            # "Del" kept those keys broken app-wide. Defaults such as Esc stay.
+            sequence = default
         shortcut = QShortcut(_sequence(sequence), self.parent)
         shortcut.activated.connect(callback)
         self._shortcuts[name] = (shortcut, default)
