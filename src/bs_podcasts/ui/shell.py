@@ -2801,14 +2801,52 @@ class MainWindow(QMainWindow):
             f"Exported subscriptions to {target.name}. Keep it private: feed URLs may contain access tokens.", "success"), "export-opml", coalesce=False)
 
     AUDIO_SUFFIXES = (".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac", ".aac", ".m4b")
+    # Each file runs a metadata probe of up to a few seconds; a bigger drop
+    # imports the first ones and says how many were left out.
+    LOCAL_IMPORT_LIMIT = 50
 
     def _import_local_audio(self):
         if self.library is None:
             return
-        path, _filter = QFileDialog.getOpenFileName(self, "Import local audio", str(Path.home()), "Audio files (*.mp3 *.m4a *.ogg *.opus *.wav *.flac);;All files (*)")
-        if not path:
+        patterns = " ".join(f"*{suffix}" for suffix in self.AUDIO_SUFFIXES)
+        paths, _filter = QFileDialog.getOpenFileNames(self, "Import local audio", str(Path.home()), f"Audio files ({patterns});;All files (*)")
+        self._import_local_audio_paths(paths)
+
+    def _import_local_audio_paths(self, paths):
+        paths = list(dict.fromkeys(paths))
+        if not paths or self.library is None:
             return
-        self._import_local_audio_path(path)
+        if len(paths) == 1:
+            self._import_local_audio_path(paths[0])
+            return
+        library, chosen, skipped = self.library, paths[:self.LOCAL_IMPORT_LIMIT], max(0, len(paths) - self.LOCAL_IMPORT_LIMIT)
+
+        def work():
+            imported, failed = 0, []
+            for path in chosen:
+                if self._closed:
+                    break
+                try:
+                    library.import_local_audio(path)
+                    imported += 1
+                except Exception as exc:
+                    failed.append(f"{Path(path).name}: {exc}")
+            return imported, failed
+
+        def apply(result):
+            imported, failed = result
+            self.navigation.select(PAGE_PODCASTS)
+            self._request_reload()
+            message = f"Imported {imported} of {len(chosen)} local audio files"
+            if skipped:
+                message += f" · {skipped} more were not imported (at most {self.LOCAL_IMPORT_LIMIT} at a time)"
+            if failed:
+                self.podcast_page.banner.show_state("error", "Some files could not be imported:\n" + "\n".join(failed[:5])
+                                                    + ("\n…" if len(failed) > 5 else ""))
+            self._notify(message, "info" if failed or skipped else "success")
+
+        self._notify(f"Reading {len(chosen)} local audio files…", "info")
+        self._run_read(work, apply, "local-import-batch", coalesce=False)
 
     def _import_local_audio_path(self, path: str):
         if self.library is None or self._closed:
@@ -2851,16 +2889,19 @@ class MainWindow(QMainWindow):
     # before, and only its own episode rows.
     def _dropped_payload(self, mime):
         if mime.hasUrls():
+            audio = []
             for url in mime.urls():
                 if url.isLocalFile():
                     path = url.toLocalFile()
                     suffix = Path(path).suffix.lower()
-                    if suffix in (".opml", ".xml"):
+                    if suffix in (".opml", ".xml") and not audio:
                         return ("opml", path)
                     if suffix in self.AUDIO_SUFFIXES:
-                        return ("audio", path)
-                elif url.scheme() in ("http", "https"):
+                        audio.append(path)  # every dropped audio file, not just the first
+                elif url.scheme() in ("http", "https") and not audio:
                     return ("feed", url.toString())
+            if audio:
+                return ("audio", audio)
         text = mime.text().strip() if mime.hasText() else ""
         if text.startswith(("http://", "https://")) and " " not in text:
             return ("feed", text)
@@ -2888,7 +2929,7 @@ class MainWindow(QMainWindow):
         if kind == "opml":
             self._import_opml_path(value)
         elif kind == "audio":
-            self._import_local_audio_path(value)
+            self._import_local_audio_paths(value)
         else:
             self._add_podcast_url(value)
 
