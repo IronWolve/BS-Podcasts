@@ -1658,7 +1658,11 @@ class HoverBubble(QFrame):
         self.label.setWordWrap("\n" in text or len(text) > 60)
         self.setMaximumWidth(scaled_px(360))
         self.adjustSize()
-        screen = self.screen() or QApplication.primaryScreen()
+        # The screen under the anchor, not the one this window last lived on:
+        # a slider's bubble kept its first screen after the window moved.
+        screen = QApplication.screenAt(QPoint(global_center_x, global_top)) or self.screen() or QApplication.primaryScreen()
+        if screen is not None and screen is not self.screen():
+            self.setScreen(screen)
         left = global_center_x - self.width() // 2
         if screen is not None:
             area = screen.availableGeometry()
