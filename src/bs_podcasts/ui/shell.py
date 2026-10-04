@@ -2763,8 +2763,39 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(icons.icon("discover", COLORS["text"], 16), "Browse Discover", lambda: self.navigation.select(PAGE_DISCOVER))
         menu.addAction(icons.icon("refresh", COLORS["text"], 16), "Refresh all podcasts", self._refresh_all)
+        self._add_resume_suspended_action(menu)
         menu.addAction(icons.icon("external", COLORS["text"], 16), "Export OPML…", self._export_opml)
         menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _add_resume_suspended_action(self, menu):
+        suspended = sum(1 for show in self._stored_shows if show.suspended)
+        if suspended:
+            menu.addAction(icons.icon("refresh", COLORS["text"], 16),
+                           f"Resume {suspended} suspended podcast{'s' if suspended != 1 else ''}", self._resume_suspended)
+
+    def _resume_suspended(self):
+        """Resume every suspended podcast in one step and refresh them.
+        Always an explicit choice: Refresh all leaves suspended podcasts
+        alone, so a feed that keeps failing is not retried silently."""
+        if self.library is None:
+            return
+        ids = [show.id for show in self._library_shows() if show.suspended]
+        if not ids:
+            self._notify("No podcasts are suspended")
+            return
+        library = self.library
+
+        def work():
+            for show_id in ids:
+                library.rearm(show_id)
+            return len(ids)
+
+        def apply(count):
+            self._request_reload()
+            self._notify(f"Resumed {count} podcast{'s' if count != 1 else ''} — refreshing them now", "success")
+            self._refresh_shows([SimpleNamespace(id=show_id) for show_id in ids])
+
+        self._run_command(work, apply)
 
     def _import_opml(self):
         if self.library is None:
@@ -3065,6 +3096,7 @@ class MainWindow(QMainWindow):
             menu.addAction(icons.icon("add", COLORS["text"], 16), "Add podcast…", self._add_podcast)
             menu.addAction("Import OPML…", self._import_opml)
             menu.addAction("Export OPML…", self._export_opml)
+            self._add_resume_suspended_action(menu)
         elif index == PAGE_QUEUE:
             menu.addSeparator()
             clear = menu.addAction("Clear Up Next…", self._clear_queue)
