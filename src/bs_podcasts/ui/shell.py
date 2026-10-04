@@ -1316,7 +1316,7 @@ class MainWindow(QMainWindow):
                 if library.remove_subscription(show_id, True, list(paths.get(show_id, ())))
             )
 
-        self._run_task("remove-shows", work, pool=self.commands)
+        self._run_task("remove-shows", work, pool=self.commands, keep=True)
 
     def _reset_library(self):
         if self.library is None:
@@ -1381,7 +1381,7 @@ class MainWindow(QMainWindow):
             if playback is not None:
                 playback.stop()
             return work()
-        self._run_task("reset-library", stopped_work, pool=self.commands)
+        self._run_task("reset-library", stopped_work, pool=self.commands, keep=True)
 
     def _show_about(self):
         library, downloads, playback = self.library, self.downloads, self.playback
@@ -1516,7 +1516,7 @@ class MainWindow(QMainWindow):
             )
             return show.title, reclaimed, len(result.get("failed_files", ()))
 
-        self._run_task("unsubscribe", work, show_id, pool=self.commands)
+        self._run_task("unsubscribe", work, show_id, pool=self.commands, keep=True)
 
     def _focus_regions(self):
         """Focus targets for F6 cycling: rail, page, pane, player. Tab alone
@@ -3811,7 +3811,9 @@ class MainWindow(QMainWindow):
             def apply(_count):
                 self._request_reload()
                 self._notify("History cleared", "success")
-            self._run_read(self.library.clear_history, apply, 'history-clear', coalesce=False)
+            # On the command queue: ordered with other edits and finished
+            # before Quit, where the read pool would drop it.
+            self._run_read(self.library.clear_history, apply, 'history-clear', pool=self.commands, coalesce=False)
 
     def _clear_queue(self):
         if self.library is None:
