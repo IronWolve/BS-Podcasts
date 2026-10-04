@@ -1,5 +1,6 @@
 """Exact source inventory, privacy checks and manifest-only build staging."""
 import argparse
+import ast
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -7,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from functools import lru_cache
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +58,25 @@ def inventory(root=ROOT):
         if private_path(name, tokens):
             raise ValueError(f'Private/agent/runtime path is not an approved deployment output: {name}')
     return files, runtime
+
+
+def package_version(path):
+    """The package's literal __version__, read as text so the checkout is never imported."""
+    tree = ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
+    values = [node.value.value for node in tree.body
+              if isinstance(node, ast.Assign) and len(node.targets) == 1
+              and isinstance(node.targets[0], ast.Name) and node.targets[0].id == '__version__'
+              and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)]
+    return values[0] if len(values) == 1 else None
+
+
+def checked_version(snapshot):
+    """pyproject's version, only when the package constant agrees with it."""
+    version = tomllib.loads((snapshot/'pyproject.toml').read_text(encoding='utf-8'))['project']['version']
+    module = package_version(snapshot/'src/bs_podcasts/__init__.py')
+    if not isinstance(version, str) or not version or module != version:
+        raise RuntimeError(f'Version mismatch: pyproject.toml {version!r}, bs_podcasts.__version__ {module!r}.')
+    return version
 
 
 def file_digest(path):
@@ -271,6 +292,14 @@ def check(root=ROOT, require_deny=True, ran=None):
             failures.append(name)
     if failures:
         raise ValueError('Private references, credential patterns, or generator metadata in: ' + ', '.join(failures))
+    if {'pyproject.toml', 'src/bs_podcasts/__init__.py'} <= set(files):
+        try:
+            version = checked_version(root)
+        except (RuntimeError, KeyError, tomllib.TOMLDecodeError) as exc:
+            raise ValueError(f'Version check failed: {exc}') from exc
+        ran.append(f'version agreement: {version} in pyproject.toml and the package')
+    else:
+        ran.append('version agreement: SKIPPED, no package version files in this manifest')
     tracked = tracking_difference(root, files)
     if tracked is not None:
         reject_commit_trailers(root)

@@ -8,9 +8,9 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
-import tomllib
 import fcntl
-from source_manifest import ROOT, check, inventory, source_digest, file_digest, stage
+# The version gate lives with the source check; deploy keeps its names for callers.
+from source_manifest import ROOT, check, checked_version, inventory, package_version, source_digest, file_digest, stage  # noqa: F401
 from runtime_state import runtime_lock, retire_stale
 from report import Reporter, size_text
 
@@ -34,25 +34,6 @@ def prune_previous_deployments(root, keep=3, retain=None):
         shutil.rmtree(stale)
         removed.append(stale.name)
     return removed
-
-
-def package_version(path):
-    """The package's literal __version__, read as text so the checkout is never imported."""
-    tree = ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
-    values = [node.value.value for node in tree.body
-              if isinstance(node, ast.Assign) and len(node.targets) == 1
-              and isinstance(node.targets[0], ast.Name) and node.targets[0].id == '__version__'
-              and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)]
-    return values[0] if len(values) == 1 else None
-
-
-def checked_version(snapshot):
-    """pyproject's version, only when the package constant agrees with it."""
-    version = tomllib.loads((snapshot/'pyproject.toml').read_text(encoding='utf-8'))['project']['version']
-    module = package_version(snapshot/'src/bs_podcasts/__init__.py')
-    if not isinstance(version, str) or not version or module != version:
-        raise RuntimeError(f'Version mismatch: pyproject.toml {version!r}, bs_podcasts.__version__ {module!r}.')
-    return version
 
 
 def install_entrypoints(workspace, destination, previous, report=None):
