@@ -50,9 +50,17 @@ def running(value):
     return process_state(PROJECT, value, DEPLOYMENT/'runner.py') == 'running'
 
 
+def remember_caller():
+    """Record the caller's temporary and cache folders before they are replaced,
+    so programs the app opens can get their own back (external_environment)."""
+    if 'BS_PODCASTS_CALLER_ENV' not in os.environ:
+        os.environ['BS_PODCASTS_CALLER_ENV']=json.dumps({key:os.environ.get(key) for key in ('TMPDIR','XDG_CACHE_HOME')})
+
+
 def environment():
     for directory in ('tmp','logs','.cache'):
         (PROJECT/directory).mkdir(exist_ok=True)
+    remember_caller()
     os.environ['TMPDIR']=str(PROJECT/'tmp')
     os.environ['XDG_CACHE_HOME']=str(PROJECT/'.cache')
     os.environ['BS_PODCASTS_CACHE_DIR']=str(PROJECT/'.cache/app')

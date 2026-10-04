@@ -1,6 +1,7 @@
 """Application identity and paths without filesystem side effects."""
 
 from pathlib import Path
+import json
 import os
 import sys
 
@@ -90,3 +91,31 @@ def default_downloads_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Music" / "Podcasts" / APP_NAME
     return _xdg_user_dir("MUSIC", "Music") / "Podcasts" / APP_NAME
+
+
+# Set by the Linux launcher for the app alone; never meant for other programs.
+_LAUNCHER_ONLY = ("BS_PODCASTS_CALLER_ENV", "BS_PODCASTS_RUNTIME_LOCK_FD", "BS_PODCASTS_DATA_DIR",
+                  "BS_PODCASTS_CACHE_DIR", "BS_PODCASTS_LOG_DIR")
+
+
+def external_environment() -> dict:
+    """Environment for programs the app opens, such as an external player.
+
+    The Linux launcher points the temporary and cache folders into the
+    project; another program gets the caller's own folders back instead of
+    writing into the project."""
+    environment = dict(os.environ)
+    try:
+        caller = json.loads(environment.get("BS_PODCASTS_CALLER_ENV", ""))
+    except ValueError:
+        caller = None
+    if isinstance(caller, dict):
+        for key in ("TMPDIR", "XDG_CACHE_HOME"):
+            value = caller.get(key)
+            if isinstance(value, str):
+                environment[key] = value
+            else:
+                environment.pop(key, None)
+    for key in _LAUNCHER_ONLY:
+        environment.pop(key, None)
+    return environment

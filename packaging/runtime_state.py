@@ -96,6 +96,11 @@ def runtime_lock(project, inherit=False):
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError('BS Podcasts is running or its deployment is busy. Retry after it stops.') from exc
+        if not own:
+            # Keep the lease in this process: a browser or file manager opened
+            # from the app must not inherit it and block start or build later.
+            os.set_inheritable(descriptor, False)
+            os.environ.pop('BS_PODCASTS_RUNTIME_LOCK_FD', None)
         yield
     finally:
         if own and descriptor is not None:

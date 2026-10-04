@@ -29,6 +29,7 @@ try:
 except BlockingIOError:
     # The running copy listens in the runtime temporary folder, not in the
     # one this shell passed, so resolve the instance name there.
+    caller_tmp = os.environ.get("TMPDIR")
     os.environ["TMPDIR"] = project+"/tmp"
     from PySide6.QtCore import QCoreApplication
     from PySide6.QtNetwork import QLocalSocket
@@ -44,6 +45,10 @@ except BlockingIOError:
         if socket.waitForReadyRead(1500) and socket.readAll().data().startswith(b"ok"):
             raise SystemExit(0)
         socket.abort()
+    if caller_tmp is None:
+        del os.environ["TMPDIR"]
+    else:
+        os.environ["TMPDIR"] = caller_tmp
     # Nothing answered. A copy that is quitting stops listening before its
     # final saves, so wait briefly for it to release the lock.
     import time
