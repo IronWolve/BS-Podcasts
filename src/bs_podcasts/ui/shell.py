@@ -3026,10 +3026,37 @@ class MainWindow(QMainWindow):
                     self._mark_with_undo(ids, True)
             self._run_read(self.library.repository.new_episode_ids, apply, "mark-new-preview")
         else:
-            def apply(count):
+            count = self._new_episode_total
+            if not self._confirm_bulk(count, "Clear", title=f"Clear new badges for {count} episodes?",
+                                      detail="Episodes stay unplayed. Undo is offered afterwards."):
+                return
+            library, repository = self.library, self.library.repository
+
+            def work():
+                # Snapshot in the same command, so Undo restores exactly the
+                # badges this cleared (in chunks: an import can add thousands).
+                ids = repository.new_episode_ids()
+                rows = {}
+                for start in range(0, len(ids), 500):
+                    rows.update(repository.episodes_by_ids(ids[start:start + 500]))
+                library.clear_all_new(False)
+                # The played-state snapshot contract: Undo re-badges only rows
+                # nothing has played or changed since.
+                return [((e.id, e.show_id, e.external_id, e.played, True, e.position_seconds, e.last_played),
+                         (e.played, False, e.position_seconds, e.last_played)) for e in rows.values() if e.is_new]
+
+            def apply(changes):
                 self._request_reload()
-                self._notify(f"Cleared new badges for {count} episodes", "success")
-            self._run_command(lambda: self.library.clear_all_new(False), apply)
+                if not changes:
+                    return
+                cleared = len(changes)
+
+                def undo():
+                    self._run_command(lambda: repository.undo_played(changes), lambda _count: self._request_reload())
+
+                self._notify(f"Cleared new badges for {cleared} episode{'s' if cleared != 1 else ''}", "success", "Undo", undo)
+
+            self._run_command(work, apply)
 
     def _show_in_progress(self):
         self._show_all_episodes("In progress")
