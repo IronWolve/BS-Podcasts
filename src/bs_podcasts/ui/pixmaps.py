@@ -18,6 +18,7 @@ from . import icons
 from .theme import COLORS, app_font
 from ..data.files import atomic_write
 from ..artwork import previews
+from ..artwork.cache import ARTWORK_FORMATS, MAX_ARTWORK_PIXELS, MAX_ARTWORK_SIDE
 
 
 class _ArtworkCache:
@@ -265,11 +266,25 @@ def _fresh(path: str) -> bool:
         return False
 
 
-def _sample(path: str) -> str:
-    """Decode a thumbnail, not the full file. `.img` caches have no real suffix."""
+def _artwork_reader(path: str) -> QImageReader:
+    """A reader held to the artwork cache's rules: its format allow-list and
+    declared-size limits, checked from the header before any pixel decodes.
+    A refused file gets an empty reader, whose read() is a null image, so the
+    cover falls back to initials. `.img` caches have no real suffix."""
     reader = QImageReader(path)
     reader.setDecideFormatFromContent(True)
     reader.setAutoTransform(True)
+    size = reader.size()
+    if (bytes(reader.format()).decode("ascii", "replace").lower() not in ARTWORK_FORMATS
+            or not (0 < size.width() <= MAX_ARTWORK_SIDE and 0 < size.height() <= MAX_ARTWORK_SIDE)
+            or size.width() * size.height() > MAX_ARTWORK_PIXELS):
+        return QImageReader()
+    return reader
+
+
+def _sample(path: str) -> str:
+    """Decode a thumbnail, not the full file."""
+    reader = _artwork_reader(path)
     reader.setScaledSize(QSize(_SAMPLE_SIZE, _SAMPLE_SIZE))
     image = reader.read()
     if image.isNull():
@@ -394,9 +409,7 @@ def initials(text: str) -> str:
 
 
 def _target_reader(path: str, width: int, height: int) -> QImageReader:
-    reader = QImageReader(path)
-    reader.setDecideFormatFromContent(True)
-    reader.setAutoTransform(True)
+    reader = _artwork_reader(path)
     source_size = reader.size()
     if source_size.isValid() and source_size.width() > 0 and source_size.height() > 0:
         factor = min(max(width / source_size.width(), height / source_size.height()),
