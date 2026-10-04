@@ -1243,6 +1243,16 @@ class MainWindow(QMainWindow):
         self._refresh_quiet = quiet
         self._pump_refresh_queue()
 
+    def _wind_down_quiet_batch(self):
+        """Pausing background work starts no more feeds of a background
+        batch; it ends when the feeds already fetching come back. A batch
+        the user started (Refresh all) carries on."""
+        if not self._refresh_batch[0] or not self._refresh_quiet or not self._refresh_in_flight:
+            return
+        total, done, new_episodes = self._refresh_batch
+        self._refresh_waiting.clear()
+        self._refresh_batch = [done + len(self._refresh_in_flight), done, new_episodes]
+
     def _pump_refresh_queue(self):
         """Keep at most two batch refreshes in flight — the refresh pool's size."""
         while self._refresh_waiting and len(self._refresh_in_flight) < 2:
@@ -1854,6 +1864,10 @@ class MainWindow(QMainWindow):
                 self.settings_page.set_background_paused(value == "1")
                 self.navigation.set_background_paused(value == "1")
                 self._notify("Background work paused" if value == "1" else "Background work resumed", "info")
+                if value == "1":
+                    self._wind_down_quiet_batch()
+                elif _bounded_int(self.library.setting("refresh.interval_minutes", "60"), 60, 0, 10**6) > 0:
+                    self._scheduled_refresh()  # catch up on what the pause skipped
             elif key == "ui.density":
                 self._apply_density(value == "compact")
             elif key == "ui.episode_lines":
