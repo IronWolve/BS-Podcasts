@@ -11,6 +11,7 @@ import sys
 
 from .data import Database
 from .data.files import atomic_write
+from .privacy import redact
 
 # Checks recorded inside the dependency try. A later exception must not hide one of these behind the generic flag.
 _DEPENDENCY_CHECKS = (
@@ -28,7 +29,7 @@ _DEPENDENCY_CHECKS = (
 
 
 def _exception_text(exc):
-    return f'{type(exc).__name__}: {exc}'
+    return redact(f'{type(exc).__name__}: {exc}')
 
 
 def _note_dependency_failure(checks, errors, exc):
@@ -161,8 +162,9 @@ def main() -> int:
             show = LocalAudioImporter(repository).import_file(audio)
             episode = repository.list_episodes(show.id)[0]
             checks['isolated local audio metadata'] = show.source == 'local' and episode.duration_seconds == 1
-        except Exception:
+        except Exception as exc:
             checks['isolated local audio metadata'] = False
+            errors['isolated local audio metadata'] = _exception_text(exc)
         finally:
             if previous_cache is None:
                 os.environ.pop('BS_PODCASTS_CACHE_DIR', None)
