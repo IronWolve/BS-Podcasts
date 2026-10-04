@@ -25,26 +25,23 @@ class FeedResponse:
     canonical_url: str = ""
 
 
-def _declared_encoding(encoding: str | None) -> str:
-    import codecs
-    name = (encoding or "").strip()
-    if not name:
-        return "utf-8"
-    try:
-        codecs.lookup(name)
-    except LookupError as exc:
-        raise FeedFetchError("Feed declares an unknown character encoding.") from exc
-    return name
+def _markup_text(body: bytes, encoding: str | None) -> str:
+    """Body text for the XML sniff and HTML discovery. Never raises.
 
-
-def _markup_text(body: bytes, encoding: str) -> str:
+    The header charset is only a hint here: the feed body reaches the XML
+    parser as raw bytes. An unknown or non-text label (`utf8mb4`, `none`,
+    `base64`) falls back to UTF-8 instead of failing the fetch.
+    """
     if body.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
         return body.decode("utf-32", "replace")
     if body.startswith((b"\xff\xfe", b"\xfe\xff")):
         return body.decode("utf-16", "replace")
     if body.startswith(b"\xef\xbb\xbf"):
         return body.decode("utf-8-sig", "replace")
-    return body.decode(encoding, "replace")
+    try:
+        return body.decode((encoding or "").strip() or "utf-8", "replace")
+    except (LookupError, ValueError):
+        return body.decode("utf-8", "replace")
 
 
 def _opening_markup(text: str) -> str:
@@ -207,7 +204,6 @@ class FeedFetcher:
                 allow_redirects=True,
                 stream=True,
             )
-            encoding = _declared_encoding(getattr(response, "encoding", None))
             if response.status_code == 304:
                 return FeedResponse(
                     final_url=response.url,
@@ -226,7 +222,7 @@ class FeedFetcher:
             discovered = ""
             # Many hosts serve RSS with a text/html Content-Type; a body that
             # is actually XML must parse as a feed, not fail HTML discovery.
-            text = _markup_text(bytes(body), encoding)
+            text = _markup_text(bytes(body), getattr(response, "encoding", None))
             lead = _opening_markup(text)
             looks_like_xml = lead.startswith(("<rss", "<feed", "<rdf", "<channel"))
             if allow_discovery and not looks_like_xml and (
