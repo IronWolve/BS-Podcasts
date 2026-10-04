@@ -15,18 +15,41 @@ def process_stamp(pid):
 
 
 def read_record(project, path=None):
+    """A well-formed record, including one written before the folder was renamed."""
     path = path or project/'tmp/bs-podcasts.pid.json'
     try:
         if path.is_symlink():
             return None
         value = json.loads(path.read_text())
-        if (value.get('kind') == 'bs-podcasts-runtime' and value.get('project') == str(project)
+        if (value.get('kind') == 'bs-podcasts-runtime' and isinstance(value.get('project'), str)
                 and type(value.get('pid')) is int and value['pid'] > 0
                 and isinstance(value.get('started'), str)):
             return value
     except (OSError, ValueError, AttributeError):
         pass
     return None
+
+
+def _holds_lock(project, pid):
+    """True when the process has this project's runtime lock open; None if unreadable."""
+    try:
+        lock = (project/'.cache/runtime.lock').stat()
+    except FileNotFoundError:
+        return False
+    try:
+        with os.scandir(f'/proc/{pid}/fd') as entries:
+            for entry in entries:
+                try:
+                    target = os.stat(entry.path)
+                except OSError:
+                    continue
+                if (target.st_dev, target.st_ino) == (lock.st_dev, lock.st_ino):
+                    return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    return False
 
 
 def process_state(project, value, runner=None):
@@ -36,6 +59,14 @@ def process_state(project, value, runner=None):
         stamp = process_stamp(value['pid'])
         if stamp is None or stamp != value['started']:
             return 'stale'
+        if value['project'] != str(project):
+            # Written under the folder's previous name (or copied with it). The
+            # command line still names the old path, so identify the owner by
+            # the runtime lock every launched copy holds for its whole life.
+            held = _holds_lock(project, value['pid'])
+            if held is None:
+                return 'unknown'
+            return 'running' if held else 'stale'
         arguments = Path(f'/proc/{value["pid"]}/cmdline').read_bytes().split(b'\0')
     except (OSError, IndexError, KeyError):
         return 'unknown'
