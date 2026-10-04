@@ -609,7 +609,9 @@ class _ListPageMixin:
         return ("No matches", "Nothing matches this filter.", "")
 
     def _update_empty(self, query: str = ""):
-        if getattr(self, "_awaiting_load", False):
+        loading_blank = (getattr(self, "_blank_while_loading", False) and not self._all_items
+                         and self.banner.state == "loading")
+        if getattr(self, "_awaiting_load", False) or loading_blank:
             self.stack.setCurrentWidget(self.view)
             return
         has_rows = self.model.rowCount() > 0
@@ -1253,6 +1255,11 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self.load_more.setVisible(False)
         self.load_more.clicked.connect(self.load_more_requested)
         self.root.addWidget(self.load_more, alignment=Qt.AlignmentFlag.AlignHCenter)
+        # While the banner says the list is loading, an empty list is not
+        # "No episodes yet": opening a podcast showed that card until its
+        # episodes arrived.
+        self._blank_while_loading = True
+        self.banner.state_changed.connect(lambda _state: self._update_empty(self.header.search.text().strip().lower()))
         self._update_empty()
 
     def set_load_more_state(self, available: bool, loading: bool = False, noun: str | None = None):

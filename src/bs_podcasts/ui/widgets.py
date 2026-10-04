@@ -985,6 +985,7 @@ class StateBanner(QFrame):
     """Persistent page state: loading / partial / error / offline / suspended."""
 
     retry_requested = Signal()
+    state_changed = Signal(str)
 
     LABELS = {
         "loading": ("Loading", "refresh", "blue"),
@@ -1035,7 +1036,7 @@ class StateBanner(QFrame):
 
     def show_state(self, state: str, message: str, retry: bool = False):
         prefix, glyph, tone = self.LABELS.get(state, (state.replace("_", " ").title(), "info", "muted"))
-        self.state = state
+        previous, self.state = self.state, state
         self.setProperty("state", state)
         self.style().unpolish(self)
         self.style().polish(self)
@@ -1050,6 +1051,8 @@ class StateBanner(QFrame):
         self.progress.setVisible(state == "loading")
         self.setAccessibleName(f"{prefix}: {message}" if prefix else message)
         self.show()
+        if state != previous:
+            self.state_changed.emit(state)
 
     def apply_metrics(self):
         size = scaled_px(18)
@@ -1058,8 +1061,10 @@ class StateBanner(QFrame):
         self.layout().itemAt(0).layout().setSpacing(SPACE["sm"])
 
     def clear(self):
-        self.state = ""
+        previous, self.state = self.state, ""
         self.hide()
+        if previous:
+            self.state_changed.emit("")
 
 
 class Toast(QFrame):
