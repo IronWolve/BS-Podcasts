@@ -156,8 +156,11 @@ def read_deny_file(path, required=False):
         if required:
             raise ValueError('Private-path deny file is required.')
         return []
-    return [line.strip() for line in path.read_text(encoding='utf-8').splitlines()
-            if line.strip() and not line.strip().startswith('#')]
+    tokens = [line.strip() for line in path.read_text(encoding='utf-8').splitlines()
+              if line.strip() and not line.strip().startswith('#')]
+    if required and not tokens:
+        raise ValueError('Private-path deny file has no tokens.')
+    return tokens
 
 
 def denied_tokens(root, required=False):
@@ -227,11 +230,25 @@ def reject_commit_trailers(root=ROOT):
         raise ValueError('Commit message contains a forbidden trailer: ' + ', '.join(bad))
 
 
-def check(root=ROOT, require_deny=False):
+_SECRETS = re.compile(r'(?:sk-[A-Za-z0-9]{24,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}'
+                      r'|(?:AKIA|ASIA)[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}'
+                      r'|-----BEGIN [A-Z ]*PRIVATE KEY-----)')
+
+
+def check(root=ROOT, require_deny=True, ran=None):
+    """Run the source gates and return the approved file count.
+
+    The private deny file is required unless a caller opts out explicitly. `ran`,
+    when given, receives one line per gate saying what was checked or skipped."""
     root = Path(root).resolve()
+    ran = [] if ran is None else ran
     files, _ = inventory(root)
     denied = denied_tokens(root, required=require_deny)
-    secrets = re.compile(r'(?:sk-[A-Za-z0-9]{24,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)')
+    ran.append(f'manifest inventory: {len(files)} exact paths, private-path rules')
+    ran.append(f'private deny tokens: {len(denied)} (paths and contents, any case)' if denied
+               else 'private deny tokens: SKIPPED, no deny file (explicit opt-out)')
+    ran.append('provenance chunks and credential patterns: all files')
+    secrets = _SECRETS
     failures = []
     for name in files:
         path = root / name
@@ -257,6 +274,9 @@ def check(root=ROOT, require_deny=False):
     tracked = tracking_difference(root, files)
     if tracked is not None:
         reject_commit_trailers(root)
+        ran.append('Git tracking parity and commit trailers: checked')
+    else:
+        ran.append('Git tracking parity and commit trailers: SKIPPED, not a Git checkout')
     return len(files)
 
 
@@ -301,13 +321,20 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('operation', choices=['check','stage','hash','list'])
     parser.add_argument('--destination', type=Path)
+    parser.add_argument('--allow-missing-deny', action='store_true',
+                        help='check without the private deny file (reported as skipped)')
     args = parser.parse_args()
     if args.operation == 'check':
-        print(f'Approved source files: {check()}')
+        ran = []
+        print(f'Approved source files: {check(require_deny=not args.allow_missing_deny, ran=ran)}')
+        for line in ran:
+            print('  ' + line, file=sys.stderr if 'SKIPPED' in line else sys.stdout)
     elif args.operation == 'hash':
         print(source_digest())
     elif args.operation == 'list':
-        check()
+        # Lists a snapshot that stage() just passed through every gate; it has no
+        # private files beside it, so the deny file is read only when present.
+        check(require_deny=False)
         sys.stdout.buffer.write(('\0'.join(inventory()[0])+'\0').encode())
     elif args.destination is None:
         parser.error('stage requires --destination')

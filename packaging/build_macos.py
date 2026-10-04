@@ -162,7 +162,9 @@ if __name__=='__main__':
                         help='delete all but the newest 3 Mac rollbacks after a successful build')
     args=parser.parse_args()
     if args.check:
-        print(f'Approved source files: {check_source()}')
+        ran=[]
+        print(f'Approved source files: {check_source(ran=ran)}')
+        print('\n'.join('  '+line for line in ran))
         raise SystemExit(0)
     workspace=Path(os.environ.get('BS_PODCASTS_BUILD_ROOT',ROOT.parent)).resolve()
     with (workspace/'.cache/macos-build.lock').open('a+b') as lease:

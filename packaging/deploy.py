@@ -168,7 +168,9 @@ if __name__ == '__main__':
                         help='delete all but the newest 3 Linux rollbacks after a successful build')
     args=parser.parse_args()
     if args.check:
-        print(f'Approved source files: {check()}')
+        ran = []
+        print(f'Approved source files: {check(ran=ran)}')
+        print('\n'.join('  ' + line for line in ran))
     else:
         with (ROOT.parent/'.cache/linux-build.lock').open('a+b') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
