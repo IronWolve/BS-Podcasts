@@ -10,7 +10,7 @@ import time
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSettings, QTimer, Qt
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 import getpass
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QImageReader
 from PySide6.QtWidgets import QApplication, QWidget
 
 from .artwork import ArtworkCache
@@ -222,11 +222,22 @@ def _redirect_toolkit_settings():
         QSettings.setPath(kind, QSettings.Scope.UserScope, folder)
 
 
+def _limit_image_decoding():
+    """Refuse to decode an image far larger than any cover before allocating it.
+
+    Sized for the largest accepted cover at 8 bytes a pixel (16-bit colour),
+    so legitimate artwork up to 4096 px square still decodes everywhere."""
+    from .artwork.cache import MAX_ARTWORK_PIXELS
+
+    QImageReader.setAllocationLimit(max(1, (MAX_ARTWORK_PIXELS * 8) >> 20))
+
+
 def create_application(argv=None) -> QApplication:
     configure_logging()
     _install_excepthook()
     _install_toolkit_messages()
     _redirect_toolkit_settings()
+    _limit_image_decoding()
     app = QApplication(argv if argv is not None else sys.argv)
     _install_window_tracer(app)
     app.setApplicationName(APP_NAME)
