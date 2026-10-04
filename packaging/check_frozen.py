@@ -3,12 +3,51 @@ import argparse
 from pathlib import Path, PureWindowsPath
 from types import CodeType
 from PyInstaller.archive.readers import CArchiveReader
-from source_manifest import contains_denied, read_deny_file
+from source_manifest import privacy_scan_bytes, read_deny_file
+
+_ENCODINGS=('utf-8','utf-16-le','utf-16-be')
+# Byte-wise separator and ASCII-case fold. Applied identically to text in any of
+# the scanned encodings, so a folded needle matches wherever its raw form does.
+_FOLD=bytes.maketrans(b'\\'+bytes(range(65,91)),b'/'+bytes(range(97,123)))
 
 
-def _encoded_constant(constant):
-    folded=constant.replace('\\','/').casefold()
-    return [folded.encode(encoding) for encoding in ('utf-8','utf-16-le','utf-16-be')]
+def _fold_text(text):
+    return text.replace('\\','/').casefold()
+
+
+def token_views(tokens):
+    """Raw and folded needles in each scanned encoding, normalised exactly like the views they meet."""
+    exact,folded=set(),set()
+    for token in tokens:
+        if not token: continue
+        for encoding in _ENCODINGS:
+            encoded=token.encode(encoding,'surrogatepass')
+            exact.add(encoded)
+            folded.add(encoded.translate(_FOLD))
+            folded.add(_fold_text(token).encode(encoding,'surrogatepass').translate(_FOLD))
+    return frozenset(exact),frozenset(folded)
+
+
+def denied_bytes(raw, views):
+    """Raw bytes against raw needles, then the folded bytes against folded needles."""
+    exact,folded=views
+    scanned=privacy_scan_bytes(raw)
+    if any(needle in scanned for needle in exact): return True
+    scanned=scanned.translate(_FOLD)
+    return any(needle in scanned for needle in folded)
+
+
+def denied_constant(constant, views):
+    """A code string, raw and casefolded/'/'-normalised, in each scanned encoding."""
+    exact,folded=views
+    # Approved public URLs are excluded before folding changes their spelling.
+    text=privacy_scan_bytes(constant.encode('utf-8','surrogatepass')).decode('utf-8','surrogatepass')
+    normalised=_fold_text(text)
+    for encoding in _ENCODINGS:
+        if any(needle in text.encode(encoding,'surrogatepass') for needle in exact): return True
+        view=normalised.encode(encoding,'surrogatepass').translate(_FOLD)
+        if any(needle in view for needle in folded): return True
+    return False
 
 
 def check(root, private_root=None):
@@ -17,6 +56,7 @@ def check(root, private_root=None):
     if private_root:
         tokens.extend((str(private_root),str(private_root/'repo')))
         tokens.extend(read_deny_file(private_root/'.config/source-deny.txt', required=True))
+    views=token_views(tokens)
     forbidden={'.git','auth.json','credentials.json','direct_url.json'}
     seen=set()
     paths=[p for p in root.rglob('*') if p.is_symlink() or (p.is_file() and not p.is_symlink())]
@@ -39,7 +79,7 @@ def check(root, private_root=None):
         if target is not None and target not in seen:
             seen.add(target)
             blobs.append(target.read_bytes())
-        if any(contains_denied(blob, tokens) for blob in blobs):
+        if any(denied_bytes(blob, views) for blob in blobs):
             raise ValueError('Known private reference in '+relative.as_posix())
         if 'mutagen' in relative.as_posix().casefold(): raise ValueError('Retired dependency found.')
     executable=root/('Contents/MacOS/BS Podcasts' if root.suffix=='.app' else 'BS Podcasts.exe')
@@ -54,7 +94,7 @@ def check(root, private_root=None):
         for constant in code.co_consts:
             if isinstance(constant,CodeType): code_check(constant)
             elif isinstance(constant,str):
-                if any(contains_denied(encoded, tokens) for encoded in _encoded_constant(constant)):
+                if denied_constant(constant, views):
                     raise ValueError('Private application constant.')
     count=0
     for name in pyz.toc:
