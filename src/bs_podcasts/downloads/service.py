@@ -24,7 +24,6 @@ import shutil
 import stat
 import time
 
-from ..artwork.cache import _looks_textual
 from ..net import SessionSlot, describe_network_error
 from ..urlguard import UnsafeUrl, ensure_fetchable, SAFE_MEDIA_SUFFIXES, unsafe_media_payload
 
@@ -50,6 +49,24 @@ class _RangeContinuation(DownloadError):
 
 class _StaleResume(DownloadError):
     """The partial no longer matches what the server serves; discard and retry."""
+
+
+def _looks_like_document(head: bytes, final: bool = False) -> bool:
+    """True when a body starts like markup, JSON or plain text, not audio.
+
+    Audio containers (ID3, MPEG and AAC frame sync, Ogg, FLAC, RIFF, MP4,
+    Matroska) carry binary bytes within their first few dozen; error pages
+    do not. The artwork rule used before let through a page with an inline
+    SVG, one opening with a comment, a bare heading and plain "Not Found"
+    text. Plain text is judged on 64 bytes, or on a whole shorter body when
+    `final`, so a first chunk that splits a binary header is not refused.
+    """
+    stripped = head.lstrip()
+    if stripped[:1] in (b"<", b"{", b"["):
+        return True
+    if len(stripped) < 64 and not final:
+        return False
+    return all(32 <= byte < 127 or byte in b"\t\n\r" for byte in stripped[:64])
 
 
 @dataclass(frozen=True)
@@ -768,10 +785,9 @@ class DownloadService:
                     if not append and len(head) < 512:
                         # The Content-Type gate trusts the header; a missing
                         # or lying one let an HTML error page be saved and
-                        # marked complete. Let the first bytes veto it —
-                        # same rule the artwork cache applies.
+                        # marked complete. Let the first bytes veto it.
                         head += chunk[: 512 - len(head)]
-                        if _looks_textual(head) or unsafe_media_payload(head):
+                        if _looks_like_document(head) or unsafe_media_payload(head):
                             raise DownloadError(
                                 "Server sent a document or executable instead of audio."
                             )
@@ -868,7 +884,7 @@ class DownloadService:
         # rejected a signature only after writing its first fragment.
         with partial.open("rb") as verification:
             complete_head = verification.read(512)
-        if _looks_textual(complete_head) or unsafe_media_payload(complete_head):
+        if _looks_like_document(complete_head, final=True) or unsafe_media_payload(complete_head):
             raise DownloadError("Server sent a document or executable instead of audio.")
         os.replace(partial, target)
         # `done` is the transfer's own byte count and equals the file size.
