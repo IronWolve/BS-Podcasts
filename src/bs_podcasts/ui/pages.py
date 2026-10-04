@@ -2,7 +2,9 @@
 
 from datetime import datetime
 from pathlib import Path
+import re
 import time
+import unicodedata
 
 from PySide6.QtCore import QEasingCurve, QEvent, QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint, QPropertyAnimation, QTimer, Signal, Qt
 from PySide6.QtGui import QContextMenuEvent, QCursor, QKeySequence, QShortcut
@@ -42,6 +44,20 @@ from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 
 
 FILTER_DEBOUNCE_MS = 200
+_DIGIT_RUNS = re.compile(r"(\d+)")
+
+
+def title_sort_key(title: str) -> tuple:
+    """A–Z the way people read it: accents and case ignored, and numbers by
+    value. Lower-cased code points put "Émission" after "Zebra" and
+    "10 Things" before "2 Dope Queens"."""
+    folded = "".join(
+        character for character in unicodedata.normalize("NFKD", title)
+        if not unicodedata.combining(character)
+    ).casefold()
+    # Split parts alternate text, number, text…, so equal positions compare
+    # like with like.
+    return tuple(int(part) if index % 2 else part for index, part in enumerate(_DIGIT_RUNS.split(folded)))
 
 
 def _debounce_filter_box(page):
@@ -954,9 +970,9 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         if not self.discover and getattr(self, "_sort", "name") == "date":
             items.sort(key=lambda item: item.latest_sort_key or "", reverse=True)
         elif not self.discover:
-            items.sort(key=lambda item: item.title.lower())
+            items.sort(key=lambda item: title_sort_key(item.title))
         if self.discover and self._discover_sort == "title":
-            items.sort(key=lambda item: item.title.lower())
+            items.sort(key=lambda item: title_sort_key(item.title))
         elif self.discover and self._discover_sort == "newest":
             items.sort(key=lambda item: item.latest_sort_key or "", reverse=True)
         self.model.replace(items)
