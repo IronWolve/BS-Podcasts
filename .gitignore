@@ -1,7 +1,7 @@
 # Deny by default: application source, required release inputs, README and its images only.
 # Audit/test/capture utilities belong in the private project devtools/ directory, not Git.
 # Add only exact necessary files to source-manifest.json and this allowlist.
-# Private/agent state (AGENTS.md), .env files, keys,
+# Private tool state (dot-directories), instruction files such as AGENTS.md, .env files, keys,
 # profiles, databases, logs, captures, caches, environments and builds stay out.
 # These rules do not scrub already-tracked files or historical Git objects.
 *

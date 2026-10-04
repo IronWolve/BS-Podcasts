@@ -15,18 +15,22 @@ PRIVATE_ROOTS = frozenset({'data', 'docs', 'logs', 'tmp', 'run', 'dist', 'dists'
 PRIVATE_NAMES = frozenset({'agents.md', 'agent.md', 'auth.json', 'credentials.json', 'id_rsa', 'id_ed25519'})
 
 
-def private_path(name):
+def private_path(name, tokens=()):
+    """Generic private-path rules, plus any private deny token in the path (case-insensitive)."""
     parts = PurePosixPath(name).parts
+    folded = name.casefold()
     return (parts[0].lower() in PRIVATE_ROOTS
             or any(part.lower() in PRIVATE_NAMES for part in parts)
             or any(part.startswith('.') for part in parts if part not in {'.gitignore', '.gitattributes'})
-            or PurePosixPath(name).suffix.lower() in {'.db', '.sqlite', '.sqlite3', '.log', '.pcap', '.key', '.pem'})
+            or PurePosixPath(name).suffix.lower() in {'.db', '.sqlite', '.sqlite3', '.log', '.pcap', '.key', '.pem'}
+            or any(token.casefold() in folded for token in tokens if token))
 
 
 def inventory(root=ROOT):
     root = Path(root).resolve()
     payload = json.loads((root / 'source-manifest.json').read_text(encoding='utf-8'))
     files = payload['files']
+    tokens = denied_tokens(root)
     if not isinstance(files, list) or len(files) != len(set(files)):
         raise ValueError('Source manifest must contain unique exact file paths.')
     if 'source-manifest.json' not in files:
@@ -35,7 +39,7 @@ def inventory(root=ROOT):
         path = PurePosixPath(name)
         if path.is_absolute() or '..' in path.parts or str(path) != name or any(c in name for c in '\\:\0\r\n'):
             raise ValueError(f'Invalid manifest path: {name}')
-        if private_path(name):
+        if private_path(name, tokens):
             raise ValueError(f'Private/agent/runtime path is not an approved source input: {name}')
         source = root / name
         if not source.is_file() or source.is_symlink() or not source.resolve().is_relative_to(root):
@@ -49,7 +53,7 @@ def inventory(root=ROOT):
         path = PurePosixPath(name)
         if path.is_absolute() or '..' in path.parts or str(path) != name or any(c in name for c in '\\:\0\r\n'):
             raise ValueError(f'Invalid runtime path: {name}')
-        if private_path(name):
+        if private_path(name, tokens):
             raise ValueError(f'Private/agent/runtime path is not an approved deployment output: {name}')
     return files, runtime
 
@@ -93,8 +97,8 @@ def privacy_scan_bytes(raw, root=ROOT):
 
 
 _PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
-# Generator markers come from the private deny file; none are embedded in source.
-_GENERATOR_MARKERS = ()
+# Product names and image-generator markers live only in the private deny file;
+# the source gate matches them case-insensitively, so this file names none of them.
 _DENIED_ENCODINGS = ('utf-8', 'utf-16-le', 'utf-16-be')
 _PNG_SKIP = (b'IHDR', b'PLTE', b'IDAT', b'IEND')
 _FORBIDDEN_TRAILER = re.compile(r'(?im)^[ \t]*(?:co-authored-by|generated-with)\b')
@@ -119,29 +123,26 @@ def _png_chunks(raw):
             return
 
 
-def _marker_needles():
-    needles = []
-    for marker in _GENERATOR_MARKERS:
-        text = marker.decode('ascii')
-        needles.extend(text.encode(encoding) for encoding in _DENIED_ENCODINGS)
-    return needles
+def _marker_needles(markers):
+    # Byte-wise ASCII fold on both sides, so a raw match is always a folded match.
+    return [marker.encode(encoding).lower() for marker in markers if marker for encoding in _DENIED_ENCODINGS]
 
 
-def generator_metadata(raw):
-    """True when a PNG carries a caBX chunk or a generator vendor/model marker."""
-    needles = _marker_needles()
-    chunks = list(_png_chunks(raw))
-    if chunks or raw.startswith(_PNG_SIGNATURE):
-        for chunk_type, payload in chunks:
+def generator_metadata(raw, markers=(), root=ROOT):
+    """True when a PNG carries a caBX chunk, or a private marker appears in any case
+    in a PNG text chunk or anywhere in another file (approved public URLs excluded)."""
+    needles = _marker_needles(markers)
+    if raw.startswith(_PNG_SIGNATURE):
+        for chunk_type, payload in _png_chunks(raw):
             if chunk_type == b'caBX':
                 return True
             if chunk_type in _PNG_SKIP:
                 continue
-            folded = payload.lower()
+            folded = privacy_scan_bytes(payload, root).lower()
             if any(needle in folded for needle in needles):
                 return True
         return False
-    folded = raw.lower()
+    folded = privacy_scan_bytes(raw, root).lower()
     return any(needle in folded for needle in needles)
 
 
@@ -245,7 +246,7 @@ def check(root=ROOT, require_deny=False):
                 blobs.append(target.read_bytes())
         else:
             blobs.append(path.read_bytes())
-        if any(contains_denied(blob, denied, root) or generator_metadata(blob) for blob in blobs):
+        if any(contains_denied(blob, denied, root) or generator_metadata(blob, denied, root) for blob in blobs):
             failures.append(name)
             continue
         text = b''.join(blobs).decode('utf-8', 'replace')

@@ -16,7 +16,8 @@ import tomllib
 import zipfile
 
 from source_manifest import (
-    ROOT, check, file_digest, inventory, source_digest, privacy_scan_bytes, reject_commit_trailers,
+    ROOT, check, deny_file, file_digest, inventory, source_digest, privacy_scan_bytes, read_deny_file,
+    reject_commit_trailers,
 )
 from build_manifest import artifact_inventory
 
@@ -34,13 +35,17 @@ def verify_files(root, records):
 
 
 def scan_inputs(files, tokens):
+    """Reject unsafe paths and private deny tokens (encoded bytes) in paths or contents, in any ASCII case."""
     forbidden = {'.git', '.env', 'auth.json', 'credentials.json', 'agents.md'}
+    needles = [token.lower() for token in tokens if token]
     for name, data in files.items():
         path = Path(name)
-        if path.is_absolute() or '..' in path.parts or any(part.lower() in forbidden for part in path.parts):
+        folded_name = name.casefold().encode('utf-8')
+        if (path.is_absolute() or '..' in path.parts or any(part.lower() in forbidden for part in path.parts)
+                or any(needle in folded_name for needle in needles)):
             raise ValueError('Private or unsafe release path: ' + name)
-        checked = privacy_scan_bytes(data)
-        if any(token in checked for token in tokens):
+        checked = privacy_scan_bytes(data).lower()
+        if any(needle in checked for needle in needles):
             raise ValueError('Known private reference in release input: ' + name)
 
 
@@ -176,13 +181,8 @@ def build(output, macos=None):
     if output.exists() or output.is_relative_to(ROOT):
         raise ValueError('Use a new release directory outside the source checkout.')
     fingerprint = source_digest()
-    private = ROOT.parent / '.config/source-deny.txt'
-    if not private.is_file():
-        raise ValueError('Private-path deny file is required.')
-    tokens = []
-    for line in private.read_text().splitlines():
-        if line.strip() and not line.strip().startswith('#'):
-            tokens.extend(line.encode(encoding) for encoding in ('utf-8', 'utf-16-le', 'utf-16-be'))
+    tokens = [token.encode(encoding) for token in read_deny_file(deny_file(ROOT), required=True)
+              for encoding in ('utf-8', 'utf-16-le', 'utf-16-be')]
     source_files = {name: (ROOT / name).read_bytes() for name in names}
     source_executable = [name for name in names if os.stat(ROOT/name).st_mode & 0o111]
     scan_inputs(source_files, tokens)

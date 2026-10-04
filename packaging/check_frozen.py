@@ -50,19 +50,24 @@ def denied_constant(constant, views):
     return False
 
 
-def check(root, private_root=None):
+def check(root, private_root):
     root=root.resolve()
-    tokens=[]
-    if private_root:
-        tokens.extend((str(private_root),str(private_root/'repo')))
-        tokens.extend(read_deny_file(private_root/'.config/source-deny.txt', required=True))
+    if not private_root:
+        raise ValueError('The frozen privacy check needs the project root and its private deny file.')
+    tokens=[str(private_root),str(private_root/'repo')]
+    deny=read_deny_file(private_root/'.config/source-deny.txt', required=True)
+    tokens.extend(deny)
     views=token_views(tokens)
+    # Tool-state folder and file names come from the private deny file, matched in any case.
+    path_tokens=[_fold_text(token) for token in deny if token]
     forbidden={'.git','auth.json','credentials.json','direct_url.json'}
     seen=set()
     paths=[p for p in root.rglob('*') if p.is_symlink() or (p.is_file() and not p.is_symlink())]
     for path in paths:
         relative=path.relative_to(root)
-        if set(relative.parts)&forbidden or path.suffix.casefold() in {'.db','.sqlite','.sqlite3','.log','.pcap'}:
+        folded_path=_fold_text(relative.as_posix())
+        if (set(relative.parts)&forbidden or path.suffix.casefold() in {'.db','.sqlite','.sqlite3','.log','.pcap'}
+                or any(token in folded_path for token in path_tokens)):
             raise ValueError('Private bundle file: '+relative.as_posix())
         blobs=[]
         target=path
@@ -106,6 +111,6 @@ def check(root, private_root=None):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('bundle',type=Path)
-    parser.add_argument('--private-root',type=Path)
+    parser.add_argument('--private-root',type=Path,required=True)
     args=parser.parse_args()
     check(args.bundle,args.private_root)
