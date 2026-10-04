@@ -1,31 +1,49 @@
 """Shared guards for untrusted XML: feeds and OPML answer to the same rules."""
 
-_DTD_TOKENS = ("<!DOCTYPE", "<!ENTITY")
-# expat auto-detects UTF-16/32 from a BOM and parses such a document happily,
-# so the declaration has to be looked for in those encodings too.
-_ENCODINGS = ("ascii", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")
+from xml.parsers import expat
+
+
+class _Refused(Exception):
+    pass
+
+
+class _RootStarted(Exception):
+    pass
 
 
 def contains_dtd(content: bytes) -> bool:
-    """True when a DTD or entity declaration appears anywhere in `content`.
+    """True when `content` declares an internal DTD subset or an entity.
 
-    Closes two bypasses of the older check. One: a declaration pushed past a
-    fixed-size prefix scan by leading comments or whitespace — this reads the
-    whole bounded buffer. Two: a declaration written in a non-ASCII-compatible
-    encoding, where a raw ASCII substring search never matches the
-    interleaved-null form. `bytes.upper()` only folds ASCII bytes, which is
-    exactly what the interleaved form still contains.
+    The prolog is read by the XML parser itself, set up like the one that
+    parses the document, so encodings, comments, processing instructions and
+    CDATA are tokenized exactly as the real parse sees them. A text scan
+    could be fooled: a processing instruction may legally contain `<!--` and
+    hide a declaration that follows it. Reading stops at the root element;
+    a declaration after it is malformed and the real parse refuses it.
+
+    A DOCTYPE that only names an external DTD, like the legacy RSS 0.91
+    header, is allowed: external DTDs and entities are never loaded.
     """
-    import re
-    # Ignore declaration-like text inside lexical comments and CDATA only.
-    upper = content.replace(b"\x00", b"")
-    upper = re.sub(rb"<!--.*?-->|<!\[CDATA\[.*?\]\]>", b"", upper, flags=re.S).upper()
-    for token in _DTD_TOKENS:
-        for encoding in _ENCODINGS:
-            try:
-                needle = token.encode(encoding)
-            except (LookupError, UnicodeEncodeError):
-                continue
-            if needle and needle in upper:
-                return True
+
+    def doctype(name, system_id, public_id, has_internal_subset):
+        if has_internal_subset:
+            raise _Refused
+
+    def entity(*args):
+        raise _Refused
+
+    def root(name, attributes):
+        raise _RootStarted
+
+    parser = expat.ParserCreate(None, "}")
+    parser.StartDoctypeDeclHandler = doctype
+    parser.EntityDeclHandler = entity
+    parser.StartElementHandler = root
+    try:
+        parser.Parse(content, True)
+    except _Refused:
+        return True
+    except (_RootStarted, expat.ExpatError):
+        # Malformed input fails the real parse at the same point.
+        pass
     return False

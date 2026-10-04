@@ -612,9 +612,9 @@ def parse_feed(content: bytes, base_url: str = "") -> FeedData:
         raise FeedParseError("Feed response was empty.")
     if len(content) > MAX_FEED_BYTES:
         raise FeedParseError("Feed exceeds the size limit.")
-    # The whole bounded input, in every encoding expat will auto-detect: a
-    # 4 KiB prefix scan missed declarations behind leading comments, and an
-    # ASCII-only search missed the UTF-16/32 forms entirely.
+    # The XML parser reads the whole prolog itself: text scans missed
+    # declarations behind long comments, in UTF-16, or after a processing
+    # instruction that contained comment markup.
     if contains_dtd(content):
         raise FeedParseError("DTD and entity declarations are not allowed.")
     _SKIPPED.take()

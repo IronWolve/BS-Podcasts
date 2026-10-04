@@ -30,9 +30,9 @@ class OpmlEntry:
 def import_opml(content: bytes) -> list[OpmlEntry]:
     if not content or len(content) > MAX_OPML_BYTES:
         raise OpmlError("OPML is empty or exceeds the size limit.")
-    # The whole bounded input, not a prefix: a comment longer than the old
-    # 4 KiB window was enough to smuggle an entity declaration past the check
-    # and reach expat's internal-entity expansion.
+    # The whole prolog, read by the XML parser itself: a long comment or a
+    # processing instruction holding comment markup was enough to smuggle an
+    # entity declaration past text scans and reach internal-entity expansion.
     if contains_dtd(content):
         raise OpmlError("DTD and entity declarations are not allowed.")
     try:
