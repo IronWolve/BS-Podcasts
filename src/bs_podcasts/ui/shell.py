@@ -41,6 +41,7 @@ from ..config import APP_NAME, RELEASES_URL, RELEASES_API_URL, app_version
 from ..logging_setup import log_path
 from ..domain import DownloadState, FeedData, Health
 from ..directories.persistent import PersistentDirectoryCache
+from ..downloads import DownloadError
 
 
 class PeekFeed(FeedData):
@@ -2258,7 +2259,16 @@ class MainWindow(QMainWindow):
                 eligible = [eid for eid in episode_ids if eid in allowed]
             elif playback is not None and playback.snapshot.episode_id in eligible:
                 playback.stop()
-            return len(eligible), sum(downloads.delete(episode_id) for episode_id in eligible)
+            # One file that cannot go must not strand the rest unreported.
+            deleted = freed = failed = 0
+            for episode_id in eligible:
+                try:
+                    freed += downloads.delete(episode_id)
+                    deleted += 1
+                except (DownloadError, OSError):
+                    logging.getLogger("bs_podcasts").warning("Could not delete the download for episode %s", episode_id, exc_info=True)
+                    failed += 1
+            return deleted, freed, failed
 
         self._run_task("delete-downloads", work, (len(episode_ids), template), pool=self.commands, keep=True)
 
@@ -5588,12 +5598,14 @@ class MainWindow(QMainWindow):
         self._request_reload()
         self._refresh_storage_settings()
         if result.status == JobStatus.OK:
-            count, freed = result.value
-            self._notify(
-                template.format(count=count, plural="" if count == 1 else "s",
-                                size=self._format_bytes(freed)),
-                "success",
-            )
+            count, freed, failed = result.value
+            message = template.format(count=count, plural="" if count == 1 else "s", size=self._format_bytes(freed))
+            if failed and not count:
+                self._notify(f"Could not delete {failed} download{'s' if failed != 1 else ''}", "error")
+            elif failed:
+                self._notify(f"{message} · {failed} could not be deleted", "info")
+            else:
+                self._notify(message, "success")
         else:
             self._notify(result.message or "Could not delete downloads", "error")
         return
