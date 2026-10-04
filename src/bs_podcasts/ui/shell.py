@@ -48,7 +48,7 @@ class PeekFeed(FeedData):
 
 from ..jobs import JobResult, JobStatus
 from ..jobs.commands import CommandQueue
-from ..services.library import LibraryService
+from ..services.library import LibraryService, _bounded_int
 from ..services.preview_cache import PreviewCache, prepare_preview
 from ..urlguard import is_web_url
 from ..privacy import feed_label
@@ -1830,15 +1830,20 @@ class MainWindow(QMainWindow):
         if tray is not None:
             tray.notify(title, message, callback)
 
+    def _default_skips(self):
+        """Global skip times, bounded the way a new podcast takes them."""
+        if self.library is None:
+            return 15, 30
+        return (_bounded_int(self.library.setting("playback.skip_back", "15"), 15, 5, 120),
+                _bounded_int(self.library.setting("playback.skip_forward", "30"), 30, 5, 300))
+
     def _apply_skip_settings(self):
         if self.library is None:
             return
-        back = int(self.library.setting("playback.skip_back", "15"))
-        forward = int(self.library.setting("playback.skip_forward", "30"))
         if self.playback is not None and self.playback.snapshot.show_id:
             self._read_playback_metadata(self.playback.snapshot, follow=False)
             return
-        self.player.set_skip_values(back, forward)
+        self.player.set_skip_values(*self._default_skips())
 
     def _reconcile_missing_downloads(self):
         if self.downloads is None or self._closed:
@@ -2288,7 +2293,7 @@ class MainWindow(QMainWindow):
         playback, commands = self.playback, self.commands
         if playback is None:
             return
-        if name in {"play", "pause", "play_pause", "stop", "next", "previous", "seek", "seek_episode", "skip_back", "skip_forward", "load_stream"}:
+        if name in {"play", "pause", "play_pause", "stop", "next", "previous", "seek", "seek_episode", "skip", "skip_back", "skip_forward", "load_stream"}:
             self._play_after_download = 0
             token = commands.supersede() if commands is not None else None
             if name in {"load_stream", "seek_episode"} and commands is not None:
@@ -2297,7 +2302,7 @@ class MainWindow(QMainWindow):
         # before the shutdown finalizer saves the position, so a pending seek
         # still lands. A superseded seek_episode still cancels itself, because
         # the drain runs before finish() retires the current token.
-        keep = name in {"seek", "seek_current", "seek_episode", "previous", "skip_back", "skip_forward"}
+        keep = name in {"seek", "seek_current", "seek_episode", "previous", "skip", "skip_back", "skip_forward"}
         self._run_command(lambda: getattr(playback, name)(*args, **kwargs), keep=keep)
 
     def _on_command(self, kind, apply, result):
@@ -4119,11 +4124,17 @@ class MainWindow(QMainWindow):
 
     def _skip_back(self):
         if self.playback is not None:
-            self._playback_command("skip_back")
+            if self.playback.snapshot.show_id:
+                self._playback_command("skip_back")
+            else:
+                self._playback_command("skip", -self._default_skips()[0])
 
     def _skip_forward(self):
         if self.playback is not None:
-            self._playback_command("skip_forward")
+            if self.playback.snapshot.show_id:
+                self._playback_command("skip_forward")
+            else:
+                self._playback_command("skip", self._default_skips()[1])
 
     def _jump_chapter(self, direction: int):
         """Next/previous chapter of the playing episode; the service methods
@@ -4341,8 +4352,9 @@ class MainWindow(QMainWindow):
             if (self._playing_episode_id, self._playing_source) != (episode_id, source):
                 return
             episode, show, chapters, queued, item, accent = data
-            if show is not None:
-                self.player.set_skip_values(show.skip_back, show.skip_forward)
+            # A Discover preview has no podcast settings: it uses the global
+            # times, not those of the podcast played before it.
+            self.player.set_skip_values(*((show.skip_back, show.skip_forward) if show is not None else self._default_skips()))
             self.player._streaming = bool(source) and not bool(episode and episode.downloaded_path)
             if episode is not None:
                 if episode.artwork_path != snapshot.artwork_path:
