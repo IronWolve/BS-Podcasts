@@ -21,6 +21,11 @@ MAX_EPISODES = 5000
 MAX_SCANNED_EPISODES = MAX_EPISODES * 4
 # A flat flood is rejected while it is parsed, not after the tree exists.
 MAX_FEED_ELEMENTS = 1_000_000
+# Elements attached to the tree at once: the feed's own fields plus the
+# item being read. Unread branches are dropped as they close, so only a
+# flood inside a kept field or item reaches this. Real feeds keep a few
+# hundred; long inline XHTML show notes stay far below it.
+MAX_KEPT_ELEMENTS = 20_000
 MIN_ENCLOSURE_BYTES = 16 * 1024
 
 
@@ -489,6 +494,11 @@ def _stream_feed(content: bytes, base_url: str):
 
     The kept episodes are the head and the tail of the document, so an
     oldest-first feed still has its newest items when the scan cap is hit.
+
+    A frame is [element, base, under, unread, size]. `unread` marks an
+    element dropped unread when it closes: a non-field child of
+    rss/channel/feed and everything inside one, except an item or entry.
+    `size` counts the frame's still-attached subtree for MAX_KEPT_ELEMENTS.
     """
     bounded = _url_budget()
     head = []
@@ -498,13 +508,23 @@ def _stream_feed(content: bytes, base_url: str):
     root = None
     root_kind = ""
     count = 0
+    kept = 0
     source = BytesIO(content)
+
+    def episode_tag(local):
+        return (local == "item" and root_kind in {"rss", "rdf", "channel"}) or (
+            local == "entry" and root_kind == "feed"
+        )
+
     try:
         for event, element in ET.iterparse(source, events=("start", "end")):
             if event == "start":
                 count += 1
+                kept += 1
                 if count > MAX_FEED_ELEMENTS:
                     raise FeedParseError("Feed element count exceeds the safety limit.")
+                if kept > MAX_KEPT_ELEMENTS:
+                    raise FeedParseError("Feed item or channel field exceeds the element safety limit.")
                 if len(stack) > 128:
                     raise FeedParseError("Feed nesting exceeds the safety limit.")
                 if root is None:
@@ -513,31 +533,36 @@ def _stream_feed(content: bytes, base_url: str):
                 parent_base, parent_under = (base_url, False) if not stack else (stack[-1][1], stack[-1][2])
                 base, under = _next_base(element, parent_base, parent_under, bounded)
                 _rewrite_attributes(element, base, under, bounded)
-                stack.append((element, base, under))
+                local = _local(element.tag)
+                if not stack or episode_tag(local):
+                    unread = False
+                elif (
+                    _local(stack[-1][0].tag) in _STRUCTURAL
+                    and local not in _METADATA
+                    and local not in _STRUCTURAL
+                ):
+                    unread = True
+                else:
+                    unread = stack[-1][3]
+                stack.append([element, base, under, unread, 1])
                 continue
-            current, base, under = stack[-1]
+            current, base, under, unread, size = stack.pop()
             _rewrite_text(current, base, under, bounded)
             local = _local(current.tag)
-            parent = stack[-2][0] if len(stack) > 1 else None
-            if local == "item" and root_kind in {"rss", "rdf", "channel"}:
-                _remember_episode(head, tail, seen, _rss_episode(current))
+            parent = stack[-1][0] if stack else None
+            if episode_tag(local):
+                read = _rss_episode if local == "item" else _atom_episode
+                _remember_episode(head, tail, seen, read(current))
                 if parent is not None:
                     parent.remove(current)
                 current.clear()
-            elif local == "entry" and root_kind == "feed":
-                _remember_episode(head, tail, seen, _atom_episode(current))
-                if parent is not None:
-                    parent.remove(current)
-                current.clear()
-            elif (
-                parent is not None
-                and _local(parent.tag) in _STRUCTURAL
-                and local not in _METADATA
-                and local not in _STRUCTURAL
-            ):
+                kept -= size
+            elif unread:
                 parent.remove(current)
                 current.clear()
-            stack.pop()
+                kept -= size
+            elif parent is not None:
+                stack[-1][4] += size
     finally:
         source.close()
     if root is None:
