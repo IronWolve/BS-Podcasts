@@ -1679,10 +1679,20 @@ class MainWindow(QMainWindow):
             self._apply_retention(show.id)
         self._run_read(work, apply, 'save-podcast-settings', pool=self.commands, coalesce=False)
 
-    def _apply_retention(self, show_id: int, preview_required: bool = False):
+    @staticmethod
+    def _retention_spared(playback, keep=()):
+        """Episodes a retention pass leaves alone this time: the one loaded
+        in the player plus `keep` (an episode just downloaded on purpose)."""
+        spared = set(keep)
+        playing = getattr(getattr(playback, "snapshot", None), "episode_id", None)
+        if playing:
+            spared.add(playing)
+        return spared
+
+    def _apply_retention(self, show_id: int, preview_required: bool = False, keep=()):
         if self.library is None or self.downloads is None:
             return
-        repository, downloads = self.library.repository, self.downloads
+        repository, downloads, playback = self.library.repository, self.downloads, self.playback
 
         def work():
             # Candidate query plus one stat() per downloaded file: worker
@@ -1690,7 +1700,7 @@ class MainWindow(QMainWindow):
             show = repository.get_show(show_id)
             if show is None or (not show.retention_keep and not show.retention_days):
                 return ()  # not None: an EMPTY read result would raise the error banner
-            candidates = repository.retention_candidates(show_id, show.retention_keep, show.retention_days)
+            candidates = downloads.retention_candidates(show, keep=self._retention_spared(playback, keep))
             previews = [downloads.cleanup_preview(item.id) for item in candidates]
             return show, [preview for preview in previews if preview is not None]
 
@@ -1699,11 +1709,11 @@ class MainWindow(QMainWindow):
                 return
             show, previews = value
             if previews:
-                self._confirm_retention(show, previews, preview_required)
+                self._confirm_retention(show, previews, preview_required, keep)
 
         self._run_read(work, apply, f"retention-{show_id}")
 
-    def _confirm_retention(self, show, previews, preview_required: bool):
+    def _confirm_retention(self, show, previews, preview_required: bool, keep=()):
         show_id = show.id
         confirmation_key = f"retention.confirmed.{show_id}"
         first_cleanup = self.library.setting(confirmation_key, "0") != "1"
@@ -1717,7 +1727,7 @@ class MainWindow(QMainWindow):
                 return
             self._persist_ui_settings({confirmation_key: "1"})
         self._delete_downloads_async(
-            previews, "Retention removed {count} download{plural} · {size}", retention_show=show_id
+            previews, "Retention removed {count} download{plural} · {size}", retention_show=show_id, retention_keep=keep
         )
 
     def _download_many(self, items):
@@ -2223,7 +2233,7 @@ class MainWindow(QMainWindow):
 
         future.add_done_callback(finished)
 
-    def _delete_downloads_async(self, previews, template: str, *, retention_show=None):
+    def _delete_downloads_async(self, previews, template: str, *, retention_show=None, retention_keep=()):
         """Unlink confirmed download targets on a worker.
 
         `DownloadService.delete()` stats and unlinks per file; looping it in a
@@ -2240,11 +2250,13 @@ class MainWindow(QMainWindow):
         def work():
             eligible = episode_ids
             if retention_show is not None:
+                # Retention never stops playback: the candidates are checked
+                # again, sparing the playing episode for a later pass.
                 show = downloads.library.get_show(retention_show)
-                candidates = downloads.library.retention_candidates(show.id, show.retention_keep, show.retention_days) if show else ()
+                candidates = downloads.retention_candidates(show, keep=self._retention_spared(playback, retention_keep))
                 allowed = {episode.id for episode in candidates}
                 eligible = [eid for eid in episode_ids if eid in allowed]
-            if playback is not None and playback.snapshot.episode_id in eligible:
+            elif playback is not None and playback.snapshot.episode_id in eligible:
                 playback.stop()
             return len(eligible), sum(downloads.delete(episode_id) for episode_id in eligible)
 
@@ -5961,7 +5973,7 @@ class MainWindow(QMainWindow):
                 self._notify(f"Downloaded {title}", "success", "Play", lambda: self._play_episode(identifier))
                 self._native_notify(APP_NAME, f"Downloaded {title}", lambda: self._play_episode(identifier))
                 if episode is not None:
-                    self._apply_retention(episode.show_id)
+                    self._apply_retention(episode.show_id, keep=(identifier,))
             self._run_read(lambda: (self.library.episode(identifier) if self.library else None,),
                            lambda rows: apply(rows[0]), f"download-notice-{identifier}")
         elif result.status in {JobStatus.OK, JobStatus.EMPTY}:
