@@ -174,16 +174,15 @@ class FeedFetcher:
         """
         return self._fetch(url, etag, last_modified, allow_discovery=True, validator_url=validator_url or url)
 
-    PEEK_BYTES = 64 * 1024
-
     def peek_latest(self, url: str) -> tuple[str, str] | None:
-        """(title, published_at) of the first item in the feed's first 64 KB.
+        """(title, published_at) of the newest dated item, in one request.
 
-        Discover's 'Newest episode' sort needs one date per result; fetching
-        and parsing every full feed (up to 20 MB each) for that was the most
-        expensive thing the app did (audit F-089). Feeds list newest first
-        almost universally; a caller falls back to the full fetch when this
-        finds nothing.
+        Discover's 'Newest episode' sort needs one date per result (audit
+        F-089). A ranged 64 KB peek could not parse any larger feed, since a
+        partial document cannot prove which item is newest, so nearly every
+        card cost the peek plus a second, full request. The body is read
+        once, up to the feed size cap; a caller falls back to the full fetch
+        only when this finds nothing.
         """
         try:
             url = ensure_fetchable(url, "Feed URL")
@@ -191,26 +190,23 @@ class FeedFetcher:
             raise _url_error(exc) from exc
         import requests
 
-        headers = {"User-Agent": USER_AGENT, "Range": f"bytes=0-{self.PEEK_BYTES - 1}", "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.2"}
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.2"}
         try:
             response = self.session.get(url, headers=headers, timeout=(8, 15), allow_redirects=True, stream=True)
         except requests.RequestException as exc:
             raise _fetch_error(exc) from exc
         try:
-            if response.status_code not in (200, 206):
+            if response.status_code != 200:
                 return None
             body = bytearray()
-            for chunk in response.iter_content(16 * 1024):
+            for chunk in response.iter_content(64 * 1024):
                 body.extend(chunk)
-                if len(body) >= self.PEEK_BYTES:
-                    break
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise FeedFetchError("Feed response exceeds the size limit.")
         except requests.RequestException as exc:
             raise _fetch_error(exc) from exc
         finally:
             response.close()
-        # A partial document cannot prove which episode is newest: feeds may
-        # be oldest-first. Small complete feeds stay cheap; larger feeds use
-        # the caller's existing bounded full-fetch fallback.
         from .parser import parse_feed, FeedParseError
         try:
             feed = parse_feed(bytes(body), base_url=response.url)
