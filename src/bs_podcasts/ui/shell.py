@@ -43,11 +43,6 @@ from ..logging_setup import log_path
 from ..domain import DownloadState, FeedData, Health
 from ..directories.persistent import PersistentDirectoryCache
 from ..downloads import DownloadError
-
-
-class PeekFeed(FeedData):
-    """A FeedData holding only the newest item, from FeedFetcher.peek_latest."""
-
 from ..jobs import JobResult, JobStatus
 from ..jobs.commands import CommandQueue
 from ..services.library import LibraryService, _bounded_float, _bounded_int
@@ -107,6 +102,12 @@ ACCENTS = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
 # window by one page; design.md forbids silently substituting a cap for "all".
 EPISODES_PAGE_SIZE = 5000
 HISTORY_PAGE_SIZE = 200
+
+
+class PeekFeed(FeedData):
+    """A FeedData holding only the newest item, from FeedFetcher.peek_latest."""
+
+
 # The window filters every event the application delivers (tooltip hints are
 # formatted app-wide); everything else returns at the first comparison.
 _FILTERED_EVENTS = frozenset({
@@ -1567,10 +1568,8 @@ class MainWindow(QMainWindow):
             if playback is not None and playback.snapshot.show_id == show_id:
                 playback.stop()
             result = library.remove_subscription(show_id, delete_files, confirmed_paths)
-            reclaimed = sum(
-                size for path, size in preview["files"]
-                if path in set(result.get("removed_files", ()))
-            )
+            removed = set(result.get("removed_files", ()))
+            reclaimed = sum(size for path, size in preview["files"] if path in removed)
             return show.title, reclaimed, len(result.get("failed_files", ()))
 
         self._run_task("unsubscribe", work, show_id, pool=self.commands, keep=True)
@@ -2622,7 +2621,7 @@ class MainWindow(QMainWindow):
         self.playlist_page.set_items(queued)
         self._finish_page_load(self.playlist_page)
         self.context.set_queue(queued)
-        self.player.set_next(queued[0].title if queued and queued[0].episode_id != self._playing_episode_id else (queued[1].title if len(queued) > 1 else ""))
+        self.player.set_next(self._next_title(queued, self._playing_episode_id))
         self.history_page.set_items(history)
         self._finish_page_load(self.history_page)
         self._set_history_chrome(len(history))
@@ -2697,11 +2696,17 @@ class MainWindow(QMainWindow):
             return [self._ui_episode_live(episode, active) for episode in library.queue()]
         self._run_read(work, self._apply_queue, "queue")
 
+    @staticmethod
+    def _next_title(queued, playing_id) -> str:
+        """The player's "Next" line: the first Up Next entry that is not the
+        playing episode (rows of the list, or library episodes)."""
+        return next((e.title for e in queued if (getattr(e, "episode_id", None) or getattr(e, "id", 0)) != playing_id), "")
+
     def _apply_queue(self, queued):
         self.playlist_page.set_items(queued)
         self._finish_page_load(self.playlist_page)
         self.context.set_queue(queued)
-        self.player.set_next(next((e.title for e in queued if e.episode_id != self._playing_episode_id), ""))
+        self.player.set_next(self._next_title(queued, self._playing_episode_id))
         self.navigation.set_badge(PAGE_QUEUE, len(queued))
         self.home_page.summary_buttons[1].set_count(len(queued))
 
@@ -4269,17 +4274,15 @@ class MainWindow(QMainWindow):
         if snapshot.source == item.media_url and self._playing_state in {"playing", "paused", "loading"}:
             self._play_pause()
             return
-        try:
-            self._playback_command("load_stream",
-                item.media_url,
-                item.title,
-                item.show,
-                item.duration_seconds,
-                item.artwork_path,
-                autoplay=True,
-            )
-        except Exception as exc:
-            self._notify(f"Couldn’t play this episode: {exc}", "error")
+        # Failures arrive through the command's completion, not here.
+        self._playback_command("load_stream",
+            item.media_url,
+            item.title,
+            item.show,
+            item.duration_seconds,
+            item.artwork_path,
+            autoplay=True,
+        )
 
     def _play_bookmark(self, item):
         if self.playback is None or not item.episode_id:
@@ -4583,7 +4586,7 @@ class MainWindow(QMainWindow):
             self._chapters_cache = {episode_id: chapters}
             duration = float(getattr(getattr(self.playback, "snapshot", snapshot), "duration", 0)) or 0
             self.player.set_chapter_markers([c.start_seconds / duration for c in chapters if duration and 0 < c.start_seconds < duration])
-            self.player.set_next(next((e.title for e in queued if e.id != episode_id), ""))
+            self.player.set_next(self._next_title(queued, episode_id))
             self.player.set_tint(accent)
         self._run_read(work, apply, "playback-metadata")
 
@@ -5588,7 +5591,9 @@ class MainWindow(QMainWindow):
         if kind != "artwork-retry":
             self._pump_directory_artwork()
         if not self._directory_artwork_active and not self._directory_artwork_waiting and self.jobs is not None:
-            self.jobs.submit(save_accents)
+            future = self.jobs.submit(save_accents)
+            self._pending_jobs.add(future)  # tracked, so Quit can cancel it like other jobs
+            future.add_done_callback(self._pending_jobs.discard)
 
     # ------------------------------------------------------------------ refresh
     def _set_episode_refresh_enabled(self, enabled: bool):
@@ -5706,6 +5711,12 @@ class MainWindow(QMainWindow):
         handler(kind, identifier, result)
 
     def _completion_handlers(self):
+        handlers = getattr(self, "_handler_table", None)
+        if handlers is None:
+            handlers = self._handler_table = self._build_completion_handlers()
+        return handlers
+
+    def _build_completion_handlers(self):
         return {
             'play-prepared': self._on_play_prepared,
             'directory-artwork': self._on_directory_artwork,
