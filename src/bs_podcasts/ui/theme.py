@@ -147,20 +147,24 @@ def theme_name() -> str:
     return _current_theme
 
 
-def resolve_theme(setting: str) -> str:
-    """Map a stored preference (system/dark/light) to a concrete theme."""
-    if setting in THEMES:
-        return setting
+def system_theme() -> str | None:
+    """The OS light/dark preference, or None when the platform does not say."""
     try:
         from PySide6.QtGui import QGuiApplication
         from PySide6.QtCore import Qt
 
         hints = QGuiApplication.styleHints()
-        if hints is not None and hints.colorScheme() == Qt.ColorScheme.Light:
-            return "light"
+        scheme = hints.colorScheme() if hints is not None else None
+        return {Qt.ColorScheme.Light: "light", Qt.ColorScheme.Dark: "dark"}.get(scheme)
     except Exception:
-        pass
-    return "dark"
+        return None
+
+
+def resolve_theme(setting: str) -> str:
+    """Map a stored preference (system/dark/light) to a concrete theme."""
+    if setting in THEMES:
+        return setting
+    return system_theme() or "dark"
 
 
 def apply_theme(name: str):

@@ -39,7 +39,7 @@ from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, P
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
 from .widgets import combo_chrome_px as widgets_combo_chrome_px
 from .widgets import PlainTextLabel, wheel_needs_focus
-from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, reduced_motion, scaled_px
+from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, reduced_motion, scaled_px, system_theme, theme_name
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 
 
@@ -1893,6 +1893,16 @@ class SettingsPage(BasePage):
         appearance_form.addRow("Hover previews", self.hover_previews)
         self.settings_content.addWidget(appearance_card)
         self.theme.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.theme", self.theme.itemData(index)))
+        # "Follow system" follows a light/dark switch made while the app runs,
+        # through the same path as choosing it here. Debounced: some desktops
+        # announce one switch twice.
+        self._scheme_timer = QTimer(self)
+        self._scheme_timer.setSingleShot(True)
+        self._scheme_timer.setInterval(300)
+        self._scheme_timer.timeout.connect(self._follow_system_scheme)
+        hints = QApplication.styleHints()
+        if hints is not None:
+            hints.colorSchemeChanged.connect(self._system_scheme_changed)
         self.density.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.density", self.density.itemData(index)))
         self.text_size.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.text_size", self.text_size.itemData(index)))
         self.ui_font.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.font", self.ui_font.itemData(index)))
@@ -2247,6 +2257,14 @@ class SettingsPage(BasePage):
         self.hover_previews.blockSignals(True)
         self.hover_previews.setChecked(enabled)
         self.hover_previews.blockSignals(False)
+
+    def _system_scheme_changed(self, *_scheme):
+        self._scheme_timer.start()
+
+    def _follow_system_scheme(self):
+        wanted = system_theme()
+        if self.theme.currentData() == "system" and wanted is not None and wanted != theme_name():
+            self.setting_changed.emit("ui.theme", "system")
 
     def load_theme(self, value: str):
         self.theme.blockSignals(True)
