@@ -1188,6 +1188,31 @@ class MainWindow(QMainWindow):
     def _refresh_shows(self, shows, quiet: bool = False):
         if quiet and self._background_paused():
             return
+        if self._refresh_batch[0]:
+            # Join the running batch rather than replacing it: a new
+            # generation would drop its summary and strand its banner and
+            # disabled controls. The batch keeps its mode, so a user Refresh
+            # all stays visible and still ends with one summary.
+            if not quiet and self._refresh_quiet:
+                # The user asked while a background batch ran: show it, and
+                # end it with the summary a Refresh all gives.
+                self._refresh_quiet = False
+                if self.episode_page.header.action:
+                    self.episode_page.header.action.setEnabled(False)
+                total, done, _ = self._refresh_batch
+                self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
+            queued = self._refresh_in_flight.union(self._refresh_waiting)
+            joined = [show_id for show_id in dict.fromkeys(show.id for show in shows) if show_id not in queued]
+            if not joined:
+                return
+            total, done, new_episodes = self._refresh_batch
+            total += len(joined)
+            self._refresh_batch = [total, done, new_episodes]
+            self._refresh_waiting.extend(joined)
+            if not self._refresh_quiet:
+                self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
+            self._pump_refresh_queue()
+            return
         # A new batch invalidates completions still in flight from the old
         # one, so they cannot count toward (or prematurely end) this batch.
         self._refresh_generation += 1
@@ -2598,7 +2623,10 @@ class MainWindow(QMainWindow):
         added = result.value or []
         self._request_reload()
         if added:
+            # Joins a running batch; nothing starts while background work is
+            # paused, and then no loading banner is left waiting for it.
             self._refresh_shows(added, quiet=True)
+        if added and self._refresh_batch[0]:
             self.podcast_page.banner.show_state("loading", f"Imported {len(added)} podcast{'s' if len(added) != 1 else ''} — fetching episodes in the background…")
         self._notify(f"Imported {len(added)} subscription{'s' if len(added) != 1 else ''}", "success")
 
@@ -5164,6 +5192,21 @@ class MainWindow(QMainWindow):
         if self.episode_page.header.action:
             self.episode_page.header.action.setEnabled(enabled)
         self.episode_page.hero.refresh.setEnabled(enabled)
+
+    def _release_episode_refresh(self):
+        """Re-enable the Episodes refresh controls a show refresh disabled.
+
+        They stay disabled while the open show's own refresh runs. A visible
+        Refresh all keeps the header action until its batch ends; the show's
+        own refresh button is free again either way.
+        """
+        if self._hero_show_id and self._hero_show_id in self._manual_refresh_in_flight:
+            return
+        if self._refresh_batch[0] and not self._refresh_quiet:
+            self.episode_page.hero.refresh.setEnabled(True)
+        else:
+            self._set_episode_refresh_enabled(True)
+
     def _refresh_episode_view(self):
         """Refresh the scope represented by the Episodes page."""
         if self._hero_show_id:
@@ -5172,6 +5215,11 @@ class MainWindow(QMainWindow):
             if self._submit_refresh(self._hero_show_id):
                 self.episode_page.banner.show_state("loading", "Refreshing this podcast…")
                 self._set_episode_refresh_enabled(False)
+            elif (self._refresh_batch[0] and self._refresh_quiet
+                    and self._hero_show_id not in self._manual_refresh_in_flight):
+                # A background batch covers this show and never reports on
+                # this page, so a loading banner here would outlive it.
+                self._notify("This podcast is already refreshing in the background")
             else:
                 self.episode_page.banner.show_state("loading", "This podcast is already refreshing…")
             return
@@ -5183,7 +5231,8 @@ class MainWindow(QMainWindow):
         self._refresh_all()
 
     def _refresh_all(self):
-        if self.library is None or self._refresh_batch[0]:
+        # A visible Refresh all is already running; a background one joins.
+        if self.library is None or (self._refresh_batch[0] and not self._refresh_quiet):
             return
         shows = [show for show in self.library.shows() if show.source != "local" and not show.suspended]
         if not shows:
@@ -5758,13 +5807,13 @@ class MainWindow(QMainWindow):
                 self._refresh_batch = [0, 0, 0]
                 self._refresh_waiting.clear()
                 self._refresh_in_flight.clear()
-                if quiet:
-                    if self.podcast_page.banner.state == "loading":
-                        self.podcast_page.banner.clear()
-                else:
+                # An import's loading banner can ride on any batch (OPML
+                # joins a running Refresh all), so none outlives the batch.
+                if self.podcast_page.banner.state == "loading":
+                    self.podcast_page.banner.clear()
+                if not quiet:
                     self.episode_page.banner.clear()
-                    if not self._manual_refresh_in_flight:
-                        self._set_episode_refresh_enabled(True)
+                    self._release_episode_refresh()
                 if self._refresh_changed:
                     self._request_reload()  # Includes the open catalogue once.
                 else:
@@ -5773,11 +5822,14 @@ class MainWindow(QMainWindow):
             # Batch: never one message per feed; problems are shown in place.
             return
         viewing_show = self.pages.currentIndex() == PAGE_EPISODES and self._hero_show_id == identifier
-        if self._refresh_batch[0]:
+        # A show refresh frees its own controls whatever batch is running.
+        self._release_episode_refresh()
+        if self._refresh_batch[0] and not self._refresh_quiet:
+            # A visible Refresh all owns the episode banner until it ends;
+            # a background batch never uses it, so the result shows below.
             if result.status != JobStatus.OK:
                 self._notify(result.message or "Refresh failed.", "error")
             return
-        self._set_episode_refresh_enabled(True)
         if result.status != JobStatus.OK:
             target = self.episode_page.banner if viewing_show else self.podcast_page.banner
             target.show_state("error", result.message or "Refresh failed.", retry=True)
@@ -5804,7 +5856,7 @@ class MainWindow(QMainWindow):
             self.podcast_page.banner.show_state(report.health.value, report.message, retry=True)
         elif report.health == Health.PARTIAL:
             self.podcast_page.banner.show_state("partial", report.message or "The podcast refreshed but did not contain playable episodes.")
-        elif not total:
+        elif not total:  # a background batch's progress keeps this banner
             self.podcast_page.banner.clear()
             if self.pages.currentWidget() is not self.discover_page:
                 self._announce_refreshed_show(identifier)
@@ -5834,28 +5886,6 @@ class MainWindow(QMainWindow):
                 self._notify(f"{show.title} is ready  ·  {show.episode_count} episodes", "success", "Play latest", lambda: self._play_latest(show_id))
         self._run_read(lambda: (self.library.repository.get_show(show_id),), apply,
                        f"refresh-notice-{show_id}")
-
-    def _reload_open_podcast_after_refresh(self, show_id: int, state: str = "", message: str = ""):
-        """Re-read only the open podcast after its feed refresh completes."""
-        if self.library is None:
-            return
-
-        def work():
-            show = self.library.repository.get_show(show_id)
-            return (self._ui_podcast(show) if show else None,
-                    self._ui_episodes(self.library.episodes(show_id=show_id, limit=None)) if show else [])
-
-        def apply(payload):
-            podcast, episodes = payload
-            if self.pages.currentIndex() != PAGE_EPISODES or self._hero_show_id != show_id:
-                return
-            if podcast is not None:
-                self._apply_open_podcast(podcast, episodes, preserve_scroll=True)
-            if state:
-                self.episode_page.banner.show_state(state, message)
-            self._set_episode_refresh_enabled(True)
-
-        self._run_read(work, apply, "episodes")
 
     def _directory_finished(self, request, result, *, cache_restore=False):
         current = (self._discover_operation, self._discover_value, self._discover_limit)
