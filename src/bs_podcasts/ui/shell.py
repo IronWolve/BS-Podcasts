@@ -10,6 +10,7 @@ from pathlib import Path
 import os
 import re
 import shutil
+import tempfile
 import time
 import weakref
 from types import SimpleNamespace
@@ -4753,50 +4754,72 @@ class MainWindow(QMainWindow):
         target_root = Path(destination)
         snapshots = list(items)
 
+        class Cancelled(Exception):
+            pass
+
+        def copy_chunks(input_file, output):
+            # 1 MiB at a time, so a Quit stops a long copy instead of
+            # waiting for it (the partial temp file is removed below).
+            while chunk := input_file.read(1 << 20):
+                if self._closed:
+                    raise Cancelled
+                output.write(chunk)
+
+        def export_one(item, source):
+            show_dir = target_root / self._safe_filename(item.show, "Podcast")
+            show_dir.mkdir(parents=True, exist_ok=True)
+            date = (item.published_at or "")[:10]
+            stem = self._safe_filename(f"{date} {item.title}".strip(), f"Episode {item.episode_id}")
+            suffix = source.suffix or ".media"
+            target = show_dir / f"{stem}{suffix}"
+            counter = 2
+            descriptor, temporary_name = tempfile.mkstemp(prefix=".export-", suffix=".tmp", dir=show_dir)
+            temporary = Path(temporary_name)
+            reserved = False
+            try:
+                with os.fdopen(descriptor, "wb") as output, source.open("rb") as input_file:
+                    copy_chunks(input_file, output)
+                    output.flush()
+                    os.fsync(output.fileno())
+                shutil.copystat(source, temporary)
+                while True:
+                    try:
+                        with target.open("xb"):
+                            pass
+                        reserved = True
+                        break
+                    except FileExistsError:
+                        target = show_dir / f"{stem} ({counter}){suffix}"
+                        counter += 1
+                os.replace(temporary, target)
+            except BaseException:
+                if reserved:
+                    target.unlink(missing_ok=True)
+                raise
+            finally:
+                temporary.unlink(missing_ok=True)
+            return str(target)
+
         def work():
-            copied = []
-            import tempfile
+            copied, failed = [], []
             for item in snapshots:
                 source = Path(item.downloaded_path)
                 if not source.is_file():
                     continue
-                show_dir = target_root / self._safe_filename(item.show, "Podcast")
-                show_dir.mkdir(parents=True, exist_ok=True)
-                date = (item.published_at or "")[:10]
-                stem = self._safe_filename(f"{date} {item.title}".strip(), f"Episode {item.episode_id}")
-                suffix = source.suffix or ".media"
-                target = show_dir / f"{stem}{suffix}"
-                counter = 2
-                descriptor, temporary_name = tempfile.mkstemp(prefix=".export-", suffix=".tmp", dir=show_dir)
-                temporary = Path(temporary_name)
-                reserved = False
                 try:
-                    with os.fdopen(descriptor, "wb") as output, source.open("rb") as input_file:
-                        shutil.copyfileobj(input_file, output)
-                        output.flush()
-                        os.fsync(output.fileno())
-                    shutil.copystat(source, temporary)
-                    while True:
-                        try:
-                            with target.open("xb"):
-                                pass
-                            reserved = True
-                            break
-                        except FileExistsError:
-                            target = show_dir / f"{stem} ({counter}){suffix}"
-                            counter += 1
-                    os.replace(temporary, target)
-                except BaseException:
-                    if reserved:
-                        target.unlink(missing_ok=True)
-                    raise
-                finally:
-                    temporary.unlink(missing_ok=True)
-                copied.append(str(target))
-            return copied
+                    copied.append(export_one(item, source))
+                except Cancelled:
+                    break
+                except OSError as exc:
+                    # One unreadable file or a full drive must not hide what
+                    # was already copied.
+                    failed.append(f"{source.name}: {exc.strerror or exc}")
+            return {"copied": copied, "failed": failed}
 
         self._notify("Exporting media…")
-        self._run_task("export-downloads", work, str(target_root))
+        # File copies run beside downloads, not on the workers serving
+        # library reads, which a long export used to hold up.
+        self._run_task("export-downloads", work, str(target_root), pool=self.download_jobs)
 
     def _cancel_downloads(self):
         if self.downloads is None:
@@ -5901,14 +5924,17 @@ class MainWindow(QMainWindow):
         if result.status != JobStatus.OK:
             self._notify(result.message or "Media export failed", "error")
             return
-        paths = list(result.value)
-        if not paths:
+        paths, failed = list(result.value["copied"]), list(result.value["failed"])
+        if not paths and not failed:
             self._notify("No downloaded files were available to export", "error")
             return
         listing = "\n".join(paths[:8]) + ("\n…" if len(paths) > 8 else "")
+        if failed:
+            listing += (f"\n\nCould not export {len(failed)} file{'s' if len(failed) != 1 else ''}:\n"
+                        + "\n".join(failed[:5]) + ("\n…" if len(failed) > 5 else ""))
         dialog = ConfirmDialog(
             f"Exported {len(paths)} media file{'s' if len(paths) != 1 else ''}",
-            listing,
+            listing.strip(),
             "Open folder", parent=self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
