@@ -597,6 +597,19 @@ class LibraryRepository:
         with self.database.connect() as connection:
             connection.execute("UPDATE shows SET health=? WHERE id=?", (health.value, show_id))
 
+    def reconcile_interrupted_refreshes(self) -> int:
+        """Settle "loading" health that no running refresh owns.
+
+        Refresh stores it before fetching. A quit that has to cut a fetch
+        short leaves it behind, and the podcast would show Refreshing until
+        something refreshed it again.
+        """
+        with self.database.connect() as connection:
+            return connection.execute(
+                "UPDATE shows SET health=CASE WHEN suspended=1 THEN 'suspended' "
+                "WHEN fail_count>0 THEN 'error' ELSE 'unknown' END WHERE health='loading'"
+            ).rowcount
+
     def record_refresh_success(
         self,
         show_id: int,

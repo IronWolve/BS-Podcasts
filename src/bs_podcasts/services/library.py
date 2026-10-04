@@ -37,6 +37,9 @@ class LibraryService:
         self.downloads = None
         self.playback = None
         self._subscription_lock = RLock()
+        # Built once per run, before any refresh starts: a "loading" health
+        # still stored now belongs to a fetch the previous run cut short.
+        repository.reconcile_interrupted_refreshes()
 
     @staticmethod
     def normalize_feed_url(url: str) -> str:
