@@ -3,6 +3,7 @@
 from contextlib import closing, contextmanager
 from pathlib import Path
 from datetime import datetime
+import logging
 import os
 import shutil
 import sqlite3
@@ -10,6 +11,8 @@ import threading
 import weakref
 import tempfile
 from .files import private_file
+
+_log = logging.getLogger("bs_podcasts")
 
 
 class _Connection(sqlite3.Connection):
@@ -97,6 +100,7 @@ class Database:
         self._handles = weakref.WeakSet()
         self._handles_lock = threading.Lock()
         self._generation = 0
+        self.last_repair_lost = {}
         self._preexisting = self.path.is_file() and self.path.stat().st_size > 0
         if self.path.is_file() and not self._preexisting:
             # An existing but empty file is damage (full disk, failed copy,
@@ -383,9 +387,12 @@ class Database:
             replace_error = None
             try:
                 with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(temporary)) as destination:
-                    script = "\n".join(source.iterdump())
-                    destination.executescript(script)
+                    lost = self._salvage(source, destination)
                     destination.commit()
+                    self.last_repair_lost = lost
+                    if lost:
+                        _log.warning("Repair could not read every row: %s", ", ".join(
+                            f"{table}: {'all' if count is None else count}" for table, count in sorted(lost.items())))
                     # Shared readers require WAL after replacement too.
                     destination.execute("PRAGMA journal_mode=WAL")
                     report = destination.execute("PRAGMA quick_check").fetchone()[0]
@@ -416,3 +423,79 @@ class Database:
                 Path(str(self.path) + sidecar).unlink(missing_ok=True)
             # Old handles were closed before any snapshot or replacement.
             return damaged
+
+    @classmethod
+    def _salvage(cls, source, destination) -> dict:
+        """Copy the schema and rows table by table into a fresh file.
+
+        Rows stream in batches rather than as one dump script held in
+        memory. When a table has unreadable pages, the rowid ranges that
+        still read are kept. Returns the rows left out per table (None when
+        the whole table was unreadable). Indexes and triggers come last, as
+        in a dump, so triggers do not fire for copied rows.
+        """
+        source.row_factory = None
+        lost = {}
+        tables = source.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' AND sql NOT NULL ORDER BY name"
+        ).fetchall()
+        for name, sql in tables:
+            if name.startswith("sqlite_"):
+                continue  # statistics only; no table uses AUTOINCREMENT sequences
+            destination.execute(sql)
+            table = '"' + name.replace('"', '""') + '"'
+            width = len(destination.execute(f"PRAGMA table_info({table})").fetchall())
+            insert = f"INSERT INTO {table} VALUES ({','.join('?' * width)})"
+            destination.execute("SAVEPOINT salvage")
+            try:
+                cls._copy_rows(source, destination, f"SELECT * FROM {table}", (), insert)
+            except sqlite3.DatabaseError:
+                destination.execute("ROLLBACK TO salvage")
+                lost[name] = cls._copy_readable_ranges(source, destination, table, insert)
+            destination.execute("RELEASE salvage")
+        for (sql,) in source.execute(
+            "SELECT sql FROM sqlite_master WHERE type IN ('index', 'trigger', 'view') AND sql NOT NULL"
+        ).fetchall():
+            destination.execute(sql)
+        lost = {table: count for table, count in lost.items() if count != 0}
+        if "episodes" in lost:
+            # Per-show counts are cached (migration 014) and only adjusted by
+            # triggers; recount them for the episodes that were kept.
+            destination.execute(
+                "UPDATE shows SET episode_count=(SELECT COUNT(*) FROM episodes e WHERE e.show_id=shows.id), "
+                "new_count=(SELECT COUNT(*) FROM episodes e WHERE e.show_id=shows.id AND e.is_new=1)"
+            )
+        return lost
+
+    @staticmethod
+    def _copy_rows(source, destination, query, params, insert):
+        cursor = source.execute(query, params)
+        while rows := cursor.fetchmany(500):
+            destination.executemany(insert, rows)
+
+    @classmethod
+    def _copy_readable_ranges(cls, source, destination, table, insert):
+        # Halve every rowid range that fails to read until single rowids
+        # remain; each of those is counted as a row that could not be read.
+        try:
+            low, high = source.execute(f"SELECT min(rowid), max(rowid) FROM {table}").fetchone()
+        except sqlite3.DatabaseError:
+            return None
+        if low is None:
+            return 0
+        lost, ranges = 0, [(low, high)]
+        while ranges:
+            start, end = ranges.pop()
+            destination.execute("SAVEPOINT salvage_range")
+            try:
+                cls._copy_rows(source, destination, f"SELECT * FROM {table} WHERE rowid BETWEEN ? AND ?",
+                               (start, end), insert)
+            except sqlite3.DatabaseError:
+                destination.execute("ROLLBACK TO salvage_range")
+                if start == end:
+                    lost += 1
+                else:
+                    middle = (start + end) // 2
+                    ranges.extend(((middle + 1, end), (start, middle)))
+            destination.execute("RELEASE salvage_range")
+        return lost
