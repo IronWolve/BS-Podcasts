@@ -118,7 +118,10 @@ class _BusinessBridge(QObject):
     KINDS = frozenset({'download', 'refresh', 'artwork', 'details', 'unsubscribe',
         'remove-shows', 'reset-library', 'delete-downloads', 'discard-download',
         'opml-import', 'library-changed', 'play-prepared', 'database-repair',
-        'database-maintenance', 'database-health', 'integrity', 'export-downloads'})
+        'database-maintenance', 'database-health', 'integrity', 'export-downloads',
+        # Previews that open a confirmation: a theme change must not drop it.
+        'unsubscribe-preview', 'remove-preview', 'reset-preview', 'played-previews',
+        'delete-downloads-preview'})
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -1330,7 +1333,7 @@ class MainWindow(QMainWindow):
         def work():
             shows = library.shows()
             return shows, [library.removal_preview(show.id) for show in shows]
-        self._run_read(work, self._confirm_reset_library, "reset-preview")
+        self._run_task("reset-preview", work)
 
     def _confirm_reset_library(self, data):
         shows, previews = data
@@ -3772,9 +3775,9 @@ class MainWindow(QMainWindow):
         if self.downloads is None:
             return
         ids = [item.episode_id for item in items if item.episode_id]
-        self._run_read(lambda: [preview for episode_id in ids
-            if (preview := self.downloads.cleanup_preview(episode_id)) is not None],
-            self._confirm_delete_downloads, 'delete-downloads-preview')
+        downloads = self.downloads
+        self._run_task('delete-downloads-preview', lambda: [preview for episode_id in ids
+            if (preview := downloads.cleanup_preview(episode_id)) is not None])
 
     def _confirm_delete_downloads(self, previews):
         if not previews:
@@ -5446,6 +5449,8 @@ class MainWindow(QMainWindow):
             "statistics": self._on_statistics,
             "update-check": self._on_update_check,
             "remove-preview": self._on_remove_preview,
+            "reset-preview": self._on_preview_confirmation(self._confirm_reset_library, "Couldn't read what would be removed"),
+            "delete-downloads-preview": self._on_preview_confirmation(self._confirm_delete_downloads, "Couldn't read those downloads"),
             "remove-shows": self._on_remove_shows,
             "reset-library": self._on_remove_shows,
             "database-health": self._on_database_health,
@@ -5463,6 +5468,17 @@ class MainWindow(QMainWindow):
             "preview-scan": self._on_preview,
             "download": self._on_download,
         }
+
+    def _on_preview_confirmation(self, confirm, failure):
+        """Completion handler for a preview that opens a confirmation."""
+        def handle(kind, identifier, result):
+            if result.status == JobStatus.OK:
+                confirm(result.value)
+                return
+            if kind == "reset-preview":
+                self.podcast_page.banner.clear()
+            self._notify(result.message or failure, "error")
+        return handle
 
     def _on_unsubscribe_preview(self, kind, identifier, result):
         self._unsubscribing.discard(identifier)
