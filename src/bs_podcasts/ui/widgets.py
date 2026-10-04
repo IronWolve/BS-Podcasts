@@ -3399,6 +3399,7 @@ class PlayerBar(QFrame):
         self._compact = False
         self._now_title = "Nothing playing"
         self._now_show = "Choose an episode to begin"
+        self._now_notice = ""
         # Three zones with SYMMETRIC sides, so the transport sits at the true
         # centre of the bar: the side columns carry equal stretch and an equal
         # minimum width. A long title lengthens inside its own column instead
@@ -3743,12 +3744,15 @@ class PlayerBar(QFrame):
         self.title.setToolTip(
             plain_tooltip(self._now_title) if title != self._now_title else "Show now playing"
         )
-        show = self.show_label.fontMetrics().elidedText(self._now_show, Qt.TextElideMode.ElideRight, avail)
+        # A playback notice ("Reconnecting…") borrows the show line until the
+        # service clears it; the show name comes straight back afterwards.
+        line = getattr(self, "_now_notice", "") or self._now_show
+        show = self.show_label.fontMetrics().elidedText(line, Qt.TextElideMode.ElideRight, avail)
         self.show_label.setText(show)
         # Elided: the full name wins the tooltip (text-is-never-cut-off rule).
         # Whole: say what a click does, when it does something.
-        if show != self._now_show:
-            self.show_label.setToolTip(self._now_show)
+        if show != line:
+            self.show_label.setToolTip(line)
         else:
             self.show_label.setToolTip("Open this podcast's episodes" if self._now_show_id else "")
 
@@ -3965,6 +3969,10 @@ class PlayerBar(QFrame):
         self._now_title = snapshot.title if self._has_episode else "Nothing playing"
         self._now_show = snapshot.show_title or ("Choose an episode to begin" if not self._has_episode else "")
         self._now_show_id = int(getattr(snapshot, "show_id", 0) or 0)
+        # Errors reach the user as a toast with Retry; a download wait is
+        # already spelled out on the status line below.
+        quiet = str(snapshot.state) == "error" or self._download_wait
+        self._now_notice = "" if quiet else (snapshot.message or "")
         self._elide_now_labels()
         self.art.set_artwork(snapshot.artwork_path, initials(snapshot.show_title or snapshot.title), "")
         self._duration = media_seconds(snapshot.duration) or 0.0
