@@ -191,18 +191,25 @@ class DownloadService:
         with self._lock:
             return episode_id in self._cancellations or (episode_id in self._queued and not self._queued[episode_id].is_set())
 
-    def queue(self, episode_id: int):
+    def queue(self, episode_id: int, priority: bool = False):
         """Register intent before a worker slot is available, without I/O.
 
         The ticket itself is memory-only. A writer thread then records it as
         a queued row, so a quit or crash before a worker reaches it leaves a
         download the next start parks as Paused, instead of nothing at all.
+
+        `priority` is a play intent bound for the caller's own worker: a
+        ticket still waiting behind background downloads is replaced, and
+        its job finds itself stale and returns without transferring. A
+        transfer that already started is left to finish (None).
         """
         with self._lock:
             if episode_id in self._retiring_episodes or episode_id in self._deleting_episodes:
                 return None
             active, queued = self._cancellations.get(episode_id), self._queued.get(episode_id)
-            if (active is not None and not active.is_set()) or (queued is not None and not queued.is_set()):
+            if active is not None and not active.is_set():
+                return None
+            if queued is not None and not queued.is_set() and not priority:
                 return None
             ticket = Event()
             self._queued[episode_id] = ticket
