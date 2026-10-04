@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from PySide6.QtCore import (
     QEvent,
+    QObject,
     QPoint,
     QPropertyAnimation,
     QRect,
@@ -678,6 +679,27 @@ def fit_combo_width(combo, floor: int = 0) -> int:
     for index in range(combo.count()):
         combo.setItemData(index, combo.itemText(index), Qt.ItemDataRole.ToolTipRole)
     return width
+
+
+class _WheelNeedsFocus(QObject):
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Wheel and not watched.hasFocus():
+            # Ignored and filtered: the wheel moves on to the scrolling parent
+            # and the value under the pointer stays put.
+            event.ignore()
+            return True
+        return False
+
+
+def wheel_needs_focus(*fields):
+    """Combo and spin boxes change only once clicked or tabbed into.
+
+    Scrolling a page past an unfocused field used to change it — and save it —
+    under the pointer: scrolling over Theme rebuilt the whole window.
+    """
+    for field in fields:
+        field.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        field.installEventFilter(_WheelNeedsFocus(field))
 
 
 # Below this page width the header drops its inline filter and the chip

@@ -36,7 +36,7 @@ from . import icons
 from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
 from .widgets import combo_chrome_px as widgets_combo_chrome_px
-from .widgets import PlainTextLabel
+from .widgets import PlainTextLabel, wheel_needs_focus
 from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, reduced_motion, scaled_px
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 
@@ -729,6 +729,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.topic.setEnabled(False)
             self.topic.addItem("Choose a category first")
             secondary_filters.addWidget(self.topic)
+            wheel_needs_focus(self.category, self.topic)
             filter_layout.addWidget(self.secondary_filters_widget)
             self.root.addWidget(filters)
             self.result_summary = PlainTextLabel("Choose For You, search, or select a category.")
@@ -1836,6 +1837,10 @@ class SettingsPage(BasePage):
         self.ui_font.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.font", self.ui_font.itemData(index)))
         self.hover_previews.toggled.connect(lambda value: self.setting_changed.emit("ui.item_tooltips", "1" if value else "0"))
         self.episode_lines.valueChanged.connect(lambda value: self.setting_changed.emit("ui.episode_lines", str(value)))
+        wheel_needs_focus(
+            self.speed, self.skip_back, self.skip_forward, self.refresh_interval, self.search_depth,
+            self.auto_download_limit, self.theme, self.density, self.text_size, self.ui_font, self.episode_lines,
+        )
 
         # Desktop --------------------------------------------------------------
         desktop_card, desktop_form = self._card("Desktop", "Small, optional desktop conveniences.")
