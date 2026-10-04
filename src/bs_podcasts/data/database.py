@@ -215,14 +215,16 @@ class Database:
     def _initialize(self):
         migrations_dir = Path(__file__).with_name("migrations")
         migrations = sorted(migrations_dir.glob("[0-9][0-9][0-9]_*.sql"))
+        shipped = {int(m.name.split("_", 1)[0]) for m in migrations}
         # The pre-migration backup must be the FIRST thing that touches a
         # preexisting file: the WAL pragma and the schema_migrations CREATE
         # below both mutate it, so backing up after them snapshots a file the
         # about-to-run migration has already partly shaped. Peeking read-only
         # decides whether a backup is due without writing anything.
-        if self._preexisting and migrations:
+        if self._preexisting:
             applied = self._applied_versions_readonly()
-            if any(int(m.name.split("_", 1)[0]) not in applied for m in migrations):
+            self._refuse_newer_schema(applied, shipped)
+            if shipped - applied:
                 self._backup_before_migration()
         with self.connect() as connection:
             # WAL is persistent in the database file; setting it once here keeps
@@ -238,6 +240,7 @@ class Database:
                 row["version"]
                 for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
             }
+        self._refuse_newer_schema(applied_versions, shipped)
         pending = [migration for migration in migrations if int(migration.name.split("_", 1)[0]) not in applied_versions]
         for migration in pending:
             version = int(migration.name.split("_", 1)[0])
@@ -249,6 +252,19 @@ class Database:
                     + f"\nINSERT INTO schema_migrations(version) VALUES ({version});\n"
                     + "COMMIT;"
                 )
+
+    @staticmethod
+    def _refuse_newer_schema(applied, shipped):
+        # A newer release has migrated this library. Code from this build
+        # would write rows its schema no longer expects, and the newer
+        # release never re-migrates them. Refuse before any write.
+        newest, known = max(applied, default=0), max(shipped, default=0)
+        if newest > known:
+            raise sqlite3.DatabaseError(
+                f"This library was updated by a newer version of the app (library format {newest}; "
+                f"this version understands up to {known}). It was left unchanged. "
+                "Open it with the newer version."
+            )
 
     @classmethod
     def migration_pending(cls, path) -> bool:
