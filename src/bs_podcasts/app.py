@@ -218,6 +218,23 @@ def _close_local_server(server):
     server.close()
 
 
+def _finalize_unclosed(commands, playback, grace_seconds: float = 2.0) -> int:
+    """Finish playback and kept commands when the quit bypassed the window.
+
+    On Windows sign-out or shutdown the toolkit emits aboutToQuit and the
+    system ends the process right after it, so neither the window's close
+    drain nor the code after exec() runs. An ordinary Quit has already
+    closed the queue through the window; then this does nothing."""
+    if commands.closing:
+        return 0
+    import time
+
+    commands.finish(playback.shutdown)
+    deadline = time.monotonic() + grace_seconds
+    busy = commands.join(max(0.0, deadline - time.monotonic()))
+    return busy + playback.join_persistence(max(0.0, deadline - time.monotonic()))
+
+
 def _claim_single_instance(app):
     """Listen after the library lease is held, or yield to a live instance.
 
@@ -504,6 +521,14 @@ def main() -> int:
         else None
     )
     app.aboutToQuit.connect(lambda: downloads.pause_all())
+    # Last: the settings write queued above is kept and drained with playback.
+    app.aboutToQuit.connect(lambda: _finalize_unclosed(commands, playback))
+    # A session-end query may still be cancelled, so only save, never close.
+    session_query = getattr(app, "commitDataRequest", None)
+    if session_query is not None:
+        session_query.connect(
+            lambda _manager: state["window"]._save_layout() if state["window"] is not None else None
+        )
     code = app.exec()
     commands.finish(playback.shutdown)
     # Bounded shutdown: cancel pending jobs, give running ones a moment, then
