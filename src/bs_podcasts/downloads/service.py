@@ -337,6 +337,17 @@ class DownloadService:
                 raise DownloadError("The download record is no longer available.")
             target = Path(prepared.target_path)
             partial = Path(prepared.partial_path) if prepared.partial_path else target.with_suffix(target.suffix + ".part")
+            if self._left_behind(target, partial):
+                # Nothing on disk to resume, and the record still names an
+                # older downloads folder: start over in the current one.
+                # Recreating the old folder brought back one the user had
+                # deleted after moving downloads, and one that could not be
+                # recreated (an unplugged drive) failed every Resume and Retry.
+                target = self._target(episode_id, episode.media_url)
+                partial = target.with_suffix(target.suffix + ".part")
+                self.downloads.remove(episode_id)
+                if self.downloads.prepare(episode_id, episode.media_url, target, partial) is None:
+                    raise DownloadError("The download record is no longer available.")
             if cancellation.is_set():
                 return self._park(episode_id, partial)
             # Setup lives inside the guard: an unusable path (mkdir or
@@ -405,6 +416,23 @@ class DownloadService:
                     self._cancellations.pop(episode_id, None)
                     self._started.pop(episode_id, None)
                     self._short_ends.pop(episode_id, None)
+
+    def _left_behind(self, target: Path, partial: Path) -> bool:
+        """True for a record outside the current downloads folder with no file of its own on disk."""
+        def folder(path):
+            return os.path.normcase(os.path.abspath(path))
+
+        if folder(target.parent) == folder(self.directory):
+            return False
+        for path in (target, partial):
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return False  # unreadable is not proof that nothing is there
+            return False
+        return True
 
     CANCEL_UNWIND_TIMEOUT = 5.0
 
