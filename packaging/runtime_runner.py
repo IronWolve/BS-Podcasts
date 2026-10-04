@@ -69,7 +69,12 @@ def environment():
     os.environ['PYTHONDONTWRITEBYTECODE']='1'
     private=PROJECT/'.config/runtime.json'
     if private.is_file():
-        values=json.loads(private.read_text()).get('environment',{})
+        try:
+            values=json.loads(private.read_text(encoding='utf-8')).get('environment',{})
+            values=dict(values.items())
+        except (OSError,ValueError,AttributeError,TypeError) as exc:
+            # Name the problem, never the private values.
+            raise SystemExit(f'.config/runtime.json is invalid ({type(exc).__name__}); fix or remove it. Nothing was started.') from None
         allowed={'BS_PODCASTS_GITHUB_URL','BS_PODCASTS_RELEASES_URL','BS_PODCASTS_RELEASES_API_URL','BS_PODCASTS_DATA_DIR'}
         for key,value in values.items():
             if key in allowed and isinstance(value,str):
