@@ -881,7 +881,7 @@ class MainWindow(QMainWindow):
         self._restoring_view = True
         try:
             if hero:
-                show = self.library.repository.get_show(hero)
+                show = self._stored_show(hero)
                 if show is not None:
                     self._open_podcast(self._ui_podcast(show))
                     return
@@ -1268,7 +1268,7 @@ class MainWindow(QMainWindow):
     def _remove_unreachable(self):
         if self.library is None:
             return
-        problems = [show for show in self.library.shows() if show.health.value in {"error", "suspended"}]
+        problems = [show for show in self._library_shows() if show.health.value in {"error", "suspended"}]
         if not problems:
             self._notify("No unreachable podcasts")
             return
@@ -2876,7 +2876,7 @@ class MainWindow(QMainWindow):
         elif index == PAGE_QUEUE:
             menu.addSeparator()
             clear = menu.addAction("Clear Up Next…", self._clear_queue)
-            clear.setEnabled(bool(self.library and self.library.queue()))
+            clear.setEnabled(bool(self.library and self.playlist_page._all_items))
         elif index == PAGE_DOWNLOADS:
             menu.addSeparator()
             pause = menu.addAction("Pause active downloads", self._cancel_downloads)
@@ -3120,6 +3120,18 @@ class MainWindow(QMainWindow):
         if menu is not None:
             menu.exec(global_position)
 
+    def _stored_show(self, show_id):
+        """A show from the library mirror. Only one the last reload has not
+        seen yet (just added, or before the first load) is read directly."""
+        show = next((show for show in self._stored_shows if show.id == show_id), None)
+        if show is None and show_id and self.library is not None:
+            show = self.library.repository.get_show(show_id)
+        return show
+
+    def _library_shows(self):
+        """Every show from the library mirror once the first load landed."""
+        return list(self._stored_shows) if self._stored_shows_ready else self.library.shows()
+
     def _episode_show_info(self, episode):
         if episode.show_id and self.library is not None:
             return self.library.repository.get_show(episode.show_id)
@@ -3141,14 +3153,14 @@ class MainWindow(QMainWindow):
         if isinstance(item, UiPodcast):
             source = None
             if item.show_id and self.library is not None:
-                source = self.library.repository.get_show(item.show_id)
+                source = self._stored_show(item.show_id)
             elif item.feed_url:
                 source = self._previews.get(item.feed_url)
             PodcastInfoDialog(item, source, self).exec()
 
     def _show_hero_information(self):
         if self._hero_show_id and self.library is not None:
-            show = self.library.repository.get_show(self._hero_show_id)
+            show = self._stored_show(self._hero_show_id)
             if show is not None:
                 PodcastInfoDialog(self._ui_podcast(show), show, self).exec()
             return
@@ -3177,10 +3189,18 @@ class MainWindow(QMainWindow):
     def _show_playing_information(self):
         if not self._playing_episode_id or self.library is None:
             return
-        episode = self.library.episode(self._playing_episode_id)
-        if episode is not None:
-            item = self._ui_episode(episode)
-            self._show_episode_information(item, self.library.repository.get_show(episode.show_id))
+        library, episode_id = self.library, self._playing_episode_id
+
+        def work():
+            episode = library.episode(episode_id)
+            return episode, library.repository.get_show(episode.show_id) if episode is not None else None
+
+        def apply(data):
+            episode, show = data
+            if episode is not None:
+                self._show_episode_information(self._ui_episode(episode), show)
+
+        self._run_read(work, apply, "playing-information")
 
     def _show_search_result_menu(self, payload, global_position):
         self._create_search_result_menu(payload).exec(global_position)
@@ -3734,12 +3754,25 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
 
     def _download_menu(self, episode_id: int, global_position):
-        episode = self.library.episode(episode_id) if self.library else None
+        """The pane's download menu, built once a worker has read the episode
+        and its download record: on the window thread a right-click waited
+        on the whole downloads table, and on maintenance's database lock."""
+        if self.library is None:
+            return
+        library, downloads = self.library, self.downloads
+
+        def work():
+            episode = library.episode(episode_id)
+            record = next((r for r in downloads.records() if r.episode_id == episode_id), None) if downloads and episode else None
+            return episode, record
+
+        self._run_read(work, lambda data: self._open_download_menu(episode_id, global_position, *data), "download-menu")
+
+    def _open_download_menu(self, episode_id, global_position, episode, record):
         if episode is None:
             return
         item = self._ui_episode(episode)
         menu = QMenu(self)
-        record = next((r for r in self.downloads.records() if r.episode_id == episode_id), None) if self.downloads else None
         state = record.state.value if record is not None else ""
         if state in {"downloading", "queued"}:
             menu.addAction(icons.icon("pause", COLORS["text"], 16), "Pause download", lambda: self._pause_download(episode_id))
@@ -5410,7 +5443,7 @@ class MainWindow(QMainWindow):
         # A visible Refresh all is already running; a background one joins.
         if self.library is None or (self._refresh_batch[0] and not self._refresh_quiet):
             return
-        shows = [show for show in self.library.shows() if show.source != "local" and not show.suspended]
+        shows = [show for show in self._library_shows() if show.source != "local" and not show.suspended]
         if not shows:
             self.episode_page.banner.show_state("empty", "There are no podcasts to refresh.")
             return
