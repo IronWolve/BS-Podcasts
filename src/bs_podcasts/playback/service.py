@@ -916,13 +916,14 @@ class PlaybackService:
                                 # A later user load wins, but an already ended
                                 # outgoing episode still needs its completion.
                                 self._complete_episode(finished_snapshot)
-                        except Exception:
+                        except Exception as exc:
                             logger.exception("Could not save episode completion")
                             if generation == self._load_generation:
                                 self._cancel_load_watchdog()
+                            reason = str(exc) if isinstance(exc, PlaybackUnavailable) else "Check library storage and retry."
                             self.snapshot = replace(self.snapshot,
                                 state=PlaybackState.ERROR if generation == self._load_generation else self.snapshot.state,
-                                message="Playback ended, but saving completion failed. Check library storage and retry.",
+                                message="Playback ended, but saving completion failed. " + reason,
                                 buffering=None, completed_episode_id=0)
                             self._emit()
                 self._dispatch(finish)
@@ -1197,11 +1198,16 @@ class PlaybackService:
         episode_id = snapshot.episode_id
         if episode_id is None:
             return
+        # Runs under the service lock. Waiting here for maintenance to free
+        # the database would hold every native event and transport command.
+        if self.repository.database.maintenance_active:
+            raise PlaybackUnavailable("Library maintenance is running; play the episode again when it finishes.")
         end = snapshot.duration or snapshot.position
         if self.snapshot.episode_id == episode_id:
             self.snapshot = replace(self.snapshot, position=end, buffering=None)
-        self.repository.set_observed_duration(episode_id, end)
         if end:
+            self._persistence.submit(('duration', episode_id),
+                lambda value: self.repository.set_observed_duration(episode_id, value), end)
             stamp = self._write_stamp()
             self._persistence.submit(
                 ('position', episode_id),
