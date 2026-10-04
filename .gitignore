@@ -75,6 +75,7 @@
 !/packaging/project-sync.sh
 !/packaging/render-desktop.py
 !/packaging/release_archives.py
+!/packaging/report.py
 !/packaging/requirements-linux.lock
 !/packaging/requirements-macos.lock
 !/packaging/requirements-windows.lock

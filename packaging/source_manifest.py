@@ -280,12 +280,12 @@ def check(root=ROOT, require_deny=True, ran=None):
     return len(files)
 
 
-def stage(destination, root=ROOT):
+def stage(destination, root=ROOT, ran=None):
     root = Path(root).resolve()
     destination = Path(destination).resolve()
     if destination.is_relative_to(root) or root.is_relative_to(destination):
         raise ValueError('Staging must be outside the source checkout and cannot contain it.')
-    check(root, require_deny=True)
+    check(root, require_deny=True, ran=ran)
     files, _ = inventory(root)
     tracked = tracking_difference(root, files)
     expected = source_digest(root)
@@ -323,12 +323,19 @@ if __name__ == '__main__':
     parser.add_argument('--destination', type=Path)
     parser.add_argument('--allow-missing-deny', action='store_true',
                         help='check without the private deny file (reported as skipped)')
+    parser.add_argument('--plain', action='store_true', help='no colour')
     args = parser.parse_args()
+    if args.operation in ('check', 'stage'):
+        from report import Reporter, size_text, tree_size
+        console = Reporter(plain=args.plain)
     if args.operation == 'check':
         ran = []
-        print(f'Approved source files: {check(require_deny=not args.allow_missing_deny, ran=ran)}')
+        count = check(require_deny=not args.allow_missing_deny, ran=ran)
+        console.ok(f'Approved source files: {count}')
+        skipped = [line for line in ran if 'SKIPPED' in line]
         for line in ran:
-            print('  ' + line, file=sys.stderr if 'SKIPPED' in line else sys.stdout)
+            console.line('warn' if line in skipped else 'ok', line)
+        console.stats([('source files', str(count)), ('gates', f'{len(ran) - len(skipped)} checked, {len(skipped)} skipped')])
     elif args.operation == 'hash':
         print(source_digest())
     elif args.operation == 'list':
@@ -339,4 +346,9 @@ if __name__ == '__main__':
     elif args.destination is None:
         parser.error('stage requires --destination')
     else:
-        print(stage(args.destination))
+        ran = []
+        staged = stage(args.destination, ran=ran)
+        files, total = tree_size(staged)
+        console.ok(f'Staged approved source: {staged}')
+        console.stats([('files', f'{files} (manifest plus origin record)'), ('size', size_text(total)),
+                       ('source SHA-256', source_digest(staged)), ('gates', f'{len(ran)} checked')])

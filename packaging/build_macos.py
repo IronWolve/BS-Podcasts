@@ -14,6 +14,7 @@ import tomllib
 
 from source_manifest import ROOT, stage, source_digest, file_digest, check as check_source
 from check_dependencies import check
+from report import Reporter, size_text, tree_size
 
 
 # Mac rollbacks are named by mkdtemp with this prefix. The shared folder also
@@ -57,14 +58,14 @@ def diagnostic(app, work):
     return result
 
 
-def build(workspace, prune=False):
+def build(workspace, prune=False, report=None):
     if sys.platform != 'darwin' or platform.machine() != 'arm64':
         raise RuntimeError('This recipe requires an arm64 Mac; universal2 is not implied.')
     check(ROOT/'packaging/requirements-macos.lock')
     work=Path(tempfile.mkdtemp(prefix=ROLLBACK_PREFIX,dir=workspace/'tmp'))
     replaced=False
     try:
-        replaced=_finish_macos(workspace, work, prune)
+        replaced=_finish_macos(workspace, work, prune, report or Reporter())
     finally:
         source=work/'source'
         if source.exists():
@@ -74,7 +75,7 @@ def build(workspace, prune=False):
             shutil.rmtree(work)
 
 
-def _finish_macos(workspace, work, prune=False):
+def _finish_macos(workspace, work, prune, report):
     snapshot=stage(work/'source')
     version=tomllib.loads((snapshot/'pyproject.toml').read_text())['project']['version']
     native=workspace/'.cache/macos-build/libmpv-lgpl/libmpv.2.dylib'
@@ -148,10 +149,16 @@ def _finish_macos(workspace, work, prune=False):
         raise
     # Rollbacks are user recovery data: pruning is an explicit opt-in, as on Windows.
     pruned=prune_previous_deployments(workspace/'.cache/previous-deployments',retain=previous) if prune else None
-    print(f'Built and headless/relocation-verified BS Podcasts {version}: {target}',flush=True)
-    print('Signing: '+('Developer ID; notarization still separate' if os.environ.get('BS_PODCASTS_SIGN_IDENTITY') else 'ad-hoc only; not notarized'))
-    print(f'Previous artifacts retained: {previous}; '+(f'older Mac rollbacks pruned: {len(pruned)}' if pruned is not None
-          else 'older rollbacks kept (--prune-old-deployments keeps only the newest 3)'))
+    signed=bool(os.environ.get('BS_PODCASTS_SIGN_IDENTITY'))
+    app_files,app_bytes=tree_size(target/app.name)
+    report.ok(f'Built and headless/relocation-verified BS Podcasts {version}: {target}')
+    (report.ok if signed else report.warn)('Signing: '+('Developer ID; notarization still separate' if signed else 'ad-hoc only; not notarized'))
+    report.ok(f'Previous artifacts retained: {previous}')
+    if pruned is None:
+        report.info('Older rollbacks kept (--prune-old-deployments keeps only the newest 3).')
+    report.stats([('version',version),('app files',str(app_files)),('app size',size_text(app_bytes)),
+                  ('archive',f'{archive.name}, {size_text((target/archive.name).stat().st_size)}'),
+                  ('rollbacks pruned','none (opt-in)' if pruned is None else str(len(pruned)))])
     return replaced
 
 
@@ -160,13 +167,19 @@ if __name__=='__main__':
     parser.add_argument('--check',action='store_true')
     parser.add_argument('--prune-old-deployments',action='store_true',
                         help='delete all but the newest 3 Mac rollbacks after a successful build')
+    parser.add_argument('--plain',action='store_true',help='no colour')
     args=parser.parse_args()
+    report=Reporter(plain=args.plain)
     if args.check:
         ran=[]
-        print(f'Approved source files: {check_source(ran=ran)}')
-        print('\n'.join('  '+line for line in ran))
+        count=check_source(ran=ran)
+        report.ok(f'Approved source files: {count}')
+        skipped=[line for line in ran if 'SKIPPED' in line]
+        for line in ran:
+            report.line('warn' if line in skipped else 'ok',line)
+        report.stats([('source files',str(count)),('gates',f'{len(ran)-len(skipped)} checked, {len(skipped)} skipped')])
         raise SystemExit(0)
     workspace=Path(os.environ.get('BS_PODCASTS_BUILD_ROOT',ROOT.parent)).resolve()
     with (workspace/'.cache/macos-build.lock').open('a+b') as lease:
         fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        build(workspace, prune=args.prune_old_deployments)
+        build(workspace, prune=args.prune_old_deployments, report=report)

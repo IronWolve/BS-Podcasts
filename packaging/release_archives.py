@@ -20,6 +20,7 @@ from source_manifest import (
     reject_commit_trailers,
 )
 from build_manifest import artifact_inventory
+from report import Reporter, size_text
 
 
 def verify_files(root, records):
@@ -161,7 +162,8 @@ def bundled_player_versions(native):
     return player, ffmpeg
 
 
-def build(output, macos=None):
+def build(output, macos=None, plain=False):
+    console = Reporter(plain=plain)
     check(require_deny=True)
     reject_commit_trailers()
     names, runtime = inventory()
@@ -260,13 +262,20 @@ def build(output, macos=None):
     if git('status', '--porcelain') or git('rev-parse', 'HEAD') != commit or source_digest() != fingerprint:
         raise ValueError('Source changed while release archives were being assembled; outputs remain staged.')
     work.rename(output)
-    print(output)
-    print(json.dumps(report, indent=2))
+    console.ok(f'Release archives assembled from verified inputs: {output}')
+    console.info(f'Report: {output/"release.json"}; checksums: {output/"SHA256SUMS"}')
+    console.info('Nothing was uploaded, published or copied anywhere else.')
+    total = sum(entry['bytes'] for entry in report['archives'].values())
+    console.stats([('version', version), ('source commit', commit[:12]), ('source files', str(len(source_files))),
+                   ('Windows files', str(len(windows_files))), ('Linux files', str(len(linux_files))),
+                   *((name, size_text(entry['bytes'])) for name, entry in report['archives'].items()),
+                   ('total', f'{len(report["archives"])} files, {size_text(total)}')])
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--macos', type=Path, help='Verified Mac ZIP and manifest downloaded from the build host')
+    parser.add_argument('--plain', action='store_true', help='no colour')
     args=parser.parse_args()
-    build(args.output,args.macos)
+    build(args.output,args.macos,args.plain)

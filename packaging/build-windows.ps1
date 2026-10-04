@@ -5,10 +5,40 @@ param(
     [string]$CheckRoot = "",
     [switch]$Clean,
     [switch]$Installer,
-    [switch]$PruneOldDeployments
+    [switch]$PruneOldDeployments,
+    [switch]$Plain
 )
 
 $ErrorActionPreference = "Stop"
+$buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
+# Colour only where ANSI is rendered: the WSL terminal pipe or Windows Terminal.
+# -Plain or NO_COLOR keeps plain text, for example when the output goes to a log.
+$useColour = -not $Plain -and -not $env:NO_COLOR -and ([Console]::IsOutputRedirected -or $env:WT_SESSION)
+
+function Format-Colour([string]$Code, [string]$Text) {
+    if ($script:useColour -and $Code) { return "$([char]27)[${Code}m$Text$([char]27)[0m" }
+    return $Text
+}
+
+function Write-State {
+    param([ValidateSet("ok", "warn", "info")][string]$Level, [string]$Text)
+    $label, $code = @{ ok = @("OK  ", "32"); warn = @("WARN", "33"); info = @("    ", "") }[$Level]
+    Write-Output ((Format-Colour $code $label) + " " + $Text)
+}
+
+function Write-Stats {
+    param([System.Collections.Specialized.OrderedDictionary]$Rows)
+    $Rows["elapsed"] = "{0:N1} s" -f $script:buildTimer.Elapsed.TotalSeconds
+    $width = ($Rows.Keys | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+    Write-Output (Format-Colour "1" "Stats")
+    foreach ($key in $Rows.Keys) {
+        Write-Output ("  " + $key.PadRight($width) + "  " + $Rows[$key])
+    }
+}
+
+function Format-Size([long]$Bytes) {
+    return "{0:N1} MB ({1:N0} bytes)" -f ($Bytes / 1MB), $Bytes
+}
 
 function Remove-OldDeployments {
     param([string]$Root, [string]$Retain, [int]$Keep = 3)
@@ -100,7 +130,7 @@ function Publish-Application {
         if ($PruneOldDeployments) {
             Remove-OldDeployments -Root $MetadataRoot -Retain $previous
         }
-        Write-Output "Previous application and manifest retained: $previous"
+        Write-State ok "Previous application and manifest retained: $previous"
     } finally {
         $lease.Dispose()
     }
@@ -234,7 +264,7 @@ try {
     if ([string]$checked.version -cne $projectVersion) {
         throw "Packaged version '$($checked.version)' differs from pyproject.toml '$projectVersion'; previous application unchanged"
     }
-    Write-Output "Packaged self-check passed for version $projectVersion (no GUI, real profile or audio device)."
+    Write-State ok "Packaged self-check passed for version $projectVersion (no GUI, real profile or audio device)."
 
     # Complete notices and provenance before replacing any previous artifact.
     & $python -B (Join-Path $stageRoot "packaging\check_frozen.py") $sourceDir --private-root $workspace
@@ -251,12 +281,18 @@ try {
     $copiedDir = Join-Path $Destination "BS Podcasts"
 
     $copiedExe = Join-Path $copiedDir "BS Podcasts.exe"
-    $size = (Get-ChildItem -LiteralPath $copiedDir -Recurse -File | Measure-Object -Sum Length).Sum
+    $copiedFiles = @(Get-ChildItem -LiteralPath $copiedDir -Recurse -File)
+    $size = ($copiedFiles | Measure-Object -Sum Length).Sum
     $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $copiedExe
-    Write-Output "Copied application: $copiedDir"
-    Write-Output "Launcher: $copiedExe"
-    Write-Output "Total size: $size bytes"
-    Write-Output "Launcher SHA-256: $($hash.Hash)"
+    Write-State ok "Published BS Podcasts ${projectVersion}: $copiedDir"
+    $stats = [ordered]@{
+        "version" = $projectVersion
+        "app files" = $copiedFiles.Count
+        "app size" = Format-Size $size
+        "launcher" = $copiedExe
+        "launcher SHA-256" = $hash.Hash
+        "rollbacks pruned" = $(if ($PruneOldDeployments) { "older than the newest 3" } else { "none (opt-in)" })
+    }
 
     if ($Installer) {
         $iscc = @(
@@ -271,12 +307,15 @@ try {
         # literal, so the installer advertised a stale version the moment
         # pyproject.toml was bumped without it.
         $appVersion = $projectVersion
-        Write-Output "Installer version: $appVersion"
+        Write-State info "Installer version: $appVersion"
         & $iscc "/DSourceDir=$copiedDir" "/DOutputDir=$Destination" "/DMyAppVersion=$appVersion" $installerSpec
         if ($LASTEXITCODE -ne 0) {
             throw "Inno Setup failed with exit code $LASTEXITCODE"
         }
+        $setup = Join-Path $Destination "BS-Podcasts-Setup.exe"
+        $stats["installer"] = $(if (Test-Path -LiteralPath $setup) { "$setup, " + (Format-Size (Get-Item -LiteralPath $setup).Length) } else { "built in $Destination" })
     }
+    Write-Stats $stats
     $buildSucceeded = $true
 } finally {
     if ($buildSucceeded) {

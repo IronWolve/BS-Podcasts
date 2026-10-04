@@ -12,6 +12,7 @@ import tomllib
 import fcntl
 from source_manifest import ROOT, check, inventory, source_digest, file_digest, stage
 from runtime_state import runtime_lock, retire_stale
+from report import Reporter, size_text
 
 
 # Linux rollbacks are named by mkdtemp with this prefix. The shared folder also
@@ -54,7 +55,7 @@ def checked_version(snapshot):
     return version
 
 
-def install_entrypoints(workspace, destination, previous):
+def install_entrypoints(workspace, destination, previous, report=None):
     template = '''#!/usr/bin/env bash
 set -euo pipefail
 BS_PROJECT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -67,7 +68,7 @@ exec bash "$BS_PROJECT/dists/linux/COMMAND.sh" "$@"
         content = template.replace('COMMAND', command)
         old = content.replace('dists/linux/'+command+'.sh', 'repo/packaging/project-'+command+'.sh')
         if target.is_symlink() or (target.exists() and target.read_text() not in (old, content)):
-            print(f'Customized {command}.sh preserved; use dists/linux/{command}.sh directly.')
+            (report or Reporter()).warn(f'Customized {command}.sh preserved; use dists/linux/{command}.sh directly.')
             continue
         if target.exists():
             shutil.copy2(target, previous/('root-'+command+'.sh'))
@@ -82,7 +83,8 @@ exec bash "$BS_PROJECT/dists/linux/COMMAND.sh" "$@"
             temporary.unlink(missing_ok=True)
 
 
-def deploy(prune=False):
+def deploy(prune=False, report=None):
+    report = report or Reporter()
     workspace = ROOT.parent
     destination = workspace/'dists/linux'
     if not (destination/'.venv/bin/python').is_file():
@@ -93,17 +95,17 @@ def deploy(prune=False):
     destination.mkdir(parents=True,exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=ROLLBACK_PREFIX,dir=workspace/'tmp'))
     try:
-        _deploy_staged(workspace, destination, temporary, prune)
+        _deploy_staged(workspace, destination, temporary, prune, report)
     finally:
         if (temporary.is_dir() and not temporary.is_symlink()
                 and temporary.name.startswith(ROLLBACK_PREFIX) and temporary.is_relative_to(workspace/'tmp')):
             shutil.rmtree(temporary)
 
 
-def _deploy_staged(workspace, destination, temporary, prune=False):
+def _deploy_staged(workspace, destination, temporary, prune, report):
     snapshot = stage(temporary/'source',root=ROOT)
     version = checked_version(snapshot)
-    _, runtime = inventory(snapshot)
+    source_files, runtime = inventory(snapshot)
     for name in runtime:
         if name.endswith('.py'):
             ast.parse((snapshot/name).read_text(encoding='utf-8'),filename=name)
@@ -149,14 +151,19 @@ def _deploy_staged(workspace, destination, temporary, prune=False):
                 (previous/name).rename(destination/name)
             raise
         snapshot.rename(previous/'source-inputs')
-        install_entrypoints(workspace, destination, previous)
+        install_entrypoints(workspace, destination, previous, report)
     # Rollbacks are user recovery data: pruning is an explicit opt-in, as on Windows.
     pruned = prune_previous_deployments(workspace/'.cache/previous-deployments', retain=previous) if prune else None
-    print(f'Built BS Podcasts {version}: {destination}')
-    print(f'Rollback retained: {previous}; ' + (f'older Linux rollbacks pruned: {len(pruned)}' if pruned is not None
-          else 'older rollbacks kept (--prune-old-deployments keeps only the newest 3)'))
-    print(f'Source SHA-256: {record["source_sha256"]}')
-    print('No dependencies installed and no application started. Run ./start.sh when ready.')
+    deployed_bytes = sum((destination/relative).stat().st_size for relative in deployed)
+    report.ok(f'Built BS Podcasts {version}: {destination}')
+    report.ok(f'Rollback retained: {previous}')
+    if pruned is None:
+        report.info('Older rollbacks kept (--prune-old-deployments keeps only the newest 3).')
+    report.info('No dependencies installed and no application started. Run ./start.sh when ready.')
+    report.stats([('version', version), ('source files', str(len(source_files))),
+                  ('source SHA-256', record['source_sha256']), ('deployed files', str(len(deployed))),
+                  ('deployed size', size_text(deployed_bytes)),
+                  ('rollbacks pruned', 'none (opt-in)' if pruned is None else str(len(pruned)))])
 
 
 if __name__ == '__main__':
@@ -166,12 +173,18 @@ if __name__ == '__main__':
     parser.add_argument('--check',action='store_true')
     parser.add_argument('--prune-old-deployments',action='store_true',
                         help='delete all but the newest 3 Linux rollbacks after a successful build')
+    parser.add_argument('--plain',action='store_true',help='no colour')
     args=parser.parse_args()
+    report = Reporter(plain=args.plain)
     if args.check:
         ran = []
-        print(f'Approved source files: {check(ran=ran)}')
-        print('\n'.join('  ' + line for line in ran))
+        count = check(ran=ran)
+        report.ok(f'Approved source files: {count}')
+        skipped = [line for line in ran if 'SKIPPED' in line]
+        for line in ran:
+            report.line('warn' if line in skipped else 'ok', line)
+        report.stats([('source files', str(count)), ('gates', f'{len(ran) - len(skipped)} checked, {len(skipped)} skipped')])
     else:
         with (ROOT.parent/'.cache/linux-build.lock').open('a+b') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
-            deploy(prune=args.prune_old_deployments)
+            deploy(prune=args.prune_old_deployments, report=report)
