@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 import re
 
-from PySide6.QtCore import QPoint, QTimer, QUrl, Qt, Signal, qVersion
+from PySide6.QtCore import QPoint, QSize, QTimer, QUrl, Qt, Signal, qVersion
 from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QKeySequence
 
 from ..urlguard import is_web_url
@@ -262,6 +262,7 @@ class StyledDialog(QDialog):
         self.setObjectName("styledDialogHost")
         self._drag_origin: QPoint | None = None
         self._scrim: QWidget | None = None
+        self._target_size: QSize | None = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(SHADOW_MARGIN, SHADOW_MARGIN, SHADOW_MARGIN, SHADOW_MARGIN)
         self.card = QFrame()
@@ -291,6 +292,10 @@ class StyledDialog(QDialog):
             screen_obj = QApplication.primaryScreen()
             centre = screen_obj.availableGeometry().center() if screen_obj is not None else None
         self.adjustSize()
+        if self._target_size is not None:
+            # adjustSize alone shrank a dialog sized for its content back to
+            # the scroll area's small hint.
+            self.resize(self._target_size)
         if screen_obj is None or centre is None:
             return
         screen = screen_obj.availableGeometry()
@@ -672,7 +677,8 @@ class EpisodeInfoDialog(StyledDialog):
         target_height = min(820, max(600, int(available.height() * 0.88)))
         # Sized, not pinned: a fixed size clipped tall content (many long
         # wrapped URLs at a large type scale) with no way to scroll or grow.
-        self.resize(min(target_width, available.width()), min(target_height, available.height()))
+        self._target_size = QSize(min(target_width, available.width()), min(target_height, available.height()))
+        self.resize(self._target_size)
         self.setMinimumSize(min(560, available.width()), min(420, available.height()))
         self.add_heading(
             _wrap_long_value(getattr(episode, "title", "Episode information")),
