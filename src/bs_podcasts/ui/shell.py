@@ -48,6 +48,7 @@ class PeekFeed(FeedData):
 
 from ..jobs import JobResult, JobStatus
 from ..jobs.commands import CommandQueue
+from ..services.library import LibraryService
 from ..services.preview_cache import PreviewCache, prepare_preview
 from ..urlguard import is_web_url
 from ..privacy import feed_label
@@ -2815,8 +2816,18 @@ class MainWindow(QMainWindow):
         self._run_read(work, apply, "subscribe-url", pool=self.commands, coalesce=False)
 
     @staticmethod
-    def _merge_subscription(item: UiPodcast, show) -> UiPodcast:
-        if item.feed_url != show.feed_url:
+    def _feed_keys(show) -> set:
+        """The keys the library uses to spot the same feed: http or https,
+        www, a trailing slash, or the address a redirect moved it to."""
+        return {LibraryService.normalize_feed_url(url) for url in (show.feed_url, show.canonical_url) if url}
+
+    @classmethod
+    def _subscriptions_by_feed(cls, shows) -> dict:
+        return {key: show for show in shows for key in cls._feed_keys(show)}
+
+    @classmethod
+    def _merge_subscription(cls, item: UiPodcast, show) -> UiPodcast:
+        if LibraryService.normalize_feed_url(item.feed_url) not in cls._feed_keys(show):
             return item
         return replace_item(item, episode_count=show.episode_count, new_count=show.new_count,
                             show_id=show.id, artwork_path=item.artwork_path or show.artwork_path,
@@ -6088,14 +6099,14 @@ class MainWindow(QMainWindow):
             candidates = result.value or []
         podcasts = []
         seen_feeds = set()
-        subscribed = {show.feed_url: show for show in self._stored_shows}
+        subscribed = self._subscriptions_by_feed(self._stored_shows)
         for index, candidate_data in enumerate(candidates):
             candidate, artwork_path = candidate_data
             result_key = (candidate.feed_url, candidate.directory_url or candidate.title) if candidate.chart_type == "trending" else candidate.feed_url
             if result_key in seen_feeds:
                 continue
             seen_feeds.add(result_key)
-            saved = subscribed.get(candidate.feed_url)
+            saved = subscribed.get(LibraryService.normalize_feed_url(candidate.feed_url))
             artwork_path = artwork_path or (saved.artwork_path if saved else "")
             is_chart = bool(candidate.chart_type)
             meta_parts = [part for part in (candidate.author, candidate.genre) if part]
