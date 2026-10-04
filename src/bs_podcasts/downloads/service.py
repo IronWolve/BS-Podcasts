@@ -13,7 +13,8 @@ from ..data.files import (
     note_completed_download,
     open_private,
 )
-from threading import Event, Lock, Thread
+from collections import deque
+from threading import Condition, Event, Lock, Thread
 from urllib.parse import urlparse
 import os
 from hashlib import sha256
@@ -170,6 +171,12 @@ class DownloadService:
         self._deleting_episodes = set()
         self._listeners = []
         self._lock = Lock()
+        # Queued tickets waiting to be recorded as rows, and the episodes whose
+        # row write is in flight; `_settled` wakes callers waiting on one.
+        self._intents = deque()
+        self._intent_writer = False
+        self._recording = set()
+        self._settled = Condition(self._lock)
 
     def subscribe(self, listener):
         self._listeners.append(listener)
@@ -185,7 +192,12 @@ class DownloadService:
             return episode_id in self._cancellations or (episode_id in self._queued and not self._queued[episode_id].is_set())
 
     def queue(self, episode_id: int):
-        """Register intent before a worker slot is available, without I/O."""
+        """Register intent before a worker slot is available, without I/O.
+
+        The ticket itself is memory-only. A writer thread then records it as
+        a queued row, so a quit or crash before a worker reaches it leaves a
+        download the next start parks as Paused, instead of nothing at all.
+        """
         with self._lock:
             if episode_id in self._retiring_episodes or episode_id in self._deleting_episodes:
                 return None
@@ -194,7 +206,58 @@ class DownloadService:
                 return None
             ticket = Event()
             self._queued[episode_id] = ticket
-            return ticket
+            self._intents.append((episode_id, ticket))
+            start, self._intent_writer = not self._intent_writer, True
+        if start:
+            try:
+                Thread(target=self._record_intents, name="bs-download-intents", daemon=True).start()
+            except RuntimeError:
+                with self._lock:
+                    self._intent_writer = False
+        return ticket
+
+    def _record_intents(self):
+        """Write a queued row for each ticket no worker has started yet.
+
+        One thread, in queue order, and only for episodes with no row: an
+        existing paused, failed or finished record already survives a
+        restart and must not be reset to queued.
+        """
+        while True:
+            with self._lock:
+                if not self._intents:
+                    self._intent_writer = False
+                    return
+                episode_id, ticket = self._intents.popleft()
+                if (self._queued.get(episode_id) is not ticket or episode_id in self._cancellations
+                        or episode_id in self._retiring_episodes or episode_id in self._deleting_episodes):
+                    continue
+                self._recording.add(episode_id)
+            try:
+                if self.downloads.get(episode_id) is None:
+                    episode = self.library.get_episode(episode_id)
+                    if episode is not None and episode.media_url:
+                        target = self._target(episode_id, episode.media_url)
+                        self.downloads.prepare(episode_id, episode.media_url, target,
+                                               target.with_suffix(target.suffix + ".part"))
+            except Exception as exc:
+                # The in-memory ticket still runs; only its survival across
+                # a quit is lost.
+                _log.warning("Could not record queued download for episode %s: %s", episode_id, exc)
+            finally:
+                with self._settled:
+                    self._recording.discard(episode_id)
+                    self._settled.notify_all()
+
+    def _await_intent(self, episode_id: int):
+        """Let an in-flight queued-row write land before the row is read or rewritten.
+
+        A transfer that started first would otherwise have its downloading or
+        complete state reset to queued by the late write, and a discard
+        would miss the row and leave it behind. Worker threads only.
+        """
+        with self._settled:
+            self._settled.wait_for(lambda: episode_id not in self._recording)
 
     RETRY_DELAYS = (2.0, 5.0, 10.0)
     MIN_FREE_BYTES = 500 * 1024 * 1024
@@ -233,6 +296,7 @@ class DownloadService:
         if cancellation is None:
             return self.downloads.get(episode_id)
         try:
+            self._await_intent(episode_id)
             # prepare() only after the guard: running it first meant a
             # duplicate call reset a live transfer's counters to zero before
             # returning. It also lives inside this try — prepare() raising
@@ -339,7 +403,7 @@ class DownloadService:
             deadline = time.monotonic() + self.CANCEL_UNWIND_TIMEOUT
             while True:
                 with self._lock:
-                    busy = bool(ids.intersection(self._cancellations))
+                    busy = bool(ids.intersection(self._cancellations) or ids.intersection(self._recording))
                 if not busy:
                     break
                 if time.monotonic() >= deadline:
@@ -465,6 +529,7 @@ class DownloadService:
         with self._lock:
             self._queued.pop(episode_id, None)
         self._await_cancelled(episode_id)
+        self._await_intent(episode_id)
         record = self.downloads.get(episode_id)
         if record is None:
             return
@@ -870,6 +935,7 @@ class DownloadService:
         with self._lock:
             self._queued.pop(episode_id, None)
         self._await_cancelled(episode_id)
+        self._await_intent(episode_id)
         record = self.downloads.get(episode_id)
         if record is None:
             return 0
