@@ -7051,3 +7051,7 @@ class MainWindow(QMainWindow):
         elif self.playback is not None:
             self.playback.shutdown()
         super().closeEvent(event)
+        # The toolkit quits on its own only when the closed window was
+        # visible, so a Quit from the tray while hidden tore everything down
+        # and left the process running with its lock held.
+        QApplication.instance().quit()
