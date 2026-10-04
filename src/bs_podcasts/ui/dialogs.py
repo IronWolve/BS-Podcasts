@@ -363,6 +363,13 @@ class StyledDialog(QDialog):
             text.setWordWrap(True)
             self.card_layout.addWidget(text)
 
+    def set_default_button(self, default: QPushButton):
+        """Enter presses `default`. Unset, it pressed the first button in the
+        focus chain: Open website, GitHub, or Copy information."""
+        for button in self.findChildren(QPushButton):
+            button.setAutoDefault(button is default)
+        default.setDefault(True)
+
     def add_file_listing(self, lines) -> QScrollArea:
         """Every exact target of a destructive action, scrolling past 180 px:
         a capped preview let Delete remove files the user never saw."""
@@ -736,6 +743,7 @@ class EpisodeInfoDialog(StyledDialog):
         buttons.addStretch(1)
         buttons.addWidget(close)
         self.card_layout.addLayout(buttons)
+        self.set_default_button(close)
 
     def _place_columns(self, two: bool):
         if two == self._two_columns:
@@ -945,6 +953,7 @@ class PodcastInfoDialog(StyledDialog):
         buttons.addStretch(1)
         buttons.addWidget(close)
         self.card_layout.addLayout(buttons)
+        self.set_default_button(close)
 
 
 class ShortcutsDialog(StyledDialog):
@@ -1119,3 +1128,4 @@ class AboutDialog(StyledDialog):
         links.addStretch(1)
         links.addWidget(close)
         self.card_layout.addLayout(links)
+        self.set_default_button(close)
