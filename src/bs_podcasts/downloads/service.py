@@ -790,8 +790,8 @@ class DownloadService:
             stall = _StallWatch(response, self.STALL_WINDOW_SECONDS, self.STALL_MIN_BYTES, self.MAX_TRANSFER_SECONDS, cancellation)
             stall.start()
             # Progress is persisted by time, not bytes: a 256 KB step meant
-            # ~400 commits for a 100 MB episode. The UI still
-            # gets a signal for every step that crosses the report interval.
+            # ~400 commits for a 100 MB episode of unknown length. The UI
+            # still gets a signal for every byte step, which writes nothing.
             report_bytes = max(256 * 1024, (total or 0) // 20)
             head = b""
             with open_private(partial, "ab" if append else "wb") as handle:
@@ -825,13 +825,15 @@ class DownloadService:
                     free_budget -= len(chunk)
                     stall.advance(len(chunk))
                     now = time.monotonic()
-                    if now - last_report_at >= 2.0 or done - last_report >= report_bytes:
+                    saving = now - last_report_at >= 2.0
+                    if saving:
                         self.downloads.progress(
                             episode_id, DownloadState.DOWNLOADING, done, total
                         )
+                        last_report_at = now
+                    if saving or done - last_report >= report_bytes:
                         self._emit(episode_id, DownloadState.DOWNLOADING, done, total)
                         last_report = done
-                        last_report_at = now
                 # The complete row commits right after the rename; without
                 # this a power loss could keep both while the data blocks
                 # never reached the disk, a "downloaded" short file.
