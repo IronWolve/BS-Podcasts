@@ -793,7 +793,7 @@ class MainWindow(QMainWindow):
                 continue
             views[str(index)] = {
                 "current": page._current_key(), "selected": page._selected_keys(),
-                "scroll": page.view.verticalScrollBar().value(),
+                "scroll": page.scroll_position(),
                 "scroll_units": "items" if page._row_aligned_scroll else "pixels",
                 "query": page.header.search.text(),
                 "filter": page.chips.current() if hasattr(page, "chips") else "All",
@@ -2901,7 +2901,7 @@ class MainWindow(QMainWindow):
         page = self.episode_page
         return {'episode_view': True, 'show_id': self._hero_show_id,
                 'query': page.header.search.text(), 'filter': page._filter, 'sort': page._sort,
-                'scroll': page.view.verticalScrollBar().value(), 'scroll_units': 'items', 'current': page._current_key(),
+                'scroll': page.scroll_position(), 'scroll_units': 'items', 'current': page._current_key(),
                 'selected': page._selected_keys()}
 
     def _open_episode_podcast(self, show_id):
