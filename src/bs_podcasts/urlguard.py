@@ -121,13 +121,27 @@ def _blocked_reason(ip) -> str:
 
 
 def _idna_host(host: str) -> str:
-    """Punycode the host the same way the HTTP client does (UTS 46)."""
+    """The name the HTTP connection will resolve for `host`.
+
+    The connection layer encodes per label: an ASCII label is only
+    lowercased, and a non-ASCII label gets strict IDNA 2008. Validating
+    ASCII labels too would refuse hosts it connects to, such as
+    `my_host` or `r4---sn-x`.
+    """
+    if host.isascii():
+        return host.lower()
     import idna
 
-    try:
-        return idna.encode(host, uts46=True).decode("utf-8")
-    except (idna.IDNAError, UnicodeError) as exc:
-        raise UnsafeUrl(f"Could not encode host name {host}") from exc
+    labels = []
+    for label in host.split("."):
+        if label.isascii():
+            labels.append(label.lower())
+            continue
+        try:
+            labels.append(idna.encode(label.lower(), strict=True, std3_rules=True).decode("ascii"))
+        except (idna.IDNAError, UnicodeError) as exc:
+            raise UnsafeUrl(f"Could not encode host name {host}") from exc
+    return ".".join(labels)
 
 
 def _addresses(host: str) -> list:
