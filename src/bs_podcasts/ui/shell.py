@@ -580,7 +580,11 @@ class MainWindow(QMainWindow):
             ("cycle_region", "F6", lambda: self._cycle_region(1)),
             ("cycle_region_back", "Shift+F6", lambda: self._cycle_region(-1)),
         ):
-            self.shortcuts.add(name, sequence, handler)
+            shortcut = self.shortcuts.add(name, sequence, handler)
+            # Toggles and one-shot actions fire once per press: holding the
+            # keys flipped play/pause or added a bookmark per key repeat.
+            if name in {"play_pause", "queue_selected", "bookmark", "silence_trim", "ab_repeat", "quit", "help"}:
+                shortcut.setAutoRepeat(False)
 
     def _wire_library(self):
         if self.library is None:
@@ -6533,16 +6537,21 @@ class MainWindow(QMainWindow):
             and (watched is self or self.isAncestorOf(watched))
             and not isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QKeySequenceEdit, QAbstractSpinBox, QComboBox, QAbstractButton))
         ):
-            if self._playing_episode_id or (
+            playing = self._playing_episode_id or (
                 # A Discover preview stream plays with no episode id; bare
                 # Space must toggle it, not play whatever row is selected.
                 self._playing_source and self._playing_state in {"playing", "paused", "loading"}
-            ):
-                self._play_pause()
-                return True
-            selected = self._selected_episode_ids()
-            if selected:
-                self._play_or_toggle(selected[0])
+            )
+            selected = () if playing else self._selected_episode_ids()
+            if playing or selected:
+                # Holding Space toggles once; the repeats are swallowed so
+                # the list does not page either.
+                if event.isAutoRepeat():
+                    return True
+                if playing:
+                    self._play_pause()
+                else:
+                    self._play_or_toggle(selected[0])
                 return True
         if event.type() == QEvent.Type.MouseButtonPress and isinstance(watched, QWidget) and (watched is self or self.isAncestorOf(watched)):
             if event.button() == Qt.MouseButton.BackButton:
