@@ -506,6 +506,16 @@ class MainWindow(QMainWindow):
                     self._refresh_context_item(previous, item) if self.pages.currentWidget() is source else None)
             page.header.back_requested.connect(self.navigate_back)
             self.pages.addWidget(page)
+        # Until its first read lands a list says it is loading, not "Nothing
+        # queued" or "No downloads" about a library that is not empty.
+        self._pages_loading = set()
+        if self.library is not None:
+            loading = [self.playlist_page, self.history_page]
+            loading += [self.download_page] if self.downloads is not None else []
+            loading += [self.bookmark_page] if self.listening is not None else []
+            for page in loading:
+                page.banner.show_state("loading", "Loading…")
+                self._pages_loading.add(page)
         for page in (self.home_page, self.playlist_page, self.history_page, self.download_page):
             page.play_requested.connect(lambda item: self._play_or_toggle(item.episode_id))
         self.episode_page.play_requested.connect(self._play_episode_item)
@@ -2591,9 +2601,11 @@ class MainWindow(QMainWindow):
         self.home_page.set_latest_title("New episodes" if fresh else "Latest episodes")
         self.home_page.set_sections(in_progress, fresh or unplayed)
         self.playlist_page.set_items(queued)
+        self._finish_page_load(self.playlist_page)
         self.context.set_queue(queued)
         self.player.set_next(queued[0].title if queued and queued[0].episode_id != self._playing_episode_id else (queued[1].title if len(queued) > 1 else ""))
         self.history_page.set_items(history)
+        self._finish_page_load(self.history_page)
         self._set_history_chrome(len(history))
         self._reload_downloads()
         active_downloads = sum(record.state.value in {"queued", "downloading", "paused"} for record in data["records"])
@@ -2668,6 +2680,7 @@ class MainWindow(QMainWindow):
 
     def _apply_queue(self, queued):
         self.playlist_page.set_items(queued)
+        self._finish_page_load(self.playlist_page)
         self.context.set_queue(queued)
         self.player.set_next(next((e.title for e in queued if e.episode_id != self._playing_episode_id), ""))
         self.navigation.set_badge(PAGE_QUEUE, len(queued))
@@ -4903,6 +4916,7 @@ class MainWindow(QMainWindow):
             samples = dict(self._download_samples)
         items = [self._download_item(item, self._download_records_seen[item.episode_id], samples) for item in items]
         self.download_page.set_items(items)
+        self._finish_page_load(self.download_page)
         self._update_download_chrome()
         self._refresh_download_capacity()
 
@@ -4966,7 +4980,21 @@ class MainWindow(QMainWindow):
     def _reload_bookmarks(self):
         if self.listening is None or self.library is None:
             return
-        self._run_read(self._read_bookmark_items, self.bookmark_page.set_items, "bookmarks")
+        def apply(items):
+            self.bookmark_page.set_items(items)
+            self._finish_page_load(self.bookmark_page)
+        self._run_read(self._read_bookmark_items, apply, "bookmarks")
+
+    def _finish_page_load(self, page, error=""):
+        """End a list's first-load state: clear its loading banner, or show
+        why the read failed instead of an empty list."""
+        if page not in self._pages_loading:
+            return
+        self._pages_loading.discard(page)
+        if error:
+            page.banner.show_state("error", error)
+        elif page.banner.state == "loading":
+            page.banner.clear()
 
     def _read_bookmark_items(self):
         items = []
@@ -5933,6 +5961,8 @@ class MainWindow(QMainWindow):
             self.podcast_page.banner.show_state("error", message)
             self.episode_page.banner.show_state("error", message)
             self.home_page.banner.show_state("error", message)
+            for page in (self.playlist_page, self.history_page):
+                self._finish_page_load(page, message)
         if self._reload_again:
             self._request_reload()
         elif result.status == JobStatus.OK:
