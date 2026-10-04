@@ -2,7 +2,7 @@
 import ipaddress
 import socket
 
-from .netlimits import bounded_call, Deadline, DNS, PLAYBACK_DNS
+from .netlimits import bounded_call, Deadline, DNS, PLAYBACK_DNS, watch_request_socket
 from .urlguard import UnsafeUrl, _blocked_reason, ensure_web_url
 
 
@@ -54,6 +54,12 @@ def guarded_adapter(deadline_provider=None, **kwargs):
     from urllib3.exceptions import ConnectTimeoutError, NameResolutionError, NewConnectionError
 
     class CheckedConnection:
+        def getresponse(self):
+            # The socket may be reused rather than constructed on this worker.
+            # Register it before urllib3 waits for a status line or headers.
+            watch_request_socket(self.sock)
+            return super().getresponse()
+
         def _new_conn(self):
             try:
                 return connect_checked(self._dns_host, self.port, self.timeout,

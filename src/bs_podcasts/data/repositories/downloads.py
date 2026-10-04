@@ -155,6 +155,21 @@ class DownloadRepository:
             raise OSError("The download folder is unavailable.")
         return None
 
+    def discard_preview(self, episode_id: int):
+        record = self.get(episode_id)
+        if record is None:
+            return None, []
+        if record.state == DownloadState.COMPLETE:
+            raise OSError("This download finished. Use Remove download to delete its file.")
+        previews = []
+        for candidate in dict.fromkeys(path for path in (record.partial_path, record.target_path) if path):
+            kind, size = inspect_download_file(candidate)
+            if kind == FILE_PRESENT:
+                previews.append(DeletionPreview(episode_id, candidate, size))
+            elif kind in {FILE_IRREGULAR, FILE_UNAVAILABLE}:
+                raise OSError("A download path is unavailable or is not a regular file.")
+        return record, previews
+
     @staticmethod
     def _select():
         return (

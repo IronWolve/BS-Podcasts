@@ -33,10 +33,7 @@ if ! "$BS_RUNTIME/.venv/bin/python" -B -c 'import sys; raise SystemExit(sys.vers
     printf 'The existing venv uses an older Python. Preserve/rename dists/linux/.venv and rerun setup with Python 3.14.7+.\n' >&2
     exit 1
 fi
-BS_PIP_ARGS=(--disable-pip-version-check --only-binary=:all:)
-if grep -q -- '--hash=sha256:' "$BS_RUNTIME/requirements-linux.lock"; then
-    BS_PIP_ARGS+=(--require-hashes)
-fi
+BS_PIP_ARGS=(--disable-pip-version-check --only-binary=:all: --require-hashes)
 "$BS_RUNTIME/.venv/bin/python" -m pip install "${BS_PIP_ARGS[@]}" \
     -r "$BS_RUNTIME/requirements-linux.lock"
 "$BS_RUNTIME/.venv/bin/python" -m pip check

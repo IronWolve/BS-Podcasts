@@ -5,7 +5,7 @@ import html
 import re
 
 from PySide6.QtCore import QAbstractListModel, QEvent, QMimeData, QModelIndex, QRect, QSize, Signal, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextLayout
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QTextLayout
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QToolTip
 
 from . import icons
@@ -631,6 +631,9 @@ class EpisodeDelegate(QStyledItemDelegate):
                 hide_hover_bubble()
                 QToolTip.showText(event.globalPos(), "Add to Up Next", view)
                 return True
+            if self.can_open_show(item) and self.show_rect(option.rect, item).contains(event.pos()):
+                QToolTip.showText(event.globalPos(), "Open podcast", view)
+                return True
             tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
             if tooltip:
                 from .widgets import show_hover_bubble
@@ -656,6 +659,26 @@ class EpisodeDelegate(QStyledItemDelegate):
     def queue_rect(self, rect: QRect) -> QRect:
         play = self.play_rect(rect)
         return play.translated(-play.width() - scaled_px(8), 0)
+
+    def can_open_show(self, item) -> bool:
+        return not self.compact and bool(getattr(item, 'show_id', 0)) and bool(getattr(item, 'show', ''))
+
+    def show_rect(self, rect, item, text_width=None):
+        if not self.can_open_show(item):
+            return QRect()
+        row = rect.adjusted(2, 3, -4, -3)
+        left = row.x() + scaled_px(26 if self.reorder else 12)
+        text_left = left + scaled_px(60) - 1 + scaled_px(14)
+        if text_width is None:
+            reserve = scaled_px(self.PLAY_ZONE + 8)
+            if self.can_queue(item):
+                reserve += self.play_rect(rect).width() + scaled_px(8)
+            if item.state not in {"New", "Unplayed", "Played", "Preview"}:
+                reserve += QFontMetrics(app_font(11, QFont.Weight.DemiBold)).horizontalAdvance(item.state.upper()) + scaled_px(36)
+            text_width = min(max(40, row.right() - reserve - text_left), scaled_px(MAX_ROW_TEXT_PX))
+        width = min(text_width, QFontMetrics(app_font(12)).horizontalAdvance(item.show))
+        top = row.y() + scaled_px(32) + scaled_px(self.SNIPPET_LINE) * max(1, self.SNIPPET_LINES) - 1 + scaled_px(3)
+        return QRect(text_left, top, width, scaled_px(16))
 
     def grip_rect(self, rect: QRect) -> QRect:
         row = rect.adjusted(2, 3, -4, -3)
@@ -696,7 +719,9 @@ class EpisodeDelegate(QStyledItemDelegate):
             left = row.x() + scaled_px(26)
         art_size = scaled_px(44 if self.compact else 60)
         art = QRect(left, row.center().y() - art_size // 2, art_size, art_size)
-        painter.drawPixmap(art, cover(item.artwork_path, art_size, art_size, 8, initials(item.show), item.accent, scale, notify=_repaint_target(option)))
+        identity = ('episode', item.episode_id) if item.episode_id else ('preview', item.media_url or item.external_id or item.title)
+        painter.drawPixmap(art, cover(item.artwork_path, art_size, art_size, 8, initials(item.show), item.accent, scale,
+                                    notify=_repaint_target(option), presentation_key=identity))
         if playing:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(11, 15, 24, 150))
@@ -762,7 +787,20 @@ class EpisodeDelegate(QStyledItemDelegate):
             remaining = f"{hours} hr {minutes} min left" if hours else f"{minutes} min left"
         compact_detail = item.detail if self.compact and item.detail else ""
         meta = compact_detail or "  ·  ".join(part for part in (item.show if not self.compact else "", item.published, remaining or item.duration) if part)
-        painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, text_width))
+        if self.can_open_show(item):
+            show_rect = self.show_rect(option.rect, item, text_width)
+            painter.setPen(QColor(COLORS['blue']))
+            painter.drawText(show_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             painter.fontMetrics().elidedText(item.show, Qt.TextElideMode.ElideRight, show_rect.width()))
+            if hovered:
+                painter.drawLine(show_rect.left(), show_rect.bottom(), show_rect.right(), show_rect.bottom())
+            suffix = '  ·  ' + '  ·  '.join(part for part in (item.published, remaining or item.duration) if part)
+            tail = QRect(show_rect.right() + 1, meta_rect.y(), max(0, text_width - show_rect.width()), meta_rect.height())
+            painter.setPen(QColor(COLORS['subtle']))
+            painter.drawText(tail, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             painter.fontMetrics().elidedText(suffix, Qt.TextElideMode.ElideRight, tail.width()))
+        else:
+            painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, text_width))
 
         if show_badge:
             _badge(painter, row.right() - play_zone - 4, row.center().y() - 10, item.state.upper(), state_color, filled=item.state in {"Downloading", "Error"})

@@ -111,6 +111,13 @@ _socket_init_lock = threading.Lock()
 _socket_init_installed = False
 
 
+def watch_request_socket(sock):
+    """Include a pooled connection in the current header cancellation scope."""
+    bag = getattr(_socket_bags, 'bag', None)
+    if sock is not None and bag is not None:
+        bag.add(sock)
+
+
 def _install_socket_watch():
     """Record sockets created on a worker that has a bag. getaddrinfo has none."""
     global _socket_init_installed
@@ -146,10 +153,10 @@ def bounded_call(work, deadline, gate=None, dispose=None):
 
     def run():
         value = None
-        _install_socket_watch()
-        _socket_bags.bag = sockets
         try:
             try:
+                _install_socket_watch()
+                _socket_bags.bag = sockets
                 deadline.remaining()
                 value = work()
                 result = (True, value)
@@ -185,13 +192,16 @@ def bounded_call(work, deadline, gate=None, dispose=None):
     except BaseException:
         with handoff:
             deadline.cancelled.set()
-            release()
+            # A DNS permit counts the actual worker: cancelling a caller
+            # cannot interrupt getaddrinfo or admit unlimited orphan threads.
+            if gate is not DNS and gate is not PLAYBACK_DNS:
+                release()
             try:
                 success, result = results.get_nowait()
             except queue.Empty:
                 success, result = False, None
         # Unblock a connect or a header read. A stuck getaddrinfo cannot be
-        # shut down here; its permit is already released above.
+        # shut down here; its permit stays held until the resolver returns.
         sockets.close()
         if success and dispose is not None:
             dispose(result)

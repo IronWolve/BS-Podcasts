@@ -21,8 +21,23 @@ def default_data_dir(project=None):
     if _RELEASE_DIR.fullmatch(project.name) and not (project / 'repo').is_dir():
         sibling = project.parent / 'BS-Podcasts-data'
         extract = project / 'data'
-        if not (sibling / 'library.db').is_file() and (extract / 'library.db').is_file():
+        if (sibling / 'library.db').is_file():
+            return sibling
+        if (extract / 'library.db').is_file():
             return extract
+        # Read-only legacy discovery. Do not silently create an empty library
+        # when the owner's data still lives under an older versioned extract.
+        previous = []
+        for candidate in project.parent.iterdir():
+            if candidate.is_symlink() or not _RELEASE_DIR.fullmatch(candidate.name):
+                continue
+            data = candidate / 'data'
+            if not data.is_symlink() and (data / 'library.db').is_file():
+                previous.append(data)
+        if len(previous) > 1:
+            raise RuntimeError('Several legacy libraries were found. Set BS_PODCASTS_DATA_DIR to the library you want; no data was moved.')
+        if previous:
+            return previous[0]
         return sibling
     return project / 'data'
 
@@ -38,13 +53,10 @@ def running(value):
 def environment():
     for directory in ('tmp','logs','.cache'):
         (PROJECT/directory).mkdir(exist_ok=True)
-    data = default_data_dir()
-    data.mkdir(parents=True, exist_ok=True)
     os.environ['TMPDIR']=str(PROJECT/'tmp')
     os.environ['XDG_CACHE_HOME']=str(PROJECT/'.cache')
     os.environ['BS_PODCASTS_CACHE_DIR']=str(PROJECT/'.cache/app')
     os.environ['BS_PODCASTS_LOG_DIR']=str(PROJECT/'logs')
-    os.environ.setdefault('BS_PODCASTS_DATA_DIR',str(data))
     os.environ['PYTHONDONTWRITEBYTECODE']='1'
     private=PROJECT/'.config/runtime.json'
     if private.is_file():
@@ -53,6 +65,11 @@ def environment():
         for key,value in values.items():
             if key in allowed and isinstance(value,str):
                 os.environ[key]=value
+    data = Path(os.environ.get('BS_PODCASTS_DATA_DIR') or default_data_dir()).expanduser()
+    if not data.is_absolute():
+        data = PROJECT / data
+    data.mkdir(parents=True, exist_ok=True)
+    os.environ['BS_PODCASTS_DATA_DIR'] = str(data)
     source=(PROJECT/'repo').resolve()
     sys.path[:]=[p for p in sys.path if p and not Path(p).resolve().is_relative_to(source)]
     sys.path.insert(0,str(DEPLOYMENT/'app'))

@@ -63,6 +63,9 @@ folder named BS-Podcasts-data beside that versioned folder. Leave
 BS-Podcasts-data in place when you replace the versioned folder. If
 BS-Podcasts-data does not already contain a library and the unpacked folder
 still has data/library.db, the app keeps using that existing data folder.
+It also finds a single existing library in an older Linux version folder without
+moving it. If several older libraries exist, choose one explicitly with
+`BS_PODCASTS_DATA_DIR`; the app will not guess or start an empty library.
 
 Finding shows, refreshing feeds, loading artwork and streaming use the network.
 Downloaded episodes can be played offline.

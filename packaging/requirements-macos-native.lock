@@ -1,5 +1,9 @@
 # Build-only tools. pkgconf 2.5.1 is built from third-party-sources.json.
-Jinja2==3.1.6
-MarkupSafe==3.0.3
-meson==1.10.1
-ninja==1.13.0
+Jinja2==3.1.6 \
+    --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
+MarkupSafe==3.0.3 \
+    --hash=sha256:c47a551199eb8eb2121d4f0f15ae0f923d31350ab9280078d1e5f12b249e0026
+meson==1.10.1 \
+    --hash=sha256:fe43d1cc2e6de146fbea78f3a062194bcc0e779efc8a0f0d7c35544dfb86731f
+ninja==1.13.0 \
+    --hash=sha256:fa2a8bfc62e31b08f83127d1613d10821775a0eb334197154c4d6067b7068ff1

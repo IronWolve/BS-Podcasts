@@ -226,6 +226,7 @@ def build(output, macos=None):
         'After moving the folder, preserve/rename dists/linux/.venv and rerun setup.sh.\n'
         'The library is stored in a folder named BS-Podcasts-data next to this versioned folder, so another version opens the same library.\n'
         'If BS-Podcasts-data has no library yet and this folder already contains data/library.db, this folder\'s data directory is used instead.\n'
+        'A single library under an older version folder is reused without moving it. If several exist, set BS_PODCASTS_DATA_DIR to choose one.\n'
         'Logs and caches stay in this versioned folder.\n'
         'Do not include those private files when redistributing or updating the application.\n').encode()
     scan_inputs(linux_files, tokens)

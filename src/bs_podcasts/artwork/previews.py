@@ -97,8 +97,8 @@ def load(path, decode, *, persist=True):
 
 
 def load_saved(path):
-    """Read only the small saved preview; normal decodes verify source freshness."""
-    return _cached(_target(path), None)
+    """Worker-only saved preview; reject an obsolete revision of an existing source."""
+    return _cached(_target(path), signature(path))
 
 
 def queue_save(path, image, stamp):

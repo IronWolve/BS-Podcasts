@@ -6,6 +6,8 @@ from pathlib import Path
 from ..data.files import (
     FILE_IRREGULAR,
     FILE_MISSING,
+    FILE_PRESENT,
+    FILE_UNAVAILABLE,
     FILE_UNCONFIRMED,
     inspect_download_file,
     note_completed_download,
@@ -434,9 +436,17 @@ class DownloadService:
             partials.append(record.partial_path)
         return partials
 
-    def discard(self, episode_id: int) -> None:
+    def discard_preview(self, episode_id: int):
+        return self.downloads.discard_preview(episode_id)
+
+    def discard(self, episode_id: int, confirmed_paths=(), expected=None) -> None:
         with self._retire_episode(episode_id):
-            return self._discard_retired(episode_id)
+            record = self.downloads.get(episode_id)
+            if record is None:
+                return
+            if expected is None or record != expected:
+                raise DownloadError("This download changed. Review its files again before discarding it.")
+            return self._discard_retired(episode_id, confirmed_paths)
 
     @contextmanager
     def _retire_episode(self, episode_id):
@@ -450,7 +460,7 @@ class DownloadService:
             with self._lock:
                 self._deleting_episodes.discard(episode_id)
 
-    def _discard_retired(self, episode_id):
+    def _discard_retired(self, episode_id, confirmed_paths):
         self.cancel(episode_id)
         with self._lock:
             self._queued.pop(episode_id, None)
@@ -460,9 +470,20 @@ class DownloadService:
             return
         if record.state == DownloadState.COMPLETE:
             raise DownloadError("This download finished. Use Remove download to delete its file.")
+        confirmed = set(confirmed_paths)
+        for candidate in (record.partial_path, record.target_path):
+            if not candidate:
+                continue
+            kind, _size = inspect_download_file(candidate)
+            if kind == FILE_IRREGULAR or kind == FILE_UNAVAILABLE:
+                raise DownloadError("The download folder is unavailable or its path is not a regular file.")
+            if kind == FILE_PRESENT and candidate not in confirmed:
+                raise DownloadError("Another file appeared. Review the download files before discarding them.")
+            if kind == FILE_UNCONFIRMED and candidate in confirmed:
+                raise DownloadError("A listed file is no longer available. Review its download folder before discarding it.")
         failures = []
         for candidate in (record.partial_path, record.target_path):
-            if candidate:
+            if candidate and candidate in confirmed:
                 try:
                     path = Path(candidate)
                     try:

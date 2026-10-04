@@ -403,7 +403,7 @@ class MpvEngine:
         # _state_lock across that native call.
         applied_position = None
         applied_autoplay = None
-        for _ in range(4):
+        while True:
             with self._state_lock:
                 if not self._opening_current(generation):
                     return
@@ -419,23 +419,6 @@ class MpvEngine:
                 return
             applied_position = position
             applied_autoplay = autoplay
-        with self._state_lock:
-            if not self._opening_current(generation):
-                return
-            position = self._pending_position
-            autoplay = self._pending_autoplay
-            if (position, autoplay) == (applied_position, applied_autoplay):
-                self._accept_file_loaded(generation, autoplay, events)
-                return
-        try:
-            self._push_opening_media(player, position, autoplay, applied_position)
-        except Exception as exc:
-            events.append(EngineEvent("error", str(exc), generation))
-            return
-        with self._state_lock:
-            if not self._opening_current(generation):
-                return
-            self._accept_file_loaded(generation, autoplay, events)
 
     def _mpv_event(self, event):
         events = []

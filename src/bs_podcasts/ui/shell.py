@@ -498,6 +498,8 @@ class MainWindow(QMainWindow):
         self.bookmark_page.play_requested.connect(self._play_bookmark)
         for page in (self.home_page, self.episode_page, self.download_page, self.history_page, self.bookmark_page):
             page.queue_episode_requested.connect(lambda item: self._queue_row_episode(item.episode_id))
+        for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.history_page, self.bookmark_page):
+            page.open_podcast_requested.connect(self._open_episode_podcast)
         for page in (self.playlist_page, self.history_page):
             page.header.action.setObjectName("dangerButton")
         self.playlist_page._hide_action_when_empty = True
@@ -2884,8 +2886,53 @@ class MainWindow(QMainWindow):
         def apply(data):
             show = data[0]
             if show is not None:
-                self._open_podcast(self._ui_podcast(show), select_episode_id)
+                restore = getattr(self, '_episode_navigation_restore', None)
+                old_history = self._history_navigation
+                if restore and restore['show_id'] == show_id:
+                    self._history_navigation = True
+                try:
+                    self._open_podcast(self._ui_podcast(show), select_episode_id)
+                finally:
+                    self._history_navigation = old_history
         self._run_read(lambda: (repository.get_show(show_id),), apply, "show-open")
+
+    def _episode_navigation_entry(self):
+        page = self.episode_page
+        return {'episode_view': True, 'show_id': self._hero_show_id,
+                'query': page.header.search.text(), 'filter': page._filter, 'sort': page._sort,
+                'scroll': page.view.verticalScrollBar().value(), 'current': page._current_key(),
+                'selected': page._selected_keys()}
+
+    def _open_episode_podcast(self, show_id):
+        if not show_id or self.library is None:
+            return
+        self.episode_page._last_inline_action = time.monotonic()
+        self._episode_navigation_restore = None
+        if self.pages.currentWidget() is self.episode_page:
+            if self._hero_show_id == show_id:
+                return
+            self._back_stack.append(self._episode_navigation_entry())
+            self._forward_stack.clear()
+        self._open_show_id(show_id)
+        self._update_navigation_controls()
+
+    def _restore_episode_navigation(self):
+        saved = getattr(self, '_episode_navigation_restore', None)
+        if not saved or saved['show_id'] != self._hero_show_id:
+            return
+        self._episode_navigation_restore = None
+        page = self.episode_page
+        page.header.search.blockSignals(True)
+        page.header.search.setText(saved['query'])
+        page.header.search.blockSignals(False)
+        page._filter, page._sort = saved['filter'], saved['sort']
+        page.chips.select(page._filter)
+        page._update_sort_button()
+        page._apply_filters(restore_key=tuple(saved['current']) if saved['current'] else None,
+                            preserve_scroll=True, selected_keys=saved['selected'])
+        revision = page._scroll_restore_revision
+        self._later(0, lambda: page.view.verticalScrollBar().setValue(saved['scroll'])
+                    if revision == page._scroll_restore_revision else None)
 
     def _open_podcast(self, podcast, select_episode_id: int = 0):
         self._pending_episodes_url = ""
@@ -2924,6 +2971,8 @@ class MainWindow(QMainWindow):
                 self.episode_page.view.setCurrentIndex(index)
                 self.episode_page.view.scrollTo(index)
         self._finish_view_restore()
+
+        self._restore_episode_navigation()
 
     def _show_hero(self, podcast, episode_count: int):
         self.episode_page.header.set_title(podcast.title)
@@ -3265,7 +3314,7 @@ class MainWindow(QMainWindow):
             menu.addAction("Mark as unplayed", lambda: self._mark_played_many(targets, False))
         if not many and episode.show_id:
             menu.addSeparator()
-            menu.addAction(icons.icon("podcasts", COLORS["text"], 16), mnemonic_safe(f"Go to {episode.show}"), lambda: self._open_show_id(episode.show_id))
+            menu.addAction(icons.icon("podcasts", COLORS["text"], 16), mnemonic_safe(f"Go to {episode.show}"), lambda: self._open_episode_podcast(episode.show_id))
         return menu
 
     def _remove_from_queue(self, episode_id: int):
@@ -3598,30 +3647,31 @@ class MainWindow(QMainWindow):
         downloads = self.downloads
 
         def work():
-            return (downloads.cleanup_preview(episode_id),)
+            return downloads.discard_preview(episode_id)
 
         self._run_read(
-            work, lambda rows: self._confirm_discard_download(episode_id, rows[0]),
+            work, lambda rows: self._confirm_discard_download(episode_id, rows),
             f"discard-preview-{episode_id}", coalesce=False,
         )
 
-    def _confirm_discard_download(self, episode_id: int, preview):
+    def _confirm_discard_download(self, episode_id: int, payload):
         if self.downloads is None or not episode_id:
             return
-        if preview is None:
+        record, previews = payload
+        if record is None:
             self._notify("Nothing to delete for this selection")
             return
         dialog = DeleteFilesDialog(
             "Delete download",
-            "The episode stays in your library; only the local file is removed.",
-            [preview], self._format_bytes, self,
+            "The episode stays in your library; only the listed local files are removed.",
+            previews, self._format_bytes, self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         downloads = self.downloads
 
         def work():
-            downloads.discard(episode_id)
+            downloads.discard(episode_id, [preview.path for preview in previews], expected=record)
             return True
 
         self._run_task("discard-download", work, episode_id)
@@ -6051,16 +6101,18 @@ class MainWindow(QMainWindow):
         self.episode_page.set_filter(filter_value)
         self.episode_page.set_items(episodes)
 
+        self._restore_episode_navigation()
+
     def navigate_back(self):
         if not self._back_stack:
             return
         current = self.pages.currentIndex()
         target = self._back_stack.pop()
         if current >= 0:
-            self._forward_stack.append(current)
+            self._forward_stack.append(self._episode_navigation_entry() if current == PAGE_EPISODES else current)
         self._history_navigation = True
         try:
-            self.navigation.select(target)
+            self._navigate_history_target(target)
         finally:
             self._history_navigation = False
         self._update_navigation_controls()
@@ -6071,13 +6123,26 @@ class MainWindow(QMainWindow):
         current = self.pages.currentIndex()
         target = self._forward_stack.pop()
         if current >= 0:
-            self._back_stack.append(current)
+            self._back_stack.append(self._episode_navigation_entry() if current == PAGE_EPISODES else current)
         self._history_navigation = True
         try:
-            self.navigation.select(target)
+            self._navigate_history_target(target)
         finally:
             self._history_navigation = False
         self._update_navigation_controls()
+
+    def _navigate_history_target(self, target):
+        if not isinstance(target, dict) or not target.get('episode_view'):
+            self._episode_navigation_restore = None
+            self.navigation.select(target)
+            return
+        self._episode_navigation_restore = target
+        if target['show_id']:
+            self._open_show_id(target['show_id'])
+        else:
+            self._show_all_episodes()
+            self._episode_navigation_prepared = True
+            self.navigation.select(PAGE_EPISODES)
 
     def _update_navigation_controls(self):
         for index in range(self.pages.count()):

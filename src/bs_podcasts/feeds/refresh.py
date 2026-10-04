@@ -92,26 +92,11 @@ class RefreshService:
 
         self.repository.set_health(show_id, Health.LOADING)
         try:
-            requested = show.canonical_url or show.feed_url
-            recovered_original = False
-            try:
-                response = self.fetcher.fetch(requested, show.etag, show.last_modified)
-            except FeedFetchError:
-                if not show.canonical_url or requested == show.feed_url:
-                    raise
-                response = self.fetcher.fetch(show.feed_url, show.etag, show.last_modified)
-                recovered_original = True
-            # Empty keeps the stored canonical (the repository cannot clear it).
-            # A failed canonical is replaced with the subscription URL, which
-            # the next refresh then requests directly.
-            stored = response.canonical_url
-            if (
-                not stored
-                and recovered_original
-                and show.canonical_url
-                and show.canonical_url != show.feed_url
-            ):
-                stored = show.feed_url
+            # Legacy libraries may contain a 302 target that still returns a
+            # successful but frozen copy. Follow the publisher's current
+            # redirect chain, not a target learned from an earlier refresh.
+            response = self.fetcher.fetch(show.feed_url, show.etag, show.last_modified)
+            stored = response.canonical_url or show.feed_url
             if response.not_modified:
                 health = Health.OK if show.episode_count else Health.PARTIAL
                 self.repository.record_refresh_success(

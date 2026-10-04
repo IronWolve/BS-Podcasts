@@ -106,15 +106,18 @@ class BasePage(QWidget):
 class _ScrollInputGuard(QObject):
     """New user input takes precedence over a queued refresh scroll restore."""
 
-    def __init__(self, view, cancel_restore):
+    def __init__(self, view, cancel_restore, scroll_started=None):
         super().__init__(view)
         self._cancel_restore = cancel_restore
+        self._scroll_started = scroll_started
         for target in (view, view.viewport(), view.verticalScrollBar()):
             target.installEventFilter(self)
         view.verticalScrollBar().sliderPressed.connect(cancel_restore)
         view.verticalScrollBar().actionTriggered.connect(lambda _action: cancel_restore())
 
     def eventFilter(self, watched, event):
+        if self._scroll_started and event.type() in {QEvent.Type.Wheel, QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate}:
+            self._scroll_started()
         if event.type() in {QEvent.Type.Wheel, QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress,
                             QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate}:
             self._cancel_restore()
@@ -146,7 +149,7 @@ class _ListPageMixin:
         self.view.setResizeMode(QListView.ResizeMode.Adjust)
         self.view.setUniformItemSizes(True)
         self.view.setModel(self.model)
-        self._scroll_input_guard = _ScrollInputGuard(self.view, self._cancel_scroll_restore)
+        self._scroll_input_guard = _ScrollInputGuard(self.view, self._cancel_scroll_restore, self._begin_artwork_scroll)
         self._install_scroll_guard()
         self.view.selectionModel().currentChanged.connect(self._selected)
         self._last_activation = (None, 0.0)
@@ -155,6 +158,12 @@ class _ListPageMixin:
         self.view.viewport().installEventFilter(self)
         self._tooltip_target = None
         if isinstance(model, EpisodeModel):
+            self._artwork_scroll_timer = QTimer(self)
+            self._artwork_scroll_timer.setSingleShot(True)
+            self._artwork_scroll_timer.timeout.connect(self._end_artwork_scroll)
+            view.verticalScrollBar().valueChanged.connect(self._begin_artwork_scroll)
+            view.verticalScrollBar().sliderPressed.connect(self._begin_artwork_scroll)
+            view.verticalScrollBar().sliderReleased.connect(self._begin_artwork_scroll)
             self._episode_artwork_timer = QTimer(self)
             self._episode_artwork_timer.setSingleShot(True)
             self._episode_artwork_timer.timeout.connect(self._request_visible_artwork)
@@ -163,6 +172,21 @@ class _ListPageMixin:
         delete = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.view)
         delete.setContext(Qt.ShortcutContext.WidgetShortcut)
         delete.activated.connect(self._remove_selected)
+
+    def _begin_artwork_scroll(self, *_args):
+        if not hasattr(self, '_artwork_scroll_timer'):
+            return
+        from .pixmaps import set_artwork_scrolling
+        set_artwork_scrolling(self.view, True)
+        self._artwork_scroll_timer.start(200)
+
+    def _end_artwork_scroll(self):
+        if self.view.isVisible() and self.view.verticalScrollBar().isSliderDown():
+            self._artwork_scroll_timer.start(200)
+            return
+        from .pixmaps import set_artwork_scrolling
+        set_artwork_scrolling(self.view, False)
+        self.view.viewport().update()
 
     def _request_visible_artwork(self):
         items = []
@@ -214,22 +238,37 @@ class _ListPageMixin:
         position = event.position().toPoint()
         index = view.indexAt(position)
         item = index.data(ItemRoles.ITEM) if index.isValid() else None
-        over_queue = delegate.can_queue(item) and delegate.queue_rect(view.visualRect(index)).contains(position)
+        rect = view.visualRect(index) if index.isValid() else None
+        over_queue = delegate.can_queue(item) and delegate.queue_rect(rect).contains(position)
+        over_show = delegate.can_open_show(item) and delegate.show_rect(rect, item).contains(position)
         if kind == QEvent.Type.MouseButtonPress:
+            self._ignore_inline_release = False
             self._pressed_queue_id = item.episode_id if over_queue else None
-            if over_queue:
+            self._pressed_show_id = item.show_id if over_show else None
+            if over_queue or over_show:
                 hide_hover_bubble()
                 QToolTip.hideText()
             # Consume the press too: queueing must not change selection/details.
-            return over_queue
+            return over_queue or over_show
         if kind == QEvent.Type.MouseButtonDblClick:
-            return over_queue
+            handled = over_queue or over_show or time.monotonic() - getattr(self, '_last_inline_action', 0) < 0.4
+            self._ignore_inline_release = handled
+            return handled
+        if getattr(self, '_ignore_inline_release', False):
+            self._ignore_inline_release = False
+            return True
         pressed = getattr(self, "_pressed_queue_id", None)
+        show = getattr(self, "_pressed_show_id", None)
         self._pressed_queue_id = None
-        if pressed is None:
+        self._pressed_show_id = None
+        if pressed is None and show is None:
             return False
         if over_queue and item.episode_id == pressed:
+            self._last_inline_action = time.monotonic()
             self.queue_episode_requested.emit(item)
+        elif over_show and item.show_id == show:
+            self._last_inline_action = time.monotonic()
+            self.open_podcast_requested.emit(item.show_id)
         return True
 
     def _activated(self, index):
@@ -953,6 +992,7 @@ SORT_OPTIONS = (
 class EpisodeListPage(BasePage, _ListPageMixin):
     play_requested = Signal(object)
     queue_episode_requested = Signal(object)
+    open_podcast_requested = Signal(int)
     load_more_requested = Signal()
     order_changed = Signal(list)
     menu_requested = Signal(object, object)
@@ -1190,12 +1230,13 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             over_play = index.isValid() and self.delegate.play_rect(visual).contains(position)
             item = index.data(ItemRoles.ITEM) if index.isValid() else None
             over_queue = self.delegate.can_queue(item) and self.delegate.queue_rect(visual).contains(position)
+            over_show = self.delegate.can_open_show(item) and self.delegate.show_rect(visual, item).contains(position)
             over_grip = (
                 index.isValid()
                 and self.reorder
                 and self.delegate.grip_rect(visual).contains(position)
             )
-            if over_play or over_queue:
+            if over_play or over_queue or over_show:
                 cursor = Qt.CursorShape.PointingHandCursor
             elif over_grip:
                 cursor = Qt.CursorShape.SizeAllCursor
@@ -1263,6 +1304,7 @@ class SummaryCard(QPushButton):
 class HomePage(BasePage, _ListPageMixin):
     play_requested = Signal(object)
     queue_episode_requested = Signal(object)
+    open_podcast_requested = Signal(int)
     new_requested = Signal()
     resume_all_requested = Signal()
     resume_remove_requested = Signal(list)
@@ -1437,7 +1479,8 @@ class HomePage(BasePage, _ListPageMixin):
             item = index.data(ItemRoles.ITEM) if index.isValid() else None
             over_play = index.isValid() and delegate.play_rect(visual).contains(position)
             over_queue = delegate.can_queue(item) and delegate.queue_rect(visual).contains(position)
-            view.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over_play or over_queue else Qt.CursorShape.ArrowCursor)
+            over_show = delegate.can_open_show(item) and delegate.show_rect(visual, item).contains(position)
+            view.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over_play or over_queue or over_show else Qt.CursorShape.ArrowCursor)
         if event.type() == QEvent.Type.ContextMenu:
             index = view.indexAt(event.pos())
             if index.isValid():

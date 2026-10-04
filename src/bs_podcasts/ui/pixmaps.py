@@ -123,6 +123,43 @@ _artwork_cache = _ArtworkCache()
 _preview_cache = _ArtworkCache(limit_bytes=32 * 1024 * 1024, max_entries=512)
 _preview_library_paths = ()
 _preview_visible_paths = ()
+_painted_episode_art = weakref.WeakKeyDictionary()
+_scroll_episode_art = weakref.WeakKeyDictionary()
+
+
+def set_artwork_scrolling(view, scrolling):
+    """GUI-only presentation hold; fetching, decoding and disk caches continue."""
+    if scrolling:
+        if view not in _scroll_episode_art:
+            _scroll_episode_art[view] = OrderedDict(_painted_episode_art.get(view, ()))
+    else:
+        _scroll_episode_art.pop(view, None)
+
+
+def _present_episode_art(view, identity, pixmap):
+    if view is None or identity is None:
+        return pixmap
+    frozen = _scroll_episode_art.get(view)
+    if frozen is not None:
+        held = frozen.get(identity)
+        if held is not None:
+            pixmap = held
+        _remember_episode_frame(frozen, identity, pixmap)
+    recent = _painted_episode_art.setdefault(view, OrderedDict())
+    _remember_episode_frame(recent, identity, pixmap)
+    return pixmap
+
+
+def _remember_episode_frame(frames, identity, pixmap):
+    previous = frames.get(identity)
+    frames[identity] = pixmap
+    frames.move_to_end(identity)
+    if previous is not None and previous.cacheKey() == pixmap.cacheKey():
+        return
+    size = sum(image.width() * image.height() * max(1, (image.depth() + 7) // 8) for image in frames.values())
+    while frames and (len(frames) > 96 or size > 8 * 1024 * 1024):
+        _, image = frames.popitem(last=False)
+        size -= image.width() * image.height() * max(1, (image.depth() + 7) // 8)
 
 
 def protect_artwork_previews(paths):
@@ -665,6 +702,7 @@ def cover(
     scale: float = 1.0,
     sync: bool = False,
     notify=None,
+    presentation_key=None,
 ) -> QPixmap:
     """Return artwork scaled to fill `width`x`height`, centre-cropped and rounded.
 
@@ -674,6 +712,17 @@ def cover(
     unavailable artwork needs initials. `notify` is repainted when it is ready.
     `sync=True` decodes on the calling thread instead.
     """
+    identity = (presentation_key, width, height, radius, scale) if presentation_key is not None else None
+    def present(pixmap):
+        return _present_episode_art(notify, identity, pixmap)
+
+    held = _scroll_episode_art.get(notify, {}).get(identity) if notify is not None and identity is not None else None
+    if held is not None:
+        _watch(path, notify)
+        if path:
+            _source(path, max(1, round(width * scale)), max(1, round(height * scale)), sync, notify)
+        return present(held)
+
     # The fallback branches below read the live COLORS dict, which apply_theme
     # mutates in place — and rebuilding the window does not clear artwork.
     # Keying only on the arguments meant a placeholder rendered before a theme
@@ -687,7 +736,7 @@ def cover(
     key = f"cover:{path}:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}:v{_revision_for(path)}"
     cached = _artwork_cache.find(key)
     if cached is not None and not cached.isNull():
-        return cached
+        return present(cached)
     physical_w = max(1, int(round(width * scale)))
     physical_h = max(1, int(round(height * scale)))
     source = _source(path, physical_w, physical_h, sync, notify) if path else None
@@ -703,7 +752,7 @@ def cover(
         key = f"coverpending:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}"
         cached = _artwork_cache.find(key)
         if cached is not None and not cached.isNull():
-            return cached
+            return present(cached)
     result = QPixmap(physical_w, physical_h)
     result.fill(Qt.GlobalColor.transparent)
     painter = QPainter(result)
@@ -736,4 +785,4 @@ def cover(
     result.setDevicePixelRatio(scale)
     if not interim:
         _artwork_cache.insert(key, result)
-    return result
+    return present(result)

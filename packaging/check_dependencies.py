@@ -56,8 +56,10 @@ def check(lock):
     else:
         failures.append('Retired dependency mutagen is still installed; remove it from this project environment before building.')
     count=0
-    for name, version, _hashes in parse_lock(Path(lock).read_text()):
+    for name, version, hashes in parse_lock(Path(lock).read_text()):
         count+=1
+        if not hashes:
+            failures.append(f'{name}: dependency lock is missing publisher hashes')
         try:
             installed=importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
