@@ -250,9 +250,11 @@ class HttpStream:
         try:
             self._open(offset)
             return offset
-        except Exception:
+        except Exception as exc:
             # libmpv treats a negative offset as an unsupported/failed seek.
             # Keep the previous response usable rather than mixing wrong bytes.
+            if not self.cancelled.is_set():
+                logger.warning("Audio stream seek to byte %s failed: %s", offset, _describe(exc))
             return -1
 
     def cancel(self):

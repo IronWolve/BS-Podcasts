@@ -120,6 +120,11 @@ class PlaybackService:
         self._dead = False
         self._last_metric_time = None
         self._last_metric_position = None
+        # Resume target the file-loaded seek has not been seen to reach yet
+        # (see _confirm_start); saves wait so a failed seek keeps the old one.
+        self._start_target = None
+        self._start_loaded_at = 0.0
+        self._start_reported = False
         try:
             saved_volume = float(self.repository.get_setting("playback.volume", "100"))
         except (TypeError, ValueError):
@@ -157,6 +162,8 @@ class PlaybackService:
     LOAD_TIMEOUT = 25.0
     STREAM_RECOVERY_LIMIT = 3
     STREAM_RECOVERY_WINDOW = 600.0
+    START_TOLERANCE = 10.0
+    SEEK_UNSUPPORTED = "This server can’t seek, so playback started from the beginning. Your saved position was kept."
 
     def _arm_load_watchdog(self, episode_id: int | None, source: str):
         self._cancel_load_watchdog()
@@ -544,6 +551,7 @@ class PlaybackService:
                 self._persist_position(force=True)
             except Exception:
                 pass
+            self._start_target = None
             self._flush_listening()
             # Removal callers rely on Stop finishing writes for the outgoing
             # show before its rows (including listening statistics) are deleted.
@@ -601,6 +609,7 @@ class PlaybackService:
             self._materialize()
             self._ignore_metric_once = True
             self._desired_position = seconds
+            self._retarget_start(seconds)
             if self.snapshot.source:
                 self.snapshot = replace(self.snapshot, position=seconds)
                 self._emit()
@@ -670,6 +679,7 @@ class PlaybackService:
                 return
             target = self._clamp_position(self.snapshot.position + delta)
             self._desired_position = target
+            self._retarget_start(target)
             if self.snapshot.source:
                 self.snapshot = replace(self.snapshot, position=target)
                 self._emit()
@@ -830,6 +840,7 @@ class PlaybackService:
                 position = max(0.0, float(event.value))
                 self._measure_silence(position, deferred)
                 self.snapshot = replace(self.snapshot, position=position)
+                self._confirm_start(position)
                 self._persist_position(deferred=deferred)
             elif event.kind == "duration":
                 duration = max(0.0, float(event.value))
@@ -861,6 +872,11 @@ class PlaybackService:
                 self._cancel_load_watchdog()
                 self._last_metric_time = time.monotonic()
                 self._last_metric_position = self.snapshot.position
+                # A start at 0 needs no seek. Anything later is confirmed by
+                # the first ticks before progress is saved over it.
+                self._start_target = self._desired_position if self._desired_position > 5.0 else None
+                self._start_loaded_at = time.monotonic()
+                self._start_reported = False
                 self._buffering_started_at = None
                 self.snapshot = replace(self.snapshot, buffering=None)
                 if self.snapshot.state in {PlaybackState.LOADING, PlaybackState.ERROR}:
@@ -974,6 +990,7 @@ class PlaybackService:
         self._load_generation += 1
         self._resolving = True
         self._engine_loaded = False
+        self._start_target = None
         self._load_autoplay = bool(autoplay)
         self._desired_position = max(0.0, float(position))
         prepare = getattr(self.engine, "prepare_load", None)
@@ -1232,7 +1249,7 @@ class PlaybackService:
 
     def _persist_position(self, force: bool = False, deferred: list | None = None):
         """Keep the latest stamped position per episode on the bounded writer."""
-        if self.snapshot.episode_id is None:
+        if self.snapshot.episode_id is None or self._start_target is not None:
             return
         if force or abs(self.snapshot.position - self._last_saved_position) >= 5.0:
             episode_id, position = self.snapshot.episode_id, self.snapshot.position
@@ -1240,6 +1257,31 @@ class PlaybackService:
             self._persistence.submit(('position', episode_id), lambda value:
                 self._require_saved(self.repository.update_position(episode_id, value[0], stamp=value[1])), (position, stamp))
             self._last_saved_position = position
+
+    def _confirm_start(self, position: float):
+        """Release saves once playback is seen at (or past) the resume target.
+
+        A server that cannot seek makes the file-loaded seek fail without an
+        error, and playback starts from 0:00. Saving that first tick would
+        replace the stored position, so saves wait and the user is told."""
+        target = self._start_target
+        if target is None:
+            return
+        if position >= target - self.START_TOLERANCE:
+            self._start_target = None
+            if self.snapshot.message == self.SEEK_UNSUPPORTED:
+                self.snapshot = replace(self.snapshot, message="")
+            return
+        if not self._start_reported and time.monotonic() - self._start_loaded_at >= 1.0:
+            self._start_reported = True
+            logger.warning("Playback resume seek did not land: target=%.1fs position=%.1fs", target, position)
+            self.snapshot = replace(self.snapshot, message=self.SEEK_UNSUPPORTED)
+
+    def _retarget_start(self, target: float):
+        # A deliberate seek while the resume is unconfirmed becomes the new
+        # target; a seek to the start means the user chose to begin again.
+        if self._start_target is not None:
+            self._start_target = target if target > 5.0 else None
 
     def _measure_silence(self, position: float, deferred: list | None = None):
         now = time.monotonic()
