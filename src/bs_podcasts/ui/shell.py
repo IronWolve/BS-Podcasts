@@ -168,7 +168,7 @@ class MainWindow(QMainWindow):
     relaunch_requested = Signal()
     _BUSINESS_STATE = ('_pending_jobs', '_download_tickets', '_play_after_download',
         '_play_after_download_intent', '_play_after_download_request', '_refresh_batch', '_refresh_generation',
-        '_refresh_failed', '_refresh_waiting', '_refresh_in_flight',
+        '_refresh_failed', '_refresh_offline', '_refresh_waiting', '_refresh_in_flight',
         '_manual_refresh_in_flight', '_refresh_quiet', '_refresh_changed', '_details_fetched', '_artwork_fetched',
         '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved')
 
@@ -215,6 +215,7 @@ class MainWindow(QMainWindow):
         self._refresh_batch = [0, 0, 0]  # total, done, new episodes
         self._refresh_generation = 0
         self._refresh_failed = []
+        self._refresh_offline = []  # failures that were only the network
         self._refresh_changed = False
         self._refresh_waiting = []
         self._refresh_in_flight = set()
@@ -1258,6 +1259,7 @@ class MainWindow(QMainWindow):
         self._refresh_generation += 1
         self._refresh_batch = [len(shows), 0, 0]
         self._refresh_failed = []
+        self._refresh_offline = []  # failures that were only the network
         self._refresh_changed = False
         self._refresh_waiting = [show.id for show in shows]
         self._refresh_in_flight.clear()
@@ -1285,12 +1287,18 @@ class MainWindow(QMainWindow):
             self._refresh_in_flight.add(show_id)
             self._submit_refresh(show_id, batch=True)
 
-    def _summarize_refresh(self, total: int, new_episodes: int, failed: int):
+    def _summarize_refresh(self, total: int, new_episodes: int, failed: int, offline: int = 0):
         """Exactly one message per batch, whatever happened inside it."""
         parts = [f"Refreshed {total} podcast{'s' if total != 1 else ''}"]
         if new_episodes:
             parts.append(f"{new_episodes} new episode{'s' if new_episodes != 1 else ''}")
-        if failed:
+        if failed and offline >= failed:
+            # Every failure was the connection, not the feeds: one plain
+            # message instead of listing each podcast as unreachable.
+            parts[0] = "You appear to be offline"
+            parts.append(f"{failed} podcast{'s' if failed != 1 else ''} could not be reached")
+            self._notify("  ·  ".join(parts), "info")
+        elif failed:
             parts.append(f"{failed} unreachable")
             self._notify("  ·  ".join(parts), "info", "Review", self._show_problem_podcasts)
         elif new_episodes:
@@ -1337,8 +1345,10 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _is_unreachable(show) -> bool:
-        """What "Remove unreachable" offers and, at removal time, re-checks."""
-        return show.health.value in {"error", "suspended"}
+        """What "Remove unreachable" offers and, at removal time, re-checks:
+        suspended podcasts and feeds that failed. A podcast whose only
+        problem was the network being down does not count failures."""
+        return show.suspended or show.health.value == "suspended" or (show.health.value == "error" and show.fail_count > 0)
 
     def _confirm_remove_shows(self, data):
         """Second phase of an off-thread bulk removal: confirm exact targets,
@@ -6317,6 +6327,8 @@ class MainWindow(QMainWindow):
             failed = result.status != JobStatus.OK or getattr(result.value, "health", None) in {Health.ERROR, Health.SUSPENDED}
             if failed:
                 self._refresh_failed.append(identifier)
+                if getattr(report, "network_error", False):
+                    self._refresh_offline.append(identifier)
             if done >= total:
                 self._refresh_batch = [0, 0, 0]
                 self._refresh_waiting.clear()
@@ -6332,7 +6344,7 @@ class MainWindow(QMainWindow):
                     self._request_reload()  # Includes the open catalogue once.
                 else:
                     self._refresh_show_summaries()
-                self._summarize_refresh(total, new_episodes, len(self._refresh_failed))
+                self._summarize_refresh(total, new_episodes, len(self._refresh_failed), len(self._refresh_offline))
             # Batch: never one message per feed; problems are shown in place.
             return
         viewing_show = self.pages.currentIndex() == PAGE_EPISODES and self._hero_show_id == identifier
