@@ -6,7 +6,7 @@ import sys
 import threading
 import sqlite3
 
-from PySide6.QtCore import QCoreApplication, QTimer, Qt
+from PySide6.QtCore import QCoreApplication, QSettings, QTimer, Qt
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 import getpass
 from PySide6.QtGui import QIcon
@@ -145,9 +145,22 @@ def _install_window_tracer(app):
     app.installEventFilter(Tracer(app))
 
 
+def _redirect_toolkit_settings():
+    """Keep the toolkit's own settings (file dialog history) in the data folder.
+
+    Left alone, file dialogs write them to the per-user config folder on Linux,
+    the registry on Windows and the preferences folder on Mac. The app has no
+    other settings of this kind, so a private INI location covers them all."""
+    folder = str(application_data_dir() / "qt")
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    for kind in (QSettings.Format.IniFormat, QSettings.Format.NativeFormat):
+        QSettings.setPath(kind, QSettings.Scope.UserScope, folder)
+
+
 def create_application(argv=None) -> QApplication:
     configure_logging()
     _install_excepthook()
+    _redirect_toolkit_settings()
     app = QApplication(argv if argv is not None else sys.argv)
     _install_window_tracer(app)
     app.setApplicationName(APP_NAME)
