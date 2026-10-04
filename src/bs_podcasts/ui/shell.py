@@ -1737,7 +1737,7 @@ class MainWindow(QMainWindow):
         if ids and self._confirm_bulk(len(ids), "Mark as played" if played else "Mark as unplayed"):
             self._mark_with_undo(ids, played)
 
-    def _mark_with_undo(self, ids, played: bool, label: str = "", show_id=None):
+    def _mark_with_undo(self, ids, played: bool, label: str = "", show_id=None, confirm_cleanup=None):
         repository = self.library.repository
 
         def apply(changes):
@@ -1759,7 +1759,10 @@ class MainWindow(QMainWindow):
                 message += " · Automatic download cleanup applies"
             self._notify(message, "success", "Undo status" if cleanup else "Undo", undo)
             if cleanup:
-                self._delete_played_quietly([before[0] for before, _after in changes])
+                # Several episodes, a whole podcast or a "hide this" action
+                # list their files first; one finished episode stays quiet.
+                confirm = confirm_cleanup if confirm_cleanup is not None else (count > 1 or show_id is not None)
+                self._delete_played_quietly([before[0] for before, _after in changes], confirm=confirm)
 
         self._run_command(lambda: repository.mark_played_with_undo(ids, played, show_id), apply)
 
@@ -1768,7 +1771,7 @@ class MainWindow(QMainWindow):
             return
         ids = [item.episode_id for item in items if getattr(item, "episode_id", 0)]
         if ids:
-            self._mark_with_undo(ids, True, "Removed from Continue listening")
+            self._mark_with_undo(ids, True, "Removed from Continue listening", confirm_cleanup=True)
 
     def _set_favorites(self, items, favorite: bool):
         if self.library is None:
@@ -3679,12 +3682,13 @@ class MainWindow(QMainWindow):
         if isinstance(current, UiEpisode) and (current.episode_id, current.artwork_url) == key:
             self._refresh_context_item(current, update(current))
 
-    def _delete_played_quietly(self, episode_ids=None):
+    def _delete_played_quietly(self, episode_ids=None, confirm=False):
         """Auto-delete downloads for episodes that JUST became played.
 
         The setting reads per-episode; deleting every historical played
         download without confirmation violated the destructive-storage rule.
-        Bulk cleanup stays behind the confirming dialog."""
+        Bulk cleanup stays behind the confirming dialog, and `confirm` puts
+        a bulk mark's files behind it too."""
         if self.downloads is None:
             return
         downloads = self.downloads
@@ -3697,7 +3701,7 @@ class MainWindow(QMainWindow):
             previews = downloads.played_previews()
             if wanted is not None:
                 previews = [p for p in previews if p.episode_id in wanted]
-            return previews, False
+            return previews, confirm and bool(previews)
 
         self._run_task("played-previews", work)
 
