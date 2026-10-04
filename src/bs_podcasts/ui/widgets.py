@@ -3657,6 +3657,11 @@ class PlayerBar(QFrame):
             self.center_wrap.updateGeometry()
             row.activate()
         self._centre_play()
+        if row is not None:
+            # Padding can change the constrained button widths. Settle that
+            # layout and measure once more without deferred callbacks.
+            row.activate()
+            self._centre_play()
         # The column width may have changed without a bar resize (compact
         # flip, first show): re-elide against it now, not on the next resize.
         if hasattr(self, "_now_title"):
