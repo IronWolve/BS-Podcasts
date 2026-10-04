@@ -102,6 +102,9 @@ ACCENTS = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
 # window by one page; design.md forbids silently substituting a cap for "all".
 EPISODES_PAGE_SIZE = 5000
 HISTORY_PAGE_SIZE = 200
+# Written out rather than strftime("%b"): month names follow the system
+# locale and mixed into English text ("Okt 03" beside "Today").
+_MONTH_ABBREVIATIONS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
 class PeekFeed(FeedData):
@@ -7388,7 +7391,8 @@ class MainWindow(QMainWindow):
             return "Yesterday"
         if 1 < days < 7:
             return f"{days} days ago"
-        return parsed.strftime("%b %d") if parsed.year == now.year else parsed.strftime("%b %d, %Y")
+        month = _MONTH_ABBREVIATIONS[parsed.month - 1]
+        return f"{month} {parsed.day:02d}" if parsed.year == now.year else f"{month} {parsed.day:02d}, {parsed.year}"
 
     @staticmethod
     def _display_full_date(value: str) -> str:
@@ -7396,7 +7400,7 @@ class MainWindow(QMainWindow):
             return "Unknown date"
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return f"{parsed:%b} {parsed.day}, {parsed:%Y}"
+            return f"{_MONTH_ABBREVIATIONS[parsed.month - 1]} {parsed.day}, {parsed.year}"
         except ValueError:
             # Some feeds ship literal template junk (Sun, DD MMMM YYY).
             return "Unknown date"
