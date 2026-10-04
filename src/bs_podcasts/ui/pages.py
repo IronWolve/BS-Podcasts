@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import time
 
-from PySide6.QtCore import QEasingCurve, QEvent, QItemSelectionModel, QModelIndex, QObject, QPoint, QPropertyAnimation, QTimer, Signal, Qt
+from PySide6.QtCore import QEasingCurve, QEvent, QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint, QPropertyAnimation, QTimer, Signal, Qt
 from PySide6.QtGui import QContextMenuEvent, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -132,6 +132,12 @@ class _ScrollInputGuard(QObject):
             event.accept()
             return True
         return False
+
+
+def _selected_rows(selection_model) -> set[int]:
+    """Rows covered by the selection's ranges, without building one index
+    object per selected row."""
+    return {row for span in selection_model.selection() for row in range(span.top(), span.bottom() + 1)}
 
 
 class _KeyboardMenu(QObject):
@@ -554,15 +560,23 @@ class _ListPageMixin:
         if self.model.rowCount():
             if wanted:
                 selection = self.view.selectionModel()
-                selection.clearSelection()
                 selection_anchor = target if target in rows else (rows[0] if rows else None)
                 selection.setCurrentIndex(self.model.index(selection_anchor, 0) if selection_anchor is not None else QModelIndex(),
                                           QItemSelectionModel.SelectionFlag.NoUpdate)
-                for row in rows:
-                    selection.select(
-                        self.model.index(row, 0),
-                        QItemSelectionModel.SelectionFlag.Select,
-                    )
+                # One merged selection, applied once, and only when it changed:
+                # a row-by-row select re-ran every selection listener per row,
+                # quadratic for thousands of rows, on every in-place refresh.
+                if _selected_rows(selection) != set(rows):
+                    chosen = QItemSelection()
+                    first = previous = None
+                    for row in rows + [None]:
+                        if first is not None and row != previous + 1:
+                            chosen.select(self.model.index(first, 0), self.model.index(previous, 0))
+                            first = None
+                        if first is None:
+                            first = row
+                        previous = row
+                    selection.select(chosen, QItemSelectionModel.SelectionFlag.ClearAndSelect)
             else:
                 self.view.setCurrentIndex(self.model.index(target or 0, 0))
         if preserve_scroll:
@@ -1273,7 +1287,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self.load_more.setEnabled(available and not loading)
 
     def _selection_changed(self, *_args):
-        self.selection_bar.set_count(len(self.view.selectionModel().selectedIndexes()))
+        self.selection_bar.set_count(len(_selected_rows(self.view.selectionModel())))
 
     def set_items(self, items, preserve_scroll: bool = True):
         key = self._current_key()
