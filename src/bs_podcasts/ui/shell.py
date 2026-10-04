@@ -794,6 +794,7 @@ class MainWindow(QMainWindow):
             views[str(index)] = {
                 "current": page._current_key(), "selected": page._selected_keys(),
                 "scroll": page.view.verticalScrollBar().value(),
+                "scroll_units": "items" if page._row_aligned_scroll else "pixels",
                 "query": page.header.search.text(),
                 "filter": page.chips.current() if hasattr(page, "chips") else "All",
                 "sort": getattr(page, "_sort", ""),
@@ -917,7 +918,7 @@ class MainWindow(QMainWindow):
             if not selected:
                 page.view.clearSelection()
             page.view.doItemsLayout()
-            value = int(saved.get("scroll", 0))
+            value = page.saved_scroll_value(saved)
             page.view.verticalScrollBar().setValue(value)
             # Run after the list mixin\'s own queued scroll restoration.
             self._later(0, lambda p=page, v=value: p.view.verticalScrollBar().setValue(v))
@@ -2900,7 +2901,7 @@ class MainWindow(QMainWindow):
         page = self.episode_page
         return {'episode_view': True, 'show_id': self._hero_show_id,
                 'query': page.header.search.text(), 'filter': page._filter, 'sort': page._sort,
-                'scroll': page.view.verticalScrollBar().value(), 'current': page._current_key(),
+                'scroll': page.view.verticalScrollBar().value(), 'scroll_units': 'items', 'current': page._current_key(),
                 'selected': page._selected_keys()}
 
     def _open_episode_podcast(self, show_id):
@@ -2931,7 +2932,8 @@ class MainWindow(QMainWindow):
         page._apply_filters(restore_key=tuple(saved['current']) if saved['current'] else None,
                             preserve_scroll=True, selected_keys=saved['selected'])
         revision = page._scroll_restore_revision
-        self._later(0, lambda: page.view.verticalScrollBar().setValue(saved['scroll'])
+        value = page.saved_scroll_value(saved)
+        self._later(0, lambda: page.view.verticalScrollBar().setValue(value)
                     if revision == page._scroll_restore_revision else None)
 
     def _open_podcast(self, podcast, select_episode_id: int = 0):

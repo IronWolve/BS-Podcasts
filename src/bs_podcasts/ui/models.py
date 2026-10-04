@@ -615,6 +615,20 @@ class EpisodeDelegate(QStyledItemDelegate):
         self.playing_source = source or ""
         self.playing_active = active
 
+    def hover_allowed(self, view):
+        return not (view is not None and view.property('episodeHoverSuppressed'))
+
+    def is_playing(self, item):
+        return bool(item) and (
+            (bool(item.episode_id) and item.episode_id == self.playing_id)
+            or (not item.episode_id and bool(item.media_url) and item.media_url == self.playing_source)
+        )
+
+    def controls_visible(self, view, index, item):
+        return index.isValid() and (
+            self.hover_allowed(view) or view.selectionModel().isSelected(index) or self.is_playing(item)
+        )
+
     def sizeHint(self, option, index):
         if self.compact:
             return QSize(1, scaled_px(self.COMPACT_HEIGHT))
@@ -623,6 +637,11 @@ class EpisodeDelegate(QStyledItemDelegate):
 
     def helpEvent(self, event, view, option, index):
         """Keep the episode tooltip anchored to the row that owns it."""
+        if not self.hover_allowed(view):
+            from .widgets import hide_hover_bubble
+            hide_hover_bubble()
+            QToolTip.hideText()
+            return True
         if event.type() == QEvent.Type.ToolTip and index.isValid():
             item = index.data(ItemRoles.ITEM)
             if self.can_queue(item) and self.queue_rect(option.rect).contains(event.pos()):
@@ -692,12 +711,9 @@ class EpisodeDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         row = option.rect.adjusted(2, 3, -4, -3)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver) and self.hover_allowed(_repaint_target(option))
         focused = bool(option.state & QStyle.StateFlag.State_HasFocus)
-        playing = (
-            (bool(item.episode_id) and item.episode_id == self.playing_id)
-            or (not item.episode_id and bool(item.media_url) and item.media_url == self.playing_source)
-        )
+        playing = self.is_playing(item)
         radius = scaled_dim(12)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(COLORS["surface_raised"] if selected or hovered else COLORS["surface"]))
