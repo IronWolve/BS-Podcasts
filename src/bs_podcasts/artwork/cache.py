@@ -20,6 +20,11 @@ MAX_ARTWORK_BYTES = 8 * 1024 * 1024
 # from the shared pool indefinitely. An 8 MB image over a 60 s wall clock is
 # ~1 Mbit/s — generous for artwork, fatal for a slow-loris.
 MAX_TRANSFER_SECONDS = 60
+# Labels object stores and CDNs give any file; the bytes decide for these.
+GENERIC_CONTENT_TYPES = frozenset({
+    "application/octet-stream", "binary/octet-stream",
+    "application/binary", "application/x-octet-stream",
+})
 
 def _looks_textual(head: bytes) -> bool:
     """True for payloads that are plainly a document rather than an image.
@@ -350,8 +355,8 @@ class ArtworkCache:
         try:
             response = self.session.get(url, timeout=(8, 20), stream=True)
             response.raise_for_status()
-            content_type = response.headers.get("Content-Type", "").lower()
-            if content_type and not content_type.startswith("image/") and content_type.split(";", 1)[0].strip() != "application/octet-stream":
+            content_type = response.headers.get("Content-Type", "").lower().split(";", 1)[0].strip()
+            if content_type and not content_type.startswith("image/") and content_type not in GENERIC_CONTENT_TYPES:
                 raise ArtworkError("Artwork response is not an image.")
             size = 0
             digest = sha256()
