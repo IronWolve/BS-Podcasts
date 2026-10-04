@@ -166,6 +166,9 @@ class DownloadService:
         self._cancellations: dict[int, Event] = {}
         self._queued: dict[int, Event] = {}
         self._started: dict[int, float] = {}
+        # Where a full transfer cleanly ended short of a length only the feed
+        # declared, per episode, for the current download() call.
+        self._short_ends: dict[int, int] = {}
         self._retiring_shows = set()
         self._retiring_episodes = set()
         self._deleting_episodes = set()
@@ -384,6 +387,7 @@ class DownloadService:
                 if self._cancellations.get(episode_id) is cancellation:
                     self._cancellations.pop(episode_id, None)
                     self._started.pop(episode_id, None)
+                    self._short_ends.pop(episode_id, None)
 
     CANCEL_UNWIND_TIMEOUT = 5.0
 
@@ -651,6 +655,13 @@ class DownloadService:
                 **policy,
             )
             if response.status_code == 416 and existing:
+                # A 416 naming exactly the size already on disk means the
+                # partial is the whole file: the earlier leg reached the true
+                # end, short of an over-stated feed length.
+                whole = re.fullmatch(r"bytes \*/(\d+)", response.headers.get("Content-Range", "").strip())
+                if (whole is not None and int(whole.group(1)) == existing
+                        and record is not None and record.expected_total in (0, existing)):
+                    return self._finish(episode_id, partial, target, existing, cancellation)
                 raise _StaleResume("The partial range is no longer available; restarting.")
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
@@ -784,26 +795,17 @@ class DownloadService:
             if total and done < total:
                 if response.status_code == 206 and done == end + 1:
                     raise _RangeContinuation()
-                raise _TruncatedDownload("Download ended before the expected size.")
+                # Only the feed's declared length said more was coming. It is
+                # advisory: when a second full transfer ends cleanly at the
+                # same byte, the length is over-stated, not the body cut, and
+                # refusing it made the episode permanently undownloadable.
+                if authoritative_total or self._short_ends.get(episode_id) != done:
+                    if not authoritative_total:
+                        self._short_ends[episode_id] = done
+                    raise _TruncatedDownload("Download ended before the expected size.")
             if authoritative_total and done != total:
                 raise DownloadError("Download size does not match the response.")
-            if cancellation.is_set():
-                return self._park(episode_id, partial)
-            # Resume can join a previously incomplete header to new bytes.
-            # Validate the combined file, including when the initial transfer
-            # rejected a signature only after writing its first fragment.
-            with partial.open("rb") as verification:
-                complete_head = verification.read(512)
-            if _looks_textual(complete_head) or unsafe_media_payload(complete_head):
-                raise DownloadError("Server sent a document or executable instead of audio.")
-            os.replace(partial, target)
-            # `done` is the transfer's own byte count and equals the file size.
-            # Calling stat() here let a concurrent delete turn a complete,
-            # correctly-named file into an ERROR record at 0/0.
-            self.downloads.complete(episode_id, str(target), done)
-            note_completed_download(target)
-            self._emit(episode_id, DownloadState.COMPLETE, done, done)
-            return self.downloads.get(episode_id)
+            return self._finish(episode_id, partial, target, done, cancellation)
         except _RangeContinuation:
             if cancellation.is_set():
                 return self._park(episode_id, partial)
@@ -856,6 +858,26 @@ class DownloadService:
                 stall.stop()
             if response is not None:
                 response.close()
+
+    def _finish(self, episode_id: int, partial: Path, target: Path, done: int, cancellation: Event):
+        """Verify the finished partial and rename it into place as complete."""
+        if cancellation.is_set():
+            return self._park(episode_id, partial)
+        # Resume can join a previously incomplete header to new bytes.
+        # Validate the combined file, including when the initial transfer
+        # rejected a signature only after writing its first fragment.
+        with partial.open("rb") as verification:
+            complete_head = verification.read(512)
+        if _looks_textual(complete_head) or unsafe_media_payload(complete_head):
+            raise DownloadError("Server sent a document or executable instead of audio.")
+        os.replace(partial, target)
+        # `done` is the transfer's own byte count and equals the file size.
+        # Calling stat() here let a concurrent delete turn a complete,
+        # correctly-named file into an ERROR record at 0/0.
+        self.downloads.complete(episode_id, str(target), done)
+        note_completed_download(target)
+        self._emit(episode_id, DownloadState.COMPLETE, done, done)
+        return self.downloads.get(episode_id)
 
     def cancel(self, episode_id: int) -> bool:
         with self._lock:
