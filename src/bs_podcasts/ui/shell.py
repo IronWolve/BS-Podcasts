@@ -4044,8 +4044,23 @@ class MainWindow(QMainWindow):
 
     def _bookmarks_changed(self):
         self._reload_bookmarks()
-        if self.context._episode_id:
-            self._load_listening_details(self.context._episode_id)
+        self._reload_pane_bookmarks()
+
+    def _reload_pane_bookmarks(self, episode_id=None):
+        """Re-read only the details pane's bookmarks, and only when the pane
+        shows `episode_id` (default: whatever it shows). Re-running the whole
+        chapters/transcript read could supersede the pane's own load of
+        another episode, and reset an active transcript search."""
+        shown = self.context._episode_id
+        if self.listening is None or not shown or (episode_id is not None and episode_id != shown):
+            return
+        listening = self.listening
+
+        def apply(bookmarks):
+            if self.context._episode_id == shown:
+                self.context.set_bookmarks(bookmarks)
+
+        self._run_read(lambda: listening.bookmarks(shown), apply, "context-bookmarks")
 
     def _pane_bookmark_menu(self, position):
         entry = self.context.bookmark_list.itemAt(position)
@@ -4082,9 +4097,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.value:
             value = dialog.value
             def apply(_result):
-                self._reload_bookmarks()
-                if self.context._episode_id:
-                    self._load_listening_details(self.context._episode_id)
+                self._bookmarks_changed()
                 self._notify("Bookmark renamed", "success")
             self._run_command(lambda: self.listening.rename_bookmark(item.bookmark_id, value), apply)
 
@@ -4401,7 +4414,7 @@ class MainWindow(QMainWindow):
         title = f"Bookmark at {self.player._time(snapshot.position)}"
         def apply(_result):
             self._reload_bookmarks()
-            self._load_listening_details(snapshot.episode_id)
+            self._reload_pane_bookmarks(snapshot.episode_id)
             self._notify(title, "success", "Show", lambda: self.navigation.select(PAGE_BOOKMARKS))
         self._run_command(lambda: listening.bookmark(snapshot.episode_id, snapshot.position, title), apply)
 
