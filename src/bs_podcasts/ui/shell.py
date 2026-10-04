@@ -6031,9 +6031,17 @@ class MainWindow(QMainWindow):
         if result.status == JobStatus.OK:
             self.library.repository.invalidate_settings_cache()
             self._run_read(self.library.repository.reload_settings, lambda _: self._request_reload(), 'settings-reload')
+            lost = getattr(self.library.repository.database, "last_repair_lost", None) or {}
+            # Rows the repair could not read are gone from the new library;
+            # say which, instead of a plain "complete".
+            missing = ", ".join(f"{table}: {'all rows' if count is None else f'{count} row' + ('s' if count != 1 else '')}"
+                                for table, count in sorted(lost.items()))
             self.settings_page.set_database_status(
                 f"Repair complete · damaged original saved at {result.value}"
+                + (f" · could not recover {missing}" if missing else "")
             )
+            if missing:
+                self._notify(f"Repair could not recover every row ({missing}); the damaged original was kept", "error")
             self._request_reload()
         else:
             self.settings_page.set_database_status(
