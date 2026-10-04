@@ -6999,8 +6999,8 @@ class MainWindow(QMainWindow):
             self._peek_feed(feed_url)
 
     def _peek_feed(self, feed_url: str):
-        """Newest-episode date for one Discover card from the feed's first
-        64 KB; the full fetch is the fallback (audit F-089)."""
+        """Newest-episode date for one Discover card, read in a single
+        request; the full fetch and parse is the fallback (audit F-089)."""
         generation = self._discover_newest_generation
         cancel = self._discover_newest_cancel
         identity = (generation, feed_url)
