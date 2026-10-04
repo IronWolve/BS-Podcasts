@@ -66,6 +66,58 @@ def _install_excepthook():
 
     threading.excepthook = thread_hook
 
+    def unraisable_hook(unraisable):
+        # Errors in finalizers and callbacks: redacted into the log, not raw stderr.
+        import traceback
+
+        try:
+            text = redact("".join(traceback.format_exception(
+                unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback)))
+            logger.error("Unraisable exception (%s):\n%s", unraisable.err_msg or "ignored", text)
+        except Exception:
+            pass
+
+    sys.unraisablehook = unraisable_hook
+
+
+def _install_toolkit_messages(per_minute: int = 50):
+    """Route the UI toolkit's own warnings through the redacting log, rate-limited."""
+    import time
+
+    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+    logger = logging.getLogger("bs_podcasts.toolkit")
+    levels = {
+        QtMsgType.QtDebugMsg: logging.DEBUG,
+        QtMsgType.QtInfoMsg: logging.INFO,
+        QtMsgType.QtWarningMsg: logging.WARNING,
+        QtMsgType.QtCriticalMsg: logging.ERROR,
+        QtMsgType.QtFatalMsg: logging.CRITICAL,
+    }
+    lock = threading.Lock()
+    budget = {"since": time.monotonic(), "count": 0, "dropped": 0}
+
+    def handler(kind, _context, message):
+        try:
+            now = time.monotonic()
+            with lock:
+                dropped = 0
+                if now - budget["since"] >= 60:
+                    dropped = budget["dropped"]
+                    budget.update(since=now, count=0, dropped=0)
+                budget["count"] += 1
+                over = budget["count"] > per_minute and kind != QtMsgType.QtFatalMsg
+                if over:
+                    budget["dropped"] += 1
+            if dropped:
+                logger.warning("%d toolkit message(s) were not logged in the last minute", dropped)
+            if not over:
+                logger.log(levels.get(kind, logging.WARNING), "%s", message)
+        except Exception:
+            pass  # a diagnostic sink must never raise into the toolkit
+
+    qInstallMessageHandler(handler)
+
 
 def _install_stall_monitor(app, threshold_ms: int = 150):
     """BS_PODCASTS_TRACE=1: log main-thread stalls with the stack that caused them."""
@@ -160,6 +212,7 @@ def _redirect_toolkit_settings():
 def create_application(argv=None) -> QApplication:
     configure_logging()
     _install_excepthook()
+    _install_toolkit_messages()
     _redirect_toolkit_settings()
     app = QApplication(argv if argv is not None else sys.argv)
     _install_window_tracer(app)
