@@ -123,8 +123,6 @@ class _StallWatch:
                 continue
             elif self._bytes - seen < self._min_bytes:
                 self.message = f"Transfer stalled ({(self._bytes - seen) // 1024} KB in {int(self._window)} s). Retry in a moment."
-            elif now - started > self._max_seconds:
-                self.message = "Transfer took too long and was stopped. Retry to resume."
             if self.message:
                 try:
                     # urllib3 2.x: the live socket sits under the http.client
@@ -1084,10 +1082,12 @@ class DownloadService:
         suffix = Path(urlparse(url).path).suffix.lower()
         if suffix not in SAFE_MEDIA_SUFFIXES:
             suffix = ".media"
-        # SQLite can reuse a deleted episode's rowid; a URL digest in the
-        # name keeps a NEW episode from ever colliding with a leftover file
-        # from the id's previous owner. Existing records keep their stored
-        # paths (see _download_once), so nothing on disk is renamed.
+        # Episode IDs are never reused within one library (migration 017's
+        # entity_sequences), but a library restored from an older backup can
+        # hand an ID out again over the same folder. A URL digest in the name
+        # keeps a NEW episode from colliding with a leftover file from the
+        # ID's earlier owner. Existing records keep their stored paths (see
+        # _download_once), so nothing on disk is renamed.
         digest = sha256(url.encode("utf-8", "ignore")).hexdigest()[:10]
         return self.directory / f"episode-{episode_id}-{digest}{suffix}"
 
