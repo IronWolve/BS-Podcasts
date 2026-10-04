@@ -66,7 +66,18 @@ class LocalAudioImporter:
         self.repository = repository
 
     def import_file(self, path: str | Path):
+        from ..urlguard import UnsafeUrl, ensure_media_source
+        refusal = "Network paths are not supported. Copy the audio file to a local drive and import that copy."
+        try:
+            ensure_media_source(str(path), "Local audio path")
+        except UnsafeUrl as exc:
+            raise LocalAudioError(refusal) from exc
         source = Path(path).expanduser().resolve()
+        try:
+            ensure_media_source(str(source), "Local audio path")
+            ensure_media_source(source.as_uri(), "Local audio path", allow_file_url=True)
+        except UnsafeUrl as exc:
+            raise LocalAudioError(refusal) from exc
         if not source.is_file():
             raise LocalAudioError("Audio file does not exist.")
         stat = source.stat()

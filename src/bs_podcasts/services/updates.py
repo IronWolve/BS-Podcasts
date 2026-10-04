@@ -18,7 +18,16 @@ class UpdateResult:
 
 
 def _version_key(value: str):
-    return tuple(int(part) for part in re.findall(r"\d+", value)[:4])
+    """(major, minor, patch, release, suffix). Hyphen suffixes sort older than the same numbers."""
+    text = str(value).strip()
+    if text[:1] in "vV":
+        text = text[1:]
+    text = text.split("+", 1)[0]
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?", text)
+    if match is None:
+        return (0, 0, 0, 1, "")
+    major, minor, patch, suffix = match.groups()
+    return (int(major), int(minor), int(patch), 0 if suffix else 1, suffix or "")
 
 
 def check_for_update(installed: str, session=None) -> UpdateResult:

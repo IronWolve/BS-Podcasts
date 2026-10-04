@@ -3,7 +3,12 @@ import argparse
 from pathlib import Path, PureWindowsPath
 from types import CodeType
 from PyInstaller.archive.readers import CArchiveReader
-from source_manifest import privacy_scan_bytes
+from source_manifest import contains_denied, read_deny_file
+
+
+def _encoded_constant(constant):
+    folded=constant.replace('\\','/').casefold()
+    return [folded.encode(encoding) for encoding in ('utf-8','utf-16-le','utf-16-be')]
 
 
 def check(root, private_root=None):
@@ -11,19 +16,30 @@ def check(root, private_root=None):
     tokens=[]
     if private_root:
         tokens.extend((str(private_root),str(private_root/'repo')))
-        deny=private_root/'.config/source-deny.txt'
-        if deny.is_file(): tokens.extend(v.strip() for v in deny.read_text().splitlines() if v.strip())
-    narrow=[v.replace('\\','/').casefold().encode() for v in tokens]
-    wide=[v.encode('utf-16-le') for v in tokens]
+        tokens.extend(read_deny_file(private_root/'.config/source-deny.txt', required=True))
     forbidden={'.git','auth.json','credentials.json','direct_url.json'}
-    paths=[p for p in root.rglob('*') if p.is_file() and not p.is_symlink()]
+    seen=set()
+    paths=[p for p in root.rglob('*') if p.is_symlink() or (p.is_file() and not p.is_symlink())]
     for path in paths:
         relative=path.relative_to(root)
         if set(relative.parts)&forbidden or path.suffix.casefold() in {'.db','.sqlite','.sqlite3','.log','.pcap'}:
             raise ValueError('Private bundle file: '+relative.as_posix())
-        raw=privacy_scan_bytes(path.read_bytes())
-        normalized=raw.replace(b'\\',b'/').lower()
-        if any(v in normalized for v in narrow) or any(v in raw for v in wide):
+        blobs=[]
+        target=path
+        if path.is_symlink():
+            blobs.append(str(path.readlink()).encode('utf-8','surrogateescape'))
+            try:
+                resolved=path.resolve(strict=True)
+            except OSError:
+                resolved=None
+            if resolved is not None and resolved.is_file() and resolved.is_relative_to(root):
+                target=resolved
+            else:
+                target=None
+        if target is not None and target not in seen:
+            seen.add(target)
+            blobs.append(target.read_bytes())
+        if any(contains_denied(blob, tokens) for blob in blobs):
             raise ValueError('Known private reference in '+relative.as_posix())
         if 'mutagen' in relative.as_posix().casefold(): raise ValueError('Retired dependency found.')
     executable=root/('Contents/MacOS/BS Podcasts' if root.suffix=='.app' else 'BS Podcasts.exe')
@@ -38,8 +54,7 @@ def check(root, private_root=None):
         for constant in code.co_consts:
             if isinstance(constant,CodeType): code_check(constant)
             elif isinstance(constant,str):
-                checked = privacy_scan_bytes(constant.encode()).decode('utf-8').replace('\\','/').casefold().encode()
-                if any(v in checked for v in narrow):
+                if any(contains_denied(encoded, tokens) for encoded in _encoded_constant(constant)):
                     raise ValueError('Private application constant.')
     count=0
     for name in pyz.toc:

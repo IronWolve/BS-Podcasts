@@ -5,10 +5,87 @@
 the first window paints, so no startup path should pay for it.
 """
 
-from .urlguard import UnsafeUrl, ensure_fetchable
+from .urlguard import UnsafeUrl, _blocked_reason, ensure_web_url
 import threading
 
 _request_context = threading.local()
+_rate_limited_until = {}
+_rate_limit_lock = threading.Lock()
+_RATE_LIMIT_CAP = 6 * 60 * 60
+
+
+def _rate_limit_message(host: str) -> str:
+    return f"Rate limited by {host or 'the server'}. Retry in a moment."
+
+
+def _remember_rate_limit(host: str, seconds: float) -> None:
+    if not host or seconds <= 0:
+        return
+    import time
+    seconds = min(float(seconds), _RATE_LIMIT_CAP)
+    until = time.monotonic() + seconds
+    with _rate_limit_lock:
+        now = time.monotonic()
+        expired = [key for key, value in _rate_limited_until.items() if value <= now]
+        for key in expired:
+            del _rate_limited_until[key]
+        if until > _rate_limited_until.get(host, 0.0):
+            _rate_limited_until[host] = until
+
+
+def _rate_limit_remaining(host: str) -> float:
+    if not host:
+        return 0.0
+    import time
+    with _rate_limit_lock:
+        until = _rate_limited_until.get(host, 0.0)
+    return max(0.0, until - time.monotonic())
+
+
+def _retry_after_seconds(response) -> float | None:
+    raw = response.headers.get("Retry-After") if response is not None else None
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if text.isdigit():
+        return float(text)
+    import email.utils
+    import time
+    parsed = email.utils.parsedate_tz(text)
+    if parsed is None:
+        return None
+    return max(0.0, email.utils.mktime_tz(parsed) - time.time())
+
+
+def _request_host(url) -> str:
+    from urllib.parse import urlsplit
+    try:
+        return (urlsplit(str(url)).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _fail_long_retry_after(response, state, request_host: str) -> None:
+    """A Retry-After past the deadline is a rate limit, not a timeout."""
+    if getattr(response, "status_code", None) not in (429, 500, 502, 503, 504):
+        return
+    seconds = _retry_after_seconds(response)
+    if seconds is None:
+        return
+    from .netlimits import NetworkDeadline
+    try:
+        left = state.remaining()
+    except NetworkDeadline:
+        left = 0
+    if seconds <= left:
+        return
+    response_host = _request_host(getattr(response, "url", "") or "")
+    _remember_rate_limit(request_host, seconds)
+    _remember_rate_limit(response_host, seconds)
+    from .netlimits import abort_response
+    abort_response(response)
+    from requests.exceptions import RetryError
+    raise RetryError(_rate_limit_message(response_host or request_host))
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -36,7 +113,19 @@ def _redirect_guard(response, *args, **kwargs):
             target = urljoin(response.url, location)
             if urlsplit(response.url).scheme.lower() == 'https' and urlsplit(target).scheme.lower() == 'http':
                 raise UnsafeUrl('A secure URL redirected to insecure HTTP; use an HTTPS endpoint.')
-            ensure_fetchable(target, "Redirect target")
+            # The connection pins and screens the address it actually uses.
+            # Resolving here looked up a different name for some international hosts.
+            checked = ensure_web_url(target, "Redirect target")
+            host = urlsplit(checked).hostname or ""
+            import ipaddress
+            try:
+                literal = ipaddress.ip_address(host)
+            except ValueError:
+                literal = None
+            if literal is not None:
+                reason = _blocked_reason(literal)
+                if reason:
+                    raise UnsafeUrl(f"Redirect target resolves to {reason}: {host}")
         except UnsafeUrl as exc:
             response.close()
             raise InvalidURL(str(exc), response=response) from exc
@@ -109,6 +198,10 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
             streaming = kwargs.pop("stream", False)
             budget = float(kwargs.pop("total_timeout", total_timeout))
             state = Deadline(min(budget, 45), kwargs.pop("cancel_event", None), foreground=foreground or is_foreground())
+            host = _request_host(url)
+            if _rate_limit_remaining(host) > 0:
+                from requests.exceptions import RetryError
+                raise RetryError(_rate_limit_message(host))
             def work():
                 _request_context.state = state
                 try:
@@ -121,6 +214,7 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
             try:
                 response = bounded_call(work, state, dispose=abort_response)
                 state.expires = state.started + budget
+                _fail_long_retry_after(response, state, host)
                 if not streaming:
                     response.content
                 return response
@@ -157,15 +251,33 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
     # .netrc, or silently route through process-wide proxy/CA configuration.
     session.trust_env = False
     session.headers["User-Agent"] = USER_AGENT
+    from http.cookiejar import DefaultCookiePolicy
+
+    class _NoCookies(DefaultCookiePolicy):
+        def set_ok(self, cookie, request):
+            return False
+
+        def return_ok(self, cookie, request):
+            return False
+
+        def domain_return_ok(self, domain, request):
+            return False
+
+        def path_return_ok(self, path, request):
+            return False
+
+    session.cookies.set_policy(_NoCookies())
+    # Status retries drain the error body with no byte cap. Fail the response
+    # and let the caller try again instead of holding this worker.
     retry = DeadlineRetry(
         total=retries,
         connect=retries,
         read=retries if read_retries else 0,
-        status=retries,
+        status=0,
         backoff_factor=backoff,
-        status_forcelist=(429, 500, 502, 503, 504),
+        status_forcelist=(),
         allowed_methods=frozenset({"GET", "HEAD"}),
-        respect_retry_after_header=True,
+        respect_retry_after_header=False,
         raise_on_status=False,
     )
     adapter = guarded_adapter(pool_connections=pool, pool_maxsize=pool, max_retries=retry,

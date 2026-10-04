@@ -22,6 +22,71 @@ class FeedResponse:
     etag: str = ""
     last_modified: str = ""
     not_modified: bool = False
+    canonical_url: str = ""
+
+
+def _declared_encoding(encoding: str | None) -> str:
+    import codecs
+    name = (encoding or "").strip()
+    if not name:
+        return "utf-8"
+    try:
+        codecs.lookup(name)
+    except LookupError as exc:
+        raise FeedFetchError("Feed declares an unknown character encoding.") from exc
+    return name
+
+
+def _markup_text(body: bytes, encoding: str) -> str:
+    if body.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return body.decode("utf-32", "replace")
+    if body.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return body.decode("utf-16", "replace")
+    if body.startswith(b"\xef\xbb\xbf"):
+        return body.decode("utf-8-sig", "replace")
+    return body.decode(encoding, "replace")
+
+
+def _opening_markup(text: str) -> str:
+    """First tag after a BOM, comments, and processing instructions."""
+    index = 0
+    length = len(text)
+    while True:
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length:
+            return ""
+        if text.startswith("<!--", index):
+            end = text.find("-->", index + 4)
+            if end < 0:
+                return ""
+            index = end + 3
+            continue
+        if text.startswith("<?", index):
+            end = text.find("?>", index + 2)
+            if end < 0:
+                return ""
+            index = end + 2
+            continue
+        return text[index:index + 64].lower()
+
+
+def _permanent_canonical(response) -> str:
+    """Final URL only after a 301 or 308. A 302 or 307 is not stored."""
+    history = list(getattr(response, "history", None) or ())
+    if not history:
+        return ""
+    chosen = ""
+    for index, hop in enumerate(history):
+        if getattr(hop, "status_code", None) not in (301, 308):
+            break
+        nxt = history[index + 1].url if index + 1 < len(history) else getattr(response, "url", "")
+        if nxt:
+            chosen = nxt
+    first = getattr(history[0], "url", "") or ""
+    if chosen and chosen != first:
+        return chosen
+    return ""
 
 
 class _FeedLinkParser(HTMLParser):
@@ -142,12 +207,14 @@ class FeedFetcher:
                 allow_redirects=True,
                 stream=True,
             )
+            encoding = _declared_encoding(getattr(response, "encoding", None))
             if response.status_code == 304:
                 return FeedResponse(
                     final_url=response.url,
                     etag=response.headers.get("ETag", etag),
                     last_modified=response.headers.get("Last-Modified", last_modified),
                     not_modified=True,
+                    canonical_url=_permanent_canonical(response),
                 )
             response.raise_for_status()
             body = bytearray()
@@ -157,15 +224,16 @@ class FeedFetcher:
                     raise FeedFetchError("Feed response exceeds the size limit.")
             content_type = response.headers.get("Content-Type", "").lower()
             discovered = ""
-            head = bytes(body[:512]).removeprefix(b"\xef\xbb\xbf").lstrip().lower()
             # Many hosts serve RSS with a text/html Content-Type; a body that
             # is actually XML must parse as a feed, not fail HTML discovery.
-            looks_like_xml = head.startswith((b"<?xml", b"<rss", b"<feed", b"<rdf"))
+            text = _markup_text(bytes(body), encoding)
+            lead = _opening_markup(text)
+            looks_like_xml = lead.startswith(("<rss", "<feed", "<rdf", "<channel"))
             if allow_discovery and not looks_like_xml and (
-                "text/html" in content_type or head.startswith(b"<!doctype html")
+                "text/html" in content_type or lead.startswith("<!doctype html")
             ):
                 parser = _FeedLinkParser()
-                parser.feed(bytes(body).decode(response.encoding or "utf-8", "replace"))
+                parser.feed(text)
                 if not parser.href:
                     raise FeedFetchError("HTML page does not advertise a podcast feed.")
                 discovered = urljoin(urljoin(response.url, parser.base), parser.href)
@@ -174,6 +242,7 @@ class FeedFetcher:
                 final_url=response.url,
                 etag=response.headers.get("ETag", ""),
                 last_modified=response.headers.get("Last-Modified", ""),
+                canonical_url=_permanent_canonical(response),
             )
             if discovered:
                 response.close()

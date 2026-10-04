@@ -110,6 +110,13 @@ class _ArtworkCache:
         self.bytes += cost
         self._index(key)
 
+    def drop(self, key):
+        old = self._items.pop(key, None)
+        if old is None:
+            return
+        self.bytes -= old[1]
+        self._unindex(key)
+
 
 _artwork_cache = _ArtworkCache()
 # Large/high-DPI renditions must not evict every usable image of a show.
@@ -408,7 +415,10 @@ def prepare_saved_previews(paths, limit=32, budget_ms=100):
 def install_previews(images):
     """GUI-thread handoff before the library's first model/paint."""
     for path, image in images.items():
-        if _preview_cache.find(path) is None and not image.isNull():
+        if image.isNull():
+            continue
+        replaces = image.width() >= previews.SIDE and image.height() >= previews.SIDE
+        if _preview_cache.find(path) is None or replaces:
             _preview_cache.insert(path, QPixmap.fromImage(image))
 
 
@@ -569,6 +579,7 @@ def invalidate_artwork(path: str, *, accent_token=None):
     """Called on the GUI thread when a producer publishes/replaces an image."""
     _revisions[path] = next(_revision_ids)
     _revision_for(path)
+    _preview_cache.drop(path)
     with _disk_lock:
         current = (_dominant.get(path), _dominant_signatures.get(path))
         if accent_token is None or current != accent_token or current[1] is None:
@@ -720,7 +731,7 @@ def cover(
     else:
         painter.fillRect(QRect(0, 0, physical_w, physical_h), QColor(COLORS["surface_raised"]))
         glyph = int(min(physical_w, physical_h) * 0.34)
-        icons.paint(painter, "podcasts", COLORS["border"], QRect((physical_w - glyph) // 2, (physical_h - glyph) // 2, glyph, glyph))
+        icons.paint(painter, "podcasts", COLORS["muted"], QRect((physical_w - glyph) // 2, (physical_h - glyph) // 2, glyph, glyph))
     painter.end()
     result.setDevicePixelRatio(scale)
     if not interim:

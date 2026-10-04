@@ -169,11 +169,16 @@ def create_application(argv=None) -> QApplication:
     return app
 
 
+def _instance_name() -> str:
+    return f"{APP_ID}-{getpass.getuser()}"
+
+
 def _probe_running_instance(name: str, timeout_ms: int = 300) -> bool:
     """True when a live instance answered the raise request."""
     probe = QLocalSocket()
     probe.connectToServer(name)
     if not probe.waitForConnected(timeout_ms):
+        probe.abort()
         return False
     probe.write(b"raise")
     probe.waitForBytesWritten(300)
@@ -187,15 +192,27 @@ def _probe_running_instance(name: str, timeout_ms: int = 300) -> bool:
     return True
 
 
-def _claim_single_instance(app):
-    """Raise the running window instead of opening a second one.
+def _close_local_server(server):
+    """Close a socket this process created. Never removeServer here."""
+    if server is None:
+        return
+    early = getattr(server, "_early_ok", None)
+    if early is not None:
+        try:
+            server.newConnection.disconnect(early)
+        except (RuntimeError, TypeError):
+            pass
+    server.close()
 
-    Two instances double-clicked during a slow start can both find no server
-    and race to listen; on Windows two named-pipe servers with one name can
-    even coexist. Checking the listen() result and re-probing closes that
-    hole. Returns None when a live instance took over, otherwise a server
-    (which may not be listening — running unguarded beats not launching)."""
-    name = f"{APP_ID}-{getpass.getuser()}"
+
+def _claim_single_instance(app):
+    """Listen after the library lease is held, or yield to a live instance.
+
+    A successful listen is not probed again: on Windows two servers can bind
+    one pipe name, so the re-probe only runs when listen() returns false.
+    Returns None when a live instance took over, otherwise a server (which
+    may not be listening — running unguarded beats not launching)."""
+    name = _instance_name()
     if _probe_running_instance(name):
         return None
     server = QLocalServer(app)
@@ -208,6 +225,7 @@ def _claim_single_instance(app):
     # confirms nothing is answering there.
     if not server.listen(name):
         if _probe_running_instance(name, timeout_ms=1500):
+            _close_local_server(server)
             return None
         QLocalServer.removeServer(name)
         server.listen(name)
@@ -216,6 +234,7 @@ def _claim_single_instance(app):
         # services, window) runs for seconds, and a second launch probing in
         # that window used to read silence, assume a dead peer, and steal
         # the socket. main() swaps this for the full raise handler later.
+        # Only this process reaches here, and it already holds the lease.
         def _early_ok():
             socket = server.nextPendingConnection()
             if socket is not None:
@@ -242,11 +261,38 @@ def main() -> int:
 
     app = create_application()
     _mark("qt-app")
+    root = application_data_dir()
+    name = _instance_name()
+    # An instance that is already listening owns the lease and answers here.
+    if _probe_running_instance(name):
+        return 0
+    lease = None
+    server = None
+    try:
+        from .data.lease import LibraryLease
+        lease = LibraryLease(root / "library.db")
+    except OSError as exc:
+        if "Close BS Podcasts before migrating it." not in str(exc):
+            from .ui.dialogs import StartupErrorDialog
+
+            dialog = StartupErrorDialog(
+                "Library could not be opened",
+                "Close the app and inspect "
+                f"the library at {root / 'library.db'}.\n\n{exc}",
+            )
+            dialog.exec()
+            return 1
+        # Ordinary second launch: the peer holds the library. Do not present
+        # that as a migration failure. Close anything we bound, then raise them.
+        _close_local_server(server)
+        _probe_running_instance(name, timeout_ms=1500)
+        return 0
     server = _claim_single_instance(app)
     if server is None:
+        _close_local_server(server)
+        lease.close()
         return 0
     _mark("single-instance")
-    root = application_data_dir()
     notice = None
     if Database.migration_pending(root / "library.db"):
         # Something visible before the backup + migration blocks.
@@ -256,14 +302,12 @@ def main() -> int:
         notice.show()
         app.processEvents()
         app.processEvents()
-    lease = None
     try:
-        from .data.lease import LibraryLease
-        lease = LibraryLease(root / "library.db")
         database = Database(root / "library.db")
     except (sqlite3.DatabaseError, OSError) as exc:
         if lease is not None:
             lease.close()
+        _close_local_server(server)
         if notice is not None:
             notice.close()
         from .ui.dialogs import StartupErrorDialog

@@ -1,4 +1,5 @@
 """Build, check and transactionally publish a project-local macOS bundle."""
+import argparse
 import fcntl
 import json
 import os
@@ -10,8 +11,17 @@ import sys
 import tempfile
 import tomllib
 
-from source_manifest import ROOT, stage, source_digest, file_digest
+from source_manifest import ROOT, stage, source_digest, file_digest, check as check_source
 from check_dependencies import check
+
+
+def prune_previous_deployments(root, keep=3):
+    if not root.is_dir() or root.is_symlink():
+        return
+    entries = [path for path in root.iterdir() if path.is_dir() and not path.is_symlink()]
+    entries.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    for stale in entries[keep:]:
+        shutil.rmtree(stale)
 
 
 def run(*args, **kwargs):
@@ -37,10 +47,21 @@ def diagnostic(app, work):
 def build(workspace):
     if sys.platform != 'darwin' or platform.machine() != 'arm64':
         raise RuntimeError('This recipe requires an arm64 Mac; universal2 is not implied.')
-    if len(sys.argv)>1:
-        raise RuntimeError('Setup is a separate approved operation; this command only builds.')
     check(ROOT/'packaging/requirements-macos.lock')
     work=Path(tempfile.mkdtemp(prefix='macos-build-',dir=workspace/'tmp'))
+    replaced=False
+    try:
+        replaced=_finish_macos(workspace, work)
+    finally:
+        source=work/'source'
+        if source.exists():
+            shutil.rmtree(source)
+        if (replaced and work.exists() and not work.is_symlink()
+                and work.name.startswith('macos-build-') and work.is_relative_to(workspace/'tmp')):
+            shutil.rmtree(work)
+
+
+def _finish_macos(workspace, work):
     snapshot=stage(work/'source')
     version=tomllib.loads((snapshot/'pyproject.toml').read_text())['project']['version']
     native=workspace/'.cache/macos-build/libmpv-lgpl/libmpv.2.dylib'
@@ -107,16 +128,25 @@ def build(workspace):
             if destination.exists():
                 destination.rename(previous/destination.name); retired.append(destination)
             source.rename(destination); published.append((source,destination))
+        replaced=True
     except BaseException:
         for source,destination in reversed(published): destination.rename(source)
         for destination in reversed(retired): (previous/destination.name).rename(destination)
         raise
+    prune_previous_deployments(workspace/'.cache/previous-deployments')
     print(f'Built and headless/relocation-verified BS Podcasts {version}: {target}',flush=True)
     print('Signing: '+('Developer ID; notarization still separate' if os.environ.get('BS_PODCASTS_SIGN_IDENTITY') else 'ad-hoc only; not notarized'))
     print(f'Previous artifacts retained: {previous}')
+    return replaced
 
 
 if __name__=='__main__':
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--check',action='store_true')
+    args=parser.parse_args()
+    if args.check:
+        print(f'Approved source files: {check_source()}')
+        raise SystemExit(0)
     workspace=Path(os.environ.get('BS_PODCASTS_BUILD_ROOT',ROOT.parent)).resolve()
     with (workspace/'.cache/macos-build.lock').open('a+b') as lease:
         fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)

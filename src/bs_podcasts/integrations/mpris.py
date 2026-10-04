@@ -1,6 +1,6 @@
 """Optional Linux MPRIS service implemented with bundled QtDBus."""
 
-from PySide6.QtCore import ClassInfo, Property, QObject, Slot
+from PySide6.QtCore import ClassInfo, Property, QObject, Qt, Slot
 from PySide6.QtDBus import QDBusAbstractAdaptor, QDBusConnection, QDBusMessage, QDBusObjectPath
 from hashlib import sha256
 
@@ -40,9 +40,11 @@ class _RootAdaptor(QDBusAbstractAdaptor):
 
     @Slot()
     def Raise(self):
-        self.host.window.show()
-        self.host.window.raise_()
-        self.host.window.activateWindow()
+        window = self.host.window
+        window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
     @Slot()
     def Quit(self):
@@ -68,6 +70,12 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
     def Rate(self):
         return self.host.playback.snapshot.speed
 
+    @Rate.setter
+    def Rate(self, value):
+        if not self.CanControl:
+            return
+        self._command("set_speed", value)
+
     @Property("QVariantMap")
     def Metadata(self):
         snapshot = self.host.playback.snapshot
@@ -81,6 +89,12 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
     @Property(float)
     def Volume(self):
         return self.host.playback.snapshot.volume / 100.0
+
+    @Volume.setter
+    def Volume(self, value):
+        if not self.CanControl:
+            return
+        self._command("set_volume", float(value) * 100)
 
     @Property("qlonglong")
     def Position(self):

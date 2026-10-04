@@ -224,16 +224,30 @@ class PublicDirectory:
         try:
             response = self.session.get(self.endpoint, params=params, timeout=(8, 20))
             response.raise_for_status()
-            payload = response.json()
-        except (requests.RequestException, ValueError) as exc:
+        except requests.RequestException as exc:
             raise DirectoryError(describe_network_error(exc, "the directory")) from exc
+        try:
+            # response.json() is json.loads; a deeply nested body raises RecursionError.
+            payload = response.json()
+        except RecursionError as exc:
+            raise DirectoryError("Directory returned a response that is too deeply nested.") from exc
+        except ValueError as exc:
+            raise DirectoryError(describe_network_error(exc, "the directory")) from exc
+        if not isinstance(payload, dict):
+            raise DirectoryError("Directory returned an unexpected response.")
 
         results = []
-        for row in payload.get("results", []):
+        rows = payload.get("results", [])
+        if not isinstance(rows, list):
+            rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
             feed_url = str(row.get("feedUrl") or "").strip()
             if not feed_url:
                 continue
-            genres = [str(value) for value in row.get("genres", [])]
+            genres_raw = row.get("genres")
+            genres = [str(value) for value in genres_raw] if isinstance(genres_raw, list) else []
             top_level_genre = next(
                 (value for value in genres if value in CATEGORY_IDS),
                 str(row.get("primaryGenreName") or "").strip(),

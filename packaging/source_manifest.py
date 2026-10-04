@@ -92,33 +92,170 @@ def privacy_scan_bytes(raw, root=ROOT):
     return raw
 
 
-def check(root=ROOT):
+_PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
+# Generator markers come from the private deny file; none are embedded in source.
+_GENERATOR_MARKERS = ()
+_DENIED_ENCODINGS = ('utf-8', 'utf-16-le', 'utf-16-be')
+_PNG_SKIP = (b'IHDR', b'PLTE', b'IDAT', b'IEND')
+_FORBIDDEN_TRAILER = re.compile(r'(?im)^[ \t]*(?:co-authored-by|generated-with)\b')
+_GENERATED_WITH = re.compile(r'(?i)\bgenerated[\s-]+with\b')
+
+
+def _png_chunks(raw):
+    if not raw.startswith(_PNG_SIGNATURE):
+        return
+    index = 8
+    while index + 8 <= len(raw):
+        length = int.from_bytes(raw[index:index + 4], 'big')
+        chunk_type = raw[index + 4:index + 8]
+        if len(chunk_type) != 4 or any(byte < 65 or 90 < byte < 97 or byte > 122 for byte in chunk_type):
+            return
+        payload_end = index + 8 + length
+        if payload_end + 4 > len(raw):
+            return
+        yield chunk_type, raw[index + 8:payload_end]
+        index = payload_end + 4
+        if chunk_type == b'IEND':
+            return
+
+
+def _marker_needles():
+    needles = []
+    for marker in _GENERATOR_MARKERS:
+        text = marker.decode('ascii')
+        needles.extend(text.encode(encoding) for encoding in _DENIED_ENCODINGS)
+    return needles
+
+
+def generator_metadata(raw):
+    """True when a PNG carries a caBX chunk or a generator vendor/model marker."""
+    needles = _marker_needles()
+    chunks = list(_png_chunks(raw))
+    if chunks or raw.startswith(_PNG_SIGNATURE):
+        for chunk_type, payload in chunks:
+            if chunk_type == b'caBX':
+                return True
+            if chunk_type in _PNG_SKIP:
+                continue
+            folded = payload.lower()
+            if any(needle in folded for needle in needles):
+                return True
+        return False
+    folded = raw.lower()
+    return any(needle in folded for needle in needles)
+
+
+def deny_file(root):
+    return Path(root).resolve().parent / '.config/source-deny.txt'
+
+
+def read_deny_file(path, required=False):
+    path = Path(path)
+    if not path.is_file():
+        if required:
+            raise ValueError('Private-path deny file is required.')
+        return []
+    return [line.strip() for line in path.read_text(encoding='utf-8').splitlines()
+            if line.strip() and not line.strip().startswith('#')]
+
+
+def denied_tokens(root, required=False):
+    return read_deny_file(deny_file(root), required=required)
+
+
+def contains_denied(raw, tokens, root=ROOT):
+    view = privacy_scan_bytes(raw, root)
+    for token in tokens:
+        if not token:
+            continue
+        for encoding in _DENIED_ENCODINGS:
+            if token.encode(encoding) in view:
+                return True
+    return False
+
+
+def git_tracked(root):
+    try:
+        top = subprocess.run(['git', '-C', str(root), 'rev-parse', '--show-toplevel'],
+                             capture_output=True, text=True, timeout=5)
+        if top.returncode != 0 or Path(top.stdout.strip()).resolve() != Path(root).resolve():
+            return None
+        tracked = subprocess.run(['git', '-C', str(root), 'ls-files', '-z'],
+                                 capture_output=True, text=True, timeout=5, check=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return set(tracked.stdout.split('\0')) - {''}
+
+
+def tracking_difference(root, files):
+    """None when Git is unavailable. Raises when the manifest and index differ."""
+    tracked = git_tracked(root)
+    if tracked is None:
+        return None
+    manifest = set(files)
+    if tracked != manifest:
+        extra = sorted(tracked - manifest)
+        missing = sorted(manifest - tracked)
+        detail = []
+        if extra:
+            detail.append('tracked but not listed: ' + ', '.join(extra))
+        if missing:
+            detail.append('listed but not tracked: ' + ', '.join(missing))
+        raise ValueError('Source manifest and Git tracking differ (' + '; '.join(detail) + ').')
+    return tracked
+
+
+def reject_commit_trailers(root=ROOT):
+    """Reject Co-Authored-By and generated-with commit trailers. Publisher entry point."""
+    try:
+        log = subprocess.run(
+            ['git', '-C', str(root), 'log', '--all', '--format=%H%x1e%B%x1f'],
+            capture_output=True, text=True, timeout=30, check=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError('Commit-message check requires Git history.') from exc
+    bad = []
+    for record in log.stdout.split('\x1f'):
+        if not record.strip():
+            continue
+        commit, separator, message = record.partition('\x1e')
+        if not separator:
+            continue
+        if _FORBIDDEN_TRAILER.search(message) or _GENERATED_WITH.search(message):
+            bad.append(commit.strip()[:12])
+    if bad:
+        raise ValueError('Commit message contains a forbidden trailer: ' + ', '.join(bad))
+
+
+def check(root=ROOT, require_deny=False):
     root = Path(root).resolve()
     files, _ = inventory(root)
-    private_tokens = root.parent / '.config/source-deny.txt'
-    denied = [s.strip() for s in private_tokens.read_text().splitlines() if s.strip()] if private_tokens.is_file() else []
+    denied = denied_tokens(root, required=require_deny)
     secrets = re.compile(r'(?:sk-[A-Za-z0-9]{24,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)')
     failures = []
     for name in files:
-        raw = (root/name).read_bytes()
-        private_view = privacy_scan_bytes(raw, root)
-        if any(value.encode() in private_view for value in denied):
+        path = root / name
+        blobs = []
+        if path.is_symlink():
+            blobs.append(str(path.readlink()).encode('utf-8', 'surrogateescape'))
+            try:
+                target = path.resolve(strict=True)
+            except OSError:
+                target = None
+            if target is not None and target.is_file() and target.is_relative_to(root):
+                blobs.append(target.read_bytes())
+        else:
+            blobs.append(path.read_bytes())
+        if any(contains_denied(blob, denied, root) or generator_metadata(blob) for blob in blobs):
             failures.append(name)
             continue
-        text = raw.decode('utf-8', 'replace')
+        text = b''.join(blobs).decode('utf-8', 'replace')
         if secrets.search(text):
             failures.append(name)
     if failures:
-        raise ValueError('Private references or credential patterns in: '+', '.join(failures))
-    try:
-        top = subprocess.run(['git','-C',str(root),'rev-parse','--show-toplevel'],capture_output=True,text=True,timeout=5)
-        if top.returncode == 0 and Path(top.stdout.strip()).resolve() == root:
-            tracked = subprocess.run(['git','-C',str(root),'ls-files','-z'],capture_output=True,text=True,timeout=5,check=True)
-            unexpected = set(tracked.stdout.split('\0')) - {''} - set(files)
-            if unexpected:
-                raise ValueError('Tracked files outside the source allowlist: '+', '.join(sorted(unexpected)))
-    except (OSError, subprocess.SubprocessError):
-        pass  # Manifest-only snapshots/build hosts need not have Git available.
+        raise ValueError('Private references, credential patterns, or generator metadata in: ' + ', '.join(failures))
+    tracked = tracking_difference(root, files)
+    if tracked is not None:
+        reject_commit_trailers(root)
     return len(files)
 
 
@@ -127,8 +264,9 @@ def stage(destination, root=ROOT):
     destination = Path(destination).resolve()
     if destination.is_relative_to(root) or root.is_relative_to(destination):
         raise ValueError('Staging must be outside the source checkout and cannot contain it.')
-    check(root)
+    check(root, require_deny=True)
     files, _ = inventory(root)
+    tracked = tracking_difference(root, files)
     expected = source_digest(root)
     destination.mkdir(parents=True, exist_ok=False)
     for name in files:
@@ -149,8 +287,9 @@ def stage(destination, root=ROOT):
         if top.returncode==0 and Path(top.stdout.strip()).resolve()==root:
             commit = subprocess.run(['git','-C',str(root),'rev-parse','HEAD'],capture_output=True,text=True,timeout=5)
             status = subprocess.run(['git','-C',str(root),'status','--porcelain'],capture_output=True,text=True,timeout=5)
+            differs = tracked is not None and tracked != set(files)
             origin.update(commit=commit.stdout.strip() if commit.returncode==0 else None,
-                          dirty=status.returncode!=0 or bool(status.stdout.strip()))
+                          dirty=differs or status.returncode!=0 or bool(status.stdout.strip()))
     except (OSError,subprocess.TimeoutExpired):
         pass  # Build hosts without Git still get content-addressed development artifacts.
     (destination/'.build-origin.json').write_text(json.dumps(origin,indent=2)+'\n')

@@ -92,9 +92,26 @@ class RefreshService:
 
         self.repository.set_health(show_id, Health.LOADING)
         try:
-            response = self.fetcher.fetch(
-                show.canonical_url or show.feed_url, show.etag, show.last_modified
-            )
+            requested = show.canonical_url or show.feed_url
+            recovered_original = False
+            try:
+                response = self.fetcher.fetch(requested, show.etag, show.last_modified)
+            except FeedFetchError:
+                if not show.canonical_url or requested == show.feed_url:
+                    raise
+                response = self.fetcher.fetch(show.feed_url, show.etag, show.last_modified)
+                recovered_original = True
+            # Empty keeps the stored canonical (the repository cannot clear it).
+            # A failed canonical is replaced with the subscription URL, which
+            # the next refresh then requests directly.
+            stored = response.canonical_url
+            if (
+                not stored
+                and recovered_original
+                and show.canonical_url
+                and show.canonical_url != show.feed_url
+            ):
+                stored = show.feed_url
             if response.not_modified:
                 health = Health.OK if show.episode_count else Health.PARTIAL
                 self.repository.record_refresh_success(
@@ -102,7 +119,7 @@ class RefreshService:
                     health,
                     response.etag,
                     response.last_modified,
-                    response.final_url,
+                    stored,
                 )
                 artwork_path = self._refresh_artwork(show_id, show.artwork_url, show.artwork_path)
                 return RefreshReport(show_id, health, not_modified=True, artwork_path=artwork_path)
@@ -115,13 +132,13 @@ class RefreshService:
                 health,
                 response.etag,
                 response.last_modified,
-                response.final_url,
+                stored,
             )
 
             artwork_path = self._refresh_artwork(show_id, feed.artwork_url, show.artwork_path)
             message = ""
             if feed.truncated:
-                message = "This large feed was limited to 5,000 episodes; older episodes may be unavailable."
+                message = "This large feed was truncated to 5,000 episodes; episodes outside the kept window were not imported."
             if health == Health.PARTIAL and feed.skipped_video:
                 n = feed.skipped_video
                 message += (" " if message else "") + f"{n} episode{'s are' if n != 1 else ' is'} video-only and {'were' if n != 1 else 'was'} skipped; this app plays audio."

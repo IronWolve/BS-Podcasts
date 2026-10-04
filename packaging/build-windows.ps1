@@ -9,20 +9,38 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Remove-OldDeployments {
+    param([string]$Root, [string]$Retain, [int]$Keep = 3)
+    if (-not (Test-Path -LiteralPath $Root)) { return }
+    $retainPath = [System.IO.Path]::GetFullPath($Retain)
+    $dirs = @(Get-ChildItem -LiteralPath $Root -Directory | Where-Object {
+        -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and
+        [System.IO.Path]::GetFullPath($_.FullName) -ne $retainPath
+    } | Sort-Object LastWriteTime -Descending)
+    $leave = [Math]::Max($Keep - 1, 0)
+    if ($dirs.Count -le $leave) { return }
+    foreach ($dir in $dirs[$leave..($dirs.Count - 1)]) {
+        Remove-Item -LiteralPath $dir.FullName -Recurse -Force
+    }
+}
+
 function Publish-Application {
-    param([string]$Application, [string]$Manifest, [string]$Target)
+    param([string]$Application, [string]$Manifest, [string]$Target, [string]$MetadataRoot)
+    New-Item -ItemType Directory -Path $MetadataRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $Target -Force | Out-Null
-    $lease = [System.IO.File]::Open((Join-Path $Target ".publish.lock"), "OpenOrCreate", "ReadWrite", "None")
+    $lease = [System.IO.File]::Open((Join-Path $MetadataRoot ".publish.lock"), "OpenOrCreate", "ReadWrite", "None")
     $token = [guid]::NewGuid().ToString("N")
-    $incoming = Join-Path $Target (".incoming-" + $token)
-    $previous = Join-Path $Target (".previous-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + $token)
+    $incoming = Join-Path $MetadataRoot (".incoming-" + $token)
+    $previous = Join-Path $MetadataRoot (".previous-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + $token)
     $names = @("BS Podcasts", "BS-Podcasts-Windows.manifest.json")
+    $sources = @($Application, $Manifest)
     $retired = @()
     $published = @()
     try {
         New-Item -ItemType Directory -Path $incoming | Out-Null
-        Copy-Item -LiteralPath $Application -Destination (Join-Path $incoming $names[0]) -Recurse
-        Copy-Item -LiteralPath $Manifest -Destination (Join-Path $incoming $names[1])
+        for ($i = 0; $i -lt $names.Count; $i++) {
+            Move-Item -LiteralPath $sources[$i] -Destination (Join-Path $incoming $names[$i])
+        }
         $applicationPath = (Join-Path $Target "BS Podcasts") + "\"
         foreach ($process in (Get-Process -Name "BS Podcasts" -ErrorAction SilentlyContinue)) {
             if (-not $process.Path -or $process.Path.StartsWith($applicationPath, [StringComparison]::OrdinalIgnoreCase)) {
@@ -56,6 +74,10 @@ function Publish-Application {
             }
             throw
         }
+        if (Test-Path -LiteralPath $incoming) {
+            Remove-Item -LiteralPath $incoming -Recurse -Force
+        }
+        Remove-OldDeployments -Root $MetadataRoot -Retain $previous
         Write-Output "Previous application and manifest retained: $previous"
     } finally {
         $lease.Dispose()
@@ -71,16 +93,12 @@ $sourceDir = Join-Path $buildRoot "dist\BS Podcasts"
 $sourceExe = Join-Path $sourceDir "BS Podcasts.exe"
 if (-not $Destination) { $Destination = Join-Path $workspace "dists\windows" }
 if (-not $CheckRoot) {
-    if ($workspace.StartsWith("\\")) {
-        $privateBuild = Join-Path $workspace ".config\build.json"
-        if (Test-Path -LiteralPath $privateBuild) {
-            $configured = Get-Content -LiteralPath $privateBuild -Raw | ConvertFrom-Json
-            if ($configured.windows_check_root) {
-                $CheckRoot = $configured.windows_check_root
-            }
+    $privateBuild = Join-Path $workspace ".config\build.json"
+    if (Test-Path -LiteralPath $privateBuild) {
+        $configured = Get-Content -LiteralPath $privateBuild -Raw | ConvertFrom-Json
+        if ($configured.windows_check_root) {
+            $CheckRoot = [string]$configured.windows_check_root
         }
-    } else {
-        $CheckRoot = Join-Path $workspace "tmp"
     }
 }
 if (-not $CheckRoot -or $CheckRoot -notmatch '^[A-Za-z]:[\\/]') {
@@ -185,7 +203,8 @@ if (Test-Path -LiteralPath $notices) {
 $preparedManifest = Join-Path $buildRoot "BS-Podcasts-Windows.manifest.json"
 & $python -B (Join-Path $stageRoot "packaging\build_manifest.py") --artifact $sourceDir --output $preparedManifest
 if ($LASTEXITCODE -ne 0) { throw "Artifact manifest generation failed; previous application unchanged" }
-Publish-Application -Application $sourceDir -Manifest $preparedManifest -Target $Destination
+$metadataRoot = Join-Path $workspace ".cache\previous-deployments"
+Publish-Application -Application $sourceDir -Manifest $preparedManifest -Target $Destination -MetadataRoot $metadataRoot
 $copiedDir = Join-Path $Destination "BS Podcasts"
 
 $copiedExe = Join-Path $copiedDir "BS Podcasts.exe"

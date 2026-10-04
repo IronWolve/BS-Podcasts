@@ -176,16 +176,20 @@ _verified_files = {}
 def _cache_dir() -> Path:
     global _file_dir
     if _file_dir is None:
-        try:
-            from ..config import cache_dir
+        from ..config import cache_dir
 
-            base = cache_dir() / "icons"
+        parent = cache_dir()
+        base = parent / "icons"
+        try:
             base.mkdir(parents=True, exist_ok=True)
         except OSError:
-            # A private, randomly-named directory: the old fixed name in a
-            # possibly-shared temp dir could be pre-planted as a symlink,
-            # sending every icon write wherever it pointed.
-            base = Path(tempfile.mkdtemp(prefix="bs-podcasts-icons-"))
+            # Stay under the app cache. A random directory avoids a planted
+            # name; never fall through to the system temp directory.
+            try:
+                parent.mkdir(parents=True, exist_ok=True)
+                base = Path(tempfile.mkdtemp(prefix="bs-podcasts-icons-", dir=parent))
+            except OSError:
+                base = parent / "icons"
         _file_dir = base
     return _file_dir
 

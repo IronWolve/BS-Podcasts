@@ -61,16 +61,73 @@ _BLOCKED = (
     ("is_reserved", "a reserved address"),
 )
 _METADATA = frozenset({ipaddress.ip_address('fd00:ec2::254'), ipaddress.ip_address('100.100.100.200')})
+# Well-known DNS64 is IPv4-only. The local prefix may embed a private IPv4 address.
+_NAT64_WELL_KNOWN = ipaddress.IPv6Network("64:ff9b::/96")
+_NAT64_LOCAL = ipaddress.IPv6Network("64:ff9b:1::/48")
+
+
+def _rfc6052_ipv4(raw: bytes, prefix_len: int) -> ipaddress.IPv4Address:
+    """IPv4 embedded by RFC 6052, skipping the u octet at bits 64-71."""
+    bits = []
+    position = prefix_len
+    while len(bits) < 32:
+        if 64 <= position <= 71:
+            position = 72
+            continue
+        bits.append((raw[position // 8] >> (7 - (position % 8))) & 1)
+        position += 1
+    value = 0
+    for bit in bits:
+        value = (value << 1) | bit
+    return ipaddress.IPv4Address(value)
+
+
+def _nat64_ipv4(ip):
+    """Embedded IPv4 when `ip` is a DNS64 form, else None.
+
+    A simplified local-prefix address with the IPv4 in the last 32 bits is
+    used when the RFC 6052 layout is empty, so the prefix itself is not what
+    gets classified as reserved. The embedded address then uses the same
+    rules as a direct IPv4 address, including a private LAN address.
+    """
+    if not isinstance(ip, ipaddress.IPv6Address):
+        return None
+    raw = ip.packed
+    if ip in _NAT64_WELL_KNOWN:
+        return ipaddress.IPv4Address(raw[12:16])
+    if ip in _NAT64_LOCAL:
+        embedded = _rfc6052_ipv4(raw, 48)
+        if int(embedded) == 0:
+            embedded = ipaddress.IPv4Address(raw[12:16])
+        return embedded
+    return None
+
+
+def _address_reason(ip) -> str:
+    if ip in _METADATA:
+        return "a cloud metadata address"
+    for attribute, reason in _BLOCKED:
+        if getattr(ip, attribute, False):
+            return reason
+    return ""
 
 
 def _blocked_reason(ip) -> str:
+    nat64 = _nat64_ipv4(ip)
+    if nat64 is not None:
+        return _address_reason(nat64)
     mapped = getattr(ip, "ipv4_mapped", None) or ip
-    if mapped in _METADATA:
-        return "a cloud metadata address"
-    for attribute, reason in _BLOCKED:
-        if getattr(mapped, attribute, False):
-            return reason
-    return ""
+    return _address_reason(mapped)
+
+
+def _idna_host(host: str) -> str:
+    """Punycode the host the same way the HTTP client does (UTS 46)."""
+    import idna
+
+    try:
+        return idna.encode(host, uts46=True).decode("utf-8")
+    except (idna.IDNAError, UnicodeError) as exc:
+        raise UnsafeUrl(f"Could not encode host name {host}") from exc
 
 
 def _addresses(host: str) -> list:
@@ -103,14 +160,24 @@ def ensure_fetchable(value, what: str = "URL") -> str:
         literal = ipaddress.ip_address(host)
     except ValueError:
         literal = None
-    for ip in ([literal] if literal is not None else _addresses(host)):
+    lookup = host if literal is not None else _idna_host(host)
+    for ip in ([literal] if literal is not None else _addresses(lookup)):
         reason = _blocked_reason(ip)
         if reason:
             raise UnsafeUrl(f"{what} resolves to {reason}: {host}")
     return text
 
 
-def ensure_media_source(value, what: str = "Media source", allow_file_url: bool = False) -> str:
+def _is_unc_path(text: str, parts) -> bool:
+    if text.startswith("\\\\") or text.startswith("//"):
+        return True
+    if not parts.scheme and parts.netloc:
+        return True
+    path = parts.path or ""
+    return path.startswith("//") or path.startswith("\\\\")
+
+
+def ensure_media_source(value, what: str = "Media source", allow_file_url: bool = False, allow_unc: bool = False) -> str:
     """A playable source: an http(s) URL, a local path, or — when the caller
     vouches for where it came from — a local `file://` URL.
 
@@ -119,6 +186,8 @@ def ensure_media_source(value, what: str = "Media source", allow_file_url: bool 
     the authority must be empty or localhost: `file://host/share/thing.exe` is
     a *remote* UNC path that `os.startfile` will launch through the shell's
     open verb, and that is exactly what feed content must never reach.
+    Schemeless `//` and `\\` authorities are the same kind of path.
+    `allow_unc` is the only opt-in; nothing in this app passes it.
     """
     text = str(value or "").strip()
     if not text:
@@ -131,10 +200,13 @@ def ensure_media_source(value, what: str = "Media source", allow_file_url: bool 
         if not allow_file_url:
             raise UnsafeUrl(f"{what} may not be a file URL: {text[:120]!r}")
         host = (parts.hostname or "").lower()
-        if host and host != "localhost":
+        if not allow_unc and ((host and host != "localhost") or _is_unc_path(text, parts)):
             raise UnsafeUrl(f"{what} points at a remote host: {text[:120]!r}")
         return text
     # No scheme at all, or a Windows drive letter ("C:\..."), is a local path.
+    # A UNC share has no scheme either; it is not a local file.
+    if not allow_unc and _is_unc_path(text, parts):
+        raise UnsafeUrl(f"{what} points at a network path: {text[:120]!r}")
     if not scheme or (len(scheme) == 1 and text[1:2] == ":"):
         return text
     raise UnsafeUrl(f"{what} must be http(s) or a local file: {text[:120]!r}")

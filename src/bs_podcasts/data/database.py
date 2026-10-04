@@ -364,7 +364,7 @@ class Database:
             descriptor, name = tempfile.mkstemp(prefix=".library-repair-", suffix=".tmp", dir=self.path.parent)
             os.close(descriptor)
             temporary = Path(name)
-            succeeded = False
+            replace_error = None
             try:
                 with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(temporary)) as destination:
                     script = "\n".join(source.iterdump())
@@ -375,13 +375,27 @@ class Database:
                     report = destination.execute("PRAGMA quick_check").fetchone()[0]
                     if report != "ok":
                         raise DatabaseIntegrityError(report)
-                succeeded = True
+                # Replace first, sidecars after: unlinking the WAL before a failed
+                # replace would damage the live library too.
+                os.replace(temporary, self.path)
+            except Exception as exc:
+                replace_error = exc
             finally:
-                if not succeeded:
-                    temporary.unlink(missing_ok=True)
-            # Replace first, sidecars after: unlinking the WAL before a failed
-            # replace would damage the live library too.
-            os.replace(temporary, self.path)
+                for suffix in ("-wal", "-shm"):
+                    try:
+                        Path(str(temporary) + suffix).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                if temporary.exists():
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except OSError:
+                        if replace_error is not None and temporary.exists():
+                            raise type(replace_error)(
+                                f"{replace_error}; repair file remains at {temporary}"
+                            ) from replace_error
+            if replace_error is not None:
+                raise replace_error
             for sidecar in ("-wal", "-shm"):
                 Path(str(self.path) + sidecar).unlink(missing_ok=True)
             # Old handles were closed before any snapshot or replacement.

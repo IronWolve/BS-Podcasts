@@ -58,6 +58,12 @@ Your subscriptions, settings and listening progress are stored locally. You can
 choose where downloaded episodes are saved. Keep a backup of your library and
 preserve your data when updating the app.
 
+On Linux, each version unpacks into its own folder. The library lives in a
+folder named BS-Podcasts-data beside that versioned folder. Leave
+BS-Podcasts-data in place when you replace the versioned folder. If
+BS-Podcasts-data does not already contain a library and the unpacked folder
+still has data/library.db, the app keeps using that existing data folder.
+
 Finding shows, refreshing feeds, loading artwork and streaming use the network.
 Downloaded episodes can be played offline.
 

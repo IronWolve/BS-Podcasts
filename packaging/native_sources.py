@@ -81,7 +81,9 @@ def sanitize(header, root):
 
 def record(artifact):
     lock=Path(__file__).with_name('native-sources.json')
-    receipt={'format':1,'artifact':artifact.name,'sha256':digest(artifact),'inputs_sha256':digest(lock)}
+    versions={entry['name']:entry['version'] for entry in json.loads(lock.read_text())}
+    receipt={'format':1,'artifact':artifact.name,'sha256':digest(artifact),'inputs_sha256':digest(lock),
+             'mpv_version':versions['mpv'],'ffmpeg_version':versions['ffmpeg']}
     if artifact.name == 'libmpv-2.dll':
         receipt.update(platform='windows', architecture='x86_64',
                        recipe_sha256=digest(lock.with_name('build-libmpv-lgpl.sh')))

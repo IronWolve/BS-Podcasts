@@ -12,7 +12,9 @@ Qt / PySide6 / Shiboken (The Qt Company)
   License: GNU Lesser General Public License v3.0 (licenses/LGPL-3.0.txt,
   which incorporates licenses/GPL-3.0.txt by reference)
   https://www.qt.io / https://download.qt.io
-  The Qt libraries ship as separate, replaceable DLL files; you may replace
+  The Qt libraries ship as separate, replaceable shared libraries: DLL files
+  on Windows, frameworks or shared libraries on macOS, and shared objects on
+  Linux (or packages installed in the Linux environment). You may replace
   them with your own builds as provided for by the LGPL.
 
 mpv / libmpv (Windows libmpv-2.dll; Linux libmpv.so.2; macOS libmpv.2.dylib)
@@ -29,24 +31,24 @@ FFmpeg (statically linked into the bundled libmpv on each platform)
   configuration (no --enable-gpl, no --enable-nonfree).
   https://ffmpeg.org
 
-libplacebo (statically linked into the bundled Windows/Linux libmpv)
+libplacebo (statically linked into the bundled libmpv on Windows, Linux, and macOS)
   License: GNU Lesser General Public License v2.1 or later
   https://code.videolan.org/videolan/libplacebo
 
-libass (statically linked into the bundled Windows/Linux libmpv)
+libass (statically linked into the bundled libmpv on Windows, Linux, and macOS)
   License: ISC (licenses/ISC-libass.txt)
   https://github.com/libass/libass
 
-HarfBuzz (statically linked into the bundled Windows/Linux libmpv)
+HarfBuzz (statically linked into the bundled libmpv on Windows, Linux, and macOS)
   License: MIT ("Old MIT") (licenses/MIT-HarfBuzz.txt)
   https://github.com/harfbuzz/harfbuzz
 
-FreeType (statically linked into the bundled Windows/Linux libmpv)
+FreeType (statically linked into the bundled libmpv on Windows, Linux, and macOS)
   License: FreeType License (BSD-style, with credit clause)
   (licenses/FTL.txt)
   https://freetype.org
 
-Fribidi (statically linked into the bundled Windows/Linux libmpv)
+Fribidi (statically linked into the bundled libmpv on Windows, Linux, and macOS)
   License: GNU Lesser General Public License v2.1 or later
   https://github.com/fribidi/fribidi
 

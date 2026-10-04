@@ -1,6 +1,8 @@
 """Fetch and parse chapters and transcripts for one episode. No Qt, no DB."""
 
 from dataclasses import dataclass
+from html import unescape
+from html.parser import HTMLParser
 import json
 import re
 
@@ -92,6 +94,39 @@ def fetch_transcript(url: str, declared_type: str = "", session=None) -> list[Se
 
 _TIMESTAMP = re.compile(r"(?<!\d)(?:(\d{1,6}):)?(\d{1,2}):(\d{2})[.,](\d{1,3})(?!\d)")
 _TAGS = re.compile(r"<[^<>]+>")
+_SKIP_HTML = {"script", "style"}
+
+
+class _TranscriptHTML(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._skip = []
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        name = tag.lower()
+        if name in _SKIP_HTML:
+            self._skip.append(name)
+        elif not self._skip and name in {"br", "p", "div", "li", "tr"}:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag):
+        name = tag.lower()
+        if self._skip and name == self._skip[-1]:
+            self._skip.pop()
+        elif not self._skip and name in {"p", "div", "li", "tr"}:
+            self.parts.append(" ")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self.parts.append(data)
+
+
+def _html_text(value: str) -> str:
+    parser = _TranscriptHTML()
+    parser.feed(value)
+    parser.close()
+    return unescape("".join(parser.parts)).strip()
 
 
 def _stamp(text: str) -> float | None:
@@ -116,7 +151,7 @@ def parse_transcript(content: bytes, kind: str = "", url: str = "") -> list[Segm
     if "vtt" in kind or "srt" in kind or "subrip" in kind or lowered_url.endswith((".vtt", ".srt")) or "-->" in text[:2000]:
         return _parse_cues(text)
     if "html" in kind:
-        text = _TAGS.sub(" ", text)
+        text = _html_text(text)
     return _parse_plain(text)
 
 
@@ -164,7 +199,7 @@ def _parse_cues(text: str) -> list[SegmentData]:
             continue
         start_text, _arrow, end_text = timing.partition("-->")
         body_lines = [line for line in lines if line is not timing and not line.isdigit() and not line.startswith(("WEBVTT", "NOTE", "STYLE"))]
-        body = _TAGS.sub("", " ".join(body_lines)).strip()
+        body = unescape(_TAGS.sub("", " ".join(body_lines))).strip()
         if body:
             segments.append(SegmentData(text=body, start_seconds=_stamp(start_text), end_seconds=_stamp(end_text)))
     return _merge_short(segments)

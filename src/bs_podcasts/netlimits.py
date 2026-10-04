@@ -72,15 +72,82 @@ def abort_response(response):
         pass
 
 
+def _shutdown_socket(sock):
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except (AttributeError, OSError):
+        pass
+    try:
+        sock.close()
+    except (AttributeError, OSError):
+        pass
+
+
+class _SocketBag:
+    """Sockets the header worker opened, so a cancelled wait can unblock it."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._socks = []
+        self._closed = False
+
+    def add(self, sock):
+        with self._lock:
+            if self._closed:
+                _shutdown_socket(sock)
+                return
+            self._socks.append(sock)
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            socks = list(self._socks)
+        for sock in socks:
+            _shutdown_socket(sock)
+
+
+_socket_bags = threading.local()
+_socket_init_lock = threading.Lock()
+_socket_init_installed = False
+
+
+def _install_socket_watch():
+    """Record sockets created on a worker that has a bag. getaddrinfo has none."""
+    global _socket_init_installed
+    with _socket_init_lock:
+        if _socket_init_installed:
+            return
+        original = socket.socket.__init__
+
+        def watched(self, *args, **kwargs):
+            original(self, *args, **kwargs)
+            bag = getattr(_socket_bags, "bag", None)
+            if bag is not None:
+                bag.add(self)
+
+        socket.socket.__init__ = watched
+        _socket_init_installed = True
+
+
 def bounded_call(work, deadline, gate=None, dispose=None):
     gate = gate if gate is not None else (PLAYBACK_HEADERS if deadline.foreground else HEADERS)
     if not gate.acquire(blocking=False):
         raise NetworkDeadline("Network workers are busy; retry shortly.")
     results = queue.Queue(1)
     handoff = threading.Lock()
+    released = False
+    sockets = _SocketBag()
+
+    def release():
+        nonlocal released
+        if not released:
+            released = True
+            gate.release()
 
     def run():
         value = None
+        _install_socket_watch()
+        _socket_bags.bag = sockets
         try:
             try:
                 deadline.remaining()
@@ -95,9 +162,16 @@ def bounded_call(work, deadline, gate=None, dispose=None):
             if abandoned and value is not None and dispose is not None:
                 dispose(value)
         finally:
-            gate.release()
+            _socket_bags.bag = None
+            with handoff:
+                release()
 
-    threading.Thread(target=run, name="bs-http-headers", daemon=True).start()
+    worker = threading.Thread(target=run, name="bs-http-headers", daemon=True)
+    try:
+        worker.start()
+    except Exception:
+        release()
+        raise
     try:
         while True:
             remaining = deadline.remaining()
@@ -111,10 +185,14 @@ def bounded_call(work, deadline, gate=None, dispose=None):
     except BaseException:
         with handoff:
             deadline.cancelled.set()
+            release()
             try:
                 success, result = results.get_nowait()
             except queue.Empty:
                 success, result = False, None
+        # Unblock a connect or a header read. A stuck getaddrinfo cannot be
+        # shut down here; its permit is already released above.
+        sockets.close()
         if success and dispose is not None:
             dispose(result)
         raise

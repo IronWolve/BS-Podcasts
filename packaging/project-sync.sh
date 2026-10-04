@@ -14,9 +14,17 @@ print(host); print(root); print(shlex.quote(root+"/repo"))
 ' "$BS_CONFIG")
 [[ ${#BS_REMOTE[@]} -eq 3 ]] || { printf 'Invalid private sync configuration.\n' >&2; exit 1; }
 BS_SNAPSHOT="$(mktemp -d "$BS_PROJECT/tmp/mac-sync.XXXXXX")"
+cleanup_mac_sync() {
+    case "$BS_SNAPSHOT" in
+        "$BS_PROJECT"/tmp/mac-sync.*) rm -rf -- "$BS_SNAPSHOT" ;;
+    esac
+    case "${BS_LIST:-}" in
+        "$BS_PROJECT"/tmp/sync-inputs.*) rm -f -- "$BS_LIST" ;;
+    esac
+}
+trap cleanup_mac_sync EXIT
 "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/source_manifest.py" stage --destination "$BS_SNAPSHOT/source"
 BS_LIST="$(mktemp "$BS_PROJECT/tmp/sync-inputs.XXXXXX")"
-trap 'rm -f -- "$BS_LIST"' EXIT
 "$BS_PYTHON" -B "$BS_SNAPSHOT/source/packaging/source_manifest.py" list > "$BS_LIST"
 printf '.build-origin.json\0' >> "$BS_LIST"
 printf 'Syncing approved source to %s:%s/repo\n' "${BS_REMOTE[0]}" "${BS_REMOTE[1]}"

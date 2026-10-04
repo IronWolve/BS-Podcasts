@@ -2,6 +2,12 @@
 
 from PySide6.QtGui import QKeySequence, QShortcut
 
+_PORTABLE = QKeySequence.SequenceFormat.PortableText
+
+
+def _sequence(text: str) -> QKeySequence:
+    return QKeySequence(text or "", _PORTABLE)
+
 
 class ShortcutManager:
     def __init__(self, parent, library=None, save_settings=None):
@@ -12,7 +18,7 @@ class ShortcutManager:
 
     def add(self, name: str, default: str, callback):
         sequence = self.library.setting(f"shortcut.{name}", default) if self.library else default
-        shortcut = QShortcut(QKeySequence(sequence), self.parent)
+        shortcut = QShortcut(_sequence(sequence), self.parent)
         shortcut.activated.connect(callback)
         self._shortcuts[name] = (shortcut, default)
         return shortcut
@@ -20,20 +26,23 @@ class ShortcutManager:
     def rebind(self, name: str, sequence: str):
         if name not in self._shortcuts:
             raise KeyError(name)
-        normalized = QKeySequence(sequence).toString()
+        parsed = _sequence(sequence)
+        normalized = parsed.toString(_PORTABLE)
         if normalized:
-            # A single unmodified printable key ("a", "5") steals typing from
-            # every text field that does not swallow it first.
-            if len(normalized) == 1 and normalized.isprintable() and not normalized.isspace():
+            # An unmodified letter or named key ("a", "Left", "Esc") steals
+            # that key from every view that does not swallow it first.
+            if self._unmodified(parsed):
+                single = len(normalized) == 1 and normalized.isprintable() and not normalized.isspace()
+                kind = "letter" if single else "key"
                 raise ValueError(
-                    f"'{normalized}' on its own would block typing that letter; add Ctrl, Alt or Shift."
+                    f"'{normalized}' on its own would block typing that {kind}; add Ctrl, Alt or Shift."
                 )
             conflict = next(
                 (
                     other_name
                     for other_name, (other, _default) in self._shortcuts.items()
                     if other_name != name
-                    and other.key().toString() == normalized
+                    and other.key().toString(_PORTABLE) == normalized
                 ),
                 None,
             )
@@ -42,7 +51,7 @@ class ShortcutManager:
                     f"{normalized} is already assigned to {conflict.replace('_', ' ')}."
                 )
         shortcut, _default = self._shortcuts[name]
-        shortcut.setKey(QKeySequence(normalized))
+        shortcut.setKey(_sequence(normalized))
         if self._save_settings is not None:
             self._save_settings({f'shortcut.{name}': normalized})
         elif self.library:
@@ -51,7 +60,7 @@ class ShortcutManager:
     def reset_all(self):
         values = {}
         for name, (shortcut, default) in self._shortcuts.items():
-            shortcut.setKey(QKeySequence(default))
+            shortcut.setKey(_sequence(default))
             values[f'shortcut.{name}'] = default
             if self.library and self._save_settings is None:
                 self.library.set_setting(f"shortcut.{name}", default)
@@ -63,11 +72,22 @@ class ShortcutManager:
 
     def bindings(self) -> dict[str, str]:
         return {
-            name: shortcut.key().toString()
+            name: shortcut.key().toString(_PORTABLE)
             for name, (shortcut, _default) in self._shortcuts.items()
         }
 
+    @staticmethod
+    def _unmodified(sequence: QKeySequence) -> bool:
+        return any(not sequence[index].keyboardModifiers() for index in range(sequence.count()))
+
     def format_hint(self, text: str) -> str:
         import re
-        choices = {default: shortcut.key().toString() for shortcut, default in self._shortcuts.values()}
-        return re.sub(r"Ctrl\+(?:Shift\+)?[A-Za-z0-9]+", lambda match: choices.get(match.group(), match.group()), text)
+        choices = {
+            default: shortcut.key().toString(_PORTABLE)
+            for shortcut, default in self._shortcuts.values()
+            if default
+        }
+        if not choices:
+            return text
+        pattern = "|".join(re.escape(token) for token in sorted(choices, key=len, reverse=True))
+        return re.sub(pattern, lambda match: choices.get(match.group(), match.group()), text)

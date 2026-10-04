@@ -3,7 +3,14 @@
 from dataclasses import dataclass, replace
 from contextlib import contextmanager
 from pathlib import Path
-from ..data.files import open_private
+from ..data.files import (
+    FILE_IRREGULAR,
+    FILE_MISSING,
+    FILE_UNCONFIRMED,
+    inspect_download_file,
+    note_completed_download,
+    open_private,
+)
 from threading import Event, Lock, Thread
 from urllib.parse import urlparse
 import os
@@ -320,10 +327,11 @@ class DownloadService:
                 ids = {row[0] for row in connection.execute('SELECT id FROM episodes WHERE show_id=?', (show_id,))}
             with self._lock:
                 self._retiring_episodes.update(ids)
+                active = [episode_id for episode_id in ids if episode_id in self._cancellations]
                 for episode_id in ids:
                     queued = self._queued.pop(episode_id, None)
-                    active = self._cancellations.get(episode_id)
-                    for event in (queued, active):
+                    running = self._cancellations.get(episode_id)
+                    for event in (queued, running):
                         if event is not None:
                             event.set()
             deadline = time.monotonic() + self.CANCEL_UNWIND_TIMEOUT
@@ -335,7 +343,7 @@ class DownloadService:
                 if time.monotonic() >= deadline:
                     raise DownloadError('Downloads are still stopping; retry removal shortly. No subscription was removed.')
                 time.sleep(.02)
-            yield
+            yield self._retired_partials(active)
         finally:
             with self._lock:
                 self._retiring_shows.discard(show_id)
@@ -392,33 +400,39 @@ class DownloadService:
         reading DOWNLOADED, so every surface offered "open location" and
         "remove" but nothing offered to download it again. As an error the
         existing Retry/Clear affordances apply, and Retry starts a fresh
-        transfer because no partial exists.
+        transfer because no partial exists. An empty directory is not proof
+        the file was deleted until this root has held a completed file.
         """
+        seen = set()
+        eligible = [
+            record for record in self.downloads.list()
+            if record.state == DownloadState.COMPLETE and record.target_path
+        ]
+        checked = []
+        for record in eligible:
+            kind, _size = inspect_download_file(record.target_path, seen, completed=True)
+            checked.append((record, kind))
         fixed = 0
-        for record in self.downloads.list():
-            if record.state != DownloadState.COMPLETE or not record.target_path:
-                continue
-            target = Path(record.target_path)
-            try:
-                parent_present = stat.S_ISDIR(target.parent.stat().st_mode)
-            except OSError:
-                continue
-            if not parent_present:
-                # The whole folder is absent (external or network drive not
-                # mounted right now): that is "not here", not "deleted".
-                # Demoting every download and forgetting the paths would
-                # make the files re-download when the drive comes back.
-                continue
-            try:
-                missing = not stat.S_ISREG(target.stat().st_mode)
-            except FileNotFoundError:
-                missing = True
-            except OSError:
-                # Access failures are not evidence that a saved file vanished.
-                continue
-            if missing:
+        for record, kind in checked:
+            if kind == FILE_UNCONFIRMED:
+                kind, _size = inspect_download_file(record.target_path, seen, completed=False)
+            if kind in {FILE_MISSING, FILE_IRREGULAR}:
                 fixed += self.downloads.mark_missing(record, self.MISSING_FILE_MESSAGE)
         return fixed
+
+    def _retired_partials(self, episode_ids) -> list[str]:
+        """Partial paths of transfers this removal cancelled before they finished."""
+        partials = []
+        seen = set()
+        for episode_id in episode_ids:
+            record = self.downloads.get(episode_id)
+            if record is None or record.state == DownloadState.COMPLETE or not record.partial_path:
+                continue
+            if record.partial_path in seen:
+                continue
+            seen.add(record.partial_path)
+            partials.append(record.partial_path)
+        return partials
 
     def discard(self, episode_id: int) -> None:
         with self._retire_episode(episode_id):
@@ -694,9 +708,14 @@ class DownloadService:
             # Calling stat() here let a concurrent delete turn a complete,
             # correctly-named file into an ERROR record at 0/0.
             self.downloads.complete(episode_id, str(target), done)
+            note_completed_download(target)
             self._emit(episode_id, DownloadState.COMPLETE, done, done)
             return self.downloads.get(episode_id)
         except _RangeContinuation:
+            if cancellation.is_set():
+                return self._park(episode_id, partial)
+            raise
+        except _TruncatedDownload:
             if cancellation.is_set():
                 return self._park(episode_id, partial)
             raise
@@ -708,10 +727,10 @@ class DownloadService:
         except DownloadError as exc:
             if cancellation.is_set():
                 return self._park(episode_id, partial)
-            self.downloads.progress(
-                episode_id, DownloadState.ERROR, partial.stat().st_size if partial.exists() else 0, 0, str(exc)
-            )
-            self._emit(episode_id, DownloadState.ERROR, 0, 0, str(exc))
+            done = partial.stat().st_size if partial.exists() else 0
+            total = 0
+            self.downloads.progress(episode_id, DownloadState.ERROR, done, total, str(exc))
+            self._emit(episode_id, DownloadState.ERROR, done, total, str(exc))
             raise
         except requests.RequestException as exc:
             if cancellation.is_set():
@@ -821,17 +840,16 @@ class DownloadService:
             path = Path(candidate) if candidate else None
             if path is not None:
                 try:
-                    try:
-                        info = path.stat()
-                    except FileNotFoundError:
-                        # An absent volume is not proof the file was deleted.
-                        if not stat.S_ISDIR(path.parent.stat().st_mode):
-                            raise OSError("The download folder is unavailable.")
+                    kind, size = inspect_download_file(path, completed=False)
+                    if kind == FILE_PRESENT:
+                        path.unlink()
+                        freed += size
+                    elif kind == FILE_MISSING:
                         continue
-                    if not stat.S_ISREG(info.st_mode):
+                    elif kind == FILE_IRREGULAR:
                         raise OSError("The download path is not a regular file.")
-                    path.unlink()
-                    freed += info.st_size
+                    else:
+                        raise OSError("The download folder is unavailable.")
                 except OSError as exc:
                     # Keep every failure: the partial's error used to
                     # overwrite the target's, hiding the message that named

@@ -233,12 +233,14 @@ class MpvEngine:
         self._guard()
         # Last intent wins: a play/pause while the file is still opening must
         # be what the file-loaded handler applies, not the original autoplay.
-        self._pending_autoplay = True
+        with self._state_lock:
+            self._pending_autoplay = True
         self._set("pause", False)
 
     def pause(self):
         self._guard()
-        self._pending_autoplay = False
+        with self._state_lock:
+            self._pending_autoplay = False
         self._set("pause", True)
 
     @property
@@ -248,19 +250,29 @@ class MpvEngine:
 
     def seek_absolute(self, seconds: float):
         self._guard()
-        if self._loading:
-            # mpv has no file yet; fold the seek into the pending start so the
-            # file-loaded handler applies it instead of the stale load target.
-            self._pending_position = max(0.0, float(seconds))
-            self._emit("position", self._pending_position)
+        with self._state_lock:
+            if not self._loading:
+                pending = None
+            else:
+                # mpv has no file yet; fold the seek into the pending start so the
+                # file-loaded handler applies it instead of the stale load target.
+                self._pending_position = max(0.0, float(seconds))
+                pending = self._pending_position
+        if pending is not None:
+            self._emit("position", pending)
             return
         self._player.command("seek", max(0.0, float(seconds)), "absolute", "exact")
 
     def skip(self, seconds: float):
         self._guard()
-        if self._loading:
-            self._pending_position = max(0.0, self._pending_position + float(seconds))
-            self._emit("position", self._pending_position)
+        with self._state_lock:
+            if not self._loading:
+                pending = None
+            else:
+                self._pending_position = max(0.0, self._pending_position + float(seconds))
+                pending = self._pending_position
+        if pending is not None:
+            self._emit("position", pending)
             return
         self._player.command("seek", float(seconds), "relative", "exact")
 
@@ -361,8 +373,73 @@ class MpvEngine:
         if level in {"error", "fatal"} and text.strip():
             self._last_error = f"{prefix}: {text.strip()}" if prefix else text.strip()
 
+    def _opening_current(self, generation) -> bool:
+        return (
+            self._player is not None
+            and not self._dead
+            and self._loading
+            and not self._resolving
+            and self._generation == generation
+            and self._expected_entry_id is not None
+            and self._event_entry_id == self._expected_entry_id
+        )
+
+    def _accept_file_loaded(self, generation, autoplay, events):
+        self._loading = False
+        events.extend((
+            EngineEvent("file_loaded", generation=generation),
+            EngineEvent("paused", not autoplay, generation),
+        ))
+
+    def _push_opening_media(self, player, position, autoplay, applied_position):
+        # A later scrub to 0 must still seek; the first open at 0 does not.
+        if position != applied_position and (position or applied_position):
+            player.seek(position, "absolute", "exact")
+        player.pause = not autoplay
+
+    def _apply_file_loaded(self, player, generation, events):
+        # python-mpv seek blocks. A scrub during it only stores pending intent
+        # while _loading stays true, so re-read after each apply. Never hold
+        # _state_lock across that native call.
+        applied_position = None
+        applied_autoplay = None
+        for _ in range(4):
+            with self._state_lock:
+                if not self._opening_current(generation):
+                    return
+                position = self._pending_position
+                autoplay = self._pending_autoplay
+                if applied_position is not None and (position, autoplay) == (applied_position, applied_autoplay):
+                    self._accept_file_loaded(generation, autoplay, events)
+                    return
+            try:
+                self._push_opening_media(player, position, autoplay, applied_position)
+            except Exception as exc:
+                events.append(EngineEvent("error", str(exc), generation))
+                return
+            applied_position = position
+            applied_autoplay = autoplay
+        with self._state_lock:
+            if not self._opening_current(generation):
+                return
+            position = self._pending_position
+            autoplay = self._pending_autoplay
+            if (position, autoplay) == (applied_position, applied_autoplay):
+                self._accept_file_loaded(generation, autoplay, events)
+                return
+        try:
+            self._push_opening_media(player, position, autoplay, applied_position)
+        except Exception as exc:
+            events.append(EngineEvent("error", str(exc), generation))
+            return
+        with self._state_lock:
+            if not self._opening_current(generation):
+                return
+            self._accept_file_loaded(generation, autoplay, events)
+
     def _mpv_event(self, event):
         events = []
+        opening = None
         with self._state_lock:
             player = self._player
             if player is None or self._dead:
@@ -378,20 +455,9 @@ class MpvEngine:
             elif self._resolving or self._expected_entry_id is None:
                 return
             elif event_id == mpv.MpvEventID.FILE_LOADED:
-                if self._event_entry_id != self._expected_entry_id:
+                if self._event_entry_id != self._expected_entry_id or not self._loading:
                     return
-                if not self._loading:
-                    return
-                try:
-                    if self._pending_position:
-                        player.seek(self._pending_position, "absolute", "exact")
-                    player.pause = not self._pending_autoplay
-                except Exception as exc:
-                    events.append(EngineEvent("error", str(exc), generation))
-                else:
-                    self._loading = False
-                    events.extend((EngineEvent("file_loaded", generation=generation),
-                                   EngineEvent("paused", not self._pending_autoplay, generation)))
+                opening = (player, generation)
             elif event_id == mpv.MpvEventID.END_FILE:
                 if event.data.playlist_entry_id != self._expected_entry_id:
                     return
@@ -422,6 +488,8 @@ class MpvEngine:
                     events.append(EngineEvent("error", message or "Unknown playback error", generation))
                 else:
                     events.append(EngineEvent("eof" if reason == event.data.EOF else "stopped", reason, generation))
+        if opening is not None:
+            self._apply_file_loaded(opening[0], opening[1], events)
         # Never hold the native lock while acquiring the service lock. These
         # events retain the generation captured before a concurrent replacement.
         for event in events:

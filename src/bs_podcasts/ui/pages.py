@@ -147,6 +147,7 @@ class _ListPageMixin:
         self.view.setUniformItemSizes(True)
         self.view.setModel(self.model)
         self._scroll_input_guard = _ScrollInputGuard(self.view, self._cancel_scroll_restore)
+        self._install_scroll_guard()
         self.view.selectionModel().currentChanged.connect(self._selected)
         self._last_activation = (None, 0.0)
         self.view.activated.connect(self._activated_once)
@@ -257,7 +258,30 @@ class _ListPageMixin:
             # Unsubscribed previews all share episode_id 0; without a real
             # key, selection snaps to row 0 after every filter/refresh.
             return ("preview", item.media_url or item.external_id or item.title)
+        if getattr(item, "is_episode", False):
+            return ("directory-episode", item.feed_url, item.directory_url or item.title)
         return ("show", 0 if item.feed_url else item.show_id, item.feed_url)
+
+    def _install_scroll_guard(self):
+        self._scroll_restore_revision = getattr(self, "_scroll_restore_revision", 0)
+        self._programmatic_scroll_ok = self._scroll_restore_revision
+        bar = self.view.verticalScrollBar()
+        original_set = bar.setValue
+
+        def set_value(value, _original=original_set):
+            if self._programmatic_scroll_ok != self._scroll_restore_revision:
+                return
+            _original(value)
+
+        bar.setValue = set_value
+        original_top = self.view.scrollToTop
+
+        def scroll_to_top(_original=original_top):
+            if self._programmatic_scroll_ok != self._scroll_restore_revision:
+                return
+            _original()
+
+        self.view.scrollToTop = scroll_to_top
 
     def _cancel_scroll_restore(self):
         self._scroll_restore_revision = getattr(self, '_scroll_restore_revision', 0) + 1
@@ -283,6 +307,7 @@ class _ListPageMixin:
         scroll_value = scrollbar.value()
         self._scroll_restore_revision = getattr(self, '_scroll_restore_revision', 0) + 1
         revision = self._scroll_restore_revision
+        self._programmatic_scroll_ok = revision
         target = None
         wanted = {normalized(value) for value in (selected_keys or ())}
         rows = []
@@ -329,11 +354,39 @@ class _ListPageMixin:
             self.context_updated.emit(previous, item)
         self._update_empty()
 
+    def _filtered_empty_text(self):
+        chip = getattr(self, "_filter", "") or ""
+        chips = getattr(self, "chips", None)
+        if chips is not None and hasattr(chips, "current") and chips.current():
+            chip = chips.current()
+        messages = {
+            "New": ("No new episodes", "Nothing in this list is new.", ""),
+            "Problems": ("No problems", "Every subscribed feed refreshed successfully.", ""),
+            "Favorites": ("No favorites", "Episodes you mark as favorite show up here.", ""),
+            "Unplayed": ("No unplayed episodes", "Everything in this list has been played.", ""),
+            "Played": ("No played episodes", "Played episodes show up here.", ""),
+            "In progress": ("Nothing in progress", "Episodes you have started show up here.", ""),
+            "Downloaded": ("No downloaded episodes", "Downloaded episodes show up here.", ""),
+            "Downloading": ("No active downloads", "Downloads in progress show up here.", ""),
+            "Paused": ("No paused downloads", "Paused downloads show up here.", ""),
+            "Error": ("No errors", "Nothing in this list is in an error state.", ""),
+        }
+        if chip in messages:
+            return messages[chip]
+        if chip and chip != "All":
+            return (f"No {chip.lower()} items", f"Nothing matches the {chip} filter.", "")
+        return ("No matches", "Nothing matches this filter.", "")
+
     def _update_empty(self, query: str = ""):
+        if getattr(self, "_awaiting_load", False):
+            self.stack.setCurrentWidget(self.view)
+            return
         has_rows = self.model.rowCount() > 0
         self.stack.setCurrentWidget(self.view if has_rows else self.empty)
         if not has_rows and query:
             self.empty.set_text("No matches", f"Nothing matches “{query}”.", "")
+        elif not has_rows and getattr(self, "_all_items", ()):
+            self.empty.set_text(*self._filtered_empty_text())
         elif not has_rows:
             self.empty.set_text(*self._empty_text)
         if not getattr(self, "_persist_search", False):
@@ -714,7 +767,16 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         if not needs_scan:
             self._apply_filters(preserve_scroll=False)
         if key == "title":
-            QTimer.singleShot(0, self, self.view.scrollToTop)
+            revision = getattr(self, "_scroll_restore_revision", 0)
+
+            def scroll_top(expected=revision):
+                if expected != self._scroll_restore_revision:
+                    return
+                self._programmatic_scroll_ok = expected
+                bar = self.view.verticalScrollBar()
+                bar.setValue(bar.minimum())
+
+            QTimer.singleShot(0, self, scroll_top)
         self.discover_sort_changed.emit(key)
 
     def discover_sort_key(self) -> str:
@@ -1231,7 +1293,14 @@ class HomePage(BasePage, _ListPageMixin):
         self._greeting_timer = QTimer(self)
         self._greeting_timer.timeout.connect(lambda: self.header.set_subtitle(self._greeting()))
         self._greeting_timer.start(60_000)
+        self._awaiting_load = True
+        self.banner.show_state("loading", "Loading your library…")
         self._update_empty()
+
+    def _finish_initial_load(self):
+        self._awaiting_load = False
+        if self.banner.state in {"loading", "error"}:
+            self.banner.clear()
 
     @staticmethod
     def _greeting() -> str:
@@ -1255,6 +1324,7 @@ class HomePage(BasePage, _ListPageMixin):
 
     def set_empty_context(self, has_shows: bool):
         """Empty library and quiet library are different states."""
+        self._finish_initial_load()
         if has_shows:
             self.empty.set_text(
                 "Nothing new yet",
@@ -1267,8 +1337,11 @@ class HomePage(BasePage, _ListPageMixin):
                 "Your library is empty — add a podcast or explore the directory to get started.",
                 "Discover podcasts",
             )
+        if not self.model.rowCount():
+            self.stack.setCurrentWidget(self.empty)
 
     def set_sections(self, in_progress, latest):
+        self._finish_initial_load()
         key = self._current_key()
         selected = self._selected_keys()
         anchor = self._scroll_anchor()

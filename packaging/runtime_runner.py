@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import sys
 import time
@@ -11,6 +12,19 @@ from runtime_state import process_stamp, read_record, process_state, runtime_loc
 DEPLOYMENT = Path(__file__).resolve().parent
 PROJECT = DEPLOYMENT.parent.parent
 PID_FILE = PROJECT/'tmp/bs-podcasts.pid.json'
+_RELEASE_DIR = re.compile(r'^BS-Podcasts-\d+\.\d+\.\d+-Linux-.+$')
+
+
+def default_data_dir(project=None):
+    """Workspace data for a checkout; a stable sibling folder for a versioned extract."""
+    project = Path(project) if project is not None else PROJECT
+    if _RELEASE_DIR.fullmatch(project.name) and not (project / 'repo').is_dir():
+        sibling = project.parent / 'BS-Podcasts-data'
+        extract = project / 'data'
+        if not (sibling / 'library.db').is_file() and (extract / 'library.db').is_file():
+            return extract
+        return sibling
+    return project / 'data'
 
 
 def record():
@@ -22,13 +36,15 @@ def running(value):
 
 
 def environment():
-    for directory in ('tmp','logs','.cache','data'):
+    for directory in ('tmp','logs','.cache'):
         (PROJECT/directory).mkdir(exist_ok=True)
+    data = default_data_dir()
+    data.mkdir(parents=True, exist_ok=True)
     os.environ['TMPDIR']=str(PROJECT/'tmp')
     os.environ['XDG_CACHE_HOME']=str(PROJECT/'.cache')
     os.environ['BS_PODCASTS_CACHE_DIR']=str(PROJECT/'.cache/app')
     os.environ['BS_PODCASTS_LOG_DIR']=str(PROJECT/'logs')
-    os.environ.setdefault('BS_PODCASTS_DATA_DIR',str(PROJECT/'data'))
+    os.environ.setdefault('BS_PODCASTS_DATA_DIR',str(data))
     os.environ['PYTHONDONTWRITEBYTECODE']='1'
     private=PROJECT/'.config/runtime.json'
     if private.is_file():

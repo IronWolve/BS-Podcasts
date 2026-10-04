@@ -13,6 +13,15 @@ from source_manifest import ROOT, check, inventory, source_digest, file_digest, 
 from runtime_state import runtime_lock, retire_stale
 
 
+def prune_previous_deployments(root, keep=3):
+    if not root.is_dir() or root.is_symlink():
+        return
+    entries = [path for path in root.iterdir() if path.is_dir() and not path.is_symlink()]
+    entries.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    for stale in entries[keep:]:
+        shutil.rmtree(stale)
+
+
 def install_entrypoints(workspace, destination, previous):
     template = '''#!/usr/bin/env bash
 set -euo pipefail
@@ -51,6 +60,15 @@ def deploy():
         retire_stale(workspace)
     destination.mkdir(parents=True,exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix='linux-build-',dir=workspace/'tmp'))
+    try:
+        _deploy_staged(workspace, destination, temporary)
+    finally:
+        if (temporary.is_dir() and not temporary.is_symlink()
+                and temporary.name.startswith('linux-build-') and temporary.is_relative_to(workspace/'tmp')):
+            shutil.rmtree(temporary)
+
+
+def _deploy_staged(workspace, destination, temporary):
     snapshot = stage(temporary/'source',root=ROOT)
     _, runtime = inventory(snapshot)
     for name in runtime:
@@ -100,7 +118,7 @@ def deploy():
             raise
         snapshot.rename(previous/'source-inputs')
         install_entrypoints(workspace, destination, previous)
-    temporary.rmdir()
+    prune_previous_deployments(workspace/'.cache/previous-deployments')
     print(f'Built BS Podcasts {version}: {destination}')
     print(f'Source SHA-256: {record["source_sha256"]}')
     print('No dependencies installed and no application started. Run ./start.sh when ready.')

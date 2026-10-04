@@ -3,11 +3,32 @@
 from urllib.parse import urlparse
 from contextlib import nullcontext
 from threading import RLock
+import math
 
 from ..data.repositories import LibraryRepository
 from ..domain import FeedData
 from ..privacy import feed_label
 from ..urlguard import ensure_web_url
+
+
+def _bounded_float(raw, fallback: float, low: float, high: float) -> float:
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+    if not math.isfinite(value) or value < low or value > high:
+        return fallback
+    return value
+
+
+def _bounded_int(raw, fallback: int, low: int, high: int) -> int:
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+    if value < low or value > high:
+        return fallback
+    return value
 
 
 class LibraryService:
@@ -48,16 +69,19 @@ class LibraryService:
         existing = self.find_subscription(feed_url)
         if existing is not None:
             raise ValueError(f"Already subscribed as “{existing.title}”.")
+        speed = _bounded_float(self.setting("playback.default_speed", "1.0"), 1.0, 0.5, 3.0)
+        skip_back = _bounded_int(self.setting("playback.skip_back", "15"), 15, 5, 120)
+        skip_forward = _bounded_int(self.setting("playback.skip_forward", "30"), 30, 5, 300)
+        auto_continue = self.setting("playback.auto_continue", "1") == "1"
         fallback = title.strip() or feed_label(feed_url)
-        show = self.repository.add_show(feed_url, fallback)
-        self.repository.update_show_playback(
-            show.id,
-            speed=float(self.setting("playback.default_speed", "1.0")),
-            skip_back=int(self.setting("playback.skip_back", "15")),
-            skip_forward=int(self.setting("playback.skip_forward", "30")),
-            auto_continue=self.setting("playback.auto_continue", "1") == "1",
+        return self.repository.add_show(
+            feed_url,
+            fallback,
+            playback_speed=speed,
+            skip_back=skip_back,
+            skip_forward=skip_forward,
+            auto_continue=auto_continue,
         )
-        return self.repository.get_show(show.id)
 
     def shows(self):
         return self.repository.list_shows()
@@ -163,11 +187,19 @@ class LibraryService:
     def removal_preview(self, show_id: int) -> dict:
         return self.repository.removal_preview(show_id)
 
-    def remove_subscription(self, show_id: int, delete_files: bool = True) -> dict:
-        with self.downloads.removing_show(show_id) if self.downloads is not None else nullcontext():
-            if self.playback is not None and self.playback.snapshot.show_id == show_id:
-                self.playback.stop()
-            return self.repository.remove_show(show_id, delete_files)
+    def remove_subscription(self, show_id: int, delete_files: bool = True, confirmed_paths=None) -> dict:
+        manager = self.downloads.removing_show(show_id) if self.downloads is not None else nullcontext(())
+        with manager as retired:
+            paths = None
+            if delete_files:
+                if isinstance(confirmed_paths, str):
+                    confirmed_paths = [confirmed_paths]
+                extra = [path for path in (retired or ()) if path]
+                if confirmed_paths is None:
+                    paths = extra or None
+                else:
+                    paths = [*confirmed_paths, *extra]
+            return self.repository.remove_show(show_id, delete_files, paths)
 
     def rearm(self, show_id: int):
         self.repository.rearm_show(show_id)

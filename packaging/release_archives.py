@@ -15,7 +15,9 @@ import tempfile
 import tomllib
 import zipfile
 
-from source_manifest import ROOT, check, file_digest, inventory, source_digest, privacy_scan_bytes
+from source_manifest import (
+    ROOT, check, file_digest, inventory, source_digest, privacy_scan_bytes, reject_commit_trailers,
+)
 from build_manifest import artifact_inventory
 
 
@@ -144,8 +146,19 @@ def verify_macos(folder, version, origin):
     return record,archive
 
 
+def bundled_player_versions(native):
+    locked = json.loads((ROOT / 'packaging/native-sources.json').read_text())
+    versions = {entry['name']: entry['version'] for entry in locked}
+    player = native.get('mpv_version') or versions['mpv']
+    ffmpeg = native.get('ffmpeg_version') or versions['ffmpeg']
+    if not re.fullmatch(r'\d+\.\d+\.\d+', str(player)) or not re.fullmatch(r'\d+\.\d+\.\d+', str(ffmpeg)):
+        raise ValueError('Native receipt has no usable player versions.')
+    return player, ffmpeg
+
+
 def build(output, macos=None):
-    check()
+    check(require_deny=True)
+    reject_commit_trailers()
     names, runtime = inventory()
     def git(*args):
         return subprocess.check_output(['git', '-C', str(ROOT), *args]).decode().strip()
@@ -164,11 +177,12 @@ def build(output, macos=None):
         raise ValueError('Use a new release directory outside the source checkout.')
     fingerprint = source_digest()
     private = ROOT.parent / '.config/source-deny.txt'
+    if not private.is_file():
+        raise ValueError('Private-path deny file is required.')
     tokens = []
-    if private.is_file():
-        for line in private.read_text().splitlines():
-            if line.strip():
-                tokens.extend(line.encode(encoding) for encoding in ('utf-8', 'utf-16-le', 'utf-16-be'))
+    for line in private.read_text().splitlines():
+        if line.strip() and not line.strip().startswith('#'):
+            tokens.extend(line.encode(encoding) for encoding in ('utf-8', 'utf-16-le', 'utf-16-be'))
     source_files = {name: (ROOT / name).read_bytes() for name in names}
     source_executable = [name for name in names if os.stat(ROOT/name).st_mode & 0o111]
     scan_inputs(source_files, tokens)
@@ -192,6 +206,7 @@ def build(output, macos=None):
             or linux_record['native']['inputs_sha256'] != file_digest(ROOT/'packaging/native-sources.json')
             or linux_record['native']['recipe_sha256'] != file_digest(ROOT/'packaging/build-libmpv-linux.sh')):
         raise ValueError('Linux native library does not match the pinned source inputs.')
+    player, ffmpeg = bundled_player_versions(linux_record['native'])
     linux_files = {'dists/linux/'+name: (linux/name).read_bytes() for name in deployed}
     linux_files['dists/linux/deployment.json'] = (linux/'deployment.json').read_bytes()
     linux_files['setup.sh'] = (ROOT/'packaging/linux-setup.sh').read_bytes()
@@ -203,13 +218,15 @@ def build(output, macos=None):
         'BS Podcasts '+version+' - Linux runtime\n\n'
         'Requires Python 3.14.7+ and compatible native desktop/audio libraries.\n'
         'Requires glibc '+linux_record['native']['minimum_glibc']+' or newer.\n'
-        'Bundles libmpv 0.41.0 with FFmpeg 9.0.2; the launcher never falls back to system libmpv.\n'
+        'Bundles libmpv '+player+' with FFmpeg '+ffmpeg+'; the launcher never falls back to system libmpv.\n'
         'Target: Linux '+linux_record['native']['architecture']+'. Distribution compatibility and desktop/audio acceptance require separate validation.\n'
         'Run bash setup.sh to create the project-local environment and install locked packages.\n'
         'Then bash start.sh --check --plain; bash start.sh launches the GUI.\n'
         'This is not a self-contained Linux binary. No developer checkout is required.\n'
         'After moving the folder, preserve/rename dists/linux/.venv and rerun setup.sh.\n'
-        'Data, configuration, logs, caches and downloads stay beside the app by default.\n'
+        'The library is stored in a folder named BS-Podcasts-data next to this versioned folder, so another version opens the same library.\n'
+        'If BS-Podcasts-data has no library yet and this folder already contains data/library.db, this folder\'s data directory is used instead.\n'
+        'Logs and caches stay in this versioned folder.\n'
         'Do not include those private files when redistributing or updating the application.\n').encode()
     scan_inputs(linux_files, tokens)
     dependencies=third_party_files()

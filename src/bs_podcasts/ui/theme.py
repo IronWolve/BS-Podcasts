@@ -187,22 +187,21 @@ HEALTH_LABELS = {
 SPACE_BASE = {"xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24, "xxl": 32, "page": 24}
 SPACE = dict(SPACE_BASE)
 
-RADIUS = {"sm": 8, "md": 12, "lg": 16, "pill": 999}
+RADIUS = {"sm": 8, "md": 12, "lg": 16}
 
-# Pixel type scale at comfortable size (size, line height).
+# Pixel type scale at comfortable size.
 TYPE_BASE = {
-    "display": (28, 34),
-    "h1": (22, 28),
-    "h2": (17, 24),
-    "body": (14, 20),
-    "small": (12, 16),
-    "micro": (11, 14),
+    "display": 28,
+    "h1": 22,
+    "h2": 17,
+    "body": 14,
+    "small": 12,
+    "micro": 11,
 }
 
-TYPE = {key: value for key, value in TYPE_BASE.items()}
+TYPE = dict(TYPE_BASE)
 
 FONT_STACK = ("Inter", "Noto Sans", "DejaVu Sans")
-FONT_FAMILY = '"Inter"'
 
 TEXT_SIZES = (
     ("small", "Small", 0.88),
@@ -284,8 +283,8 @@ def play_button_size() -> int:
 
 def _rebuild_type():
     TYPE.clear()
-    for role, (size, line_height) in TYPE_BASE.items():
-        TYPE[role] = (max(10, round(size * _type_scale)), max(12, round(line_height * _type_scale)))
+    for role, size in TYPE_BASE.items():
+        TYPE[role] = max(10, round(size * _type_scale))
 
 
 def _rebuild_space():
@@ -355,19 +354,18 @@ def available_ui_fonts() -> list[tuple[str, str]]:
 def apply_typography(size_key: str = "comfortable", font_key: str = "Inter"):
     """Update the shared type scale and UI font. Existing widgets need a stylesheet refresh."""
     _forget_families()
-    global _type_scale, _font_key, FONT_FAMILY
+    global _type_scale, _font_key
     _type_scale = _TEXT_SIZE_SCALE.get(size_key, 1.0)
     _font_key = font_key or "Inter"
     _resolved_families.clear()
     _rebuild_type()
     _rebuild_space()
-    FONT_FAMILY = css_font_family()
 
 
 def app_font(size_px: int | None = None, weight: int = QFont.Weight.Normal) -> QFont:
     """Return the application font at a pixel size so lists match QSS text."""
     if size_px is None:
-        size_px = TYPE["body"][0]
+        size_px = TYPE["body"]
     else:
         size_px = scaled_px(size_px)
     family = resolve_font_family(_font_key)
@@ -397,9 +395,9 @@ def apply_app_stylesheet(app) -> bool:
 def stylesheet() -> str:
     c = COLORS
     r = RADIUS
-    body, body_lh = TYPE["body"]
-    small, _ = TYPE["small"]
-    micro, _ = TYPE["micro"]
+    body = TYPE["body"]
+    small = TYPE["small"]
+    micro = TYPE["micro"]
     focus_ring = f"2px solid {c['accent']}"
     family = css_font_family()
     sp = scaled_px
@@ -420,7 +418,7 @@ def stylesheet() -> str:
         border-right: 1px solid {c['hairline']};
     }}
     QLabel#brandIcon {{ background: transparent; }}
-    QLabel#brandName {{ font-size: {TYPE['h2'][0]}px; font-weight: 700; color: {c['text_strong']}; }}
+    QLabel#brandName {{ font-size: {TYPE['h2']}px; font-weight: 700; color: {c['text_strong']}; }}
     QLabel#brandSub, QLabel#muted, QLabel#meta {{ color: {c['muted']}; font-size: {small}px; }}
     QLabel#eyebrow {{
         color: {c['subtle']}; font-size: {micro}px; font-weight: 600;
@@ -455,10 +453,10 @@ def stylesheet() -> str:
     /* ---------- Page header ---------- */
     QFrame#pageHeader {{ background: transparent; }}
     QLabel#pageTitle {{
-        font-size: {TYPE['display'][0]}px; font-weight: 700; color: {c['text_strong']};
+        font-size: {TYPE['display']}px; font-weight: 700; color: {c['text_strong']};
     }}
     QLabel#pageSubtitle {{ color: {c['muted']}; font-size: {small}px; }}
-    QLabel#sectionTitle {{ font-size: {TYPE['h2'][0]}px; font-weight: 600; }}
+    QLabel#sectionTitle {{ font-size: {TYPE['h2']}px; font-weight: 600; }}
 
     /* ---------- Inputs ---------- */
     QLineEdit#searchField {{
@@ -650,7 +648,7 @@ def stylesheet() -> str:
 
     /* ---------- Context panel ---------- */
     QFrame#contextPanel {{ background: {c['surface']}; border-left: 1px solid {c['hairline']}; }}
-    QLabel#contextTitle {{ font-size: {TYPE['h1'][0]}px; font-weight: 600; color: {c['text_strong']}; }}
+    QLabel#contextTitle {{ font-size: {TYPE['h1']}px; font-weight: 600; color: {c['text_strong']}; }}
     QLabel#contextBody {{ color: {c['muted']}; }}
     QTabWidget#contextTabs::pane {{ border: 0; background: transparent; }}
     QTabWidget#contextTabs QTabBar {{ qproperty-drawBase: 0; }}
@@ -764,7 +762,7 @@ def stylesheet() -> str:
         border-radius: {r['md']}px;
     }}
     QLabel#seekBubbleText {{ color: {c['text_strong']}; font-weight: 600; font-size: {small}px; }}
-    QLabel#emptyTitle {{ font-size: {TYPE['h2'][0]}px; font-weight: 600; color: {c['text_strong']}; }}
+    QLabel#emptyTitle {{ font-size: {TYPE['h2']}px; font-weight: 600; color: {c['text_strong']}; }}
     QLabel#emptyBody {{ color: {c['muted']}; }}
     QFrame#emptyGlyph {{
         background: {c['surface']}; border: 1px solid {c['hairline']}; border-radius: 28px;
@@ -786,9 +784,9 @@ def stylesheet() -> str:
     }}
     QPushButton#summaryCard:hover {{ background: {c['surface_raised']}; border-color: {c['border']}; }}
     QPushButton#summaryCard:focus {{ border: {focus_ring}; }}
-    QLabel#summaryNumber {{ color: {c['text_strong']}; font-size: {TYPE['display'][0]}px; font-weight: 700; }}
+    QLabel#summaryNumber {{ color: {c['text_strong']}; font-size: {TYPE['display']}px; font-weight: 700; }}
     QLabel#summaryLabel {{ color: {c['muted']}; }}
-    QLabel#cardTitle {{ font-size: {TYPE['h2'][0]}px; font-weight: 600; }}
+    QLabel#cardTitle {{ font-size: {TYPE['h2']}px; font-weight: 600; }}
     QLabel#settingHint {{ color: {c['subtle']}; font-size: {small}px; }}
     QFrame#heroCard {{
         background: {c['surface']}; border: 1px solid {c['hairline']}; border-radius: {r['lg']}px;

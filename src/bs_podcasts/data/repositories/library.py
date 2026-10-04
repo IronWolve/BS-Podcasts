@@ -3,17 +3,41 @@
 from pathlib import Path
 import json
 import logging
-import stat
 import threading
 import time
 
 from ...domain import Episode, FeedData, Health, Show
 from ..database import Database
+from ..files import (
+    FILE_IRREGULAR,
+    FILE_MISSING,
+    FILE_PRESENT,
+    FILE_UNCONFIRMED,
+    inspect_download_file,
+)
 
 
 _log = logging.getLogger("bs_podcasts")
 
 MAX_REFRESH_FAILURES = 3
+
+
+def _confirmed_path_list(confirmed_paths) -> list[str]:
+    if isinstance(confirmed_paths, (str, Path)):
+        confirmed_paths = [confirmed_paths]
+    ordered = []
+    seen = set()
+    for item in confirmed_paths or ():
+        if isinstance(item, (tuple, list)):
+            if not item:
+                continue
+            item = item[0]
+        text = str(item or "")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        ordered.append(text)
+    return ordered
 
 # Feed-synced episode columns: drives the change-detection SELECT and both
 # comparison tuples in import_feed so the three can never drift apart.
@@ -35,7 +59,17 @@ class LibraryRepository:
         self._settings_revision = 0
         self._settings_generation = 0
 
-    def add_show(self, feed_url: str, title: str = "", source: str = "rss") -> Show:
+    def add_show(
+        self,
+        feed_url: str,
+        title: str = "",
+        source: str = "rss",
+        *,
+        playback_speed: float | None = None,
+        skip_back: int | None = None,
+        skip_forward: int | None = None,
+        auto_continue: bool | None = None,
+    ) -> Show:
         now = time.time()
         with self.database.connect() as connection:
             connection.execute(
@@ -43,9 +77,21 @@ class LibraryRepository:
                 "VALUES ((SELECT value+1 FROM entity_sequences WHERE kind=\'show\'), ?, ?, ?, ?)",
                 (feed_url, title, source, now),
             )
+            inserted = connection.execute("SELECT changes()").fetchone()[0]
             row = connection.execute(
                 "SELECT id FROM shows WHERE feed_url=?", (feed_url,)
             ).fetchone()
+            if inserted and playback_speed is not None:
+                connection.execute(
+                    "UPDATE shows SET playback_speed=?, skip_back=?, skip_forward=?, auto_continue=? WHERE id=?",
+                    (
+                        float(playback_speed),
+                        int(skip_back),
+                        int(skip_forward),
+                        int(bool(auto_continue)),
+                        row["id"],
+                    ),
+                )
         return self.get_show(row["id"])
 
     def get_show(self, show_id: int) -> Show | None:
@@ -348,23 +394,39 @@ class LibraryRepository:
             bookmarks = connection.execute(
                 "SELECT COUNT(*) FROM bookmarks b JOIN episodes e ON e.id=b.episode_id WHERE e.show_id=?", (show_id,)
             ).fetchone()[0]
-        files = []
-        seen = set()
+        completed_by_path = {}
+        ordered_paths = []
         for row in rows:
+            row_complete = row["state"] == "complete"
             for candidate in (row["target_path"], row["partial_path"]):
-                path = Path(candidate) if candidate else None
-                if path is None or str(path) in seen:
+                if not candidate:
                     continue
-                seen.add(str(path))
-                try:
-                    info = path.stat()
-                except FileNotFoundError:
-                    if not stat.S_ISDIR(path.parent.stat().st_mode):
-                        raise OSError("A download folder is unavailable.")
-                    continue
-                if not stat.S_ISREG(info.st_mode):
-                    raise OSError("A download path is not a regular file.")
-                files.append((str(path), info.st_size))
+                is_completed = row_complete and candidate == row["target_path"]
+                if candidate not in completed_by_path:
+                    ordered_paths.append(candidate)
+                    completed_by_path[candidate] = is_completed
+                elif is_completed:
+                    completed_by_path[candidate] = True
+        candidates = [(path, completed_by_path[path]) for path in ordered_paths]
+        roots = set()
+        checked = []
+        for candidate, completed in candidates:
+            kind, size = inspect_download_file(candidate, roots, completed=completed)
+            checked.append((candidate, completed, kind, size))
+        files = []
+        for candidate, completed, kind, size in checked:
+            if kind == FILE_UNCONFIRMED:
+                kind, size = inspect_download_file(candidate, roots, completed=False)
+            if kind == FILE_PRESENT:
+                files.append((candidate, size))
+            elif kind == FILE_MISSING:
+                continue
+            elif kind == FILE_IRREGULAR:
+                raise OSError("A download path is not a regular file.")
+            elif kind == FILE_UNCONFIRMED and not completed:
+                continue
+            else:
+                raise OSError("A download folder is unavailable.")
         # Artwork is shared cache data, not owned by this subscription. Leave
         # it to cache maintenance; a refresh may be about to attach a reference.
         return {
@@ -462,21 +524,18 @@ class LibraryRepository:
                 if path in referenced:
                     cleared.append(path)  # tracking retired; the live file stays
                     continue
-                try:
-                    candidate = Path(path)
-                    if stat.S_ISREG(candidate.stat().st_mode):
-                        candidate.unlink()
-                    cleared.append(path)
-                except FileNotFoundError:
+                kind, _size = inspect_download_file(path, completed=False)
+                candidate = Path(path)
+                if kind == FILE_PRESENT:
                     try:
-                        parent_present = stat.S_ISDIR(candidate.parent.stat().st_mode)
+                        candidate.unlink()
                     except OSError:
-                        parent_present = False
-                    if parent_present:
-                        cleared.append(path)
-                    else:
                         failed_paths.append(path)
-                except OSError:
+                    else:
+                        cleared.append(path)
+                elif kind in {FILE_MISSING, FILE_IRREGULAR}:
+                    cleared.append(path)
+                else:
                     failed_paths.append(path)
             # Failed entries rotate behind untouched ones, so one persistently
             # locked file cannot starve cleanup of every later record.
@@ -489,32 +548,27 @@ class LibraryRepository:
             self.reload_settings()
         return cleared
 
-    def remove_show(self, show_id: int, delete_files: bool = True) -> dict:
-        """Delete a show, its episodes and dependent rows (cascade), and its files.
+    def remove_show(self, show_id: int, delete_files: bool = True, confirmed_paths=None) -> dict:
+        """Delete a show and its cascaded rows.
 
-        Files go first. Dropping the rows first — as this used to — meant a
-        file that could not be removed (locked by the player, an in-flight
-        download, a scanner; guaranteed on Windows) was left on disk with no
-        row anywhere still naming it, so nothing could find or retry it and
-        the reclaimed-bytes figure quietly under-reported. Whatever survives
-        the unlink is recorded as an orphan rather than forgotten.
+        Files named by the caller go first. ``confirmed_paths`` is the list
+        already shown to the user; None unlinks nothing. A path this removal
+        itself retired may be included in that list. An absent file counts as
+        removed only when the download root is confirmed. Survivors are
+        recorded as orphans. Orphan retry is not part of this call.
         """
         preview = self.removal_preview(show_id)
         if not preview:
             return {}
-        self.sweep_orphans()  # each removal retries what an earlier one left
         removed_files = []
         failed_files = []
-        if delete_files:
-            for path, _size in preview["files"]:
+        if delete_files and confirmed_paths is not None:
+            for path in _confirmed_path_list(confirmed_paths):
                 try:
                     Path(path).unlink()
                 except FileNotFoundError:
-                    try:
-                        parent_present = stat.S_ISDIR(Path(path).parent.stat().st_mode)
-                    except OSError:
-                        parent_present = False
-                    if parent_present:
+                    kind, _size = inspect_download_file(path, completed=False)
+                    if kind == FILE_MISSING:
                         removed_files.append(path)
                     else:
                         failed_files.append(path)
@@ -708,20 +762,40 @@ class LibraryRepository:
                     (position, episode_id),
                 )
 
-    def update_position(self, episode_id: int, seconds: float, stamp: float | None = None):
+    def update_position(self, episode_id: int, seconds: float, stamp: float | None = None, *, finish: bool = False):
         # Let the playback writer retain this save for retry instead of
         # waiting behind exclusive maintenance or claiming it was persisted.
+        # A finished episode must land its end position even when a newer
+        # stamp already won, so mark_played does not run ahead of that write.
         if self.database.maintenance_active:
             return False
         stamp = time.time() if stamp is None else stamp
-        # Starting an episode is what makes it "not new" everywhere in the UI.
+        seconds = max(0.0, float(seconds))
         with self.database.connect() as connection:
-            connection.execute(
-                "UPDATE episodes SET position_seconds=?, last_played=?, is_new=0, position_updated_at=? "
-                "WHERE id=? AND position_updated_at<=?",
-                (max(0.0, float(seconds)), stamp, stamp, episode_id, stamp),
-            )
-        return True
+            if self._write_position(connection, episode_id, seconds, stamp):
+                return True
+            if not finish:
+                return True
+            row = connection.execute(
+                "SELECT position_updated_at FROM episodes WHERE id=?",
+                (episode_id,),
+            ).fetchone()
+            if row is None:
+                return True
+            stored = float(row["position_updated_at"] or 0.0)
+            if stored < stamp:
+                return True
+            return self._write_position(connection, episode_id, seconds, stored + 0.000001)
+
+    @staticmethod
+    def _write_position(connection, episode_id: int, seconds: float, stamp: float) -> bool:
+        # Starting an episode is what makes it "not new" everywhere in the UI.
+        cursor = connection.execute(
+            "UPDATE episodes SET position_seconds=?, last_played=?, is_new=0, position_updated_at=? "
+            "WHERE id=? AND position_updated_at<=?",
+            (seconds, stamp, stamp, episode_id, stamp),
+        )
+        return cursor.rowcount > 0
 
     def set_observed_duration(self, episode_id: int, seconds: float):
         import math
@@ -801,9 +875,10 @@ class LibraryRepository:
         """Change and snapshot in one transaction; Undo never guesses old state."""
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            played_flag = int(bool(played))
             if show_id is not None:
                 ids = [row[0] for row in connection.execute(
-                    "SELECT id FROM episodes WHERE show_id=?", (show_id,))]
+                    "SELECT id FROM episodes WHERE show_id=? AND played!=?", (show_id, played_flag))]
             else:
                 ids = list(dict.fromkeys(int(i) for i in episode_ids))
             changes = []
@@ -811,12 +886,12 @@ class LibraryRepository:
                 before = connection.execute(
                     "SELECT id, show_id, external_id, played, is_new, position_seconds, last_played "
                     "FROM episodes WHERE id=?", (episode_id,)).fetchone()
-                if before is None:
+                if before is None or int(before["played"]) == played_flag:
                     continue
                 if played:
                     connection.execute(
-                        "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=1, is_new=0, last_played=? WHERE id=?",
-                        (time.time(), episode_id))
+                        "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=1, is_new=0 WHERE id=?",
+                        (episode_id,))
                 else:
                     connection.execute(
                         "UPDATE episodes SET position_updated_at=unixepoch('subsec'), played=0, is_new=0, position_seconds=CASE "

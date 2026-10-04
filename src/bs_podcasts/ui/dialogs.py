@@ -280,6 +280,37 @@ class StyledDialog(QDialog):
         self.setFixedWidth(width + 2 * SHADOW_MARGIN)
 
     # -- scrim ----------------------------------------------------------------
+    def _place_on_screen(self):
+        """Same centering move as exec, including when no parent window exists."""
+        parent = self.parentWidget()
+        if parent is not None:
+            window = parent.window()
+            screen_obj = window.screen()
+            centre = window.mapToGlobal(window.rect().center())
+        else:
+            screen_obj = QApplication.primaryScreen()
+            centre = screen_obj.availableGeometry().center() if screen_obj is not None else None
+        self.adjustSize()
+        if screen_obj is None or centre is None:
+            return
+        screen = screen_obj.availableGeometry()
+        available = max(100, screen.height() - 24)
+        if self.height() > available and not hasattr(self, "_overflow_scroll"):
+            self.layout().removeWidget(self.card)
+            self._overflow_scroll = QScrollArea(self)
+            self._overflow_scroll.setWidgetResizable(True)
+            self._overflow_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self.card.setMinimumHeight(self.card.sizeHint().height())
+            self._overflow_scroll.setWidget(self.card)
+            self.layout().addWidget(self._overflow_scroll)
+        self.setMaximumHeight(available)
+        if self.width() > screen.width() - 24:
+            self.setFixedWidth(max(100, screen.width() - 24))
+        self.resize(self.width(), min(self.height(), available))
+        x = max(screen.left(), min(centre.x() - self.width() // 2, screen.right() - self.width() + 1))
+        y = max(screen.top(), min(centre.y() - self.height() // 2, screen.bottom() - self.height() + 1))
+        self.move(x, y)
+
     def exec(self):
         parent = self.parentWidget()
         if parent is not None:
@@ -290,25 +321,7 @@ class StyledDialog(QDialog):
             self._scrim.setGeometry(window.rect())
             self._scrim.show()
             self._scrim.raise_()
-            self.adjustSize()
-            centre = window.mapToGlobal(window.rect().center())
-            screen = window.screen().availableGeometry()
-            available = max(100, screen.height() - 24)
-            if self.height() > available and not hasattr(self, "_overflow_scroll"):
-                self.layout().removeWidget(self.card)
-                self._overflow_scroll = QScrollArea(self)
-                self._overflow_scroll.setWidgetResizable(True)
-                self._overflow_scroll.setFrameShape(QFrame.Shape.NoFrame)
-                self.card.setMinimumHeight(self.card.sizeHint().height())
-                self._overflow_scroll.setWidget(self.card)
-                self.layout().addWidget(self._overflow_scroll)
-            self.setMaximumHeight(available)
-            if self.width() > screen.width() - 24:
-                self.setFixedWidth(max(100, screen.width() - 24))
-            self.resize(self.width(), min(self.height(), available))
-            x = max(screen.left(), min(centre.x() - self.width() // 2, screen.right() - self.width() + 1))
-            y = max(screen.top(), min(centre.y() - self.height() // 2, screen.bottom() - self.height() + 1))
-            self.move(x, y)
+        self._place_on_screen()
         try:
             return super().exec()
         finally:
@@ -564,18 +577,27 @@ class RemovePodcastDialog(StyledDialog):
             row.addWidget(val, 1)
             rows.addLayout(row)
         self.card_layout.addLayout(rows)
+        file_count = len(preview["files"])
         if preview["files"]:
-            listing = PlainTextLabel("\n".join(path for path, _size in preview["files"][:8]) + ("\n…" if len(preview["files"]) > 8 else ""))
+            listing = PlainTextLabel("\n".join(path for path, _size in preview["files"]))
             listing.setObjectName("settingHint")
             listing.setWordWrap(True)
             listing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            self.card_layout.addWidget(listing)
+            scroll = QScrollArea(self)
+            scroll.setObjectName("dialogScroll")
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setWidget(listing)
+            scroll.setMaximumHeight(scaled_px(180))
+            self.card_layout.addWidget(scroll)
         from PySide6.QtWidgets import QCheckBox
 
-        self.delete_files = QCheckBox("Delete the files listed above")
+        noun = "file" if file_count == 1 else "files"
+        self.delete_files = QCheckBox(f"Delete all {file_count} downloaded {noun}", self)
         self.delete_files.setChecked(True)
-        self.delete_files.setVisible(bool(preview["files"]))
         self.card_layout.addWidget(self.delete_files)
+        self.delete_files.setVisible(bool(preview["files"]))
         remove = QPushButton("Unsubscribe")
         remove.setObjectName("dangerButton")
         remove.clicked.connect(self.accept)
@@ -835,6 +857,7 @@ class PodcastInfoDialog(StyledDialog):
         about.setObjectName("contextBody")
         about.setFrameShape(QFrame.Shape.NoFrame)
         about.setOpenExternalLinks(False)
+        about.setOpenLinks(False)
         about.anchorClicked.connect(open_web_url)
         about.document().setDefaultStyleSheet(f"a {{ color: {COLORS['blue']}; text-decoration: underline; }}")
         about.setHtml(safe_feed_html(description or "No description provided by this feed."))
@@ -999,6 +1022,10 @@ class MigrationNotice(StyledDialog):
             "Updating your library…",
             "Making a backup and applying the update. This takes a few seconds on a large library.",
         )
+
+    def show(self):
+        self._place_on_screen()
+        super().show()
 
 
 class StartupErrorDialog(StyledDialog):

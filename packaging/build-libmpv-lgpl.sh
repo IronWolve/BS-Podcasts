@@ -9,7 +9,8 @@ SRC="$ROOT/src"
 JOBS="${BS_NATIVE_JOBS:-2}"
 [[ "$JOBS" =~ ^[1-4]$ ]] || { printf 'BS_NATIVE_JOBS must be 1 to 4.\n' >&2; exit 1; }
 TRIPLE=x86_64-w64-mingw32
-mkdir -p "$PREFIX" "$SRC"
+mkdir -p "$PREFIX" "$SRC" "$ROOT/tmp"
+export TMPDIR="$ROOT/tmp" PYTHONDONTWRITEBYTECODE=1
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
 export PKG_CONFIG_PATH=""
 
@@ -65,16 +66,32 @@ if [ ! -f "$PREFIX/.done-ffmpeg" ]; then
 (cd "$SRC/ffmpeg-9.0.2" && make distclean >/dev/null 2>&1 || true
  ./configure --prefix="$PREFIX" --arch=x86_64 --target-os=mingw32 \
    --cross-prefix=${TRIPLE}- --enable-cross-compile --pkg-config=pkg-config \
-   --disable-shared --enable-static --disable-programs --disable-doc \
+   --disable-shared --enable-static --disable-autodetect --enable-zlib \
+   --disable-programs --disable-doc --disable-debug \
    --disable-encoders --disable-muxers --disable-outdevs --disable-indevs \
-   --enable-schannel --disable-debug \
+   --enable-schannel \
    --extra-cflags="-ffile-prefix-map=$ROOT=/bs-native -fdebug-prefix-map=$ROOT=/bs-native" \
  && "$BS_PYTHON" -B "$BS_BUILD_WORKSPACE/repo/packaging/native_sources.py" --sanitize config.h --root "$ROOT" \
  && make -j $JOBS && make install) >> "$ROOT/build.log" 2>&1
 touch "$PREFIX/.done-ffmpeg"
 fi
 echo "=== built ffmpeg"
-grep -iE "^(License|version)" "$SRC/ffmpeg-9.0.2/ffbuild/config.log" 2>/dev/null | head -3 || true
+BS_FFMPEG_LOG="$SRC/ffmpeg-9.0.2/ffbuild/config.log"
+BS_LICENSE="$(grep -E "^license=" "$BS_FFMPEG_LOG" | head -n 1 || true)"
+BS_CONFIGURE="$(head -n 1 "$BS_FFMPEG_LOG" || true)"
+if [[ "$BS_LICENSE" != "license='LGPL version 2.1 or later'" ]]; then
+    printf 'FFmpeg config.log does not record the expected LGPL configuration.\n' >&2
+    exit 1
+fi
+case "$BS_CONFIGURE" in
+    *--enable-gpl*|*--enable-nonfree*)
+        printf 'FFmpeg configure enables a non-LGPL license option.\n' >&2
+        exit 1 ;;
+    *--disable-autodetect*) ;;
+    *)
+        printf 'FFmpeg config.log does not record --disable-autodetect.\n' >&2
+        exit 1 ;;
+esac
 
 echo "=== libplacebo"
 if [ ! -f "$PREFIX/.done-libplacebo" ]; then
@@ -107,7 +124,15 @@ mkdir -p "$ROOT/out"
 cp "$DLL" "$ROOT/out/libmpv-2.dll"
 ${TRIPLE}-strip "$ROOT/out/libmpv-2.dll"
 "$BS_PYTHON" -B "$BS_BUILD_WORKSPACE/repo/packaging/native_sources.py" --record "$ROOT/out/libmpv-2.dll"
-echo "=== DLL: $(ls -la "$ROOT/out/libmpv-2.dll" | awk '{print $5}') bytes"
+BS_CACHE="$BS_BUILD_WORKSPACE/.cache/windows-build/libmpv-lgpl"
+mkdir -p "$BS_BUILD_WORKSPACE/.cache/windows-build"
+if [[ -e "$BS_CACHE" ]]; then
+    BS_PREVIOUS="$(mktemp -d "$ROOT/previous-native.XXXXXX")"
+    mv -- "$BS_CACHE" "$BS_PREVIOUS/libmpv-lgpl"
+fi
+mv -- "$ROOT/out" "$BS_CACHE"
+echo "=== DLL: $(ls -la "$BS_CACHE/libmpv-2.dll" | awk '{print $5}') bytes"
+printf 'Native Windows library prepared: %s/libmpv-2.dll\n' "$BS_CACHE"
 echo "=== imports:"
-${TRIPLE}-objdump -p "$ROOT/out/libmpv-2.dll" | grep "DLL Name" | sort
+${TRIPLE}-objdump -p "$BS_CACHE/libmpv-2.dll" | grep "DLL Name" | sort
 echo "=== BUILD COMPLETE"

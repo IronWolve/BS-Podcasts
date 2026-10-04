@@ -687,7 +687,7 @@ class EpisodeDelegate(QStyledItemDelegate):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(11, 15, 24, 150))
             painter.drawRoundedRect(art, 8, 8)
-            icons.paint(painter, "playing" if self.playing_active else "pause", COLORS["accent"], art.adjusted(art_size // 4, art_size // 4, -art_size // 4, -art_size // 4), scale)
+            icons.paint(painter, "playing" if self.playing_active else "pause", "#FFFFFF", art.adjusted(art_size // 4, art_size // 4, -art_size // 4, -art_size // 4), scale)
 
         text_left = art.right() + scaled_px(14)
         play_zone = scaled_px(self.PLAY_ZONE + 8)

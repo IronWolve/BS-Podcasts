@@ -167,7 +167,40 @@ class ArtworkCache:
                     continue
                 if retired >= 256:
                     break
+            self._drop_stale_partials(threshold)
             return removed, freed
+
+    def _drop_stale_partials(self, threshold: float) -> None:
+        # The URL lock is checked out before the partial is created, so holding
+        # the guard across the check and unlink cannot race a live fetch.
+        if not self.directory.is_dir():
+            return
+        try:
+            partials = [path for path in self.directory.iterdir() if path.suffix == '.part']
+        except OSError:
+            return
+        for partial in partials:
+            digest = partial.stem
+            if len(digest) != 64 or any(char not in '0123456789abcdef' for char in digest):
+                continue
+            try:
+                if partial.is_symlink() or not partial.is_file():
+                    continue
+                if partial.stat().st_mtime_ns / 1e9 >= threshold:
+                    continue
+            except OSError:
+                continue
+            try:
+                with self._locks_guard:
+                    if any(sha256(url.encode('utf-8')).hexdigest() == digest for url in self._url_locks):
+                        continue
+                    if partial.is_symlink() or not partial.is_file():
+                        continue
+                    if partial.stat().st_mtime_ns / 1e9 >= threshold:
+                        continue
+                    partial.unlink()
+            except OSError:
+                continue
 
     def path_for(self, url: str) -> Path:
         digest = sha256(url.encode("utf-8")).hexdigest()

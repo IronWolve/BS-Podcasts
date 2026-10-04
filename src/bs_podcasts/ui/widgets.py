@@ -9,7 +9,6 @@ import re
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import (
-    QCoreApplication,
     QEvent,
     QPoint,
     QPropertyAnimation,
@@ -110,13 +109,15 @@ class _SafeFeedHtml(HTMLParser):
         self.parts = []
         self._blocked = 0
         self._anchors = []
+        self._block_stack = []
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
-        if tag == "img":
+        if tag == "img" or tag == "embed":
             return
         if tag in self.BLOCKED:
             self._blocked += 1
+            self._block_stack.append(tag)
             return
         if self._blocked or tag not in self.ALLOWED:
             return
@@ -137,7 +138,23 @@ class _SafeFeedHtml(HTMLParser):
 
     def handle_endtag(self, tag):
         tag = tag.lower()
+        if tag == "embed":
+            return
+        if tag == "object":
+            while self._block_stack and self._block_stack[-1] == "embed":
+                self._block_stack.pop()
+                self._blocked = max(0, self._blocked - 1)
+            if self._block_stack and self._block_stack[-1] == "object":
+                self._block_stack.pop()
+                self._blocked = max(0, self._blocked - 1)
+            elif self._blocked:
+                self._blocked = max(0, self._blocked - 1)
+            return
         if tag in self.BLOCKED:
+            if self._block_stack and self._block_stack[-1] == tag:
+                self._block_stack.pop()
+            elif self._block_stack:
+                self._block_stack.pop()
             self._blocked = max(0, self._blocked - 1)
             return
         if self._blocked or tag not in self.ALLOWED or tag in self.VOID:
@@ -379,15 +396,12 @@ class NavigationRail(QFrame):
         brand.setSpacing(SPACE["sm"])
         self.mark = PlainTextLabel()
         self.mark.setObjectName("brandIcon")
-        self.mark.setPixmap(
-            QPixmap(str(icon_path(64))).scaled(
-                40, 40, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-            )
-        )
         self.mark.setAccessibleName("About BS Podcasts")
         self.mark.setToolTip("About BS Podcasts")
         self.mark.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mark.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.mark.setFixedSize(scaled_px(40), scaled_px(40))
+        self._paint_brand()
         self.mark.installEventFilter(self)
         self.brand_text = QWidget()
         brand_col = QVBoxLayout(self.brand_text)
@@ -397,6 +411,7 @@ class NavigationRail(QFrame):
         self.brand_name.setObjectName("brandName")
         self.brand_name.setToolTip("About BS Podcasts")
         self.brand_name.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.brand_name.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.brand_name.installEventFilter(self)
         self.summary = PlainTextLabel("Library")
         self.summary.setObjectName("brandSub")
@@ -451,12 +466,6 @@ class NavigationRail(QFrame):
         self.background_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.background_status.hide()
         layout.addWidget(self.background_status)
-        footer = QHBoxLayout()
-        self.version = PlainTextLabel(self._version_text())
-        self.version.setObjectName("eyebrow")
-        self.version.hide()
-        footer.addWidget(self.version, 1)
-        layout.addLayout(footer)
         # Collapse handle; the shell adopts it into the centre area's edge.
         self.toggle = EdgeHandle("collapse-left", "Collapse navigation")
         self.toggle.clicked.connect(lambda: self.set_compact(not self._compact, user=True))
@@ -466,10 +475,45 @@ class NavigationRail(QFrame):
         self.background_status.setVisible(self._background_paused and not self._compact)
 
     def eventFilter(self, watched, event):
-        if watched in {self.mark, self.brand_name} and event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-            self.about_requested.emit()
-            return True
+        if event.type() == QEvent.Type.DevicePixelRatioChange and watched is getattr(self, "_dpr_window", None):
+            self._paint_brand()
+        if watched in {self.mark, self.brand_name}:
+            mouse = event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton
+            key = event.type() == QEvent.Type.KeyPress and event.key() in {
+                Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space,
+            }
+            if mouse or key:
+                self.about_requested.emit()
+                return True
         return super().eventFilter(watched, event)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.DevicePixelRatioChange:
+            self._paint_brand()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        window = self.window()
+        if window is not None and getattr(self, "_dpr_window", None) is not window:
+            previous = getattr(self, "_dpr_window", None)
+            if previous is not None:
+                previous.removeEventFilter(self)
+            window.installEventFilter(self)
+            self._dpr_window = window
+        self._paint_brand()
+
+    def _paint_brand(self):
+        if not hasattr(self, "mark"):
+            return
+        side = self.mark.width() if self.mark.width() > 0 else scaled_px(40)
+        ratio = self.devicePixelRatioF() or 1.0
+        pixels = max(1, int(round(side * ratio)))
+        pixmap = QPixmap(str(icon_path(512))).scaled(
+            pixels, pixels, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
+        )
+        pixmap.setDevicePixelRatio(ratio)
+        self.mark.setPixmap(pixmap)
 
     # -- drag episodes onto "Up Next" ---------------------------------------
     def _queue_button(self):
@@ -520,11 +564,6 @@ class NavigationRail(QFrame):
             event.setDropAction(Qt.DropAction.CopyAction)
             event.accept()
 
-    @staticmethod
-    def _version_text() -> str:
-        version = QCoreApplication.applicationVersion() or ""
-        return f"v{version}" if version else ""
-
     def _paint_icons(self):
         size = scaled_px(20)
         for button, glyph, _label in self._buttons:
@@ -567,7 +606,6 @@ class NavigationRail(QFrame):
         changed = compact != self._compact
         self._compact = compact
         self.brand_text.setVisible(not compact)
-        self.version.setVisible(False)
         self.background_status.setVisible(self._background_paused and not compact)
         self.toggle.set_glyph(
             "collapse-right" if compact else "collapse-left",
@@ -592,11 +630,7 @@ class NavigationRail(QFrame):
         self.layout().setSpacing(SPACE["xs"])
         side = scaled_px(40)
         self.mark.setFixedSize(side, side)
-        self.mark.setPixmap(
-            QPixmap(str(icon_path(64))).scaled(
-                side, side, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-            )
-        )
+        self._paint_brand()
         self._paint_icons()
 
 
@@ -1071,16 +1105,25 @@ class Toast(QFrame):
         """duration_ms=0 keeps the toast up until dismissed; on_close runs
         only when the person clicks the X, never on programmatic dismissal
         — a sticky progress toast uses it as its cancel affordance."""
-        if self.isVisible():
-            # Never let a burst stack up: drop duplicates, keep only the newest few.
-            if any(queued[0] == message for queued in self._queue) or self.text.text() == message:
-                # The text repeats but the action may not: several call sites
-                # use one fixed message for different episodes, so keeping the
-                # first toast's callback pointed its action at the wrong one.
-                if callback is not None and self.text.text() == message:
+        showing = self.isVisible() and not self._closing
+        if showing:
+            entry = (message, tone, action, callback, duration_ms, on_close, owner)
+            duplicate = self.text.text() == message or any(queued[0] == message for queued in self._queue)
+            if callback is not None:
+                for index, queued in enumerate(self._queue):
+                    if queued[0] == message:
+                        self._queue[index] = entry
+                if self.text.text() == message:
                     self._callback = callback
+                    self.action.setText(action)
+                    self.action.setVisible(bool(action))
+                    if duration_ms > 0:
+                        self._timer.start(duration_ms)
+                    else:
+                        self._timer.stop()
+            if duplicate:
                 return
-            self._queue.append((message, tone, action, callback, duration_ms, on_close, owner))
+            self._queue.append(entry)
             del self._queue[:-self.MAX_QUEUE]
             return
         glyph = {"success": "check", "error": "warning", "info": "info", "loading": "refresh"}.get(tone, "info")
@@ -1222,7 +1265,7 @@ class EmptyState(QWidget):
         badge_layout.setContentsMargins(0, 0, 0, 0)
         self.glyph = PlainTextLabel()
         self.glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.glyph.setPixmap(icons.pixmap(glyph, COLORS["muted"], scaled_px(24), self.devicePixelRatioF()))
+        self._paint_glyph()
         badge_layout.addWidget(self.glyph)
         self.heading = PlainTextLabel(title)
         self.heading.setObjectName("emptyTitle")
@@ -1248,8 +1291,32 @@ class EmptyState(QWidget):
         self.layout().setSpacing(SPACE["sm"])
         side = scaled_px(56)
         self.badge.setFixedSize(side, side)
-        self.glyph.setPixmap(icons.pixmap(self._glyph_name, COLORS["muted"], scaled_px(24), self.devicePixelRatioF()))
+        self._paint_glyph()
         self.body_label.setMaximumWidth(scaled_px(380))
+
+    def _paint_glyph(self):
+        self.glyph.setPixmap(icons.pixmap(self._glyph_name, COLORS["muted"], scaled_px(24), self.devicePixelRatioF()))
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.DevicePixelRatioChange:
+            self._paint_glyph()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        window = self.window()
+        if window is not None and getattr(self, "_dpr_window", None) is not window:
+            previous = getattr(self, "_dpr_window", None)
+            if previous is not None:
+                previous.removeEventFilter(self)
+            window.installEventFilter(self)
+            self._dpr_window = window
+        self._paint_glyph()
+
+    def eventFilter(self, watched, event):
+        if watched is getattr(self, "_dpr_window", None) and event.type() == QEvent.Type.DevicePixelRatioChange:
+            self._paint_glyph()
+        return super().eventFilter(watched, event)
 
     def set_text(self, title: str, body: str, action: str = ""):
         self.heading.setText(title)
@@ -1597,7 +1664,6 @@ def hide_hover_bubble():
 class SeekSlider(QSlider):
     """Click-to-seek slider with hover time readout and chapter markers."""
 
-    hover_time = Signal(float)
     user_step = Signal()
 
     TRACK_HEIGHT = 6
@@ -1668,10 +1734,23 @@ class SeekSlider(QSlider):
         position = min(max(0, x - track.x()), track.width())
         return QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), position, track.width())
 
+    def _show_value_bubble(self, global_x: int):
+        if not (self._duration and self._formatter):
+            return
+        fraction = self.value() / max(1, self.maximum())
+        if self._bubble is None:
+            self._bubble = HoverBubble(self)
+        self._bubble.show_at(
+            self._formatter(fraction * self._duration),
+            int(global_x),
+            self.mapToGlobal(QPoint(0, 0)).y(),
+        )
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
             self.setSliderDown(True)
             self.setValue(self._value_at(int(event.position().x())))
+            self._show_value_bubble(int(event.globalPosition().x()))
             event.accept()
             return
         super().mousePressEvent(event)
@@ -1679,8 +1758,10 @@ class SeekSlider(QSlider):
     def mouseMoveEvent(self, event):
         if self.isSliderDown():
             self.setValue(self._value_at(int(event.position().x())))
+            self._show_value_bubble(int(event.globalPosition().x()))
             event.accept()
-        elif self.isEnabled() and self._duration and self._formatter:
+            return
+        if self.isEnabled() and self._duration and self._formatter:
             fraction = self._value_at(int(event.position().x())) / max(1, self.maximum())
             if self._bubble is None:
                 self._bubble = HoverBubble(self)
@@ -1696,6 +1777,8 @@ class SeekSlider(QSlider):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.isSliderDown():
             self.setSliderDown(False)
+            if self._bubble is not None and not self.rect().contains(event.position().toPoint()):
+                self._bubble.hide()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -1705,7 +1788,7 @@ class SeekSlider(QSlider):
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        if self._bubble is not None:
+        if self._bubble is not None and not self.isSliderDown():
             self._bubble.hide()
         self.update()
         super().leaveEvent(event)
@@ -1782,6 +1865,13 @@ class Popover(QFrame):
         top_left = anchor.mapToGlobal(QPoint(0, 0))
         x = top_left.x() + (anchor.width() - self.width()) // 2
         y = top_left.y() - self.height() - SPACE["sm"]
+        screen = anchor.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            if y < area.top():
+                y = top_left.y() + anchor.height() + SPACE["sm"]
+            x = max(area.left(), min(x, area.right() - self.width() + 1))
+            y = max(area.top(), min(y, area.bottom() - self.height() + 1))
         self.move(x, y)
         self.show()
         self.setFocus()
@@ -1982,9 +2072,6 @@ class ContextPanel(QFrame):
         self.info_button.setEnabled(False)
         self.info_button.clicked.connect(self._information_clicked)
         top.addWidget(self.info_button)
-        self.close_button = icon_button("close", "Close details")
-        self.close_button.clicked.connect(self.closed)
-        self.close_button.hide()
         layout.addLayout(top)
 
         self.stack = QStackedWidget()
@@ -2115,6 +2202,7 @@ class ContextPanel(QFrame):
         self.body.setObjectName("contextBody")
         self.body.setReadOnly(True)
         self.body.setOpenExternalLinks(False)
+        self.body.setOpenLinks(False)
         self.body.anchorClicked.connect(lambda url: self.open_url_requested.emit(url.toString()))
         self.body.document().setDefaultStyleSheet(_link_style())
         self.body.setFrameShape(QFrame.Shape.NoFrame)
@@ -2253,10 +2341,14 @@ class ContextPanel(QFrame):
 
     def set_transcript(self, segments):
         segments = list(segments)
-        self.transcript_text.setPlainText(
-            "\n\n".join(f"{self._time(segment.start_seconds or 0)}   {segment.text}" for segment in segments)
-            or "No transcript provided"
-        )
+        timed = bool(segments) and all(segment.start_seconds is not None for segment in segments)
+        if timed:
+            body = "\n\n".join(
+                f"{self._time(segment.start_seconds)}   {segment.text or ''}" for segment in segments
+            )
+        else:
+            body = "\n\n".join(segment.text or "" for segment in segments)
+        self.transcript_text.setPlainText(body or "No transcript provided")
 
     def show_details_error(self, message: str):
         """A failed chapters/transcript download looked exactly like 'the
@@ -2405,7 +2497,7 @@ class ContextPanel(QFrame):
             # No inline span: safe_feed_html strips style attributes, so the
             # colour never rendered — the markup was dead weight.
             items = "".join(f"<li>{_escape(title)} · {_escape(date)}</li>" for title, date in recent)
-            body = (body if "<" in body else f"<p>{_escape(body)}</p>") + f"<p><b>Recent episodes</b></p><ul>{items}</ul>"
+            body = safe_feed_html(body) + f"<p><b>Recent episodes</b></p><ul>{items}</ul>"
         self._set_body(body)
         self.primary.setText("Subscribe")
         self.primary.setEnabled(True)
@@ -2687,7 +2779,7 @@ def set_button_text_elided(button: QPushButton, text: str, cap_px: int):
     tooltip."""
     elided = button.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, cap_px)
     button.setText(mnemonic_safe(elided))
-    button.setToolTip(text if elided != text else "")
+    button.setToolTip(plain_tooltip(text) if elided != text else "")
 
 
 class ElidedValueLabel(PlainTextLabel):
@@ -2744,6 +2836,7 @@ class NowPlayingView(QFrame):
         layout.setSpacing(SPACE["xxl"])
 
         left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(SPACE["md"])
         top = QHBoxLayout()
         eyebrow = PlainTextLabel("NOW PLAYING")
@@ -2786,6 +2879,7 @@ class NowPlayingView(QFrame):
         left.addStretch(1)
         self.left_wrap = QWidget()
         self.left_wrap.setLayout(left)
+        left.setContentsMargins(0, 0, 0, 0)
         self.left_wrap.setMaximumWidth(scaled_px(460))
         layout.addWidget(self.left_wrap, 0)
 
@@ -2800,6 +2894,7 @@ class NowPlayingView(QFrame):
         self.notes = QTextBrowser()
         self.notes.setReadOnly(True)
         self.notes.setOpenExternalLinks(False)
+        self.notes.setOpenLinks(False)
         self.notes.anchorClicked.connect(lambda url: self.open_url_requested.emit(url.toString()))
         self.notes.document().setDefaultStyleSheet(_link_style())
         self.notes.setFrameShape(QFrame.Shape.NoFrame)
@@ -2811,6 +2906,11 @@ class NowPlayingView(QFrame):
         self.transcript = QTextEdit()
         self.transcript.setReadOnly(True)
         self.transcript.setFrameShape(QFrame.Shape.NoFrame)
+        self._transcript_user_scrolled = False
+        self._ignore_transcript_scroll = False
+        self._transcript_timed = False
+        self._segment_blocks = []
+        self.transcript.verticalScrollBar().valueChanged.connect(self._transcript_scrolled)
         self.tabs.addTab(self.transcript, "Transcript")
         self.bookmark_list = QListWidget()
         self.bookmark_list.itemClicked.connect(self._seek_item)
@@ -2845,17 +2945,31 @@ class NowPlayingView(QFrame):
 
         At large text sizes the title/meta/info card grow; with a fixed art
         side they overflowed onto the artwork and pushed the card off-view."""
-        column = max(120, self.left_wrap.maximumWidth() - SPACE["md"])
-        used = SPACE["xl"] * 2  # view margins
-        used += max(self.info_button.sizeHint().height(), scaled_px(24))  # top row
-        used += self.title.heightForWidth(column) if self.title.text() else 0
+        margins = self.left_wrap.layout().contentsMargins()
+        column = max(1, self.left_wrap.maximumWidth() - margins.left() - margins.right())
+        used = SPACE["xl"] * 2 + margins.top() + margins.bottom()
+        used += max(self.info_button.sizeHint().height(), scaled_px(24))
+        used += self.title.heightForWidth(max(1, column)) if self.title.text() else 0
         used += self.show_link.sizeHint().height() if self.show_link.isVisible() else 0
         used += self.meta.sizeHint().height()
-        if self.stats.isVisible():
-            used += self.stats.sizeHint().height()
-        used += SPACE["md"] * 6  # column spacing between rows
+        has_stats = self._stats_grid.count() > 0
+        stats_height = self.stats.sizeHint().height() if has_stats else 0
+        used += SPACE["md"] * 6
+        if has_stats:
+            used += stats_height
         available = self.height() - used - scaled_px(16)
-        side = max(scaled_px(160), min(scaled_px(420), column, available))
+        floor = scaled_px(160)
+        if has_stats and available < floor:
+            without_stats = available + stats_height + SPACE["md"]
+            if without_stats >= floor or available < scaled_px(64):
+                has_stats = False
+                available = without_stats
+        if self.stats.isVisible() != has_stats:
+            self.stats.setVisible(has_stats)
+        cap = scaled_px(420)
+        side = min(cap, column, max(1, int(available)))
+        lower = floor if available >= floor else 1
+        self.art.set_bounds(min(lower, max(1, side)), cap)
         self.art.set_side(side)
 
     def resizeEvent(self, event):
@@ -2900,6 +3014,9 @@ class NowPlayingView(QFrame):
             self.transcript.clear()
             self._chapters, self._segments = [], []
             self._chapter_starts, self._segment_starts = [], []
+            self._segment_blocks = []
+            self._transcript_timed = False
+            self._transcript_user_scrolled = False
             self._current_chapter = self._current_segment = -1
 
     def set_episode(self, snapshot, description: str, chapters, segments, bookmarks, accent: str):
@@ -2924,15 +3041,7 @@ class NowPlayingView(QFrame):
             self.chapter_list.addItem(placeholder)
         self.tabs.setTabText(1, f"Chapters ({len(self._chapters)})" if self._chapters else "Chapters")
         self._segments = list(segments)
-        self._segment_starts = [(segment.start_seconds or 0) for segment in self._segments]
-        self.transcript.clear()
-        cursor = self.transcript.textCursor()
-        for index, segment in enumerate(self._segments):
-            if index:
-                cursor.insertBlock()
-            cursor.insertText(f"{PlayerBar._time(segment.start_seconds or 0)}   {segment.text}")
-        if not self._segments:
-            self.transcript.setPlainText("No transcript provided")
+        self._fill_transcript(self._segments)
         self.bookmark_list.clear()
         for bookmark in bookmarks:
             item = QListWidgetItem(f"{PlayerBar._time(bookmark.position_seconds)}   {bookmark.title or 'Bookmark'}")
@@ -2963,19 +3072,57 @@ class NowPlayingView(QFrame):
         if chapter_index != self._current_chapter and self._chapters:
             self._current_chapter = chapter_index
             self.chapter_list.setCurrentRow(chapter_index)
+        if not self._transcript_timed or not self._segments:
+            return
         segment_index = bisect_right(self._segment_starts, position) - 1
-        if segment_index != self._current_segment and self._segments:
+        if segment_index != self._current_segment and 0 <= segment_index < len(self._segment_blocks):
             self._current_segment = segment_index
             document = self.transcript.document()
-            block = document.findBlockByNumber(max(0, segment_index))
+            block = document.findBlockByNumber(self._segment_blocks[segment_index])
+            if not block.isValid():
+                return
             cursor = QTextCursor(block)
             cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
             selection = QTextEdit.ExtraSelection()
             selection.cursor = cursor
             selection.format.setBackground(QColor(COLORS["accent_soft"]))
             self.transcript.setExtraSelections([selection])
+            if self._transcript_user_scrolled or self.transcript.textCursor().hasSelection():
+                return
+            self._ignore_transcript_scroll = True
             self.transcript.setTextCursor(QTextCursor(block))
             self.transcript.ensureCursorVisible()
+            self._ignore_transcript_scroll = False
+
+    def _transcript_scrolled(self, _value):
+        if self._ignore_transcript_scroll:
+            return
+        self._transcript_user_scrolled = True
+
+    def _fill_transcript(self, segments):
+        self._transcript_user_scrolled = False
+        self._ignore_transcript_scroll = True
+        starts = [segment.start_seconds for segment in segments]
+        self._transcript_timed = bool(segments) and all(start is not None for start in starts)
+        self._segment_starts = list(starts) if self._transcript_timed else []
+        self._segment_blocks = []
+        self.transcript.setExtraSelections([])
+        if not segments:
+            self.transcript.setPlainText("No transcript provided")
+            self._ignore_transcript_scroll = False
+            return
+        parts = []
+        block = 0
+        for segment in segments:
+            self._segment_blocks.append(block)
+            text = segment.text or ""
+            if self._transcript_timed:
+                text = f"{PlayerBar._time(segment.start_seconds)}   {text}"
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            parts.append(text)
+            block += text.count("\n") + 1
+        self.transcript.setPlainText("\n".join(parts))
+        self._ignore_transcript_scroll = False
 
     def _seek_item(self, item):
         position = item.data(Qt.ItemDataRole.UserRole)
@@ -3036,7 +3183,7 @@ class SearchOverlay(QFrame):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(160)
-        self._timer.timeout.connect(lambda: self.query_changed.emit(self.field.text().strip()))
+        self._timer.timeout.connect(self._emit_query)
         self.field.installEventFilter(self)
         self.hide()
 
@@ -3070,6 +3217,15 @@ class SearchOverlay(QFrame):
         self.field.selectAll()
         if not self.results.count():
             self.set_results([], [], self.field.text().strip())
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def _emit_query(self):
+        if not self.isVisible():
+            return
+        self.query_changed.emit(self.field.text().strip())
 
     def _debounce(self, _text):
         self.results.clear()
@@ -3122,6 +3278,7 @@ class SearchOverlay(QFrame):
             self._activate(item)
 
     def _activate(self, item):
+        self._timer.stop()
         if getattr(self, "_result_query", None) != self.field.text().strip():
             return
         payload = item.data(Qt.ItemDataRole.UserRole)
@@ -3198,6 +3355,7 @@ class PlayerBar(QFrame):
         self._capabilities = None
         self._speed = 1.0
         self._volume = 100.0
+        self._volume_wheel = 0
         self._skip_back = 15
         self._skip_forward = 30
         self._has_episode = False
@@ -3227,6 +3385,7 @@ class PlayerBar(QFrame):
         left_row.addWidget(self.art)
 
         now = QVBoxLayout()
+        now.setContentsMargins(0, 0, 0, 0)
         now.setSpacing(1)
         self.title = QPushButton("Nothing playing")
         self.title.setObjectName("textButton")
@@ -3253,6 +3412,7 @@ class PlayerBar(QFrame):
         now.addWidget(self.next_label)
         now_wrap = QWidget()
         now_wrap.setLayout(now)
+        now.setContentsMargins(0, 0, 0, 0)
         now_wrap.setMinimumWidth(scaled_px(180))
         # Ignored width: the title fills its column but never demands more,
         # which would widen the column and unbalance the sides.
@@ -3534,11 +3694,7 @@ class PlayerBar(QFrame):
             width = self.now_wrap.width()
         if width < 40:  # not laid out yet
             width = self.now_wrap.minimumWidth() or scaled_px(180)
-        # The labels sit inside the column's own layout margins (18 px by
-        # default); eliding against the full column left the show name 9 px
-        # too wide and hard-clipped.
-        margins = self.now_wrap.layout().contentsMargins()
-        return max(60, width - margins.left() - margins.right())
+        return max(60, width)
 
     def _elide_now_labels(self):
         """Title/show are a plain button and label: without eliding, a long
@@ -3546,7 +3702,9 @@ class PlayerBar(QFrame):
         avail = self._now_text_width()
         title = self.title.fontMetrics().elidedText(self._now_title, Qt.TextElideMode.ElideRight, avail)
         self.title.setText(mnemonic_safe(title))
-        self.title.setToolTip(self._now_title if title != self._now_title else "Show now playing")
+        self.title.setToolTip(
+            plain_tooltip(self._now_title) if title != self._now_title else "Show now playing"
+        )
         show = self.show_label.fontMetrics().elidedText(self._now_show, Qt.TextElideMode.ElideRight, avail)
         self.show_label.setText(show)
         # Elided: the full name wins the tooltip (text-is-never-cut-off rule).
@@ -3853,8 +4011,17 @@ class PlayerBar(QFrame):
                 return True
             return super().eventFilter(watched, event)
         if watched is getattr(self, "volume", None) and event.type() == QEvent.Type.Wheel and self.volume.isEnabled():
-            step = 5 if event.angleDelta().y() > 0 else -5
-            self.volume_requested.emit(float(max(0, min(100, int(self._volume) + step))))
+            delta = event.angleDelta().y()
+            if delta == 0:
+                delta = event.pixelDelta().y()
+            if delta == 0:
+                return True
+            self._volume_wheel += delta
+            steps = int(self._volume_wheel / 120)
+            if steps == 0:
+                return True
+            self._volume_wheel -= steps * 120
+            self.volume_requested.emit(float(max(0, min(100, int(self._volume) + steps * 5))))
             return True
         return super().eventFilter(watched, event)
 

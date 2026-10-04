@@ -16,14 +16,22 @@ analysis = Analysis(
            (str(ROOT/'packaging/THIRD-PARTY-NOTICES.txt'), '.')],
     hiddenimports=[], hookspath=[], hooksconfig={},
     runtime_hooks=[str(ROOT/'packaging/runtime_macos.py')],
-    excludes=['mutagen','PySide6.QtDBus','PySide6.QtQml','PySide6.QtQuick','PySide6.QtPdf'],
+    excludes=['mutagen','PIL','Pillow','PySide6.QtDBus','PySide6.QtQml','PySide6.QtQuick','PySide6.QtPdf'],
     noarchive=False, optimize=1,
 )
 UNUSED = ('qtqml','qtquick','qtpdf','qtvirtualkeyboard','qtvirtualkeyboardplugin','imageformats/qpdf','imageformats/libqpdf')
-analysis.binaries = TOC(entry for entry in analysis.binaries
-    if not any(marker in entry[0].replace('\\','/').lower() for marker in UNUSED))
-analysis.datas = TOC(entry for entry in analysis.datas
-    if not any(marker in entry[0].replace('\\','/').lower() for marker in UNUSED))
+
+def _dropped_payload(name):
+    normalized = name.replace('\\','/').lower()
+    parts = normalized.split('/')
+    if normalized.endswith('.qm') or 'translations' in parts:
+        return True
+    if any(part == 'pil' or part.startswith('pil.') or part == 'pillow' or part.startswith('pillow.') for part in parts):
+        return True
+    return any(marker in normalized for marker in UNUSED)
+
+analysis.binaries = TOC(entry for entry in analysis.binaries if not _dropped_payload(entry[0]))
+analysis.datas = TOC(entry for entry in analysis.datas if not _dropped_payload(entry[0]))
 pyz = PYZ(analysis.pure)
 exe = EXE(pyz, analysis.scripts, [], exclude_binaries=True, name='BS Podcasts',
           debug=False, bootloader_ignore_signals=False, strip=False, upx=False,

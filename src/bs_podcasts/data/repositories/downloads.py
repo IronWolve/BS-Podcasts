@@ -3,10 +3,16 @@
 from dataclasses import dataclass
 from pathlib import Path
 import time
-import stat
 
 from ...domain import DownloadRecord, DownloadState
 from ..database import Database
+from ..files import (
+    FILE_IRREGULAR,
+    FILE_MISSING,
+    FILE_PRESENT,
+    FILE_UNAVAILABLE,
+    inspect_download_file,
+)
 
 
 @dataclass(frozen=True)
@@ -136,18 +142,18 @@ class DownloadRepository:
         record = self.get(episode_id)
         if record is None:
             return None
-        path = Path(record.target_path if record.state == DownloadState.COMPLETE else record.partial_path)
-        try:
-            info = path.stat()
-        except FileNotFoundError:
-            if not stat.S_ISDIR(path.parent.stat().st_mode):
-                raise OSError("The download folder is unavailable.")
-            size = 0
-        else:
-            if not stat.S_ISREG(info.st_mode):
-                raise OSError("The download path is not a regular file.")
-            size = info.st_size
-        return DeletionPreview(episode_id, str(path), size)
+        completed = record.state == DownloadState.COMPLETE
+        path = Path(record.target_path if completed else record.partial_path)
+        kind, size = inspect_download_file(path, completed=completed)
+        if kind == FILE_PRESENT:
+            return DeletionPreview(episode_id, str(path), size)
+        if kind == FILE_MISSING:
+            return DeletionPreview(episode_id, str(path), 0)
+        if kind == FILE_IRREGULAR:
+            raise OSError("The download path is not a regular file.")
+        if kind == FILE_UNAVAILABLE:
+            raise OSError("The download folder is unavailable.")
+        return None
 
     @staticmethod
     def _select():

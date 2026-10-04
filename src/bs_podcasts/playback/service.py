@@ -72,6 +72,9 @@ class PlaybackSnapshot:
     revision: int = 0
     download_request: int = 0
     load_generation: int = 0
+    # Set only on the snapshot handed to listeners for the episode that just
+    # became played. The live snapshot is cleared back to 0 without a second emit.
+    completed_episode_id: int = 0
 
 
 logger = logging.getLogger("bs_podcasts")
@@ -560,20 +563,37 @@ class PlaybackService:
     def previous(self):
         self.seek(0.0)
 
+    def _clamp_position(self, seconds: float) -> float:
+        seconds = max(0.0, float(seconds))
+        duration = float(self.snapshot.duration or 0.0)
+        if duration > 0.0 and seconds > duration:
+            return duration
+        return seconds
+
     def seek(self, seconds: float, *, autoplay=None):
         with self._lock:
             self._guard()
+            seconds = self._clamp_position(seconds)
+            # Download-first is already waiting. Reloading here, including an
+            # idle replay, goes through _begin_load and clears the pending Play.
+            if self.snapshot.download_request:
+                self._ignore_metric_once = True
+                self._desired_position = seconds
+                self.snapshot = replace(self.snapshot, position=seconds)
+                self._emit()
+                return
             if self.snapshot.source and self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR}:
-                self._replay_current(position=max(0.0, float(seconds)), autoplay=bool(autoplay))
+                self._replay_current(position=seconds, autoplay=bool(autoplay))
                 return
             self._materialize()
             self._ignore_metric_once = True
-            if self._resolving:
-                self._desired_position = max(0.0, float(seconds))
-                self.snapshot = replace(self.snapshot, position=self._desired_position)
+            self._desired_position = seconds
+            if self.snapshot.source:
+                self.snapshot = replace(self.snapshot, position=seconds)
                 self._emit()
-            else:
-                self.engine.seek_absolute(seconds)
+            if self.snapshot.download_request or self._resolving:
+                return
+            self.engine.seek_absolute(seconds)
 
     def seek_episode(self, episode_id: int, seconds: float, *, cancelled=None):
         with self._lock:
@@ -623,15 +643,24 @@ class PlaybackService:
     def skip(self, seconds: float):
         with self._lock:
             self._guard()
+            delta = float(seconds)
+            if self.snapshot.download_request:
+                self.seek(self.snapshot.position + delta)
+                return
             if self.snapshot.source and self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR}:
-                self.seek(max(0.0, self.snapshot.position + float(seconds)))
+                self.seek(self.snapshot.position + delta)
                 return
             self._materialize()
             self._ignore_metric_once = True
-            if self._resolving:
-                self.seek(self._desired_position + float(seconds))
-            else:
-                self.engine.skip(float(seconds))
+            if self.snapshot.download_request or self._resolving:
+                self.seek(self._desired_position + delta)
+                return
+            target = self._clamp_position(self.snapshot.position + delta)
+            self._desired_position = target
+            if self.snapshot.source:
+                self.snapshot = replace(self.snapshot, position=target)
+                self._emit()
+            self.engine.skip(delta)
 
     def set_ab_start(self):
         with self._lock:
@@ -846,9 +875,6 @@ class PlaybackService:
                 intent = self.intent_revision
                 finished_snapshot = self.snapshot
                 self._flush_listening()
-                self.snapshot = replace(self.snapshot, state=PlaybackState.IDLE,
-                                        position=self.snapshot.duration or self.snapshot.position, buffering=None)
-                self._emit()
                 def finish():
                     with self._lock:
                         if self._dead:
@@ -867,7 +893,8 @@ class PlaybackService:
                                 self._cancel_load_watchdog()
                             self.snapshot = replace(self.snapshot,
                                 state=PlaybackState.ERROR if generation == self._load_generation else self.snapshot.state,
-                                message="Playback ended, but saving completion failed. Check library storage and retry.", buffering=None)
+                                message="Playback ended, but saving completion failed. Check library storage and retry.",
+                                buffering=None, completed_episode_id=0)
                             self._emit()
                 if self._command_dispatcher is not None:
                     self._command_dispatcher(finish)
@@ -1038,7 +1065,10 @@ class PlaybackService:
     def _finish_and_advance(self, *, advance=True):
         episode_id = self.snapshot.episode_id
         if episode_id is None:
-            self.snapshot = replace(self.snapshot, state=PlaybackState.IDLE, position=self.snapshot.duration)
+            self.snapshot = replace(
+                self.snapshot, state=PlaybackState.IDLE, buffering=None,
+                position=self.snapshot.duration or self.snapshot.position,
+            )
             self._emit()
             return
         self._complete_episode(self.snapshot)
@@ -1071,13 +1101,31 @@ class PlaybackService:
         if episode_id is None:
             return
         end = snapshot.duration or snapshot.position
+        if self.snapshot.episode_id == episode_id:
+            self.snapshot = replace(self.snapshot, position=end, buffering=None)
         self.repository.set_observed_duration(episode_id, end)
         if end:
-            self.repository.update_position(episode_id, end)
+            stamp = self._write_stamp()
+            self._persistence.submit(
+                ('position', episode_id),
+                lambda value: self._require_saved(self.repository.update_position(
+                    episode_id, value[0], stamp=value[1], finish=True)),
+                (end, stamp),
+            )
+            self._flush_persistence()
         self.repository.mark_played(episode_id, True)
         if self.listening and snapshot.show_id:
             self.listening.increment_completed(snapshot.show_id)
         self.repository.dequeue(episode_id)
+        self._publish_completed(episode_id)
+
+    def _publish_completed(self, episode_id: int):
+        # _emit replaces before the listener call. Listeners must keep that
+        # object: the live snapshot drops the id and that clear is not emitted,
+        # so the following idle or next-episode snapshot does not repeat it.
+        self.snapshot = replace(self.snapshot, completed_episode_id=int(episode_id))
+        self._emit()
+        self.snapshot = replace(self.snapshot, completed_episode_id=0)
 
     def _write_stamp(self):
         self._last_write_stamp = max(time.time(), self._last_write_stamp + 0.000001)

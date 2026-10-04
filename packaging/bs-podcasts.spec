@@ -65,6 +65,8 @@ analysis = Analysis(
     runtime_hooks=[str(ROOT / "packaging" / "runtime_windows.py")],
     excludes=[
         "mutagen",
+        "PIL",
+        "Pillow",
         "PySide6.QtDBus",
         "PySide6.QtQml",
         "PySide6.QtQuick",
@@ -87,10 +89,18 @@ _UNUSED_BINARIES = (
     "imageformats\\qpdf",
     "opengl32sw",
 )
-analysis.binaries = TOC(
-    entry for entry in analysis.binaries
-    if not any(marker in entry[0].lower() for marker in _UNUSED_BINARIES)
-)
+
+def _dropped_payload(name):
+    normalized = name.replace("\\", "/").lower()
+    parts = normalized.split("/")
+    if normalized.endswith(".qm") or "translations" in parts:
+        return True
+    if any(part == "pil" or part.startswith("pil.") or part == "pillow" or part.startswith("pillow.") for part in parts):
+        return True
+    return any(marker in name.lower() for marker in _UNUSED_BINARIES)
+
+analysis.binaries = TOC(entry for entry in analysis.binaries if not _dropped_payload(entry[0]))
+analysis.datas = TOC(entry for entry in analysis.datas if not _dropped_payload(entry[0]))
 
 pyz = PYZ(analysis.pure)
 
