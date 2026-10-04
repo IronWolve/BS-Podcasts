@@ -2257,7 +2257,11 @@ class MainWindow(QMainWindow):
             token = commands.supersede() if commands is not None else None
             if name in {"load_stream", "seek_episode"} and commands is not None:
                 kwargs["cancelled"] = lambda: not commands.current(token)
-        keep = name in {"seek", "skip_back", "skip_forward"}
+        # Every position change is retained: Quit drains retained commands
+        # before the shutdown finalizer saves the position, so a pending seek
+        # still lands. A superseded seek_episode still cancels itself, because
+        # the drain runs before finish() retires the current token.
+        keep = name in {"seek", "seek_current", "seek_episode", "previous", "skip_back", "skip_forward"}
         self._run_command(lambda: getattr(playback, name)(*args, **kwargs), keep=keep)
 
     def _on_command(self, kind, apply, result):
