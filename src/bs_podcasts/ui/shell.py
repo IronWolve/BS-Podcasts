@@ -520,7 +520,7 @@ class MainWindow(QMainWindow):
         self.settings_page.cleanup_played_requested.connect(self._cleanup_played)
         self.settings_page.change_download_folder_requested.connect(self._change_download_folder)
         self.playlist_page.order_changed.connect(self._queue_reordered)
-        self.playlist_page.remove_requested.connect(lambda items: [self._remove_from_queue(item.episode_id) for item in items])
+        self.playlist_page.remove_requested.connect(lambda items: self._remove_many_from_queue([item.episode_id for item in items]))
         self.playlist_page.empty_action_requested.connect(lambda: self.navigation.select(PAGE_EPISODES))
         self.podcast_page.empty_action_requested.connect(self._add_podcast)
         self.podcast_page.card_action_requested.connect(lambda item: self._play_latest(item.show_id))
@@ -3253,7 +3253,7 @@ class MainWindow(QMainWindow):
             item.episode_id for item in self.home_page.resume_items()
         }
         if page is self.playlist_page:
-            remove = menu.addAction(icons.icon("close", COLORS["text"], 16), "Remove from Up Next", lambda: [self._remove_from_queue(item.episode_id) for item in targets])
+            remove = menu.addAction(icons.icon("close", COLORS["text"], 16), "Remove from Up Next", lambda: self._remove_many_from_queue([item.episode_id for item in targets]))
             remove.setShortcut(QKeySequence(Qt.Key.Key_Delete))
         else:
             queue = menu.addAction(icons.icon("queue-add", COLORS["text"], 16), "Add to Up Next", lambda: self._queue_many(targets))
@@ -3352,11 +3352,56 @@ class MainWindow(QMainWindow):
         return menu
 
     def _remove_from_queue(self, episode_id: int):
-        if self.library is not None:
-            def apply(_result):
-                self._reload_queue()
-                self._notify("Removed from Up Next", "info", "Undo", lambda: self._queue_episode(episode_id, quiet=True))
-            self._run_command(lambda: self.library.dequeue(episode_id), apply)
+        self._remove_many_from_queue([episode_id])
+
+    def _remove_many_from_queue(self, episode_ids):
+        """One ordered command and one notice for any number of rows; its
+        Undo puts every removed episode back where it was. One command per
+        row left a single notice whose Undo re-added only the last row, at
+        the end of Up Next."""
+        library = self.library
+        ids = list(dict.fromkeys(episode_id for episode_id in episode_ids if episode_id))
+        if library is None or not ids:
+            return
+
+        def work():
+            wanted = set(ids)
+            before = [episode.id for episode in library.queue()]
+            removed = [episode_id for episode_id in before if episode_id in wanted]
+            for episode_id in removed:
+                library.dequeue(episode_id)
+            return before, removed
+
+        def apply(result):
+            before, removed = result
+            self._reload_queue()
+            if not removed:
+                return
+            count = len(removed)
+            message = "Removed from Up Next" if count == 1 else f"Removed {count} episodes from Up Next"
+            self._notify(message, "info", "Undo", lambda: self._restore_queue_rows(before, removed))
+
+        self._run_command(work, apply)
+
+    def _restore_queue_rows(self, before, removed):
+        """Re-insert removed rows after the nearest row that preceded each
+        one before the removal; rows added or moved since keep their place."""
+        library = self.library
+        if library is None:
+            return
+
+        def work():
+            order = [episode.id for episode in library.queue()]
+            missing = [episode_id for episode_id in removed if episode_id not in order]
+            for episode_id in missing:
+                index = before.index(episode_id)
+                anchor = next((earlier for earlier in reversed(before[:index]) if earlier in order), None)
+                order.insert(order.index(anchor) + 1 if anchor is not None else 0, episode_id)
+            library.enqueue_many(missing)
+            library.reorder_queue(order)
+            return len(missing)
+
+        self._run_command(work, lambda _count: self._reload_queue())
 
     def _auto_download(self, show_id: int):
         if self.library is None or self.downloads is None or self._background_paused():
