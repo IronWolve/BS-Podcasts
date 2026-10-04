@@ -104,6 +104,10 @@ class PlaybackService:
         # got its one retry, and whether the current load wanted autoplay.
         self._rescued_source = ""
         self._load_autoplay = False
+        # Mid-play stream recovery (see _start_stream_recovery): attempts per
+        # item inside a time window, so a dead source cannot loop forever.
+        self._recovery_key = None
+        self._recovery_times = []
         self._load_generation = 0
         self._resolve_cancel = Event()
         self.intent_revision = 0
@@ -151,6 +155,8 @@ class PlaybackService:
             pass
 
     LOAD_TIMEOUT = 25.0
+    STREAM_RECOVERY_LIMIT = 3
+    STREAM_RECOVERY_WINDOW = 600.0
 
     def _arm_load_watchdog(self, episode_id: int | None, source: str):
         self._cancel_load_watchdog()
@@ -434,6 +440,9 @@ class PlaybackService:
     def play_pause(self):
         with self._lock:
             self._guard()
+            if self.snapshot.source:
+                logger.info("Playback toggle requested: state=%s position=%.1fs",
+                            self.snapshot.state.value, self.snapshot.position)
             self.intent_revision += 1
             if self.snapshot.download_request:
                 if self._load_autoplay:
@@ -463,6 +472,9 @@ class PlaybackService:
     def play(self):
         with self._lock:
             self._guard()
+            if self.snapshot.source:
+                logger.info("Playback play requested: state=%s position=%.1fs",
+                            self.snapshot.state.value, self.snapshot.position)
             self.intent_revision += 1
             if self._materialize(autoplay=True):
                 return
@@ -896,13 +908,7 @@ class PlaybackService:
                                 message="Playback ended, but saving completion failed. Check library storage and retry.",
                                 buffering=None, completed_episode_id=0)
                             self._emit()
-                if self._command_dispatcher is not None:
-                    self._command_dispatcher(finish)
-                else:
-                    from ..jobs.commands import CommandQueue
-                    if self._event_commands is None:
-                        self._event_commands = CommandQueue()
-                    self._event_commands.submit(finish, keep=True)
+                self._dispatch(finish)
                 return
             elif event.kind == "external_ready":
                 self._cancel_load_watchdog()
@@ -930,7 +936,13 @@ class PlaybackService:
                 )
             elif event.kind == "error":
                 self._cancel_load_watchdog()
-                if self._start_redirect_rescue():
+                if self._engine_loaded:
+                    # The source had opened: this is a stream lost mid-play,
+                    # not an open failure, so the redirect rescue does not fit.
+                    if self._start_stream_recovery(str(event.value or "")):
+                        self._emit()
+                        return
+                elif self._start_redirect_rescue():
                     # One retry with a pre-resolved URL is in flight; stay in
                     # LOADING instead of flashing an error the retry may fix.
                     self.snapshot = replace(
@@ -938,10 +950,21 @@ class PlaybackService:
                     )
                     self._emit()
                     return
+                self._engine_loaded = False
                 self.snapshot = replace(
                     self.snapshot, state=PlaybackState.ERROR, message=str(event.value), buffering=None
                 )
             self._emit()
+
+    def _dispatch(self, work):
+        """Run follow-up work from a native event on the ordered command queue."""
+        if self._command_dispatcher is not None:
+            self._command_dispatcher(work)
+            return
+        from ..jobs.commands import CommandQueue
+        if self._event_commands is None:
+            self._event_commands = CommandQueue()
+        self._event_commands.submit(work, keep=True)
 
     def _begin_load(self, position: float, autoplay: bool):
         self._resolve_cancel.set()
@@ -1041,6 +1064,62 @@ class PlaybackService:
             name="playback-redirect-rescue",
         )
         thread.start()
+        return True
+
+    def _start_stream_recovery(self, detail: str) -> bool:
+        """Reopen a web source that failed mid-play, where audio stopped.
+
+        HttpStream has already retried its own connection by then. A fresh
+        open resolves the episode URL again, which also renews an expired CDN
+        link. Bounded per item. Called with the service lock held on the
+        native event thread, so the reload runs on the ordered command queue.
+        Until it runs, Play/Pause and seeks only update the pending intent."""
+        source = self.snapshot.source
+        if not source or not is_web_url(source):
+            return False
+        now = time.monotonic()
+        key = (self.snapshot.episode_id, source)
+        if key != self._recovery_key:
+            self._recovery_key, self._recovery_times = key, []
+        self._recovery_times = [t for t in self._recovery_times if now - t < self.STREAM_RECOVERY_WINDOW]
+        if len(self._recovery_times) >= self.STREAM_RECOVERY_LIMIT:
+            logger.error("Playback stream recovery stopped: %d reopen attempts within %d minutes",
+                         len(self._recovery_times), int(self.STREAM_RECOVERY_WINDOW // 60))
+            return False
+        self._recovery_times.append(now)
+        episode_id = self.snapshot.episode_id
+        generation = self._load_generation
+        self._engine_loaded = False
+        self._resolving = True
+        self._desired_position = self.snapshot.position
+        logger.warning("Playback stream lost at %.1fs; reopening there, attempt %d of %d, autoplay=%s",
+                       self._desired_position, len(self._recovery_times),
+                       self.STREAM_RECOVERY_LIMIT, self._load_autoplay)
+        self.snapshot = replace(self.snapshot, state=PlaybackState.LOADING,
+                                message="Reconnecting…", buffering=None)
+        self._arm_load_watchdog(episode_id, source)
+
+        def recover():
+            with self._lock:
+                if self._dead or generation != self._load_generation or self.snapshot.source != source:
+                    return  # Stop, a new load or the watchdog already decided.
+                position, autoplay = self._desired_position, self._load_autoplay
+                try:
+                    if episode_id is not None:
+                        self.load_episode(episode_id, autoplay=autoplay, start_position=position,
+                                          force_stream=True)
+                    else:
+                        self._replay_current(position=position, autoplay=autoplay)
+                except Exception as exc:
+                    logger.error("Playback stream recovery failed: %s", redact(exc))
+                    self._cancel_load_watchdog()
+                    self._resolving = False
+                    self._load_autoplay = False
+                    self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR,
+                                            message=detail or str(exc), buffering=None)
+                    self._emit()
+
+        self._dispatch(recover)
         return True
 
     def _rescue_redirects(self, source: str, position: float, autoplay: bool, generation=None, cancel=None):

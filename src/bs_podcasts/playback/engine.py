@@ -153,7 +153,11 @@ class MpvEngine:
             with self._http_lock:
                 if self._http_sources.get(uri) == source:
                     self._http_failure = message
-        stream = HttpStream(source, defer_open=True, on_error=failed)
+        def recovered():
+            with self._http_lock:
+                if self._http_sources.get(uri) == source:
+                    self._http_failure = None
+        stream = HttpStream(source, defer_open=True, on_error=failed, on_recovered=recovered)
         with self._http_lock:
             if self._http_sources.get(uri) != source:
                 stream.close()
