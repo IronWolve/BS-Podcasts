@@ -202,6 +202,8 @@ class MainWindow(QMainWindow):
         # bookkeeping so a double-click (or menu + header race) cannot submit
         # the same show twice (UI-P2-7).
         self._manual_refresh_in_flight = set()
+        # The show behind a Retry on the Podcasts page error banner.
+        self._podcast_banner_show_id = 0
         self._discover_operation = ""
         self._directory_generation = 0
         self._directory_future = None
@@ -580,6 +582,7 @@ class MainWindow(QMainWindow):
             self.episode_page.header.action.setIcon(icons.icon("refresh", COLORS["text"], 16))
             self.episode_page.header.action.clicked.connect(self._refresh_episode_view)
         self.episode_page.banner.retry_requested.connect(self._refresh_episode_view)
+        self.podcast_page.banner.retry_requested.connect(self._retry_podcast_banner)
         self.home_page.header.search.returnPressed.connect(self._home_search)
         self.home_page.header.search.textEdited.connect(self._home_search_typed)
         self.settings_page.setting_changed.connect(self._save_setting)
@@ -5345,6 +5348,22 @@ class MainWindow(QMainWindow):
             return
         self._refresh_all()
 
+    def _retry_podcast_banner(self):
+        """Retry on the Podcasts page banner refreshes the show that failed,
+        resuming it first when the banner says it is suspended."""
+        show_id, self._podcast_banner_show_id = self._podcast_banner_show_id, 0
+        if not show_id or self.library is None:
+            self.podcast_page.banner.clear()
+            return
+        if self.podcast_page.banner.state == "suspended":
+            self.podcast_page.banner.show_state("loading", "Resuming and refreshing this podcast…")
+            self._rearm_podcast(show_id)
+        elif self._submit_refresh(show_id):
+            self.podcast_page.banner.show_state("loading", "Refreshing this podcast…")
+        else:
+            self.podcast_page.banner.clear()
+            self._notify("This podcast is already refreshing")
+
     def _refresh_all(self):
         # A visible Refresh all is already running; a background one joins.
         if self.library is None or (self._refresh_batch[0] and not self._refresh_quiet):
@@ -5948,6 +5967,8 @@ class MainWindow(QMainWindow):
         if result.status != JobStatus.OK:
             target = self.episode_page.banner if viewing_show else self.podcast_page.banner
             target.show_state("error", result.message or "Refresh failed.", retry=True)
+            if not viewing_show:
+                self._podcast_banner_show_id = identifier
             return
         report = result.value
         if viewing_show:
@@ -5969,6 +5990,7 @@ class MainWindow(QMainWindow):
             return
         if report.health in {Health.ERROR, Health.SUSPENDED}:
             self.podcast_page.banner.show_state(report.health.value, report.message, retry=True)
+            self._podcast_banner_show_id = identifier
         elif report.health == Health.PARTIAL:
             self.podcast_page.banner.show_state("partial", report.message or "The podcast refreshed but did not contain playable episodes.")
         elif not total:  # a background batch's progress keeps this banner
