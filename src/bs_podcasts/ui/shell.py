@@ -746,10 +746,19 @@ class MainWindow(QMainWindow):
         self._playback_listener = lambda snapshot: (None if self._closed else self._bridge.playback_event.emit(snapshot))
         self.playback.subscribe(self._playback_listener)
         self.player.set_capabilities(self.playback.engine.capabilities)
-        try:
-            self.playback.resume_saved(autoplay=False)
-        except Exception as exc:
-            self._notify(f"Couldn’t restore the last episode: {exc}", "error")
+        playback = self.playback
+
+        def restore():
+            # On the command queue: restoring reads the database, which on
+            # the window thread waited behind maintenance at startup. The
+            # restored episode reaches the window as a playback event.
+            try:
+                playback.resume_saved(autoplay=False)
+                return ""
+            except Exception as exc:
+                return str(exc) or type(exc).__name__
+
+        self._run_command(restore, lambda error: self._notify(f"Couldn’t restore the last episode: {error}", "error") if error else None)
         self._playback_changed(self.playback.snapshot)
 
     def _wire_downloads(self):
