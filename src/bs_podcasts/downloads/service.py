@@ -829,6 +829,24 @@ class DownloadService:
     def cleanup_preview(self, episode_id: int):
         return self.downloads.cleanup_preview(episode_id)
 
+    def retention_candidates(self, show, keep=()) -> list:
+        """Downloads a podcast's retention rule may remove right now.
+
+        The repository rule already spares favorites. A background pass also
+        spares an episode the listener is partway through and every id in
+        `keep` (the episode loaded in the player, or one just downloaded on
+        purpose from the back catalogue): retention used to stop and delete
+        the episode being listened to. A later pass reconsiders them.
+        """
+        if show is None or (not show.retention_keep and not show.retention_days):
+            return []
+        keep = set(keep)
+        return [
+            episode
+            for episode in self.library.retention_candidates(show.id, show.retention_keep, show.retention_days)
+            if episode.id not in keep and not (episode.position_seconds > 0 and not episode.played)
+        ]
+
     def played_previews(self):
         """Exact targets for every completed download whose episode is played."""
         previews = []
