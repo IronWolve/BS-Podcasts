@@ -204,6 +204,7 @@ class MainWindow(QMainWindow):
         self._manual_refresh_in_flight = set()
         # The show behind a Retry on the Podcasts page error banner.
         self._podcast_banner_show_id = 0
+        self._local_import_error = None
         self._discover_operation = ""
         self._directory_generation = 0
         self._directory_future = None
@@ -2668,10 +2669,15 @@ class MainWindow(QMainWindow):
                 return None, str(exc)
         def apply(result):
             show, error = result
+            banner = self.podcast_page.banner
             if show is None:
-                self.podcast_page.banner.show_state('error', error)
+                banner.show_state('error', error)
+                self._local_import_error = error
                 self._notify(error, 'error')
                 return
+            # A later import that works retires an earlier failure's banner.
+            if banner.state == 'error' and banner.label.text() == self._local_import_error:
+                banner.clear()
             if self._read_tokens.get('show-open', 0) == navigation:
                 self.navigation.select(PAGE_PODCASTS)
                 token = self._read_tokens.get('show-open', 0)
