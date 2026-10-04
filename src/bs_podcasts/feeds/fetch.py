@@ -1,6 +1,6 @@
 """Bounded direct-feed HTTP fetcher."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
@@ -47,7 +47,28 @@ class FeedResponse:
     etag: str = ""
     last_modified: str = ""
     not_modified: bool = False
+    # Set after a 301/308 chain, or to the feed an HTML page advertised.
     canonical_url: str = ""
+
+
+def _comparable(url: str) -> str:
+    """`url` as the HTTP stack sends it, so stored and answered URLs compare."""
+    from requests.models import PreparedRequest
+
+    request = PreparedRequest()
+    try:
+        request.prepare_url(url.strip(), None)
+    except (ValueError, UnicodeError):
+        return url.strip()
+    return request.url
+
+
+def _answered_by(response, url: str) -> bool:
+    """True when `url` is on the request chain that produced `response`."""
+    chain = [getattr(hop, "url", "") for hop in getattr(response, "history", None) or ()]
+    chain.append(getattr(response, "url", ""))
+    wanted = _comparable(url)
+    return any(_comparable(hop) == wanted for hop in chain if hop)
 
 
 def _markup_text(body: bytes, encoding: str | None) -> str:
@@ -144,8 +165,14 @@ class FeedFetcher:
         if session is not None:
             session.max_redirects = 5
 
-    def fetch(self, url: str, etag: str = "", last_modified: str = "") -> FeedResponse:
-        return self._fetch(url, etag, last_modified, allow_discovery=True)
+    def fetch(self, url: str, etag: str = "", last_modified: str = "", validator_url: str = "") -> FeedResponse:
+        """Fetch a feed, or the feed an HTML page at `url` advertises.
+
+        `etag` and `last_modified` came from `validator_url` (default `url`)
+        and only count there: a 304 answered by another resource, such as
+        the page of a page-URL subscription, is fetched again without them.
+        """
+        return self._fetch(url, etag, last_modified, allow_discovery=True, validator_url=validator_url or url)
 
     PEEK_BYTES = 64 * 1024
 
@@ -201,6 +228,8 @@ class FeedFetcher:
         etag: str = "",
         last_modified: str = "",
         allow_discovery: bool = True,
+        validator_url: str = "",
+        conditional: bool = True,
     ) -> FeedResponse:
         try:
             url = ensure_fetchable(url, "Feed URL")
@@ -218,9 +247,9 @@ class FeedFetcher:
         # Both values were stored from an earlier response; scrub CR/LF so a
         # hostile server cannot smuggle extra header lines into the next
         # request through its own ETag/Last-Modified.
-        if etag:
+        if etag and conditional:
             headers["If-None-Match"] = etag.replace("\r", "").replace("\n", "").strip()
-        if last_modified:
+        if last_modified and conditional:
             headers["If-Modified-Since"] = last_modified.replace("\r", "").replace("\n", "").strip()
         response = None
         try:
@@ -232,6 +261,12 @@ class FeedFetcher:
                 stream=True,
             )
             if response.status_code == 304:
+                if conditional and validator_url and not _answered_by(response, validator_url):
+                    # Another resource answered for the feed's validators;
+                    # trusting it would hide new episodes indefinitely.
+                    response.close()
+                    response = None
+                    return self._fetch(url, etag, last_modified, allow_discovery, validator_url, conditional=False)
                 return FeedResponse(
                     final_url=response.url,
                     etag=response.headers.get("ETag", etag),
@@ -270,7 +305,9 @@ class FeedFetcher:
             if discovered:
                 response.close()
                 response = None
-                return self._fetch(discovered, allow_discovery=False)
+                # The stored validators belong to the feed, not this page.
+                feed = self._fetch(discovered, etag, last_modified, allow_discovery=False, validator_url=validator_url)
+                return replace(feed, canonical_url=feed.canonical_url or discovered)
             return result
         except FeedFetchError:
             raise

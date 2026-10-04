@@ -97,7 +97,12 @@ class RefreshService:
             # Legacy libraries may contain a 302 target that still returns a
             # successful but frozen copy. Follow the publisher's current
             # redirect chain, not a target learned from an earlier refresh.
-            response = self.fetcher.fetch(show.feed_url, show.etag, show.last_modified)
+            # The stored validators came from the canonical URL; a page-URL
+            # subscription keeps its advertised feed there.
+            extra = {}
+            if show.canonical_url and show.canonical_url != show.feed_url:
+                extra["validator_url"] = show.canonical_url
+            response = self.fetcher.fetch(show.feed_url, show.etag, show.last_modified, **extra)
             stored = response.canonical_url or show.feed_url
             if response.not_modified:
                 health = Health.OK if show.episode_count else Health.PARTIAL
