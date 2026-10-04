@@ -3339,8 +3339,10 @@ class MainWindow(QMainWindow):
         return list(self._stored_shows) if self._stored_shows_ready else self.library.shows()
 
     def _episode_show_info(self, episode):
+        # From the library mirror: every right-click on an episode builds the
+        # menu with this, so it must not wait on the database.
         if episode.show_id and self.library is not None:
-            return self.library.repository.get_show(episode.show_id)
+            return self._stored_show(episode.show_id)
         feed_url = self._preview_episodes_url
         preview = self._previews.get(feed_url) if feed_url else None
         return SimpleNamespace(
