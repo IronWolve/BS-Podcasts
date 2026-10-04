@@ -954,7 +954,7 @@ class DownloadService:
                 try:
                     kind, size = inspect_download_file(path, completed=False)
                     if kind == FILE_PRESENT:
-                        path.unlink()
+                        self._unlink_settled(path)
                         freed += size
                     elif kind == FILE_MISSING:
                         continue
@@ -976,6 +976,26 @@ class DownloadService:
         else:
             self.downloads.remove(episode_id)
         return freed
+
+    UNLINK_SETTLE_SECONDS = 1.0
+
+    def _unlink_settled(self, path: Path):
+        """Unlink, waiting out a brief Windows sharing violation.
+
+        Stopping the player engine is asynchronous, so the file of the
+        episode just stopped can stay open for a moment after stop()
+        returns. POSIX unlinks open files and its permission errors are not
+        transient, so those raise at once.
+        """
+        deadline = time.monotonic() + self.UNLINK_SETTLE_SECONDS
+        while True:
+            try:
+                path.unlink()
+                return
+            except PermissionError as exc:
+                if getattr(exc, "winerror", None) is None or time.monotonic() >= deadline:
+                    raise
+            time.sleep(0.1)
 
     def _target(self, episode_id: int, url: str) -> Path:
         suffix = Path(urlparse(url).path).suffix.lower()
