@@ -107,6 +107,13 @@ ACCENTS = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
 # window by one page; design.md forbids silently substituting a cap for "all".
 EPISODES_PAGE_SIZE = 5000
 HISTORY_PAGE_SIZE = 200
+# The window filters every event the application delivers (tooltip hints are
+# formatted app-wide); everything else returns at the first comparison.
+_FILTERED_EVENTS = frozenset({
+    QEvent.Type.ToolTip, QEvent.Type.Enter, QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.Resize,
+    QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove, QEvent.Type.ContextMenu,
+})
+_HINT_EVENTS = frozenset({QEvent.Type.ToolTip, QEvent.Type.Enter})
 
 
 class _JobBridge(QObject):
@@ -6657,7 +6664,9 @@ class MainWindow(QMainWindow):
         )
 
     def eventFilter(self, watched, event):
-        if event.type() in {QEvent.Type.ToolTip, QEvent.Type.Enter} and isinstance(watched, QWidget) and hasattr(self, "shortcuts"):
+        if event.type() not in _FILTERED_EVENTS:
+            return False
+        if event.type() in _HINT_EVENTS and isinstance(watched, QWidget) and hasattr(self, "shortcuts"):
             tip = watched.toolTip()
             previous = watched.property("bsFormattedHint")
             template = watched.property("bsHintTemplate") if tip == previous else tip
