@@ -616,6 +616,8 @@ def stylesheet() -> str:
     QPushButton#chip:checked {{
         color: {c['text_strong']}; background: {c['surface_soft']}; border-color: {c['surface_soft']};
     }}
+    /* After :checked, whose border-color would otherwise hide the ring. */
+    QPushButton#chip:checked:focus {{ border: {focus_ring}; }}
 
     /* ---------- Lists ---------- */
     QListView {{
@@ -663,6 +665,7 @@ def stylesheet() -> str:
     QTabWidget#nowPlayingTabWidget QTabBar::tab:selected {{
         color: {c['text_strong']}; border-bottom: 2px solid {c['accent']};
     }}
+    QTabWidget#nowPlayingTabWidget QTabBar::tab:focus {{ color: {c['accent']}; }}
     QFrame#nowPlayingPanel {{ background: {c['surface']}; border: 1px solid {c['hairline']}; border-radius: {r['lg']}px; }}
     QFrame#nowPlayingStats {{ background: {c['surface']}; border: 1px solid {c['hairline']}; border-radius: {r['md']}px; }}
     QLabel#statKey {{ color: {c['subtle']}; font-size: {micro}px; font-weight: 600; letter-spacing: 0.4px; }}
@@ -716,6 +719,7 @@ def stylesheet() -> str:
     QSlider#volumeSlider::handle:horizontal {{
         background: {c['text_strong']}; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px;
     }}
+    QSlider#volumeSlider::handle:horizontal:focus {{ background: {c['accent']}; }}
     QPushButton#edgeToggle {{
         background: transparent; border: 1px solid transparent;
         border-radius: 10px; padding: 0;
@@ -810,6 +814,7 @@ def stylesheet() -> str:
     QPushButton#contextMode:checked {{
         background: {c['surface_soft']}; color: {c['text_strong']}; font-weight: 600;
     }}
+    QPushButton#contextMode:focus {{ border: {focus_ring}; }}
     QFrame#dialogCard {{ background: {c['surface']}; border: 1px solid {c['border']}; border-radius: {r['lg']}px; }}
     QWidget#scrim {{ background: {c['scrim']}; }}
     QFrame#searchOverlay {{ background: {c['scrim']}; }}
