@@ -132,7 +132,11 @@ class PlaybackService:
         self.snapshot = replace(self.snapshot, volume=max(0.0, min(100.0, saved_volume)))
         self._unsaved_silence = 0.0
         self._unsaved_listening = 0.0
-        self._ignore_metric_once = False
+        # Silence is measured over windows of a second or more, and ticks
+        # before a seek lands count as neither listening nor silence.
+        self._silence_window = None
+        self._metric_seek_target = None
+        self._metric_seek_deadline = 0.0
         self._restore_snapshot()
 
     def subscribe(self, listener):
@@ -573,6 +577,7 @@ class PlaybackService:
                 except Exception:
                     pass
             self._engine_loaded = False
+            self._close_silence_window()
             self.snapshot = PlaybackSnapshot(speed=self.snapshot.speed, volume=self.snapshot.volume)
             if episode_id is not None:
                 self._set_current_playback(None, PlaybackState.IDLE.value)
@@ -606,7 +611,7 @@ class PlaybackService:
             # Download-first is already waiting. Reloading here, including an
             # idle replay, goes through _begin_load and clears the pending Play.
             if self.snapshot.download_request:
-                self._ignore_metric_once = True
+                self._expect_seek(seconds)
                 self._desired_position = seconds
                 self.snapshot = replace(self.snapshot, position=seconds)
                 self._emit()
@@ -615,7 +620,7 @@ class PlaybackService:
                 self._replay_current(position=seconds, autoplay=bool(autoplay))
                 return
             self._materialize()
-            self._ignore_metric_once = True
+            self._expect_seek(seconds)
             self._desired_position = seconds
             self._retarget_start(seconds)
             if self.snapshot.source:
@@ -681,11 +686,11 @@ class PlaybackService:
                 self.seek(self.snapshot.position + delta)
                 return
             self._materialize()
-            self._ignore_metric_once = True
             if self.snapshot.download_request or self._resolving:
                 self.seek(self._desired_position + delta)
                 return
             target = self._clamp_position(self.snapshot.position + delta)
+            self._expect_seek(target)
             self._desired_position = target
             self._retarget_start(target)
             if self.snapshot.source:
@@ -737,6 +742,7 @@ class PlaybackService:
             self.engine.set_speed(speed)
             if self.snapshot.show_id:
                 self.repository.update_show_playback(self.snapshot.show_id, speed=speed)
+            self._close_silence_window()  # measured at the old speed
             self.snapshot = replace(self.snapshot, speed=speed)
             self._emit()
 
@@ -785,6 +791,7 @@ class PlaybackService:
             if self._dead:
                 return
             self._persist_position(force=True)
+            self._close_silence_window()
             if self._unsaved_silence > 0 and self.listening:
                 self._persistence.submit('silence', self.listening.add_silence_saved,
                                          self._unsaved_silence, additive=True)
@@ -867,8 +874,7 @@ class PlaybackService:
                 if event.value:
                     self._flush_listening(deferred)
                 if state != self.snapshot.state:
-                    self._last_metric_time = time.monotonic()
-                    self._last_metric_position = self.snapshot.position
+                    self._reset_metrics(self.snapshot.position)
                 self.snapshot = replace(self.snapshot, state=state)
                 if self.snapshot.episode_id is not None:
                     episode_id = self.snapshot.episode_id
@@ -878,8 +884,8 @@ class PlaybackService:
                             self._engine_generation, source_kind, self._load_autoplay)
                 self._engine_loaded = True
                 self._cancel_load_watchdog()
-                self._last_metric_time = time.monotonic()
-                self._last_metric_position = self.snapshot.position
+                self._metric_seek_target = None  # the load applied any pending seek
+                self._reset_metrics(self.snapshot.position)
                 # A start at 0 needs no seek. Anything later is confirmed by
                 # the first ticks before progress is saved over it.
                 self._start_target = self._desired_position if self._desired_position > 5.0 else None
@@ -903,6 +909,9 @@ class PlaybackService:
                         logger.info("Playback buffering ended: generation=%s seconds=%.1f",
                                     self._engine_generation, elapsed)
                     self._buffering_started_at = None
+                if (event.value is None) != (previous_buffer is None):
+                    # A stall is not listening time; restart measuring at its edges.
+                    self._reset_metrics(self.snapshot.position)
                 self.snapshot = replace(self.snapshot, buffering=event.value)
             elif event.kind == "loading":
                 pass
@@ -996,6 +1005,7 @@ class PlaybackService:
         self._resolve_cancel.set()
         self._resolve_cancel = Event()
         self._cancel_load_watchdog()
+        self._close_silence_window()
         self._load_generation += 1
         self._resolving = True
         self._engine_loaded = False
@@ -1297,35 +1307,71 @@ class PlaybackService:
         if self._start_target is not None:
             self._start_target = target if target > 5.0 else None
 
+    def _expect_seek(self, target: float):
+        self._metric_seek_target = target
+        self._metric_seek_deadline = time.monotonic() + 3.0
+
+    def _reset_metrics(self, position: float, now: float | None = None):
+        self._close_silence_window()
+        self._last_metric_time = time.monotonic() if now is None else now
+        self._last_metric_position = position
+        self._silence_window = (self._last_metric_time, position)
+
+    def _close_silence_window(self):
+        # Count the open window up to the last tick measured while playing,
+        # never the tick that ended it (a seek, a pause, a stall).
+        window, self._silence_window = self._silence_window, None
+        if window is None or self._last_metric_time is None or self.snapshot.trim_level == "off":
+            return
+        window_time, window_position = window
+        if self._last_metric_time > window_time:
+            self._add_silence((self._last_metric_position - window_position)
+                              - (self._last_metric_time - window_time) * self.snapshot.speed)
+
+    def _add_silence(self, skipped: float):
+        self._unsaved_silence += max(0.0, skipped)
+        if self._unsaved_silence >= 1.0 and self.listening:
+            delta, listening = self._unsaved_silence, self.listening
+            self._persistence.submit('silence', listening.add_silence_saved, delta, additive=True)
+            self._unsaved_silence = 0.0
+            saved = self.snapshot.silence_saved + delta
+            self.snapshot = replace(self.snapshot, silence_saved=saved)
+
     def _measure_silence(self, position: float, deferred: list | None = None):
         now = time.monotonic()
-        if self._last_metric_time is None or self._last_metric_position is None:
-            self._last_metric_time = now
-            self._last_metric_position = position
+        target = self._metric_seek_target
+        if target is not None:
+            # Until the seek lands (or is given up on), a tick is either the
+            # old position or the jump itself; neither is listening or silence.
+            if abs(position - target) <= 1.0 or now >= self._metric_seek_deadline:
+                self._metric_seek_target = None
+            self._reset_metrics(position, now)
+            return
+        if (self._last_metric_time is None or self._last_metric_position is None
+                or self.snapshot.state != PlaybackState.PLAYING or self.snapshot.buffering is not None
+                or position < self._last_metric_position):
+            self._reset_metrics(position, now)
             return
         elapsed = max(0.0, min(10.0, now - self._last_metric_time))
-        if self._ignore_metric_once or self.snapshot.state != PlaybackState.PLAYING:
-            self._ignore_metric_once = False
-        elif position >= self._last_metric_position:
-            if self.snapshot.state == PlaybackState.PLAYING and self.snapshot.show_id:
-                self._unsaved_listening += elapsed
-                if self._unsaved_listening >= 30:
-                    self._flush_listening(deferred)
-            if self.snapshot.trim_level == "off":
-                self._last_metric_time = now
-                self._last_metric_position = position
-                return
-            media_delta = position - self._last_metric_position
-            expected = (now - self._last_metric_time) * self.snapshot.speed
-            self._unsaved_silence += max(0.0, media_delta - expected)
-            if self._unsaved_silence >= 1.0 and self.listening:
-                delta, listening = self._unsaved_silence, self.listening
-                self._persistence.submit('silence', listening.add_silence_saved, delta, additive=True)
-                self._unsaved_silence = 0.0
-                saved = self.snapshot.silence_saved + delta
-                self.snapshot = replace(self.snapshot, silence_saved=saved)
         self._last_metric_time = now
         self._last_metric_position = position
+        if self.snapshot.show_id:
+            self._unsaved_listening += elapsed
+            if self._unsaved_listening >= 30:
+                self._flush_listening(deferred)
+        if self.snapshot.trim_level == "off":
+            return
+        if self._silence_window is None:
+            self._silence_window = (now, position)
+            return
+        window_time, window_position = self._silence_window
+        skipped = (position - window_position) - (now - window_time) * self.snapshot.speed
+        # Tick delivery jitter is milliseconds and cancels over a second,
+        # instead of each positive wobble counting as skipped silence. A
+        # trimmed pause jumps a quarter second or more and counts at once.
+        if now - window_time >= 1.0 or skipped >= 0.25:
+            self._silence_window = (now, position)
+            self._add_silence(skipped)
 
     def _flush_listening(self, deferred: list | None = None):
         if self._unsaved_listening > 0 and self.listening and self.snapshot.show_id:
