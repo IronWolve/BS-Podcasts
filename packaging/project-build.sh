@@ -7,7 +7,7 @@ if [[ "$(uname -s)" == Darwin ]]; then
 fi
 if [[ "${1:-}" == --windows ]]; then
     shift
-    mkdir -p "$BS_PROJECT/tmp"
+    mkdir -p -m 700 "$BS_PROJECT/tmp"
     BS_WINDOWS_STAGE="$(mktemp -d "$BS_PROJECT/tmp/windows-source.XXXXXX")"
     cleanup_windows_stage() {
         case "$BS_WINDOWS_STAGE" in
@@ -27,7 +27,8 @@ if [[ ! -x "$BS_PYTHON" ]]; then
     printf 'Missing project Python environment: %s\nDependency installation must be approved separately.\n' "$BS_PYTHON" >&2
     exit 1
 fi
-mkdir -p "$BS_PROJECT/tmp" "$BS_PROJECT/.cache" "$BS_PROJECT/logs"
+# Private from the start; an existing folder keeps the mode it has.
+mkdir -p -m 700 "$BS_PROJECT/tmp" "$BS_PROJECT/.cache" "$BS_PROJECT/logs"
 unset PYTHONPATH
 export TMPDIR="$BS_PROJECT/tmp" XDG_CACHE_HOME="$BS_PROJECT/.cache" PYTHONDONTWRITEBYTECODE=1
 exec "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/deploy.py" "$@"

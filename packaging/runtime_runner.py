@@ -58,8 +58,9 @@ def remember_caller():
 
 
 def environment():
+    # Private from the start: later 0700 requests do not tighten existing folders.
     for directory in ('tmp','logs','.cache'):
-        (PROJECT/directory).mkdir(exist_ok=True)
+        (PROJECT/directory).mkdir(mode=0o700,exist_ok=True)
     remember_caller()
     os.environ['TMPDIR']=str(PROJECT/'tmp')
     os.environ['XDG_CACHE_HOME']=str(PROJECT/'.cache')
@@ -76,7 +77,7 @@ def environment():
     data = Path(os.environ.get('BS_PODCASTS_DATA_DIR') or default_data_dir()).expanduser()
     if not data.is_absolute():
         data = PROJECT / data
-    data.mkdir(parents=True, exist_ok=True)
+    data.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.environ['BS_PODCASTS_DATA_DIR'] = str(data)
     source=(PROJECT/'repo').resolve()
     sys.path[:]=[p for p in sys.path if p and not Path(p).resolve().is_relative_to(source)]

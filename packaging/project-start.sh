@@ -20,7 +20,7 @@ done
 exec "$BS_RUNTIME/.venv/bin/python" -I -B -c '
 import fcntl, os, stat, sys
 project, runner = sys.argv[1:3]
-os.makedirs(project+"/.cache", exist_ok=True)
+os.makedirs(project+"/.cache", mode=0o700, exist_ok=True)
 fd = os.open(project+"/.cache/runtime.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
 if not stat.S_ISREG(os.fstat(fd).st_mode):
     raise SystemExit("Runtime lock is not a regular file.")

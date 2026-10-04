@@ -78,7 +78,7 @@ def process_state(project, value, runner=None):
 def runtime_lock(project, inherit=False):
     """Exclusive lease; inherited shell FD protects even the bootstrap import."""
     lock_path = project/'.cache/runtime.lock'
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     inherited = os.environ.get('BS_PODCASTS_RUNTIME_LOCK_FD') if inherit else None
     own = inherited is None
     descriptor = None
