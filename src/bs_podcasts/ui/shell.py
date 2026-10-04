@@ -2240,6 +2240,21 @@ class MainWindow(QMainWindow):
             or self.search_overlay._timer.isActive()
         )
 
+    # Reads that keep a page's data current report a failure on that page;
+    # background bookkeeping nobody asked for on screen only logs it. Every
+    # other read reports on the page that was showing when it was asked for.
+    _PAGE_READS = {"downloads": "download_page", "bookmarks": "bookmark_page", "queue": "playlist_page"}
+    _BACKGROUND_READS = ("new-badge", "reconcile-missing", "download-capacity", "show-summaries", "scheduled-refresh",
+                         "visible-artwork", "settings-reload", "playback-metadata", "history-times",
+                         "download-notice-", "refresh-notice-", "auto-download-", "retention-")
+
+    def _read_owner(self, key: str):
+        if key in self._PAGE_READS:
+            return getattr(self, self._PAGE_READS[key])
+        if key.startswith(self._BACKGROUND_READS):
+            return None
+        return self.pages.currentWidget()
+
     def _run_read(self, work, apply, key: str, pool=None, *, coalesce=True):
         """Run `work()` on a worker, then `apply(result)` on the main thread.
         Read-only keys retain one active request and one replaceable latest.
@@ -2250,7 +2265,7 @@ class MainWindow(QMainWindow):
         if self.jobs is None:
             apply(work())
             return
-        owner = self.pages.currentWidget()
+        owner = self._read_owner(key)
         executor = pool if pool is not None else self.jobs
         token = None
         if coalesce and executor is not self.commands:
@@ -5865,10 +5880,14 @@ class MainWindow(QMainWindow):
             # The banner said "Opening…"; without this it never resolves.
             message = result.message or "The library could not be read."
             page = owners[0] if owners else self.pages.currentWidget()
+            if page is None:
+                logging.getLogger("bs_podcasts").warning("Background read %s failed: %s", key, message)
+                return
             banner = getattr(page, "banner", None)
             if banner is not None:
                 banner.show_state("error", message)
-            self._notify(message, "error")
+            if key not in self._PAGE_READS or page is self.pages.currentWidget():
+                self._notify(message, "error")
             # A failed Load more must not leave its button stuck on
             # "Loading…"; recompute availability so it can be retried.
             if key == "episodes-more":
