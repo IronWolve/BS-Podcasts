@@ -1193,7 +1193,9 @@ class Toast(QFrame):
                   + sum(widget.sizeHint().width() for widget in controls)
                   + self.layout().spacing() * len(controls))
         maximum = max(1, parent.width() - 2 * SPACE["md"])
-        natural = chrome + self.text.fontMetrics().horizontalAdvance(self.text.text())
+        # Leave room for the scroll area's transient scrollbar and rounding;
+        # an exact-width fit can wrap the last progress number below one line.
+        natural = chrome + self.text.fontMetrics().horizontalAdvance(self.text.text()) + scaled_px(18)
         self.setFixedWidth(min(maximum, max(chrome + scaled_px(80), natural)))
         # Long diagnostics scroll inside the toast. Actions never leave the
         # parent viewport, and the complete text remains selectable/copyable.

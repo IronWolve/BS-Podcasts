@@ -113,7 +113,7 @@ class _ScrollInputGuard(QObject):
         self._scroll_started = scroll_started
         self._wheel_handler = wheel_handler
         self._stop_scroll = stop_scroll
-        self._view = view
+        self._bar = view.verticalScrollBar()
         for target in (view, view.viewport(), view.verticalScrollBar()):
             target.installEventFilter(self)
         view.verticalScrollBar().sliderPressed.connect(cancel_restore)
@@ -121,7 +121,7 @@ class _ScrollInputGuard(QObject):
 
     def eventFilter(self, watched, event):
         if self._stop_scroll and (event.type() == QEvent.Type.KeyPress or
-                                 watched is self._view.verticalScrollBar() and event.type() == QEvent.Type.MouseButtonPress):
+                                 event.type() == QEvent.Type.MouseButtonPress and watched is self._bar):
             self._stop_scroll(False)
         if self._scroll_started and event.type() in {QEvent.Type.Wheel, QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate}:
             self._scroll_started()
