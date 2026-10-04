@@ -350,6 +350,11 @@ class StyledDialog(QDialog):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_origin = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            # Wayland ignores a client moving its own window; the compositor
+            # runs the drag instead. Elsewhere the clamped manual move stays.
+            handle = self.windowHandle()
+            if QApplication.platformName() == "wayland" and handle is not None and handle.startSystemMove():
+                self._drag_origin = None
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
