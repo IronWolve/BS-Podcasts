@@ -114,6 +114,14 @@ $stageRoot = Join-Path $buildRoot "source"
 $sourceDir = Join-Path $buildRoot "dist\BS Podcasts"
 $sourceExe = Join-Path $sourceDir "BS Podcasts.exe"
 if (-not $Destination) { $Destination = Join-Path $workspace "dists\windows" }
+# The build publishes its manifest and installer beside the app, so it stays inside
+# this workspace's dists folder. The owner's Windows app copy receives the runtime
+# files alone through the separate app-only delivery step, never through this recipe.
+$Destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)
+$distsRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace "dists")).TrimEnd('\') + '\'
+if (-not ([System.IO.Path]::GetFullPath($Destination).TrimEnd('\') + '\').StartsWith($distsRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "-Destination must be inside $distsRoot; copy the app anywhere else with the app-only delivery step."
+}
 if (-not $CheckRoot) {
     $privateBuild = Join-Path $workspace ".config\build.json"
     if (Test-Path -LiteralPath $privateBuild) {
