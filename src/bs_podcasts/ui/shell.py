@@ -278,6 +278,9 @@ class MainWindow(QMainWindow):
         self._download_tickets = {}
         self._samples_lock = threading.Lock()
         self._unsubscribing = set()
+        # Retention dialogs open now, and shows whose check came in meanwhile.
+        self._retention_prompting = set()
+        self._retention_again = {}
         self._playback_revision = 0
         self._handled_completion = None
         self._new_episode_total = 0
@@ -1690,7 +1693,7 @@ class MainWindow(QMainWindow):
             spared.add(playing)
         return spared
 
-    def _apply_retention(self, show_id: int, preview_required: bool = False, keep=()):
+    def _apply_retention(self, show_id: int, preview_required: bool = False, keep=(), background=False):
         if self.library is None or self.downloads is None:
             return
         repository, downloads, playback = self.library.repository, self.downloads, self.playback
@@ -1710,26 +1713,58 @@ class MainWindow(QMainWindow):
                 return
             show, previews = value
             if previews:
-                self._confirm_retention(show, previews, preview_required, keep)
+                self._confirm_retention(show, previews, preview_required, keep, background)
 
         self._run_read(work, apply, f"retention-{show_id}")
 
-    def _confirm_retention(self, show, previews, preview_required: bool, keep=()):
+    def _confirm_retention(self, show, previews, preview_required: bool, keep=(), background=False):
+        """Delete what exceeds a podcast's limits; the first time (or when
+        asked to preview) list the files first.
+
+        Background checks after downloads never stack a second dialog, never
+        raise one over a hidden window, and do not ask again for limits the
+        user declined; saving the podcast's settings asks again."""
         show_id = show.id
         confirmation_key = f"retention.confirmed.{show_id}"
+        declined_key = f"retention.declined.{show_id}"
         first_cleanup = self.library.setting(confirmation_key, "0") != "1"
         if preview_required or first_cleanup:
-            dialog = DeleteFilesDialog(
-                f"Apply retention for {show.title}",
-                "These downloaded files exceed this podcast’s limits. Favorites are protected.",
-                previews, self._format_bytes, self,
-            )
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            limits = f"{show.retention_keep}:{show.retention_days}"
+            if show_id in self._retention_prompting:
+                self._retention_again.setdefault(show_id, set()).update(keep)
                 return
-            self._persist_ui_settings({confirmation_key: "1"})
+            if background and self.library.setting(declined_key, "") == limits:
+                return
+            if background and (not self.isVisible() or self.isMinimized()):
+                message = f"Downloads for {show.title} exceed its retention limits"
+                review = lambda: self._apply_retention(show_id)
+                self._notify(message, "info", "Review", review)
+                self._native_notify(APP_NAME, message, review)
+                return
+            self._retention_prompting.add(show_id)
+            try:
+                dialog = DeleteFilesDialog(
+                    f"Apply retention for {show.title}",
+                    "These downloaded files exceed this podcast’s limits. Favorites are protected.",
+                    previews, self._format_bytes, self,
+                )
+                accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            finally:
+                self._retention_prompting.discard(show_id)
+            again = self._retention_again.pop(show_id, None)
+            if not accepted:
+                self._persist_ui_settings({declined_key: limits})
+                return
+            self._persist_ui_settings({confirmation_key: "1", declined_key: ""})
+        else:
+            again = None
         self._delete_downloads_async(
             previews, "Retention removed {count} download{plural} · {size}", retention_show=show_id, retention_keep=keep
         )
+        if again is not None:
+            # Downloads that finished while the dialog was open, checked once
+            # the delete above has run (the command queue keeps the order).
+            self._run_command(lambda: None, lambda _none: self._apply_retention(show_id, keep=tuple(again), background=True))
 
     def _download_many(self, items):
         # is_active() is the live truth; filtering on the row's state string
@@ -5600,6 +5635,8 @@ class MainWindow(QMainWindow):
         if result.status == JobStatus.OK:
             count, freed, failed = result.value
             message = template.format(count=count, plural="" if count == 1 else "s", size=self._format_bytes(freed))
+            if not count and not failed:
+                return  # a re-check found nothing left to remove
             if failed and not count:
                 self._notify(f"Could not delete {failed} download{'s' if failed != 1 else ''}", "error")
             elif failed:
@@ -5985,7 +6022,7 @@ class MainWindow(QMainWindow):
                 self._notify(f"Downloaded {title}", "success", "Play", lambda: self._play_episode(identifier))
                 self._native_notify(APP_NAME, f"Downloaded {title}", lambda: self._play_episode(identifier))
                 if episode is not None:
-                    self._apply_retention(episode.show_id, keep=(identifier,))
+                    self._apply_retention(episode.show_id, keep=(identifier,), background=True)
             self._run_read(lambda: (self.library.episode(identifier) if self.library else None,),
                            lambda rows: apply(rows[0]), f"download-notice-{identifier}")
         elif result.status in {JobStatus.OK, JobStatus.EMPTY}:
