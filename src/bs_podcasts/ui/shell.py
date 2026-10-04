@@ -49,7 +49,7 @@ class PeekFeed(FeedData):
 
 from ..jobs import JobResult, JobStatus
 from ..jobs.commands import CommandQueue
-from ..services.library import LibraryService, _bounded_int
+from ..services.library import LibraryService, _bounded_float, _bounded_int
 from ..services.preview_cache import PreviewCache, prepare_preview
 from ..urlguard import is_web_url
 from ..privacy import feed_label
@@ -610,9 +610,8 @@ class MainWindow(QMainWindow):
         self.settings_page.import_opml_requested.connect(self._import_opml)
         self.settings_page.export_opml_requested.connect(self._export_opml)
         self.settings_page.load_values(
-            float(self.library.setting("playback.default_speed", "1.0")),
-            int(self.library.setting("playback.skip_back", "15")),
-            int(self.library.setting("playback.skip_forward", "30")),
+            self._float_setting("playback.default_speed", 1.0, 0.5, 3.0),
+            *self._default_skips(),
             self.library.setting("playback.auto_continue", "1") == "1",
         )
         self._apply_skip_settings()
@@ -635,11 +634,11 @@ class MainWindow(QMainWindow):
         self.settings_page.clear_artwork_requested.connect(self._clear_artwork_cache)
         self._later(4000, self._prune_artwork_cache)
         self.settings_page.load_downloads(
-            self.library.setting("downloads.auto", "0") == "1", int(self.library.setting("downloads.auto_limit", "3")),
+            self.library.setting("downloads.auto", "0") == "1", self._int_setting("downloads.auto_limit", 3, 1, 10),
             self.library.setting("downloads.delete_played", "0") == "1",
             self.library.setting("playback.download_first", "0") == "1",
         )
-        self.settings_page.load_refresh_interval(int(self.library.setting("refresh.interval_minutes", "60")))
+        self.settings_page.load_refresh_interval(self._refresh_interval())
         self.settings_page.open_log_requested.connect(lambda: self._open_location(str(log_path())))
         self.settings_page.load_desktop_options(
             self._background_paused(),
@@ -1162,7 +1161,7 @@ class MainWindow(QMainWindow):
         future.add_done_callback(finished)
 
     def _arm_refresh_timer(self):
-        minutes = int(self.library.setting("refresh.interval_minutes", "60")) if self.library else 0
+        minutes = self._refresh_interval() if self.library else 0
         self._refresh_timer.stop()
         if minutes > 0:
             self._refresh_timer.start(minutes * 60 * 1000)
@@ -1178,7 +1177,7 @@ class MainWindow(QMainWindow):
         self._stale_check_done = True
         if self.library is None or self.jobs is None or getattr(self.refresh, "refresh", None) is None or self._background_paused():
             return
-        minutes = int(self.library.setting("refresh.interval_minutes", "60"))
+        minutes = self._refresh_interval()
         if minutes <= 0:
             return
         cutoff = time.time() - minutes * 60
@@ -1197,7 +1196,7 @@ class MainWindow(QMainWindow):
         if self.library is None or self._refresh_batch[0] or getattr(self.refresh, "refresh", None) is None or self._background_paused():
             return
 
-        cutoff = time.time() - int(self.library.setting("refresh.interval_minutes", "60")) * 60
+        cutoff = time.time() - self._refresh_interval() * 60
         def read_all():
             return [show for show in self.library.shows() if show.source != "local" and not show.suspended
                     and (show.last_refresh is None or show.last_refresh < cutoff)]
@@ -1870,7 +1869,7 @@ class MainWindow(QMainWindow):
                 self._notify("Background work paused" if value == "1" else "Background work resumed", "info")
                 if value == "1":
                     self._wind_down_quiet_batch()
-                elif _bounded_int(self.library.setting("refresh.interval_minutes", "60"), 60, 0, 10**6) > 0:
+                elif self._refresh_interval() > 0:
                     self._scheduled_refresh()  # catch up on what the pause skipped
             elif key == "ui.density":
                 self._apply_density(value == "compact")
@@ -1897,12 +1896,24 @@ class MainWindow(QMainWindow):
         if tray is not None:
             tray.notify(title, message, callback)
 
+    def _int_setting(self, key: str, default: int, low: int, high: int) -> int:
+        """A numeric setting within the range Settings offers; a value from
+        another build or a hand-edited database falls back to the default
+        instead of stopping the window from opening."""
+        return _bounded_int(self.library.setting(key, str(default)), default, low, high)
+
+    def _float_setting(self, key: str, default: float, low: float, high: float) -> float:
+        return _bounded_float(self.library.setting(key, str(default)), default, low, high)
+
+    def _refresh_interval(self) -> int:
+        return self._int_setting("refresh.interval_minutes", 60, 0, 24 * 60)
+
     def _default_skips(self):
         """Global skip times, bounded the way a new podcast takes them."""
         if self.library is None:
             return 15, 30
-        return (_bounded_int(self.library.setting("playback.skip_back", "15"), 15, 5, 120),
-                _bounded_int(self.library.setting("playback.skip_forward", "30"), 30, 5, 300))
+        return (self._int_setting("playback.skip_back", 15, 5, 120),
+                self._int_setting("playback.skip_forward", 30, 5, 300))
 
     def _apply_skip_settings(self):
         if self.library is None:
@@ -3548,7 +3559,7 @@ class MainWindow(QMainWindow):
         )
         if not enabled:
             return []
-        limit = show.auto_download_limit or int(self.library.setting("downloads.auto_limit", "3"))
+        limit = show.auto_download_limit or self._int_setting("downloads.auto_limit", 3, 1, 10)
         active = {record.episode_id for record in self.downloads.records()}
         candidates = [
             episode for episode in self.library.episodes(show_id=show_id, limit=limit * 3)
