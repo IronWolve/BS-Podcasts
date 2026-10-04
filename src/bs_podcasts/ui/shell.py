@@ -159,7 +159,7 @@ class MainWindow(QMainWindow):
         '_manual_refresh_in_flight', '_refresh_quiet', '_refresh_changed', '_details_fetched', '_artwork_fetched',
         '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved')
 
-    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None):
+    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.library = library
@@ -170,6 +170,9 @@ class MainWindow(QMainWindow):
         self.jobs = jobs
         self.commands = commands or (CommandQueue() if jobs is not None else None)
         self.download_jobs = download_jobs or jobs
+        # A download-first Play runs on its own worker when the app gives
+        # it one, so it never waits behind automatic or bulk downloads.
+        self.play_download_jobs = play_download_jobs
         # Batch feed refreshes run on their own pool so UI reads never queue
         # behind network fetches; without one they share the general pool.
         self.refresh_jobs = refresh_jobs or jobs
@@ -4278,7 +4281,7 @@ class MainWindow(QMainWindow):
                 self._play_after_download_request = request
                 self._play_after_download_intent = self.playback.intent_revision
                 if self.downloads is not None and self.jobs is not None:
-                    self._download_episode(episode_id, quiet=True)
+                    self._download_episode(episode_id, quiet=True, priority=True)
                     self._notify("Downloading before playing…", "loading", "Stream instead",
                                  lambda: self._play_episode(episode_id, force_stream=True))
                 else:
@@ -4493,14 +4496,17 @@ class MainWindow(QMainWindow):
         return mapping.get(value, value or "")
 
     # ---------------------------------------------------------------- downloads
-    def _download_episode(self, episode_id: int, quiet: bool = False):
+    def _download_episode(self, episode_id: int, quiet: bool = False, priority: bool = False):
         if self.downloads is None or self.jobs is None or not episode_id:
             return
-        ticket = self.downloads.queue(episode_id)
+        # `priority` is a play intent: it takes over a ticket still waiting
+        # in line (the old job then returns without transferring).
+        ticket = self.downloads.queue(episode_id, priority=True) if priority else self.downloads.queue(episode_id)
         if ticket is None:
             return
         self._download_tickets[episode_id] = ticket
-        future = self.download_jobs.submit(self.downloads.download, episode_id, ticket)
+        runner = (self.play_download_jobs or self.download_jobs) if priority else self.download_jobs
+        future = runner.submit(self.downloads.download, episode_id, ticket)
         self._request_reload()
         self._pending_jobs.add(future)
 
