@@ -858,24 +858,33 @@ class EpisodeDelegate(QStyledItemDelegate):
             return
         metrics = painter.fontMetrics()
         line_height = scaled_px(self.SNIPPET_LINE)
-        layout = QTextLayout(text.replace("\n", " "), painter.font())
-        layout.beginLayout()
-        spans = []
-        while len(spans) < max_lines:
-            line = layout.createLine()
-            if not line.isValid():
-                break
-            line.setLineWidth(rect.width())
-            spans.append((line.textStart(), line.textLength()))
-        more = layout.createLine().isValid()
-        layout.endLayout()
-        for row, (start, length) in enumerate(spans):
-            piece = text[start:start + length].strip()
-            last = row == len(spans) - 1
+        pieces, more = self._wrap_snippet(text, painter.font(), rect.width(), max_lines)
+        for row, piece in enumerate(pieces):
+            last = row == len(pieces) - 1
             if last and more:
                 piece = metrics.elidedText(piece + "…", Qt.TextElideMode.ElideRight, rect.width())
             line_rect = QRect(rect.x(), rect.y() + row * line_height, rect.width(), line_height)
             painter.drawText(line_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, piece)
+
+    @staticmethod
+    def _wrap_snippet(text: str, font, width: int, max_lines: int) -> tuple[list[str], bool]:
+        flat = text.replace("\n", " ")
+        # Line offsets count UTF-16 units, not Python characters: slicing the
+        # str with them garbled every line after an emoji.
+        units = flat.encode("utf-16-le", "surrogatepass")
+        layout = QTextLayout(flat, font)
+        layout.beginLayout()
+        pieces = []
+        while len(pieces) < max_lines:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(width)
+            start, length = line.textStart(), line.textLength()
+            pieces.append(units[2 * start:2 * (start + length)].decode("utf-16-le", "ignore").strip())
+        more = layout.createLine().isValid()
+        layout.endLayout()
+        return pieces, more
 
     def _snippet(self, item) -> str:
         # Enough plain text to fill the configured line count; the limit is
