@@ -17,10 +17,11 @@ LIBMPV = Path(os.environ["BS_PODCASTS_LIBMPV_DLL"])
 if not LIBMPV.is_file():
     raise FileNotFoundError(f"Bundled libmpv DLL not found: {LIBMPV}")
 
-VERSION = "0.1.0"
 match = re.search(r'^version\s*=\s*"([^"]+)"', (ROOT / "pyproject.toml").read_text(encoding="utf-8"), re.M)
-if match:
-    VERSION = match.group(1)
+if not match or not re.search(r"\d", match.group(1)):
+    # Never stamp a placeholder version into the executable.
+    raise SystemExit("Could not read a version from pyproject.toml; refusing to build.")
+VERSION = match.group(1)
 NUMERIC = tuple((list(map(int, re.findall(r"\d+", VERSION))) + [0, 0, 0, 0])[:4])
 
 # Identify the process as BS Podcasts (not the Python bootloader) in Task

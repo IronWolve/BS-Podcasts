@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -15,13 +16,25 @@ from source_manifest import ROOT, stage, source_digest, file_digest, check as ch
 from check_dependencies import check
 
 
-def prune_previous_deployments(root, keep=3):
+# Mac rollbacks are named by mkdtemp with this prefix. The shared folder also
+# holds other platforms' rollbacks and staging, which this build never prunes.
+ROLLBACK_PREFIX = 'macos-build-'
+_ROLLBACK_NAME = re.compile(re.escape(ROLLBACK_PREFIX) + r'[a-z0-9_]+')
+
+
+def prune_previous_deployments(root, keep=3, retain=None):
+    """Keep the newest `keep` Mac rollbacks (always including `retain`); return removed names."""
     if not root.is_dir() or root.is_symlink():
-        return
-    entries = [path for path in root.iterdir() if path.is_dir() and not path.is_symlink()]
+        return []
+    entries = [path for path in root.iterdir()
+               if _ROLLBACK_NAME.fullmatch(path.name) and path.is_dir() and not path.is_symlink()
+               and path != retain]
     entries.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    for stale in entries[keep:]:
+    removed = []
+    for stale in entries[max(keep - (retain is not None), 0):]:
         shutil.rmtree(stale)
+        removed.append(stale.name)
+    return removed
 
 
 def run(*args, **kwargs):
@@ -44,24 +57,24 @@ def diagnostic(app, work):
     return result
 
 
-def build(workspace):
+def build(workspace, prune=False):
     if sys.platform != 'darwin' or platform.machine() != 'arm64':
         raise RuntimeError('This recipe requires an arm64 Mac; universal2 is not implied.')
     check(ROOT/'packaging/requirements-macos.lock')
-    work=Path(tempfile.mkdtemp(prefix='macos-build-',dir=workspace/'tmp'))
+    work=Path(tempfile.mkdtemp(prefix=ROLLBACK_PREFIX,dir=workspace/'tmp'))
     replaced=False
     try:
-        replaced=_finish_macos(workspace, work)
+        replaced=_finish_macos(workspace, work, prune)
     finally:
         source=work/'source'
         if source.exists():
             shutil.rmtree(source)
         if (replaced and work.exists() and not work.is_symlink()
-                and work.name.startswith('macos-build-') and work.is_relative_to(workspace/'tmp')):
+                and work.name.startswith(ROLLBACK_PREFIX) and work.is_relative_to(workspace/'tmp')):
             shutil.rmtree(work)
 
 
-def _finish_macos(workspace, work):
+def _finish_macos(workspace, work, prune=False):
     snapshot=stage(work/'source')
     version=tomllib.loads((snapshot/'pyproject.toml').read_text())['project']['version']
     native=workspace/'.cache/macos-build/libmpv-lgpl/libmpv.2.dylib'
@@ -133,16 +146,20 @@ def _finish_macos(workspace, work):
         for source,destination in reversed(published): destination.rename(source)
         for destination in reversed(retired): (previous/destination.name).rename(destination)
         raise
-    prune_previous_deployments(workspace/'.cache/previous-deployments')
+    # Rollbacks are user recovery data: pruning is an explicit opt-in, as on Windows.
+    pruned=prune_previous_deployments(workspace/'.cache/previous-deployments',retain=previous) if prune else None
     print(f'Built and headless/relocation-verified BS Podcasts {version}: {target}',flush=True)
     print('Signing: '+('Developer ID; notarization still separate' if os.environ.get('BS_PODCASTS_SIGN_IDENTITY') else 'ad-hoc only; not notarized'))
-    print(f'Previous artifacts retained: {previous}')
+    print(f'Previous artifacts retained: {previous}; '+(f'older Mac rollbacks pruned: {len(pruned)}' if pruned is not None
+          else 'older rollbacks kept (--prune-old-deployments keeps only the newest 3)'))
     return replaced
 
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check',action='store_true')
+    parser.add_argument('--prune-old-deployments',action='store_true',
+                        help='delete all but the newest 3 Mac rollbacks after a successful build')
     args=parser.parse_args()
     if args.check:
         print(f'Approved source files: {check_source()}')
@@ -150,4 +167,4 @@ if __name__=='__main__':
     workspace=Path(os.environ.get('BS_PODCASTS_BUILD_ROOT',ROOT.parent)).resolve()
     with (workspace/'.cache/macos-build.lock').open('a+b') as lease:
         fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        build(workspace)
+        build(workspace, prune=args.prune_old_deployments)

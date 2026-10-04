@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import tomllib
@@ -13,13 +14,44 @@ from source_manifest import ROOT, check, inventory, source_digest, file_digest, 
 from runtime_state import runtime_lock, retire_stale
 
 
-def prune_previous_deployments(root, keep=3):
+# Linux rollbacks are named by mkdtemp with this prefix. The shared folder also
+# holds other platforms' rollbacks and staging, which this build never prunes.
+ROLLBACK_PREFIX = 'linux-build-'
+_ROLLBACK_NAME = re.compile(re.escape(ROLLBACK_PREFIX) + r'[a-z0-9_]+')
+
+
+def prune_previous_deployments(root, keep=3, retain=None):
+    """Keep the newest `keep` Linux rollbacks (always including `retain`); return removed names."""
     if not root.is_dir() or root.is_symlink():
-        return
-    entries = [path for path in root.iterdir() if path.is_dir() and not path.is_symlink()]
+        return []
+    entries = [path for path in root.iterdir()
+               if _ROLLBACK_NAME.fullmatch(path.name) and path.is_dir() and not path.is_symlink()
+               and path != retain]
     entries.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    for stale in entries[keep:]:
+    removed = []
+    for stale in entries[max(keep - (retain is not None), 0):]:
         shutil.rmtree(stale)
+        removed.append(stale.name)
+    return removed
+
+
+def package_version(path):
+    """The package's literal __version__, read as text so the checkout is never imported."""
+    tree = ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
+    values = [node.value.value for node in tree.body
+              if isinstance(node, ast.Assign) and len(node.targets) == 1
+              and isinstance(node.targets[0], ast.Name) and node.targets[0].id == '__version__'
+              and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)]
+    return values[0] if len(values) == 1 else None
+
+
+def checked_version(snapshot):
+    """pyproject's version, only when the package constant agrees with it."""
+    version = tomllib.loads((snapshot/'pyproject.toml').read_text(encoding='utf-8'))['project']['version']
+    module = package_version(snapshot/'src/bs_podcasts/__init__.py')
+    if not isinstance(version, str) or not version or module != version:
+        raise RuntimeError(f'Version mismatch: pyproject.toml {version!r}, bs_podcasts.__version__ {module!r}.')
+    return version
 
 
 def install_entrypoints(workspace, destination, previous):
@@ -50,7 +82,7 @@ exec bash "$BS_PROJECT/dists/linux/COMMAND.sh" "$@"
             temporary.unlink(missing_ok=True)
 
 
-def deploy():
+def deploy(prune=False):
     workspace = ROOT.parent
     destination = workspace/'dists/linux'
     if not (destination/'.venv/bin/python').is_file():
@@ -59,17 +91,18 @@ def deploy():
     with runtime_lock(workspace):
         retire_stale(workspace)
     destination.mkdir(parents=True,exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix='linux-build-',dir=workspace/'tmp'))
+    temporary = Path(tempfile.mkdtemp(prefix=ROLLBACK_PREFIX,dir=workspace/'tmp'))
     try:
-        _deploy_staged(workspace, destination, temporary)
+        _deploy_staged(workspace, destination, temporary, prune)
     finally:
         if (temporary.is_dir() and not temporary.is_symlink()
-                and temporary.name.startswith('linux-build-') and temporary.is_relative_to(workspace/'tmp')):
+                and temporary.name.startswith(ROLLBACK_PREFIX) and temporary.is_relative_to(workspace/'tmp')):
             shutil.rmtree(temporary)
 
 
-def _deploy_staged(workspace, destination, temporary):
+def _deploy_staged(workspace, destination, temporary, prune=False):
     snapshot = stage(temporary/'source',root=ROOT)
+    version = checked_version(snapshot)
     _, runtime = inventory(snapshot)
     for name in runtime:
         if name.endswith('.py'):
@@ -88,7 +121,6 @@ def _deploy_staged(workspace, destination, temporary):
     for name in ('libmpv.so.2', 'native-build.json'):
         shutil.copy2(native/name, temporary/'native'/name)
     deployed = [*runtime.values(), 'native/libmpv.so.2', 'native/native-build.json']
-    version = tomllib.loads((snapshot/'pyproject.toml').read_text())['project']['version']
     record = {'version':version,'built_at':datetime.now(timezone.utc).isoformat(),
               'source_sha256':source_digest(snapshot),
               'files':{relative:file_digest(temporary/relative) for relative in deployed},
@@ -118,8 +150,11 @@ def _deploy_staged(workspace, destination, temporary):
             raise
         snapshot.rename(previous/'source-inputs')
         install_entrypoints(workspace, destination, previous)
-    prune_previous_deployments(workspace/'.cache/previous-deployments')
+    # Rollbacks are user recovery data: pruning is an explicit opt-in, as on Windows.
+    pruned = prune_previous_deployments(workspace/'.cache/previous-deployments', retain=previous) if prune else None
     print(f'Built BS Podcasts {version}: {destination}')
+    print(f'Rollback retained: {previous}; ' + (f'older Linux rollbacks pruned: {len(pruned)}' if pruned is not None
+          else 'older rollbacks kept (--prune-old-deployments keeps only the newest 3)'))
     print(f'Source SHA-256: {record["source_sha256"]}')
     print('No dependencies installed and no application started. Run ./start.sh when ready.')
 
@@ -129,10 +164,12 @@ if __name__ == '__main__':
     check_dependencies(ROOT/'packaging/requirements-linux.lock')
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check',action='store_true')
+    parser.add_argument('--prune-old-deployments',action='store_true',
+                        help='delete all but the newest 3 Linux rollbacks after a successful build')
     args=parser.parse_args()
     if args.check:
         print(f'Approved source files: {check()}')
     else:
         with (ROOT.parent/'.cache/linux-build.lock').open('a+b') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
-            deploy()
+            deploy(prune=args.prune_old_deployments)

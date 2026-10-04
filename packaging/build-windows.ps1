@@ -14,7 +14,10 @@ function Remove-OldDeployments {
     param([string]$Root, [string]$Retain, [int]$Keep = 3)
     if (-not (Test-Path -LiteralPath $Root)) { return }
     $retainPath = [System.IO.Path]::GetFullPath($Retain)
-    $dirs = @(Get-ChildItem -LiteralPath $Root -Directory | Where-Object {
+    # Only this script's own .previous-<stamp>-<guid> rollbacks. The shared folder
+    # also holds other platforms' rollbacks and in-flight staging; never prune those.
+    $dirs = @(Get-ChildItem -LiteralPath $Root -Directory -Force | Where-Object {
+        $_.Name -cmatch '^\.previous-\d{8}-\d{6}-[0-9a-f]{32}$' -and
         -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and
         [System.IO.Path]::GetFullPath($_.FullName) -ne $retainPath
     } | Sort-Object LastWriteTime -Descending)
@@ -22,6 +25,22 @@ function Remove-OldDeployments {
     if ($dirs.Count -le $leave) { return }
     foreach ($dir in $dirs[$leave..($dirs.Count - 1)]) {
         Remove-Item -LiteralPath $dir.FullName -Recurse -Force
+    }
+}
+
+function Remove-BuildRoot {
+    param([string]$Root, [string]$Workspace)
+    # Only this run's own tmp\windows-build-<guid> work folder, never a link or another path.
+    $full = [System.IO.Path]::GetFullPath($Root)
+    $tmpRoot = [System.IO.Path]::GetFullPath((Join-Path $Workspace "tmp"))
+    if (-not [string]::Equals([System.IO.Path]::GetDirectoryName($full), $tmpRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        [System.IO.Path]::GetFileName($full) -cnotmatch '^windows-build-[0-9a-f]{32}$') { return }
+    if (-not (Test-Path -LiteralPath $full)) { return }
+    if ((Get-Item -LiteralPath $full -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return }
+    try {
+        Remove-Item -LiteralPath $full -Recurse -Force
+    } catch {
+        Write-Warning "Could not remove build work folder ${full}: $($_.Exception.Message)"
     }
 }
 
@@ -123,121 +142,138 @@ if (-not (Test-Path -LiteralPath $LibMpvDll)) {
 
 $env:BS_PODCASTS_LIBMPV_DLL = (Resolve-Path -LiteralPath $LibMpvDll).ProviderPath
 New-Item -ItemType Directory -Path $buildRoot -Force | Out-Null
-$env:TEMP = $buildRoot
-$env:TMP = $buildRoot
-$env:PYTHONDONTWRITEBYTECODE = "1"
-$env:PYINSTALLER_CONFIG_DIR = Join-Path $workspace ".cache\pyinstaller-windows"
-Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-if ($SourceStage) {
-    $stageRoot = (Resolve-Path -LiteralPath $SourceStage).ProviderPath
-    $originPath = Join-Path $stageRoot ".build-origin.json"
-    if (-not (Test-Path -LiteralPath $originPath)) { throw "Source stage has no origin record" }
-    $origin = Get-Content -LiteralPath $originPath -Raw | ConvertFrom-Json
-    $digest = & $python -B (Join-Path $stageRoot "packaging\source_manifest.py") hash
-    if ($LASTEXITCODE -ne 0 -or $digest.Trim() -ne $origin.sha256) { throw "Source stage fingerprint mismatch" }
-} else {
-    & $python -B (Join-Path $repo "packaging\source_manifest.py") stage --destination $stageRoot
-    if ($LASTEXITCODE -ne 0) { throw "Source staging failed" }
-}
-& $python -B (Join-Path $stageRoot "packaging\check_dependencies.py") (Join-Path $stageRoot "packaging\requirements-windows.lock")
-if ($LASTEXITCODE -ne 0) { throw "Build environment failed the approved dependency check" }
-$nativeReceiptPath = Join-Path (Split-Path -Parent $env:BS_PODCASTS_LIBMPV_DLL) "native-build.json"
-if (-not (Test-Path -LiteralPath $nativeReceiptPath)) { throw "Native input receipt is missing; rebuild the pinned native dependencies" }
-$nativeReceipt = Get-Content -LiteralPath $nativeReceiptPath -Raw | ConvertFrom-Json
-$nativeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:BS_PODCASTS_LIBMPV_DLL).Hash.ToLowerInvariant()
-$nativeLockHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stageRoot "packaging\native-sources.json")).Hash.ToLowerInvariant()
-$nativeRecipeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stageRoot "packaging\build-libmpv-lgpl.sh")).Hash.ToLowerInvariant()
-if ($nativeReceipt.sha256 -ne $nativeHash -or $nativeReceipt.inputs_sha256 -ne $nativeLockHash -or $nativeReceipt.recipe_sha256 -ne $nativeRecipeHash) {
-    throw "Native DLL, inputs or recipe differ from the recorded build; rebuild the native library. Legacy receipts cannot be relabeled as verified."
-}
-$env:BS_PODCASTS_NATIVE_RECEIPT = $nativeReceiptPath
-$spec = Join-Path $stageRoot "packaging\bs-podcasts.spec"
-$env:BS_PODCASTS_SOURCE_STAGE = $stageRoot
-$env:BS_PODCASTS_BUILD_WORK = Join-Path $buildRoot "work"
-Push-Location $buildRoot
+# Remove this run's build work on success; keep it after a failure for diagnosis.
+$buildSucceeded = $false
 try {
-    $arguments = @("-B", "-m", "PyInstaller", "--noconfirm", "--distpath", (Join-Path $buildRoot "dist"), "--workpath", $env:BS_PODCASTS_BUILD_WORK)
-    if ($Clean) {
-        $arguments += "--clean"
+    $env:TEMP = $buildRoot
+    $env:TMP = $buildRoot
+    $env:PYTHONDONTWRITEBYTECODE = "1"
+    $env:PYINSTALLER_CONFIG_DIR = Join-Path $workspace ".cache\pyinstaller-windows"
+    Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    if ($SourceStage) {
+        $stageRoot = (Resolve-Path -LiteralPath $SourceStage).ProviderPath
+        $originPath = Join-Path $stageRoot ".build-origin.json"
+        if (-not (Test-Path -LiteralPath $originPath)) { throw "Source stage has no origin record" }
+        $origin = Get-Content -LiteralPath $originPath -Raw | ConvertFrom-Json
+        $digest = & $python -B (Join-Path $stageRoot "packaging\source_manifest.py") hash
+        if ($LASTEXITCODE -ne 0 -or $digest.Trim() -ne $origin.sha256) { throw "Source stage fingerprint mismatch" }
+    } else {
+        & $python -B (Join-Path $repo "packaging\source_manifest.py") stage --destination $stageRoot
+        if ($LASTEXITCODE -ne 0) { throw "Source staging failed" }
     }
-    $arguments += $spec
-    & $python @arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "PyInstaller failed with exit code $LASTEXITCODE"
-    }
-}
-finally {
-    Pop-Location
-}
-
-if (-not (Test-Path -LiteralPath $sourceExe)) {
-    throw "Build finished but the application folder is missing: $sourceExe"
-}
-
-# Execute only the non-GUI diagnostic in a disposable profile before publication.
-$checkDir = Join-Path $CheckRoot ("build-self-check-" + [guid]::NewGuid().ToString("N"))
-$checkArgs = '--self-check --self-check-dir "' + $checkDir + '"'
-$checkStart = New-Object System.Diagnostics.ProcessStartInfo
-$checkStart.FileName = $sourceExe
-$checkStart.Arguments = $checkArgs
-$checkStart.WorkingDirectory = $buildRoot
-$checkStart.UseShellExecute = $false
-$checkStart.CreateNoWindow = $true
-$checkProcess = [System.Diagnostics.Process]::Start($checkStart)
-if (-not $checkProcess.WaitForExit(30000)) {
-    $checkProcess.Kill()  # Only the owned diagnostic process, never another app.
-    throw "Packaged self-check timed out; previous application unchanged"
-}
-$checkReport = Join-Path $checkDir "self-check.json"
-if ($checkProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $checkReport)) {
-    throw "Packaged self-check failed; previous application unchanged"
-}
-$checked = Get-Content -LiteralPath $checkReport -Raw | ConvertFrom-Json
-if (-not $checked.passed) { throw "Packaged dependency/storage/asset check failed; previous application unchanged" }
-Write-Output "Packaged self-check passed (no GUI, real profile or audio device)."
-
-# Complete notices and provenance before replacing any previous artifact.
-& $python -B (Join-Path $stageRoot "packaging\check_frozen.py") $sourceDir --private-root $workspace
-if ($LASTEXITCODE -ne 0) { throw "Frozen privacy check failed; previous application unchanged" }
-$notices = Join-Path $sourceDir "_internal\THIRD-PARTY-NOTICES.txt"
-if (Test-Path -LiteralPath $notices) {
-    Copy-Item -LiteralPath $notices -Destination (Join-Path $sourceDir "THIRD-PARTY-NOTICES.txt")
-}
-$preparedManifest = Join-Path $buildRoot "BS-Podcasts-Windows.manifest.json"
-& $python -B (Join-Path $stageRoot "packaging\build_manifest.py") --artifact $sourceDir --output $preparedManifest
-if ($LASTEXITCODE -ne 0) { throw "Artifact manifest generation failed; previous application unchanged" }
-$metadataRoot = Join-Path $workspace ".cache\previous-deployments"
-Publish-Application -Application $sourceDir -Manifest $preparedManifest -Target $Destination -MetadataRoot $metadataRoot -PruneOldDeployments:$PruneOldDeployments
-$copiedDir = Join-Path $Destination "BS Podcasts"
-
-$copiedExe = Join-Path $copiedDir "BS Podcasts.exe"
-$size = (Get-ChildItem -LiteralPath $copiedDir -Recurse -File | Measure-Object -Sum Length).Sum
-$hash = Get-FileHash -Algorithm SHA256 -LiteralPath $copiedExe
-Write-Output "Copied application: $copiedDir"
-Write-Output "Launcher: $copiedExe"
-Write-Output "Total size: $size bytes"
-Write-Output "Launcher SHA-256: $($hash.Hash)"
-
-if ($Installer) {
-    $iscc = @(
-        (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
-        (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
-    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
-    if (-not $iscc) {
-        throw "-Installer was requested, but Inno Setup 6 was not found. The application was still copied to $copiedDir"
-    }
-    $installerSpec = Join-Path $stageRoot "packaging\bs-podcasts.iss"
-    # One source of truth for the version. The .iss used to carry its own
-    # literal, so the installer advertised a stale version the moment
-    # pyproject.toml was bumped without it.
+    & $python -B (Join-Path $stageRoot "packaging\check_dependencies.py") (Join-Path $stageRoot "packaging\requirements-windows.lock")
+    if ($LASTEXITCODE -ne 0) { throw "Build environment failed the approved dependency check" }
+    # One source of truth for the version. The packaged self-check must report it
+    # before anything is published, and the installer reuses it.
     $pyproject = Get-Content -LiteralPath (Join-Path $stageRoot "pyproject.toml") -Raw
     if ($pyproject -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
         throw "Could not read version from pyproject.toml"
     }
-    $appVersion = $Matches[1]
-    Write-Output "Installer version: $appVersion"
-    & $iscc "/DSourceDir=$copiedDir" "/DOutputDir=$Destination" "/DMyAppVersion=$appVersion" $installerSpec
-    if ($LASTEXITCODE -ne 0) {
-        throw "Inno Setup failed with exit code $LASTEXITCODE"
+    $projectVersion = $Matches[1]
+    $nativeReceiptPath = Join-Path (Split-Path -Parent $env:BS_PODCASTS_LIBMPV_DLL) "native-build.json"
+    if (-not (Test-Path -LiteralPath $nativeReceiptPath)) { throw "Native input receipt is missing; rebuild the pinned native dependencies" }
+    $nativeReceipt = Get-Content -LiteralPath $nativeReceiptPath -Raw | ConvertFrom-Json
+    $nativeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:BS_PODCASTS_LIBMPV_DLL).Hash.ToLowerInvariant()
+    $nativeLockHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stageRoot "packaging\native-sources.json")).Hash.ToLowerInvariant()
+    $nativeRecipeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stageRoot "packaging\build-libmpv-lgpl.sh")).Hash.ToLowerInvariant()
+    if ($nativeReceipt.sha256 -ne $nativeHash -or $nativeReceipt.inputs_sha256 -ne $nativeLockHash -or $nativeReceipt.recipe_sha256 -ne $nativeRecipeHash) {
+        throw "Native DLL, inputs or recipe differ from the recorded build; rebuild the native library. Legacy receipts cannot be relabeled as verified."
+    }
+    $env:BS_PODCASTS_NATIVE_RECEIPT = $nativeReceiptPath
+    $spec = Join-Path $stageRoot "packaging\bs-podcasts.spec"
+    $env:BS_PODCASTS_SOURCE_STAGE = $stageRoot
+    $env:BS_PODCASTS_BUILD_WORK = Join-Path $buildRoot "work"
+    Push-Location $buildRoot
+    try {
+        $arguments = @("-B", "-m", "PyInstaller", "--noconfirm", "--distpath", (Join-Path $buildRoot "dist"), "--workpath", $env:BS_PODCASTS_BUILD_WORK)
+        if ($Clean) {
+            $arguments += "--clean"
+        }
+        $arguments += $spec
+        & $python @arguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "PyInstaller failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    if (-not (Test-Path -LiteralPath $sourceExe)) {
+        throw "Build finished but the application folder is missing: $sourceExe"
+    }
+
+    # Execute only the non-GUI diagnostic in a disposable profile before publication.
+    $checkDir = Join-Path $CheckRoot ("build-self-check-" + [guid]::NewGuid().ToString("N"))
+    $checkArgs = '--self-check --self-check-dir "' + $checkDir + '"'
+    $checkStart = New-Object System.Diagnostics.ProcessStartInfo
+    $checkStart.FileName = $sourceExe
+    $checkStart.Arguments = $checkArgs
+    $checkStart.WorkingDirectory = $buildRoot
+    $checkStart.UseShellExecute = $false
+    $checkStart.CreateNoWindow = $true
+    $checkProcess = [System.Diagnostics.Process]::Start($checkStart)
+    if (-not $checkProcess.WaitForExit(30000)) {
+        $checkProcess.Kill()  # Only the owned diagnostic process, never another app.
+        throw "Packaged self-check timed out; previous application unchanged"
+    }
+    $checkReport = Join-Path $checkDir "self-check.json"
+    if ($checkProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $checkReport)) {
+        throw "Packaged self-check failed; previous application unchanged"
+    }
+    $checked = Get-Content -LiteralPath $checkReport -Raw | ConvertFrom-Json
+    if (-not $checked.passed) { throw "Packaged dependency/storage/asset check failed; previous application unchanged" }
+    if ([string]$checked.version -cne $projectVersion) {
+        throw "Packaged version '$($checked.version)' differs from pyproject.toml '$projectVersion'; previous application unchanged"
+    }
+    Write-Output "Packaged self-check passed for version $projectVersion (no GUI, real profile or audio device)."
+
+    # Complete notices and provenance before replacing any previous artifact.
+    & $python -B (Join-Path $stageRoot "packaging\check_frozen.py") $sourceDir --private-root $workspace
+    if ($LASTEXITCODE -ne 0) { throw "Frozen privacy check failed; previous application unchanged" }
+    $notices = Join-Path $sourceDir "_internal\THIRD-PARTY-NOTICES.txt"
+    if (Test-Path -LiteralPath $notices) {
+        Copy-Item -LiteralPath $notices -Destination (Join-Path $sourceDir "THIRD-PARTY-NOTICES.txt")
+    }
+    $preparedManifest = Join-Path $buildRoot "BS-Podcasts-Windows.manifest.json"
+    & $python -B (Join-Path $stageRoot "packaging\build_manifest.py") --artifact $sourceDir --output $preparedManifest
+    if ($LASTEXITCODE -ne 0) { throw "Artifact manifest generation failed; previous application unchanged" }
+    $metadataRoot = Join-Path $workspace ".cache\previous-deployments"
+    Publish-Application -Application $sourceDir -Manifest $preparedManifest -Target $Destination -MetadataRoot $metadataRoot -PruneOldDeployments:$PruneOldDeployments
+    $copiedDir = Join-Path $Destination "BS Podcasts"
+
+    $copiedExe = Join-Path $copiedDir "BS Podcasts.exe"
+    $size = (Get-ChildItem -LiteralPath $copiedDir -Recurse -File | Measure-Object -Sum Length).Sum
+    $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $copiedExe
+    Write-Output "Copied application: $copiedDir"
+    Write-Output "Launcher: $copiedExe"
+    Write-Output "Total size: $size bytes"
+    Write-Output "Launcher SHA-256: $($hash.Hash)"
+
+    if ($Installer) {
+        $iscc = @(
+            (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+            (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+        ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+        if (-not $iscc) {
+            throw "-Installer was requested, but Inno Setup 6 was not found. The application was still copied to $copiedDir"
+        }
+        $installerSpec = Join-Path $stageRoot "packaging\bs-podcasts.iss"
+        # One source of truth for the version. The .iss used to carry its own
+        # literal, so the installer advertised a stale version the moment
+        # pyproject.toml was bumped without it.
+        $appVersion = $projectVersion
+        Write-Output "Installer version: $appVersion"
+        & $iscc "/DSourceDir=$copiedDir" "/DOutputDir=$Destination" "/DMyAppVersion=$appVersion" $installerSpec
+        if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE"
+        }
+    }
+    $buildSucceeded = $true
+} finally {
+    if ($buildSucceeded) {
+        Remove-BuildRoot -Root $buildRoot -Workspace $workspace
+    } elseif (Test-Path -LiteralPath $buildRoot) {
+        Write-Output "Build work kept for diagnosis: $buildRoot"
     }
 }

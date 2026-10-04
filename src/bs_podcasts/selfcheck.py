@@ -171,20 +171,23 @@ def main() -> int:
             database.close()
 
     from . import __version__
-    from .config import app_version
     package_version = _distribution_version()
     compared_version = _pyproject_version_in_bundle()
-    if compared_version is None:
-        compared_version = app_version()
-    visible = package_version if package_version is not None else __version__
-    checks['version agreement'] = visible == compared_version == __version__
-    if not checks['version agreement']:
-        errors['version agreement'] = f'package {visible}, compared {compared_version}, module {__version__}'
+    # Agreement needs an independent source; never compare the module constant with itself.
+    # Builds compare the reported version with pyproject.toml where no source ships.
+    sources = [value for value in (package_version, compared_version) if value is not None]
+    version_agreement = 'not available'
+    if sources:
+        checks['version agreement'] = all(value == __version__ for value in sources)
+        version_agreement = 'checked'
+        if not checks['version agreement']:
+            errors['version agreement'] = f'package {package_version}, compared {compared_version}, module {__version__}'
     failed = [name for name, passed in checks.items() if not passed]
     if args.self_check_dir:
         report = {
             'version': __version__,
-            'package_version': visible,
+            'version_agreement': version_agreement,
+            'package_version': package_version,
             'compared_version': compared_version,
             'python': sys.version.split()[0],
             'checks': checks,
@@ -198,7 +201,8 @@ def main() -> int:
         detail = " (" + "; ".join(parts) + ")" if parts else ""
         print("Self-check failed: " + ", ".join(failed) + detail)
         return 1
-    print("BS Podcasts self-check passed.")
+    print("BS Podcasts self-check passed."
+          + (" Version agreement: not available in this runtime." if not sources else ""))
     return 0
 
 
