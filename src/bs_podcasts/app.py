@@ -186,8 +186,13 @@ def _instance_name() -> str:
     return f"{APP_ID}-{getpass.getuser()}"
 
 
-def _probe_running_instance(name: str, timeout_ms: int = 300) -> bool:
-    """True when a live instance answered the raise request."""
+def _probe_running_instance(name: str, timeout_ms: int = 300, answered_only: bool = False) -> bool:
+    """True when a live instance answered the raise request.
+
+    A peer that accepts but stays silent also counts unless `answered_only`:
+    callers that hold or still need the library lease ask for an answer,
+    because only the lease proves who owns the library. Another local
+    account can create a listener under this name on Windows."""
     probe = QLocalSocket()
     probe.connectToServer(name)
     if not probe.waitForConnected(timeout_ms):
@@ -202,7 +207,7 @@ def _probe_running_instance(name: str, timeout_ms: int = 300) -> bool:
     # Connected but silent: something IS listening. Treating that as dead
     # used to removeServer() a live-but-busy first instance's socket, after
     # which BOTH processes listened and shared one library.
-    return True
+    return not answered_only
 
 
 def _close_local_server(server):
@@ -243,7 +248,8 @@ def _claim_single_instance(app):
     Returns None when a live instance took over, otherwise a server (which
     may not be listening — running unguarded beats not launching)."""
     name = _instance_name()
-    if _probe_running_instance(name):
+    # The lease is held, so a silent listener cannot own this library.
+    if _probe_running_instance(name, answered_only=True):
         return None
     server = QLocalServer(app)
     server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
@@ -294,7 +300,8 @@ def main() -> int:
     root = application_data_dir()
     name = _instance_name()
     # An instance that is already listening owns the lease and answers here.
-    if _probe_running_instance(name):
+    # A silent listener does not end this launch: the lease decides below.
+    if _probe_running_instance(name, answered_only=True):
         return 0
     from .data.lease import LibraryLease
 
@@ -317,13 +324,13 @@ def main() -> int:
             # Ordinary second launch: the peer holds the library and raises
             # its window. A peer that no longer answers is finishing its quit
             # (it stops listening first), so give its lease a moment to free.
-            if _probe_running_instance(name, timeout_ms=1500):
+            if _probe_running_instance(name, timeout_ms=1500, answered_only=True):
                 return 0
             if _time.monotonic() >= lease_wait_until:
                 dialog = StartupErrorDialog(
                     "BS Podcasts is still closing",
                     "The library is still in use, most likely by a window that is "
-                    "finishing its shutdown. Try again in a moment.",
+                    "finishing its shutdown or not responding. Try again in a moment.",
                 )
                 dialog.exec()
                 return 1
