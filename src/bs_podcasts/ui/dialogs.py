@@ -93,16 +93,32 @@ def _wrap_long_value(value: str) -> str:
     )
 
 
+_MONTHS = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
+
 def _episode_date(value: str) -> str:
+    # Spelled out rather than strftime: the month, AM/PM and zone name follow
+    # the user's locale, and locales with no AM/PM marker (German, French)
+    # showed an ambiguous 12-hour time inside English text.
     if not value:
         return ""
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        zone = ""
         if parsed.tzinfo is not None:
             parsed = parsed.astimezone()
-        hour = parsed.strftime("%I").lstrip("0") or "0"
-        zone = parsed.strftime(" %Z") if parsed.tzinfo is not None else ""
-        return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year} at {hour}:{parsed.strftime('%M %p')}{zone}"
+            name = parsed.tzname() or ""
+            if name.isascii() and name.isalpha() and len(name) <= 5:
+                zone = f" {name}"
+            else:
+                minutes = int(parsed.utcoffset().total_seconds() // 60)
+                zone = f" UTC{'+' if minutes >= 0 else '-'}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+        hour = parsed.hour % 12 or 12
+        meridiem = "AM" if parsed.hour < 12 else "PM"
+        return f"{_MONTHS[parsed.month - 1]} {parsed.day}, {parsed.year} at {hour}:{parsed.minute:02d} {meridiem}{zone}"
     except (ValueError, OverflowError, OSError):
         return value
 
