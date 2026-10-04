@@ -11,6 +11,10 @@ BODIES = threading.BoundedSemaphore(12)
 PLAYBACK_HEADERS = threading.BoundedSemaphore(2)
 PLAYBACK_DNS = threading.BoundedSemaphore(2)
 PLAYBACK_BODIES = threading.BoundedSemaphore(2)
+_FOREGROUND_GATES = (PLAYBACK_HEADERS, PLAYBACK_DNS, PLAYBACK_BODIES)
+# A superseded play is cancelled at once, but its worker can take a moment to
+# hand its permit back. A new play waits this long for it instead of failing.
+FOREGROUND_ADMISSION_WAIT = 2.0
 _context = threading.local()
 
 
@@ -55,6 +59,22 @@ class Deadline:
         if remaining <= 0:
             raise NetworkDeadline("Network operation exceeded its deadline.")
         return remaining
+
+
+def _admit(gate, deadline) -> bool:
+    """Take a permit. Background work fails fast when the gate is full;
+    playback waits briefly, within its own deadline and cancellation."""
+    if gate.acquire(blocking=False):
+        return True
+    if not any(gate is foreground for foreground in _FOREGROUND_GATES):
+        return False
+    until = time.monotonic() + FOREGROUND_ADMISSION_WAIT
+    while True:
+        left = min(until - time.monotonic(), deadline.remaining())
+        if left <= 0:
+            return False
+        if gate.acquire(timeout=min(.05, left)):
+            return True
 
 
 def abort_response(response):
@@ -138,7 +158,7 @@ def _install_socket_watch():
 
 def bounded_call(work, deadline, gate=None, dispose=None):
     gate = gate if gate is not None else (PLAYBACK_HEADERS if deadline.foreground else HEADERS)
-    if not gate.acquire(blocking=False):
+    if not _admit(gate, deadline):
         raise NetworkDeadline("Network workers are busy; retry shortly.")
     results = queue.Queue(1)
     handoff = threading.Lock()
@@ -210,7 +230,12 @@ def bounded_call(work, deadline, gate=None, dispose=None):
 
 def bounded_chunks(response, original, deadline, maximum, chunk_size, decode_unicode=False):
     gate = PLAYBACK_BODIES if deadline.foreground else BODIES
-    if not gate.acquire(blocking=False):
+    try:
+        admitted = _admit(gate, deadline)
+    except NetworkDeadline:
+        abort_response(response)
+        raise
+    if not admitted:
         abort_response(response)
         raise NetworkDeadline("Network readers are busy; retry shortly.")
     results = queue.Queue(4)
