@@ -2365,7 +2365,9 @@ class SettingsPage(BasePage):
                 text.setFixedWidth(scaled_px(260))
                 editor = QKeySequenceEdit()
                 editor.setFixedWidth(scaled_px(self.FIELD_WIDTH))
-                editor.setKeySequence(bindings.get(name, ""))
+                # Stored bindings are portable text; a bare string would be
+                # parsed in the platform's native format.
+                editor.setKeySequence(QKeySequence(bindings.get(name, ""), QKeySequence.SequenceFormat.PortableText))
                 editor.setAccessibleName(f"Shortcut for {label}")
                 editor.editingFinished.connect(lambda key=name, ed=editor: self.shortcut_changed.emit(key, ed.keySequence().toString()))
                 self._shortcut_editors[name] = editor

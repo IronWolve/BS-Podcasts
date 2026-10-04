@@ -1057,7 +1057,10 @@ class ShortcutsDialog(StyledDialog):
         columns = QHBoxLayout()
         columns.setSpacing(SPACE["xl"])
         left, right = QVBoxLayout(), QVBoxLayout()
-        for index, (title, entries) in enumerate(list(groups) + [("Fixed keys", self.FIXED)]):
+        from .shortcuts import display_text
+
+        bindable = [(title, [(display_text(key), label) for key, label in entries]) for title, entries in groups]
+        for index, (title, entries) in enumerate(bindable + [("Fixed keys", self.FIXED)]):
             target = left if index % 2 == 0 else right
             heading = PlainTextLabel(title.upper())
             heading.setObjectName("eyebrow")

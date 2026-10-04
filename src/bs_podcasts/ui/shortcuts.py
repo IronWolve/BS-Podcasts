@@ -1,12 +1,29 @@
 """Persisted, rebindable application shortcut registry."""
 
+import sys
+
 from PySide6.QtGui import QKeySequence, QShortcut
 
 _PORTABLE = QKeySequence.SequenceFormat.PortableText
+# "Ctrl" is Command on the Mac, and Command-Space opens Spotlight.
+_MAC_DEFAULTS = {"Ctrl+Space": "Ctrl+Alt+P"}
 
 
 def _sequence(text: str) -> QKeySequence:
     return QKeySequence(text or "", _PORTABLE)
+
+
+def _platform_default(default: str) -> str:
+    return _MAC_DEFAULTS.get(default, default) if sys.platform == "darwin" else default
+
+
+def display_text(sequence: str) -> str:
+    """How a stored binding reads to the user. Bindings are stored and parsed
+    as portable text; Mac users read Command and Option symbols, not "Ctrl+".
+    Never feed the result back into rebind()."""
+    if sys.platform != "darwin" or not sequence:
+        return sequence
+    return _sequence(sequence).toString(QKeySequence.SequenceFormat.NativeText)
 
 
 class ShortcutManager:
@@ -15,9 +32,13 @@ class ShortcutManager:
         self.library = library
         self._save_settings = save_settings
         self._shortcuts = {}
+        self._hint_tokens = {}
 
     def add(self, name: str, default: str, callback):
+        written, default = default, _platform_default(default)
         sequence = self.library.setting(f"shortcut.{name}", default) if self.library else default
+        if sequence == written:
+            sequence = default  # a reset stored the reserved default
         stored = _sequence(sequence)
         if stored.toString(_PORTABLE) != _sequence(default).toString(_PORTABLE) and self._unmodified(stored):
             # Bound before rebind() refused bare keys: a stored "Return" or
@@ -26,6 +47,7 @@ class ShortcutManager:
         shortcut = QShortcut(_sequence(sequence), self.parent)
         shortcut.activated.connect(callback)
         self._shortcuts[name] = (shortcut, default)
+        self._hint_tokens[name] = written
         return shortcut
 
     def rebind(self, name: str, sequence: str):
@@ -87,9 +109,10 @@ class ShortcutManager:
 
     def format_hint(self, text: str) -> str:
         import re
+        # Hint templates name the defaults as written in the source.
         choices = {
-            default: shortcut.key().toString(_PORTABLE)
-            for shortcut, default in self._shortcuts.values()
+            self._hint_tokens.get(name, default): display_text(shortcut.key().toString(_PORTABLE))
+            for name, (shortcut, default) in self._shortcuts.items()
             if default
         }
         if not choices:
