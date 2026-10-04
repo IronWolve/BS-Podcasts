@@ -1429,9 +1429,8 @@ class MainWindow(QMainWindow):
         # Under the convert lock: a worker inside _ui_episodes may be reading
         # the cache this clears.
         self._invalidate_library_caches()
-        # SQLite reuses rowids, so a fetched-once set surviving a reset would
-        # make a future episode with a recycled id silently skip its
-        # chapters/transcript/artwork fetch for the whole session.
+        # Episode IDs are never reused (the stable-ID sequences), so this only
+        # forgets fetched-once marks for episodes the reset deletes.
         self._details_fetched.clear()
         self._artwork_fetched.clear()
         self.podcast_page.set_items([])
@@ -1575,10 +1574,9 @@ class MainWindow(QMainWindow):
         delete_files = dialog.delete_files.isChecked()
         confirmed_paths = [path for path, _size in preview.get("files", ())] if delete_files else []
         self._previews.pop(show.feed_url, None)
-        # The removed show's episode rowids can be reused by the next import;
-        # dropping the whole fetched-once memory is cheap (each fetch
-        # re-checks its own preconditions) and beats a recycled id silently
-        # skipping its chapters/transcript/artwork for the session.
+        # Episode IDs are never reused (the stable-ID sequences); dropping the
+        # whole fetched-once memory just forgets the removed show's episodes
+        # and is cheap, since each fetch re-checks its own preconditions.
         self._details_fetched.clear()
         self._artwork_fetched.clear()
         if self.pages.currentWidget() is self.episode_page and self._hero_show_id == show_id:
