@@ -356,23 +356,12 @@ class LibraryRepository:
                 "SELECT COUNT(*) FROM episodes WHERE is_new=1"
             ).fetchone()[0]
 
-    def artwork_paths(self, exclude_show_id: int | None = None) -> set[str]:
-        """Every artwork file the library still references.
-
-        `exclude_show_id` ignores one show's own rows, so a removal can ask
-        what would remain referenced *once this show is gone* while the show
-        is still present — which is what lets files be unlinked before the
-        records naming them are dropped.
-        """
-        shows_clause = "" if exclude_show_id is None else " AND id != ?"
-        episodes_clause = "" if exclude_show_id is None else " AND show_id != ?"
-        params = () if exclude_show_id is None else (exclude_show_id, exclude_show_id)
+    def artwork_paths(self) -> set[str]:
+        """Every artwork file the library still references."""
         with self.database.connect() as connection:
             rows = connection.execute(
-                f"SELECT artwork_path FROM shows WHERE artwork_path != ''{shows_clause} "
-                f"UNION SELECT episode_artwork_path FROM episodes "
-                f"WHERE episode_artwork_path != ''{episodes_clause}",
-                params,
+                "SELECT artwork_path FROM shows WHERE artwork_path != '' "
+                "UNION SELECT episode_artwork_path FROM episodes WHERE episode_artwork_path != ''"
             ).fetchall()
         return {row[0] for row in rows}
 
@@ -581,9 +570,9 @@ class LibraryRepository:
         with self.database.connect() as connection:
             connection.execute("DELETE FROM shows WHERE id=?", (show_id,))
             connection.execute("DELETE FROM settings WHERE key=?", (retention_key,))
-        # That raw DELETE bypasses the settings cache, and SQLite reuses a
-        # deleted show's rowid — a stale entry would be read back as the NEXT
-        # show's retention confirmation and skip its delete prompt entirely.
+        # That raw DELETE bypasses the settings cache. Show IDs are never
+        # reused (migration 017's entity_sequences), so this only drops the
+        # retired show's entry from the mirror.
         with self._settings_lock:
             if self._settings_cache is not None:
                 self._settings_cache.pop(retention_key, None)
@@ -860,11 +849,6 @@ class LibraryRepository:
             return connection.executemany('UPDATE episodes SET favorite=? WHERE id=?',
                 ((int(favorite), value) for value in dict.fromkeys(episode_ids))).rowcount
 
-    def mark_show_seen(self, show_id: int) -> int:
-        """Opening a show clears its new-episode badge."""
-        with self.database.connect() as connection:
-            return connection.execute("UPDATE episodes SET is_new=0 WHERE show_id=? AND is_new=1", (show_id,)).rowcount
-
     def clear_all_new(self, played: bool = False) -> int:
         with self.database.connect() as connection:
             if played:
@@ -949,30 +933,6 @@ class LibraryRepository:
                     "AND played IS ? AND is_new IS ? AND position_seconds IS ? AND last_played IS ?",
                     (*values, *identity, *after)).rowcount
         return restored
-
-    def mark_played_many(self, episode_ids, played: bool = True) -> int:
-        """One transaction for a bulk mark: the per-row method committed
-        (and synced) once per selected episode (audit F-031)."""
-        ids = [int(i) for i in episode_ids]
-        if not ids:
-            return 0
-        with self.database.connect() as connection:
-            if played:
-                connection.executemany(
-                    "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=1, is_new=0, last_played=? WHERE id=?",
-                    [(time.time(), i) for i in ids],
-                )
-            else:
-                connection.executemany(
-                    """UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=0, is_new=0,
-                       position_seconds = CASE
-                           WHEN COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds) > 0
-                                AND position_seconds >= COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds) - 2
-                           THEN 0 ELSE position_seconds END
-                       WHERE id=?""",
-                    [(i,) for i in ids],
-                )
-        return len(ids)
 
     def enqueue_many(self, episode_ids) -> int:
         """Append many episodes to the queue in one transaction, in order."""
@@ -1089,16 +1049,14 @@ class LibraryRepository:
         )
 
     @staticmethod
-    def _show_select(episode_filter: str = "") -> str:
+    def _show_select() -> str:
         """Shows with their cached counters (migration 014).
 
         The counts and the latest episode used to be aggregated from every
         episode row on each call (85 ms / 280 MB of reads on a 175k-episode
         library per reload, audit F-051); triggers now keep them on the
-        shows row. `episode_filter` is accepted for the old call sites and
-        ignored: the counters are per show already.
+        shows row.
         """
-        del episode_filter
         return "SELECT s.* FROM shows s"
 
     @staticmethod

@@ -223,13 +223,6 @@ class ListeningRepository:
             row = connection.execute("SELECT id FROM folders WHERE name=? COLLATE NOCASE", (name.strip(),)).fetchone()
         return row["id"]
 
-    def assign_show(self, folder_id: int, show_id: int):
-        with self.database.connect() as connection:
-            connection.execute(
-                "INSERT OR IGNORE INTO folder_shows(folder_id, show_id) VALUES (?, ?)",
-                (folder_id, show_id),
-            )
-
     def create_playlist(self, name: str) -> int:
         with self.database.connect() as connection:
             connection.execute(
