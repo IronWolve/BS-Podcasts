@@ -29,6 +29,10 @@ GENERIC_CONTENT_TYPES = frozenset({
 # installed image plugin, including a PDF renderer on Linux that the Windows
 # and Mac builds leave out; anything else falls back to initials.
 ARTWORK_FORMATS = frozenset({"png", "jpeg", "jpg", "gif", "webp", "bmp", "svg", "svgz"})
+# The byte cap bounds compressed size only: a small PNG can declare a canvas
+# that costs hundreds of MiB to decode. Covers are about 3000 px square.
+MAX_ARTWORK_SIDE = 8192
+MAX_ARTWORK_PIXELS = 4096 * 4096
 
 def _looks_textual(head: bytes) -> bool:
     """True for payloads that are plainly a document rather than an image.
@@ -91,6 +95,11 @@ class ArtworkCache:
         reader.setDecideFormatFromContent(True)
         # The handler chosen here is the one read() uses.
         valid = bytes(reader.format()).decode("ascii", "replace").lower() in ARTWORK_FORMATS
+        if valid:
+            # Header dimensions, before any pixel is decoded.
+            size = reader.size()
+            valid = (0 < size.width() <= MAX_ARTWORK_SIDE and 0 < size.height() <= MAX_ARTWORK_SIDE
+                     and size.width() * size.height() <= MAX_ARTWORK_PIXELS)
         if valid:
             reader.setScaledSize(QSize(64, 64))
             valid = not reader.read().isNull()
