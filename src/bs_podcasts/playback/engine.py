@@ -247,37 +247,23 @@ class MpvEngine:
             self._pending_autoplay = False
         self._set("pause", True)
 
-    @property
-    def autoplay_pending(self) -> bool:
-        """The intent the in-flight load will apply once the file opens."""
-        return self._pending_autoplay
-
     def seek_absolute(self, seconds: float):
         self._guard()
         with self._state_lock:
-            if not self._loading:
-                pending = None
-            else:
+            if self._loading:
                 # mpv has no file yet; fold the seek into the pending start so the
                 # file-loaded handler applies it instead of the stale load target.
+                # The service already shows the target in its snapshot.
                 self._pending_position = max(0.0, float(seconds))
-                pending = self._pending_position
-        if pending is not None:
-            self._emit("position", pending)
-            return
+                return
         self._player.command("seek", max(0.0, float(seconds)), "absolute", "exact")
 
     def skip(self, seconds: float):
         self._guard()
         with self._state_lock:
-            if not self._loading:
-                pending = None
-            else:
+            if self._loading:
                 self._pending_position = max(0.0, self._pending_position + float(seconds))
-                pending = self._pending_position
-        if pending is not None:
-            self._emit("position", pending)
-            return
+                return
         self._player.command("seek", float(seconds), "relative", "exact")
 
     def set_speed(self, speed: float):
