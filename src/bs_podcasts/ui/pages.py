@@ -206,6 +206,32 @@ class _ListPageMixin:
             self._context_item = item
             self.context_changed.emit(item)
 
+    def _queue_button_event(self, view, delegate, event):
+        kind = event.type()
+        if kind not in {QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                        QEvent.Type.MouseButtonDblClick} or event.button() != Qt.MouseButton.LeftButton:
+            return False
+        position = event.position().toPoint()
+        index = view.indexAt(position)
+        item = index.data(ItemRoles.ITEM) if index.isValid() else None
+        over_queue = delegate.can_queue(item) and delegate.queue_rect(view.visualRect(index)).contains(position)
+        if kind == QEvent.Type.MouseButtonPress:
+            self._pressed_queue_id = item.episode_id if over_queue else None
+            if over_queue:
+                hide_hover_bubble()
+                QToolTip.hideText()
+            # Consume the press too: queueing must not change selection/details.
+            return over_queue
+        if kind == QEvent.Type.MouseButtonDblClick:
+            return over_queue
+        pressed = getattr(self, "_pressed_queue_id", None)
+        self._pressed_queue_id = None
+        if pressed is None:
+            return False
+        if over_queue and item.episode_id == pressed:
+            self.queue_episode_requested.emit(item)
+        return True
+
     def _activated(self, index):
         item = index.data(ItemRoles.ITEM)
         if item is not None:
@@ -926,6 +952,7 @@ SORT_OPTIONS = (
 
 class EpisodeListPage(BasePage, _ListPageMixin):
     play_requested = Signal(object)
+    queue_episode_requested = Signal(object)
     load_more_requested = Signal()
     order_changed = Signal(list)
     menu_requested = Signal(object, object)
@@ -997,8 +1024,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             self.view.setDefaultDropAction(Qt.DropAction.MoveAction)
             self.model.order_changed.connect(self.order_changed)
         else:
-            self.view.setDragEnabled(True)
-            self.view.setDragDropMode(QListView.DragDropMode.DragOnly)
+            self.view.setDragDropMode(QListView.DragDropMode.NoDragDrop)
         self._all_items = list(items)
         self.root.addWidget(self.stack, 1)
         # Paging footer for capped views (global Episodes, History). Hidden by
@@ -1151,6 +1177,8 @@ class EpisodeListPage(BasePage, _ListPageMixin):
 
     def eventFilter(self, watched, event):
         if watched is self.view.viewport():
+            if self._queue_button_event(self.view, self.delegate, event):
+                return True
             self._track_item_tooltip(self.view, event)
         if watched is self.view.viewport() and event.type() == QEvent.Type.ContextMenu:
             self._menu(event.pos())
@@ -1160,12 +1188,14 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             position = event.position().toPoint()
             visual = self.view.visualRect(index) if index.isValid() else None
             over_play = index.isValid() and self.delegate.play_rect(visual).contains(position)
+            item = index.data(ItemRoles.ITEM) if index.isValid() else None
+            over_queue = self.delegate.can_queue(item) and self.delegate.queue_rect(visual).contains(position)
             over_grip = (
                 index.isValid()
                 and self.reorder
                 and self.delegate.grip_rect(visual).contains(position)
             )
-            if over_play:
+            if over_play or over_queue:
                 cursor = Qt.CursorShape.PointingHandCursor
             elif over_grip:
                 cursor = Qt.CursorShape.SizeAllCursor
@@ -1232,6 +1262,7 @@ class SummaryCard(QPushButton):
 
 class HomePage(BasePage, _ListPageMixin):
     play_requested = Signal(object)
+    queue_episode_requested = Signal(object)
     new_requested = Signal()
     resume_all_requested = Signal()
     resume_remove_requested = Signal(list)
@@ -1285,9 +1316,7 @@ class HomePage(BasePage, _ListPageMixin):
             EpisodeModel(()),
             EmptyState(*self._empty_text, glyph="episodes"),
         )
-        for drag_view in (self.view,):
-            drag_view.setDragEnabled(True)
-            drag_view.setDragDropMode(QListView.DragDropMode.DragOnly)
+        self.view.setDragDropMode(QListView.DragDropMode.NoDragDrop)
         self.activate_requested.connect(self.play_requested)
         self.root.addWidget(self.stack, 1)
         self._greeting_timer = QTimer(self)
@@ -1398,11 +1427,17 @@ class HomePage(BasePage, _ListPageMixin):
         if view is None or watched is not view.viewport():
             return super().eventFilter(watched, event)
         delegate = self.delegate
+        if self._queue_button_event(view, delegate, event):
+            return True
         self._track_item_tooltip(view, event)
         if event.type() == QEvent.Type.MouseMove:
             index = view.indexAt(event.position().toPoint())
-            over_play = index.isValid() and delegate.play_rect(view.visualRect(index)).contains(event.position().toPoint())
-            view.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over_play else Qt.CursorShape.ArrowCursor)
+            position = event.position().toPoint()
+            visual = view.visualRect(index) if index.isValid() else None
+            item = index.data(ItemRoles.ITEM) if index.isValid() else None
+            over_play = index.isValid() and delegate.play_rect(visual).contains(position)
+            over_queue = delegate.can_queue(item) and delegate.queue_rect(visual).contains(position)
+            view.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over_play or over_queue else Qt.CursorShape.ArrowCursor)
         if event.type() == QEvent.Type.ContextMenu:
             index = view.indexAt(event.pos())
             if index.isValid():

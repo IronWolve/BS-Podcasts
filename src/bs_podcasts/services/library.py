@@ -117,7 +117,7 @@ class LibraryService:
         return self.repository.get_setting(key, default)
 
     def enqueue(self, episode_id: int):
-        self.repository.enqueue(episode_id)
+        return self.repository.enqueue(episode_id)
 
     def enqueue_many(self, episode_ids) -> int:
         return self.repository.enqueue_many(episode_ids)

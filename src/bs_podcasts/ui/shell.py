@@ -496,6 +496,8 @@ class MainWindow(QMainWindow):
             page.play_requested.connect(lambda item: self._play_or_toggle(item.episode_id))
         self.episode_page.play_requested.connect(self._play_episode_item)
         self.bookmark_page.play_requested.connect(self._play_bookmark)
+        for page in (self.home_page, self.episode_page, self.download_page, self.history_page, self.bookmark_page):
+            page.queue_episode_requested.connect(lambda item: self._queue_row_episode(item.episode_id))
         for page in (self.playlist_page, self.history_page):
             page.header.action.setObjectName("dangerButton")
         self.playlist_page._hide_action_when_empty = True
@@ -3854,6 +3856,20 @@ class MainWindow(QMainWindow):
         if self.playback is not None:
             self._play_after_download = 0
             self._playback_command("next")
+
+    def _queue_row_episode(self, episode_id: int):
+        if self.library is None or not episode_id:
+            return
+        library = self.library
+
+        def apply(added):
+            self._reload_queue()
+            if added:
+                self._notify("Added to Up Next", "success", "Undo", lambda: self._remove_from_queue(episode_id))
+            else:
+                self._notify("Already in Up Next", "info")
+
+        self._run_command(lambda: library.enqueue(episode_id), apply)
 
     def _queue_episode(self, episode_id: int, quiet: bool = False):
         if self.library is None or not episode_id:

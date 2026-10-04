@@ -718,15 +718,16 @@ class LibraryRepository:
                 return self._settings_pending[key][1]
             return (self._settings_cache or {}).get(key, default)
 
-    def enqueue(self, episode_id: int):
+    def enqueue(self, episode_id: int) -> bool:
         with self.database.connect() as connection:
             # Position computed inside the INSERT: a separate SELECT let two
             # connections claim the same position.
-            connection.execute(
+            cursor = connection.execute(
                 "INSERT OR IGNORE INTO queue(episode_id, position, added_at) "
                 "SELECT ?, COALESCE(MAX(position), 0) + 1, ? FROM queue",
                 (episode_id, time.time()),
             )
+            return cursor.rowcount > 0
 
     def list_queue(self) -> list[Episode]:
         with self.database.connect() as connection:

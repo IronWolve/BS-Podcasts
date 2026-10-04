@@ -624,6 +624,13 @@ class EpisodeDelegate(QStyledItemDelegate):
     def helpEvent(self, event, view, option, index):
         """Keep the episode tooltip anchored to the row that owns it."""
         if event.type() == QEvent.Type.ToolTip and index.isValid():
+            item = index.data(ItemRoles.ITEM)
+            if self.can_queue(item) and self.queue_rect(option.rect).contains(event.pos()):
+                from .widgets import hide_hover_bubble
+
+                hide_hover_bubble()
+                QToolTip.showText(event.globalPos(), "Add to Up Next", view)
+                return True
             tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
             if tooltip:
                 from .widgets import show_hover_bubble
@@ -642,6 +649,13 @@ class EpisodeDelegate(QStyledItemDelegate):
         size = scaled_px(30 if self.compact else 36)
         pad = scaled_px(10)
         return QRect(row.right() - size - pad, row.center().y() - size // 2, size, size)
+
+    def can_queue(self, item) -> bool:
+        return not self.reorder and bool(getattr(item, "episode_id", 0))
+
+    def queue_rect(self, rect: QRect) -> QRect:
+        play = self.play_rect(rect)
+        return play.translated(-play.width() - scaled_px(8), 0)
 
     def grip_rect(self, rect: QRect) -> QRect:
         row = rect.adjusted(2, 3, -4, -3)
@@ -691,6 +705,8 @@ class EpisodeDelegate(QStyledItemDelegate):
 
         text_left = art.right() + scaled_px(14)
         play_zone = scaled_px(self.PLAY_ZONE + 8)
+        if self.can_queue(item):
+            play_zone += self.play_rect(option.rect).width() + scaled_px(8)
         badge_reserve = 0
         state_color = STATE_COLORS.get(item.state, item.accent)
         show_badge = item.state not in {"New", "Unplayed", "Played", "Preview"}
@@ -753,6 +769,13 @@ class EpisodeDelegate(QStyledItemDelegate):
 
         play = self.play_rect(option.rect)
         if hovered or selected or playing:
+            if self.can_queue(item):
+                queue = self.queue_rect(option.rect)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(COLORS["surface_soft"]))
+                painter.drawEllipse(queue)
+                inset = scaled_px(8)
+                icons.paint(painter, "queue-add", COLORS["text"], queue.adjusted(inset, inset, -inset, -inset), scale)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["accent"] if hovered else COLORS["surface_soft"]))
             painter.drawEllipse(play)
