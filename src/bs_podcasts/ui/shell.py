@@ -509,7 +509,7 @@ class MainWindow(QMainWindow):
         self.home_page.empty_action_requested.connect(lambda: self.navigation.select(PAGE_DISCOVER))
         self.download_page.remove_requested.connect(self._delete_downloads)
         self.bookmark_page.remove_requested.connect(self._delete_bookmarks)
-        self.history_page.remove_requested.connect(lambda items: [self._remove_history(item.episode_id) for item in items])
+        self.history_page.remove_requested.connect(lambda items: self._remove_history([item.episode_id for item in items]))
         self.episode_page.load_more_requested.connect(self._load_more_episodes)
         self.history_page.load_more_requested.connect(self._load_more_history)
         self.context.download_menu_requested.connect(self._download_menu)
@@ -1590,15 +1590,15 @@ class MainWindow(QMainWindow):
 
     BULK_CONFIRM_ROWS = 20
 
-    def _confirm_bulk(self, count: int, verb: str) -> bool:
+    def _confirm_bulk(self, count: int, verb: str, *, title: str = "", detail: str = "", destructive: bool = False) -> bool:
         """A multi-select action on more than a screenful of rows asks first;
         one mis-click on a 5,000-row selection used to be irreversible without Undo."""
         if count <= self.BULK_CONFIRM_ROWS:
             return True
         dialog = ConfirmDialog(
-            f"{verb} {count} episodes?",
-            f"This applies to every selected episode ({count}).",
-            verb, destructive=False, parent=self,
+            title or f"{verb} {count} episodes?",
+            detail or f"This applies to every selected episode ({count}).",
+            verb, destructive=destructive, parent=self,
         )
         return dialog.exec() == QDialog.DialogCode.Accepted
 
@@ -3290,7 +3290,7 @@ class MainWindow(QMainWindow):
             remove_history = menu.addAction(
                 icons.icon("close", COLORS["text"], 16),
                 f"Remove from history ({status})",
-                lambda: [self._remove_history(item.episode_id) for item in targets],
+                lambda: self._remove_history([item.episode_id for item in targets]),
             )
             remove_history.setShortcut(QKeySequence(Qt.Key.Key_Delete))
         if continue_listening:
@@ -3741,16 +3741,45 @@ class MainWindow(QMainWindow):
     def _delete_bookmarks(self, items):
         if self.listening is None:
             return
-        ids = [item.bookmark_id for item in items if item.bookmark_id]
-        if ids:
-            def work():
-                return self.listening.repository.delete_bookmarks(ids)
-            def apply(_result):
-                self._reload_bookmarks()
-                if self.context._episode_id:
-                    self._load_listening_details(self.context._episode_id)
-                self._notify(f"Deleted {len(ids)} bookmark{'s' if len(ids) != 1 else ''}", "success")
-            self._run_read(work, apply, 'delete-bookmarks', pool=self.commands, coalesce=False)
+        ids = list(dict.fromkeys(item.bookmark_id for item in items if item.bookmark_id))
+        count = len(ids)
+        if not ids or not self._confirm_bulk(
+                count, "Delete", title=f"Delete {count} bookmarks?",
+                detail="Their positions and titles are removed. Undo is offered afterwards.", destructive=True):
+            return
+        repository = self.listening.repository
+
+        def work():
+            # Snapshot in the same command so Undo can put back typed titles.
+            saved = [bookmark for bookmark_id in ids for bookmark in repository.bookmarks(bookmark_id=bookmark_id)]
+            repository.delete_bookmarks(ids)
+            return saved
+
+        def apply(saved):
+            self._bookmarks_changed()
+            deleted = len(saved)
+            if deleted:
+                self._notify(f"Deleted {deleted} bookmark{'s' if deleted != 1 else ''}", "success",
+                             "Undo", lambda: self._restore_bookmarks(saved))
+        self._run_read(work, apply, 'delete-bookmarks', pool=self.commands, coalesce=False)
+
+    def _restore_bookmarks(self, saved):
+        if self.listening is None or not saved:
+            return
+        repository = self.listening.repository
+
+        def work():
+            # Oldest first, so the restored bookmarks keep their order.
+            for bookmark in sorted(saved, key=lambda bookmark: bookmark.created_at):
+                repository.add_bookmark(bookmark.episode_id, bookmark.position_seconds, bookmark.title)
+            return len(saved)
+
+        self._run_command(work, lambda _count: self._bookmarks_changed())
+
+    def _bookmarks_changed(self):
+        self._reload_bookmarks()
+        if self.context._episode_id:
+            self._load_listening_details(self.context._episode_id)
 
     def _pane_bookmark_menu(self, position):
         entry = self.context.bookmark_list.itemAt(position)
@@ -3793,10 +3822,49 @@ class MainWindow(QMainWindow):
                 self._notify("Bookmark renamed", "success")
             self._run_command(lambda: self.listening.rename_bookmark(item.bookmark_id, value), apply)
 
-    def _remove_history(self, episode_id: int):
-        if self.library is None or not episode_id:
+    def _remove_history(self, episode_ids):
+        """Take rows off History in one ordered command, with Undo.
+
+        Only the last-played time is cleared. Undo uses the played-state
+        snapshot contract with every other field unchanged, so it puts the
+        time back only on rows nothing has played since."""
+        library = self.library
+        ids = list(dict.fromkeys(episode_id for episode_id in episode_ids if episode_id))
+        count = len(ids)
+        if library is None or not ids or not self._confirm_bulk(
+                count, "Remove", title=f"Remove {count} episodes from History?",
+                detail="Playback positions and played marks are kept. Undo is offered afterwards.", destructive=True):
             return
-        self._run_command(lambda: self.library.clear_history(episode_id), lambda _: self._request_reload())
+        repository = library.repository
+
+        def work():
+            stamps = {}
+            for episode_id in ids:
+                episode = repository.get_episode(episode_id)
+                if episode is not None and episode.last_played is not None:
+                    stamps[episode_id] = episode.last_played
+                    repository.clear_history(episode_id)
+            changes = []
+            for episode_id, last_played in stamps.items():
+                episode = repository.get_episode(episode_id)
+                if episode is None or episode.last_played is not None:
+                    continue
+                state = (episode.played, episode.is_new, episode.position_seconds)
+                changes.append(((episode.id, episode.show_id, episode.external_id, *state, last_played), (*state, None)))
+            return changes
+
+        def apply(changes):
+            self._request_reload()
+            if not changes:
+                return
+            removed = len(changes)
+
+            def undo():
+                self._run_command(lambda: repository.undo_played(changes), lambda _count: self._request_reload())
+
+            self._notify(f"Removed {removed} episode{'s' if removed != 1 else ''} from History", "success", "Undo", undo)
+
+        self._run_command(work, apply)
 
     def _clear_history(self):
         if self.library is None:
