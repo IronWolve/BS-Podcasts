@@ -4,6 +4,7 @@ import platform
 from datetime import datetime
 from pathlib import Path
 import re
+import threading
 
 from PySide6.QtCore import QPoint, QSize, QTimer, QUrl, Qt, Signal, qVersion
 from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QKeySequence
@@ -113,8 +114,14 @@ def _episode_duration(seconds: int) -> str:
     return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
 
 
-def episode_information_rows(episode, show=None, format_bytes=None) -> list[tuple[str, str]]:
-    """Human-readable episode/feed facts shared by the dialog and Copy all."""
+_STAT = object()
+
+
+def episode_information_rows(episode, show=None, format_bytes=None, downloaded_bytes=_STAT) -> list[tuple[str, str]]:
+    """Human-readable episode/feed facts shared by the dialog and Copy all.
+
+    `downloaded_bytes` skips the file stat: None leaves the size out.
+    """
     byte_text = format_bytes or (lambda value: f"{value} bytes")
     rows = [("Podcast", getattr(show, "title", "") or getattr(episode, "show", ""))]
     author = getattr(episode, "author", "")
@@ -167,10 +174,13 @@ def episode_information_rows(episode, show=None, format_bytes=None) -> list[tupl
     downloaded_path = getattr(episode, "downloaded_path", "")
     if downloaded_path:
         rows.append(("Downloaded file", downloaded_path))
-        try:
-            rows.append(("Downloaded size", byte_text(Path(downloaded_path).stat().st_size)))
-        except OSError:
-            pass
+        if downloaded_bytes is _STAT:
+            try:
+                downloaded_bytes = Path(downloaded_path).stat().st_size
+            except OSError:
+                downloaded_bytes = None
+        if downloaded_bytes is not None:
+            rows.append(("Downloaded size", byte_text(downloaded_bytes)))
     for label, value in (
         ("Episode page", getattr(episode, "website_url", "")),
         ("Podcast website", getattr(show, "website_url", "") if show else ""),
@@ -183,8 +193,9 @@ def episode_information_rows(episode, show=None, format_bytes=None) -> list[tupl
     return [(label, value) for label, value in rows if value]
 
 
-def episode_information_text(episode, show=None, format_bytes=None) -> str:
-    rows = episode_information_rows(episode, show, format_bytes)
+def episode_information_text(episode, show=None, format_bytes=None, rows=None) -> str:
+    if rows is None:
+        rows = episode_information_rows(episode, show, format_bytes)
     text = [getattr(episode, "title", "Episode"), ""]
     text.extend(f"{label}: {value}" for label, value in rows)
     notes = getattr(episode, "description", "")
@@ -686,8 +697,12 @@ class EpisodeInfoDialog(StyledDialog):
             _wrap_long_value(getattr(episode, "title", "Episode information")),
             "Feed metadata and local library state. Full show notes remain available through Show details.",
         )
-        self.information_text = episode_information_text(episode, show, format_bytes)
-        rows = episode_information_rows(episode, show, format_bytes)
+        # Rows built once and without touching the file: the download may sit
+        # on a slow or sleeping drive. Its size is filled in when a background
+        # stat returns.
+        rows = episode_information_rows(episode, show, format_bytes, downloaded_bytes=None)
+        self.information_text = episode_information_text(episode, show, format_bytes, rows)
+        self._info_source = (episode, show, format_bytes)
         source_names = {
             "Feed ID", "Transcript source", "Chapters source", "Downloaded file",
             "Episode page", "Podcast website", "Feed URL", "Audio URL", "Artwork URL",
@@ -711,19 +726,11 @@ class EpisodeInfoDialog(StyledDialog):
             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
             form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             for name, value in group:
-                field = PlainTextLabel(_wrap_long_value(value))
-                field.setTextFormat(Qt.TextFormat.PlainText)
-                field.setWordWrap(True)
-                field.setToolTip(value)
-                field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                label = PlainTextLabel(name)
-                label.setObjectName("muted")
-                label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-                form.addRow(label, field)
-                self.value_labels.append(field)
+                self._add_information_row(form, name, value)
             holder = QWidget()
             holder.setLayout(form)
             self._column_holders.append(holder)
+        self._facts_form = self._column_holders[0].layout()
         # Overflow scrolls instead of clipping: the row set grows with the
         # feed (transcripts, chapters, season data) and with the type scale.
         content = QWidget()
@@ -752,6 +759,51 @@ class EpisodeInfoDialog(StyledDialog):
         buttons.addWidget(close)
         self.card_layout.addLayout(buttons)
         self.set_default_button(close)
+        downloaded_path = getattr(episode, "downloaded_path", "")
+        if downloaded_path:
+            self._measure_download(downloaded_path)
+
+    def _add_information_row(self, form, name: str, value: str):
+        field = PlainTextLabel(_wrap_long_value(value))
+        field.setTextFormat(Qt.TextFormat.PlainText)
+        field.setWordWrap(True)
+        field.setToolTip(value)
+        field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        label = PlainTextLabel(name)
+        label.setObjectName("muted")
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        form.addRow(label, field)
+        self.value_labels.append(field)
+
+    def _measure_download(self, path: str):
+        """Stat the file on a daemon thread (never blocking the window or
+        app exit) and poll for the answer from a timer this dialog owns."""
+        result = {}
+
+        def work():
+            try:
+                result["size"] = Path(path).stat().st_size
+            except OSError:
+                result["size"] = None
+
+        worker = threading.Thread(target=work, name="bs-episode-info-stat", daemon=True)
+        poll = QTimer(self)
+        poll.setInterval(40)
+
+        def check():
+            if worker.is_alive():
+                return
+            poll.stop()
+            episode, show, format_bytes = self._info_source
+            rows = episode_information_rows(episode, show, format_bytes, downloaded_bytes=result.get("size"))
+            size_text = dict(rows).get("Downloaded size")
+            if size_text:
+                self.information_text = episode_information_text(episode, show, format_bytes, rows)
+                self._add_information_row(self._facts_form, "Downloaded size", size_text)
+
+        poll.timeout.connect(check)
+        worker.start()
+        poll.start()
 
     def _place_columns(self, two: bool):
         if two == self._two_columns:
