@@ -208,7 +208,7 @@ class PlaybackService:
                 self.engine.pause()
             except Exception:
                 pass
-        self._emit()
+            self._emit()
 
     def load_episode(self, episode_id: int, autoplay: bool = True, *, cancelled=None, start_position=None, force_stream=False):
         with self._lock:
@@ -409,21 +409,29 @@ class PlaybackService:
         The source is opened on the first play/seek/skip, so an offline launch
         never produces a stream error and startup does no media I/O.
         """
-        if self._load_generation or self._engine_loaded or self.snapshot.state in {PlaybackState.PLAYING, PlaybackState.LOADING}:
-            # A live session (e.g. the theme-change window rebuild re-wiring
-            # playback) must not be overwritten with stale durable state.
+        # Every window build calls this on the UI thread. A held lock means a
+        # command or native event is changing playback right now and will
+        # publish it; waiting could stall the window behind maintenance.
+        if not self._lock.acquire(timeout=0.25):
+            return self.snapshot.episode_id is not None
+        try:
+            if self._load_generation or self._engine_loaded or self.snapshot.state in {PlaybackState.PLAYING, PlaybackState.LOADING}:
+                # A live session (e.g. the theme-change window rebuild re-wiring
+                # playback) must not be overwritten with stale durable state.
+                self._emit()
+                return self.snapshot.episode_id is not None
+            episode_id, _state = self.repository.current_playback()
+            if episode_id is None:
+                return False
+            if autoplay:
+                self.load_episode(episode_id, autoplay=True)
+                return True
+            self._restore_snapshot()
+            self._deferred_episode_id = episode_id if self.snapshot.episode_id == episode_id else None
             self._emit()
             return self.snapshot.episode_id is not None
-        episode_id, _state = self.repository.current_playback()
-        if episode_id is None:
-            return False
-        if autoplay:
-            self.load_episode(episode_id, autoplay=True)
-            return True
-        self._restore_snapshot()
-        self._deferred_episode_id = episode_id if self.snapshot.episode_id == episode_id else None
-        self._emit()
-        return self.snapshot.episode_id is not None
+        finally:
+            self._lock.release()
 
     def _materialize(self, autoplay: bool = False) -> bool:
         """Open the deferred episode in the engine if it is not loaded yet.
@@ -569,7 +577,7 @@ class PlaybackService:
             if episode_id is not None:
                 self._set_current_playback(None, PlaybackState.IDLE.value)
             self._flush_persistence()
-        self._emit()
+            self._emit()
 
     def next(self):
         with self._lock:
@@ -1341,15 +1349,18 @@ class PlaybackService:
                 self._emit()
 
     def _emit(self):
-        self._revision += 1
-        self.snapshot = replace(
-            self.snapshot, revision=self._revision, load_generation=self._load_generation
-        )
-        for listener in tuple(self._listeners):
-            try:
-                listener(self.snapshot)
-            except Exception:
-                continue
+        # The revision and the snapshot it stamps change together, so a
+        # listener never receives an older snapshot under a newer revision.
+        with self._lock:
+            self._revision += 1
+            self.snapshot = replace(
+                self.snapshot, revision=self._revision, load_generation=self._load_generation
+            )
+            for listener in tuple(self._listeners):
+                try:
+                    listener(self.snapshot)
+                except Exception:
+                    continue
 
     def _restore_snapshot(self):
         episode_id, _state = self.repository.current_playback()
