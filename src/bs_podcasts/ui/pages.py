@@ -5,7 +5,7 @@ from pathlib import Path
 import time
 
 from PySide6.QtCore import QEasingCurve, QEvent, QItemSelectionModel, QModelIndex, QObject, QPoint, QPropertyAnimation, QTimer, Signal, Qt
-from PySide6.QtGui import QCursor, QKeySequence, QShortcut
+from PySide6.QtGui import QContextMenuEvent, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSlider,
@@ -134,6 +134,23 @@ class _ScrollInputGuard(QObject):
         return False
 
 
+class _KeyboardMenu(QObject):
+    """A keyboard context-menu request (the Menu key) goes to the view
+    itself, never to the viewport the mouse path watches, so rows and cards
+    had no menu without a mouse."""
+
+    def __init__(self, view, open_menu):
+        super().__init__(view)
+        self._open_menu = open_menu
+        view.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.ContextMenu and event.reason() == QContextMenuEvent.Reason.Keyboard:
+            self._open_menu()
+            return True
+        return False
+
+
 class _ListPageMixin:
     """Shared list behaviours: preserved selection/scroll, empty state, keyboard.
 
@@ -167,6 +184,7 @@ class _ListPageMixin:
         self.view.activated.connect(self._activated_once)
         self.view.doubleClicked.connect(self._activated_once)
         self.view.viewport().installEventFilter(self)
+        self._keyboard_menu_filter = _KeyboardMenu(self.view, self._keyboard_menu)
         self._tooltip_target = None
         if isinstance(model, EpisodeModel):
             self._episode_scroll_pixels = False
@@ -616,6 +634,12 @@ class _ListPageMixin:
             chips.setVisible(bool(getattr(self, "_all_items", ())) or bool(query))
         if getattr(self, "_hide_action_when_empty", False) and self.header.action is not None:
             self.header.action.setVisible(bool(getattr(self, "_all_items", ())))
+
+    def _keyboard_menu(self):
+        index = self.view.currentIndex()
+        if index.isValid():
+            self.view.scrollTo(index)
+            self._menu(self.view.visualRect(index).center())
 
     def _menu(self, position):
         index = self.view.indexAt(position)
