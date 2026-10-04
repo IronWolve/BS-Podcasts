@@ -4,7 +4,8 @@ param(
     [string]$SourceStage = "",
     [string]$CheckRoot = "",
     [switch]$Clean,
-    [switch]$Installer
+    [switch]$Installer,
+    [switch]$PruneOldDeployments
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,7 +26,7 @@ function Remove-OldDeployments {
 }
 
 function Publish-Application {
-    param([string]$Application, [string]$Manifest, [string]$Target, [string]$MetadataRoot)
+    param([string]$Application, [string]$Manifest, [string]$Target, [string]$MetadataRoot, [switch]$PruneOldDeployments)
     New-Item -ItemType Directory -Path $MetadataRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $Target -Force | Out-Null
     $lease = [System.IO.File]::Open((Join-Path $MetadataRoot ".publish.lock"), "OpenOrCreate", "ReadWrite", "None")
@@ -77,7 +78,9 @@ function Publish-Application {
         if (Test-Path -LiteralPath $incoming) {
             Remove-Item -LiteralPath $incoming -Recurse -Force
         }
-        Remove-OldDeployments -Root $MetadataRoot -Retain $previous
+        if ($PruneOldDeployments) {
+            Remove-OldDeployments -Root $MetadataRoot -Retain $previous
+        }
         Write-Output "Previous application and manifest retained: $previous"
     } finally {
         $lease.Dispose()
@@ -204,7 +207,7 @@ $preparedManifest = Join-Path $buildRoot "BS-Podcasts-Windows.manifest.json"
 & $python -B (Join-Path $stageRoot "packaging\build_manifest.py") --artifact $sourceDir --output $preparedManifest
 if ($LASTEXITCODE -ne 0) { throw "Artifact manifest generation failed; previous application unchanged" }
 $metadataRoot = Join-Path $workspace ".cache\previous-deployments"
-Publish-Application -Application $sourceDir -Manifest $preparedManifest -Target $Destination -MetadataRoot $metadataRoot
+Publish-Application -Application $sourceDir -Manifest $preparedManifest -Target $Destination -MetadataRoot $metadataRoot -PruneOldDeployments:$PruneOldDeployments
 $copiedDir = Join-Path $Destination "BS Podcasts"
 
 $copiedExe = Join-Path $copiedDir "BS Podcasts.exe"

@@ -52,6 +52,17 @@ meson_build() { # dir extra-args...
   echo "=== built $dir"
 }
 
+echo "=== zlib"
+if [ ! -f "$PREFIX/.done-zlib" ]; then
+  (cd "$SRC/zlib-1.3.2" && make -f win32/Makefile.gcc -j "$JOBS" \
+       PREFIX="${TRIPLE}-" \
+       CFLAGS="-O3 -Wall -ffile-prefix-map=$ROOT=/bs-native -fdebug-prefix-map=$ROOT=/bs-native" \
+       prefix="$PREFIX" INCLUDE_PATH="$PREFIX/include" LIBRARY_PATH="$PREFIX/lib" \
+       BINARY_PATH="$PREFIX/bin" SHARED_MODE=0 install) >> "$ROOT/build.log" 2>&1
+  touch "$PREFIX/.done-zlib"
+fi
+echo "=== built zlib"
+
 echo "=== freetype"
 meson_build freetype-2.14.3 -Dharfbuzz=disabled -Dbrotli=disabled -Dpng=disabled -Dbzip2=disabled -Dzlib=internal -Dtests=disabled
 echo "=== fribidi"

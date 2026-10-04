@@ -31,6 +31,11 @@ FFmpeg (statically linked into the bundled libmpv on each platform)
   configuration (no --enable-gpl, no --enable-nonfree).
   https://ffmpeg.org
 
+zlib 1.3.2 (statically linked into the bundled Windows native player)
+  Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler
+  License: zlib (licenses/Native-bundled-third-party.txt)
+  https://zlib.net
+
 libplacebo (statically linked into the bundled libmpv on Windows, Linux, and macOS)
   License: GNU Lesser General Public License v2.1 or later
   https://code.videolan.org/videolan/libplacebo
