@@ -1295,7 +1295,7 @@ class MainWindow(QMainWindow):
     def _remove_unreachable(self):
         if self.library is None:
             return
-        problems = [show for show in self._library_shows() if show.health.value in {"error", "suspended"}]
+        problems = [show for show in self._library_shows() if self._is_unreachable(show)]
         if not problems:
             self._notify("No unreachable podcasts")
             return
@@ -1323,6 +1323,11 @@ class MainWindow(QMainWindow):
 
         self._run_task("remove-preview", work)
 
+    @staticmethod
+    def _is_unreachable(show) -> bool:
+        """What "Remove unreachable" offers and, at removal time, re-checks."""
+        return show.health.value in {"error", "suspended"}
+
     def _confirm_remove_shows(self, data):
         """Second phase of an off-thread bulk removal: confirm exact targets,
         then delete on a worker so the window never blocks."""
@@ -1343,16 +1348,20 @@ class MainWindow(QMainWindow):
         library = self.library
         playback = self.playback
         paths = data.get("paths") or {}
-        removing = set(show_ids)
         self.podcast_page.banner.show_state("loading", f"Removing {len(show_ids)} podcasts…")
 
         def work():
-            if playback is not None and playback.snapshot.show_id in removing:
+            # Only shows still unreachable now: a feed that recovered while
+            # the dialog was open is kept. Nothing outside the list goes.
+            current = {show_id: library.repository.get_show(show_id) for show_id in show_ids}
+            targets = [show_id for show_id, show in current.items() if show is not None and self._is_unreachable(show)]
+            if playback is not None and playback.snapshot.show_id in set(targets):
                 playback.stop()
-            return sum(
-                1 for show_id in show_ids
+            removed = sum(
+                1 for show_id in targets
                 if library.remove_subscription(show_id, True, list(paths.get(show_id, ())))
             )
+            return removed, sum(1 for show in current.values() if show is not None) - len(targets)
 
         self._run_task("remove-shows", work, pool=self.commands, keep=True)
 
@@ -1410,10 +1419,12 @@ class MainWindow(QMainWindow):
         self.podcast_page.banner.show_state("loading", f"Removing {len(show_ids)} podcasts…")
 
         def work():
-            return sum(
+            removed = sum(
                 1 for show_id in show_ids
                 if library.remove_subscription(show_id, True, list(confirmed_paths.get(show_id, ())))
             )
+            # Podcasts added while the dialog was open were not listed in it.
+            return removed, len(library.shows())
 
         def stopped_work():
             if playback is not None:
@@ -5833,15 +5844,22 @@ class MainWindow(QMainWindow):
             self._notify(result.message or "Removal failed", "error")
             self._request_reload()
             return
-        removed = int(result.value or 0)
+        removed, kept = result.value
+        plural = lambda count: "" if count == 1 else "s"
         if kind == "reset-library":
             self._refresh_storage_settings()
             self._request_reload()
-            self._notify(f"Library reset — removed {removed} podcast{'s' if removed != 1 else ''}", "success")
+            message = f"Library reset — removed {removed} podcast{plural(removed)}"
+            if kept:
+                message += f" · kept {kept} added during the reset"
+            self._notify(message, "success")
         else:
             self.podcast_page.chips.select("All")
             self._request_reload(lambda: self.podcast_page._apply_filters())
-            self._notify(f"Removed {removed} unreachable podcast{'s' if removed != 1 else ''}", "success")
+            message = f"Removed {removed} unreachable podcast{plural(removed)}"
+            if kept:
+                message += f" · kept {kept} that recovered"
+            self._notify(message, "success")
         return
     def _on_database_health(self, kind, identifier, result):
         if result.status == JobStatus.OK and result.value == "ok":
