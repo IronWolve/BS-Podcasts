@@ -25,15 +25,18 @@ GENERIC_CONTENT_TYPES = frozenset({
     "application/octet-stream", "binary/octet-stream",
     "application/binary", "application/x-octet-stream",
 })
+# Image formats podcast artwork uses. Sniffing alone hands a file to every
+# installed image plugin, including a PDF renderer on Linux that the Windows
+# and Mac builds leave out; anything else falls back to initials.
+ARTWORK_FORMATS = frozenset({"png", "jpeg", "jpg", "gif", "webp", "bmp", "svg", "svgz"})
 
 def _looks_textual(head: bytes) -> bool:
     """True for payloads that are plainly a document rather than an image.
 
-    Deliberately not an image allow-list: the image format space keeps
-    growing, and rejecting an unusual-but-valid file Qt could decode would
-    cost more than it saves (`ui/pixmaps.py` already null-checks whatever
-    fails to decode). What must never reach the cache is what an SSRF probe of
-    an internal service actually returns — an HTML admin page or a JSON body.
+    An early veto while the body streams, not the format allow-list:
+    `valid_file` decides that with ARTWORK_FORMATS once the file is complete.
+    What must be stopped early is what an SSRF probe of an internal service
+    actually returns — an HTML admin page or a JSON body.
     """
     sniff = head.lstrip()[:512]
     lowered = sniff.lower()
@@ -86,8 +89,11 @@ class ArtworkCache:
         from PySide6.QtGui import QImageReader
         reader = QImageReader(str(path))
         reader.setDecideFormatFromContent(True)
-        reader.setScaledSize(QSize(64, 64))
-        valid = not reader.read().isNull()
+        # The handler chosen here is the one read() uses.
+        valid = bytes(reader.format()).decode("ascii", "replace").lower() in ARTWORK_FORMATS
+        if valid:
+            reader.setScaledSize(QSize(64, 64))
+            valid = not reader.read().isNull()
         if self.signature(path) != stamp:
             return False
         with self._locks_guard:
