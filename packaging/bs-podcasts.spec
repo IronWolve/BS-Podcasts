@@ -64,10 +64,17 @@ analysis = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(ROOT / "packaging" / "runtime_windows.py")],
+    # The app never imports setuptools. It only arrived through urllib3's optional
+    # backports.zstd import (Python 3.14 has compression.zstd) plus its own runtime
+    # hook. The packaged self-check below the build still gates publication.
     excludes=[
         "mutagen",
         "PIL",
         "Pillow",
+        "setuptools",
+        "pkg_resources",
+        "_distutils_hack",
+        "distutils",
         "PySide6.QtDBus",
         "PySide6.QtQml",
         "PySide6.QtQuick",
