@@ -59,6 +59,26 @@ def atomic_write(path: Path, content: bytes) -> Path:
     return path
 
 
+def sync_directory(directory: Path) -> None:
+    """Make a rename inside `directory` durable on POSIX; best effort.
+
+    Without it a crash can keep a renamed name whose directory entry never
+    reached the disk. Windows has no directory handle to flush this way.
+    """
+    if os.name != "posix":
+        return
+    try:
+        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 DOWNLOAD_ROOT_MARKER = ".bs-podcasts-download-root"
 
 FILE_PRESENT = "present"

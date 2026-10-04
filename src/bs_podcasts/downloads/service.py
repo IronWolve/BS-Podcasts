@@ -12,6 +12,7 @@ from ..data.files import (
     inspect_download_file,
     note_completed_download,
     open_private,
+    sync_directory,
 )
 from collections import deque
 from threading import Condition, Event, Lock, Thread
@@ -831,6 +832,11 @@ class DownloadService:
                         self._emit(episode_id, DownloadState.DOWNLOADING, done, total)
                         last_report = done
                         last_report_at = now
+                # The complete row commits right after the rename; without
+                # this a power loss could keep both while the data blocks
+                # never reached the disk, a "downloaded" short file.
+                handle.flush()
+                os.fsync(handle.fileno())
             stall.stop()
             if stall.message:
                 raise DownloadError(stall.message)
@@ -915,6 +921,7 @@ class DownloadService:
         if _looks_like_document(complete_head, final=True) or unsafe_media_payload(complete_head):
             raise DownloadError("Server sent a document or executable instead of audio.")
         os.replace(partial, target)
+        sync_directory(target.parent)
         # `done` is the transfer's own byte count and equals the file size.
         # Calling stat() here let a concurrent delete turn a complete,
         # correctly-named file into an ERROR record at 0/0.
