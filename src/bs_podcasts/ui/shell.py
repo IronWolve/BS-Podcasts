@@ -5188,11 +5188,14 @@ class MainWindow(QMainWindow):
             choose.setObjectName("popoverItem")
             choose.setCursor(Qt.CursorShape.PointingHandCursor)
             choose.setToolTip(f"Search for {query}")
+            choose.setAccessibleName(f"Search for {query}")
             remove = QPushButton()
             remove.setObjectName("iconButton")
             remove.setIcon(icons.icon("close", COLORS["muted"], scaled_px(12)))
             remove.setFixedSize(scaled_px(26), scaled_px(26))
             remove.setToolTip(f"Remove {query} from search history")
+            # Icon-only: screen readers need the name, not just the tooltip.
+            remove.setAccessibleName(f"Remove {query} from search history")
             choose.clicked.connect(
                 lambda _checked=False, value=query, owner=menu: (
                     owner.close(),
@@ -5208,6 +5211,8 @@ class MainWindow(QMainWindow):
             layout.addWidget(choose, 1)
             layout.addWidget(remove)
             action.setDefaultWidget(row)
+            # Enter on a highlighted row runs that search, as a click does.
+            action.triggered.connect(choose.click)
             menu.addAction(action)
         if self._discover_search_history:
             menu.addSeparator()
