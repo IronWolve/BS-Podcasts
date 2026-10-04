@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 import ctypes.util
 import os
 import sys
+import time
 
 from .data import Database
 from .data.files import atomic_write
@@ -87,10 +88,21 @@ def _pyproject_version_in_bundle():
     return None
 
 
+def _painter(plain):
+    """Colour only on a terminal; --plain, NO_COLOR or TERM=dumb turn it off.
+    Windowed builds have no stdout at all, and print() then does nothing."""
+    stream = sys.stdout
+    colour = (stream is not None and not plain and not os.environ.get('NO_COLOR')
+              and os.environ.get('TERM') != 'dumb' and stream.isatty())
+    return lambda code, text: f'\033[{code}m{text}\033[0m' if colour else text
+
+
 def main() -> int:
+    started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--self-check', action='store_true')
     parser.add_argument('--self-check-dir', type=Path)
+    parser.add_argument('--plain', action='store_true', help='no colour')
     args = parser.parse_args()
     from .config import cache_dir
     workspace_tmp = args.self_check_dir or Path(os.environ.get("TMPDIR") or cache_dir()/'selfcheck')
@@ -198,14 +210,23 @@ def main() -> int:
         if errors:
             report['errors'] = errors
         atomic_write(workspace_tmp/'self-check.json', json.dumps(report, indent=2).encode())
+    paint = _painter(args.plain)
+    for name, passed in checks.items():
+        reason = f": {errors[name]}" if not passed and name in errors else ""
+        print((paint('32', 'OK  ') if passed else paint('31', 'FAIL')) + f" {name}{reason}")
     if failed:
         parts = [errors[name] for name in failed if name in errors]
         detail = " (" + "; ".join(parts) + ")" if parts else ""
-        print("Self-check failed: " + ", ".join(failed) + detail)
-        return 1
-    print("BS Podcasts self-check passed."
-          + (" Version agreement: not available in this runtime." if not sources else ""))
-    return 0
+        print(paint('31', "Self-check failed: ") + ", ".join(failed) + detail)
+    else:
+        print(paint('32', "BS Podcasts self-check passed.")
+              + (" Version agreement: not available in this runtime." if not sources else ""))
+    print(paint('1', 'Stats'))
+    for label, value in (('checks', f'{len(checks) - len(failed)} passed, {len(failed)} failed'),
+                         ('version', f'{__version__} (agreement {version_agreement})'),
+                         ('elapsed', f'{time.monotonic() - started:.1f} s')):
+        print(f'  {label:<8} {value}')
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

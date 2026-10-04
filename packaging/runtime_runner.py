@@ -125,14 +125,62 @@ def _run_gui(extra, requested):
         sys.argv=original_argv
 
 
-def _describe(args):
+class Report:
+    """State lines and a stats block in the build commands' format.
+
+    Colour only on a terminal; --plain, NO_COLOR or TERM=dumb turn it off."""
+    STATES={'ok':('OK  ','32'),'warn':('WARN','33'),'fail':('FAIL','31'),'info':('    ','')}
+
+    def __init__(self,plain=False):
+        self.colour=(not plain and not os.environ.get('NO_COLOR') and os.environ.get('TERM')!='dumb'
+                     and sys.stdout.isatty())
+        self.started=time.monotonic()
+
+    def paint(self,code,text):
+        return f'\033[{code}m{text}\033[0m' if self.colour and code else text
+
+    def line(self,state,text):
+        label,code=self.STATES[state]
+        print(self.paint(code,label)+' '+text,flush=True)
+
+    def stats(self,rows):
+        rows=[*rows,('elapsed',f'{time.monotonic()-self.started:.1f} s')]
+        width=max(len(label) for label,_ in rows)
+        print(self.paint('1','Stats'))
+        for label,value in rows:
+            print(f'  {label:<{width}}  {value}')
+        sys.stdout.flush()
+
+
+def _size(path):
+    """File count and human size under path, without following links."""
+    files=total=0
+    for root,_,names in os.walk(path):
+        for name in names:
+            entry=os.path.join(root,name)
+            try:
+                if not os.path.islink(entry):
+                    total+=os.path.getsize(entry); files+=1
+            except OSError:
+                pass
+    value=float(total)
+    for unit in ('bytes','KB','MB','GB'):
+        if value<1024 or unit=='GB':
+            break
+        value/=1024
+    return f'{files:,} files, '+(f'{total:,} bytes' if unit=='bytes' else f'{value:.1f} {unit}')
+
+
+def _describe(args,report):
     module=environment()
     current=record()
-    color='\033[1;36m' if sys.stdout.isatty() and not args.plain and 'NO_COLOR' not in os.environ else ''
-    reset='\033[0m' if color else ''
-    print(f'{color}BS Podcasts {module.__version__}{reset}',flush=True)
-    print(f'Runtime: {DEPLOYMENT}\nPython: {sys.version.split()[0]}\nData: {os.environ["BS_PODCASTS_DATA_DIR"]}\nLog: {PROJECT/"logs/bs-podcasts.log"}',flush=True)
-    print(f'State: running (PID {current["pid"]})' if running(current) else 'State: stopped',flush=True)
+    print(report.paint('1;36',f'BS Podcasts {module.__version__}'),flush=True)
+    for label,value in (('Runtime',DEPLOYMENT),('Python',sys.version.split()[0]),
+                        ('Data',os.environ['BS_PODCASTS_DATA_DIR']),('Log',PROJECT/'logs/bs-podcasts.log')):
+        report.line('info',f'{label}: {value}')
+    live=running(current)
+    report.line('ok' if live else 'info',f'State: running (PID {current["pid"]})' if live else 'State: stopped')
+    return current if live else None
 
 
 def main():
@@ -142,13 +190,16 @@ def main():
     parser.add_argument('--check',action='store_true')
     parser.add_argument('--stop',action='store_true')
     args,extra=parser.parse_known_args()
+    report=Report(plain=args.plain)
     current=record()
     if args.stop:
         if not running(current):
+            retired=False
             if process_state(PROJECT,current)=='stale':
                 with runtime_lock(PROJECT):
-                    retire_stale(PROJECT,PID_FILE)
-            print('BS Podcasts is not running from this deployment.')
+                    retired=retire_stale(PROJECT,PID_FILE)
+            report.line('info','BS Podcasts is not running from this deployment.')
+            report.stats([('stopped','nothing (no running copy)'),('stale record','retired' if retired else 'none')])
             return 0
         if not hasattr(os,'pidfd_open') or not hasattr(signal,'pidfd_send_signal'):
             raise RuntimeError('Safe process signalling requires Linux pidfd support; nothing was stopped.')
@@ -159,26 +210,35 @@ def main():
             signal.pidfd_send_signal(descriptor,signal.SIGTERM)
         finally:
             os.close(descriptor)
-        deadline=time.monotonic()+5
+        signalled=time.monotonic()
+        deadline=signalled+5
         while running(current) and time.monotonic()<deadline:
             time.sleep(.1)
-        print('Stopped.' if not running(current) else 'Still stopping; inspect the project logs. No forced kill was sent.')
-        return 0 if not running(current) else 1
+        stopped=not running(current)
+        if stopped:
+            report.line('ok','Stopped.')
+        else:
+            report.line('fail','Still stopping; inspect the project logs. No forced kill was sent.')
+        report.stats([('process',f'PID {current["pid"]}'),('result','stopped' if stopped else 'still running'),
+                      ('wait',f'{time.monotonic()-signalled:.1f} s of 5.0 s')])
+        return 0 if stopped else 1
     if args.status or args.check:
-        _describe(args)
+        live=_describe(args,report)
         if args.check:
             from tempfile import TemporaryDirectory
             from bs_podcasts.selfcheck import main as check
             with TemporaryDirectory(prefix='runtime-check-', dir=PROJECT/'tmp') as folder:
                 previous = sys.argv
                 try:
-                    sys.argv = ['selfcheck', '--self-check-dir', folder]
+                    sys.argv = ['selfcheck', '--self-check-dir', folder, *(['--plain'] if args.plain else [])]
                     return check()
                 finally:
                     sys.argv = previous
+        report.stats([('state',f'running, PID {live["pid"]}' if live else 'stopped'),
+                      ('data',_size(os.environ['BS_PODCASTS_DATA_DIR'])),('logs',_size(PROJECT/'logs'))])
         return 0
     with runtime_lock(PROJECT,inherit=True):
-        _describe(args)
+        _describe(args,report)
         retire_stale(PROJECT,PID_FILE)
         value={'kind':'bs-podcasts-runtime','project':str(PROJECT),'pid':os.getpid(),'started':process_stamp(os.getpid())}
         signals={}
@@ -188,7 +248,7 @@ def main():
             requested=[False]
             for kind in (signal.SIGTERM,signal.SIGINT):
                 signals[kind]=signal.signal(kind,lambda *_:requested.__setitem__(0,True))
-            print(f'Starting PID {os.getpid()} (local desktop; no public endpoint).',flush=True)
+            report.line('ok',f'Starting PID {os.getpid()} (local desktop; no public endpoint).')
             return _run_gui(extra,requested)
         finally:
             for kind,handler in signals.items():
