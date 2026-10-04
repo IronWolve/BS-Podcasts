@@ -363,6 +363,23 @@ class StyledDialog(QDialog):
             text.setWordWrap(True)
             self.card_layout.addWidget(text)
 
+    def add_file_listing(self, lines) -> QScrollArea:
+        """Every exact target of a destructive action, scrolling past 180 px:
+        a capped preview let Delete remove files the user never saw."""
+        listing = PlainTextLabel("\n".join(lines))
+        listing.setObjectName("settingHint")
+        listing.setWordWrap(True)
+        listing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        scroll = QScrollArea(self)
+        scroll.setObjectName("dialogScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(listing)
+        scroll.setMaximumHeight(scaled_px(180))
+        self.card_layout.addWidget(scroll)
+        return scroll
+
     def add_buttons(self, primary: QPushButton, cancel_label: str = "Cancel", *, default_primary: bool = True):
         row = QHBoxLayout()
         row.setSpacing(SPACE["sm"])
@@ -579,18 +596,7 @@ class RemovePodcastDialog(StyledDialog):
         self.card_layout.addLayout(rows)
         file_count = len(preview["files"])
         if preview["files"]:
-            listing = PlainTextLabel("\n".join(path for path, _size in preview["files"]))
-            listing.setObjectName("settingHint")
-            listing.setWordWrap(True)
-            listing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            scroll = QScrollArea(self)
-            scroll.setObjectName("dialogScroll")
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            scroll.setWidget(listing)
-            scroll.setMaximumHeight(scaled_px(180))
-            self.card_layout.addWidget(scroll)
+            self.add_file_listing(path for path, _size in preview["files"])
         from PySide6.QtWidgets import QCheckBox
 
         noun = "file" if file_count == 1 else "files"
@@ -616,11 +622,8 @@ class DeleteFilesDialog(StyledDialog):
         summary = PlainTextLabel(f"{len(previews)} file{'s' if len(previews) != 1 else ''}  ·  {format_bytes(total)} reclaimed")
         summary.setObjectName("cardTitle")
         self.card_layout.addWidget(summary)
-        listing = PlainTextLabel("\n".join(f"{p.path}  ({format_bytes(p.bytes_reclaimed)})" for p in previews[:8]) + ("\n…" if len(previews) > 8 else ""))
-        listing.setObjectName("settingHint")
-        listing.setWordWrap(True)
-        listing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.card_layout.addWidget(listing)
+        if previews:
+            self.listing = self.add_file_listing(f"{p.path}  ({format_bytes(p.bytes_reclaimed)})" for p in previews)
         delete = QPushButton("Delete")
         delete.setObjectName("dangerButton")
         delete.clicked.connect(self.accept)
