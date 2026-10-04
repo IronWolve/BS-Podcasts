@@ -459,6 +459,9 @@ def main() -> int:
     _mark("theme")
     jobs = JobRunner(max_workers=4)
     download_jobs = JobRunner(max_workers=2)
+    # A download started by Play gets its own worker, so it never waits
+    # behind queued bulk downloads.
+    play_download_jobs = JobRunner(max_workers=1)
     # Feed refreshes get their own small pool so a batch can never occupy the
     # workers the UI needs for reads, search, and artwork.
     refresh_jobs = JobRunner(max_workers=2)
@@ -505,6 +508,7 @@ def main() -> int:
             downloads=downloads,
             listening=listening,
             download_jobs=download_jobs,
+            play_download_jobs=play_download_jobs,
             refresh_jobs=refresh_jobs,
             network_jobs=network_jobs,
             artwork_jobs=artwork_jobs,
@@ -622,7 +626,7 @@ def main() -> int:
     deadline = _time.monotonic() + 3.0
     busy = commands.join(max(0.0, deadline - _time.monotonic()))
     busy += playback.join_persistence(max(0.0, deadline - _time.monotonic()))
-    for pool in (jobs, download_jobs, refresh_jobs, network_jobs, artwork_jobs):
+    for pool in (jobs, download_jobs, play_download_jobs, refresh_jobs, network_jobs, artwork_jobs):
         busy += pool.join(max(0.0, deadline - _time.monotonic()))
     from .ui.pixmaps import shutdown_decodes
     busy += shutdown_decodes(max(0.0, deadline - _time.monotonic()))
