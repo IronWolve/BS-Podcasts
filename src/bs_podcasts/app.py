@@ -5,12 +5,13 @@ import os
 import sys
 import threading
 import sqlite3
+import time
 
-from PySide6.QtCore import QCoreApplication, QSettings, QTimer, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSettings, QTimer, Qt
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 import getpass
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from .artwork import ArtworkCache
 from .assets import icon_path
@@ -149,6 +150,52 @@ def _install_stall_monitor(app, threshold_ms: int = 150):
     threading.Thread(target=watch, name="bs-stall-monitor", daemon=True).start()
 
 
+_TRACER_SECONDS = 15
+_TRACER_CAP = 25
+
+
+class _WindowTracer(QObject):
+    """Logs top-level windows shown during startup, then removes itself.
+
+    An application-wide filter costs one Python call for every event, so it
+    stays installed only for the startup window or until the cap is hit."""
+
+    def __init__(self, app):
+        super().__init__(app)
+        self._app = app
+        self._t0 = time.monotonic()
+        self._logged = 0
+        QTimer.singleShot(int(_TRACER_SECONDS * 1000), self, self.stop)
+
+    def stop(self):
+        self._app.removeEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if (
+            event.type() == QEvent.Type.Show
+            and self._logged < _TRACER_CAP
+            and isinstance(obj, QWidget)
+            and obj.isWindow()
+        ):
+            elapsed = time.monotonic() - self._t0
+            if elapsed < _TRACER_SECONDS:
+                self._logged += 1
+                logging.getLogger("bs_podcasts").info(
+                    "window shown +%.2fs: %s title=%r flags=%s size=%dx%d visible=%s",
+                    elapsed, type(obj).__name__, obj.windowTitle(),
+                    hex(int(obj.windowFlags().value)), obj.width(), obj.height(),
+                    obj.isVisible(),
+                )
+                if self._logged == _TRACER_CAP:
+                    # Say the cap was hit: a silent stop would read as
+                    # "no more windows appeared" while diagnosing the
+                    # exact bug class this tracer exists for.
+                    logging.getLogger("bs_podcasts").info(
+                        "window tracer: %d-event cap reached; further Show events are not logged", _TRACER_CAP)
+                    self.stop()
+        return False
+
+
 def _install_window_tracer(app):
     """Log top-level windows shown during startup (chasing launch flashes).
 
@@ -157,44 +204,10 @@ def _install_window_tracer(app):
     of them recurse through the filter chain.
     """
     if os.environ.get("BS_PODCASTS_NO_TRACER"):
-        return
-    import time
-
-    from PySide6.QtCore import QEvent, QObject
-    from PySide6.QtWidgets import QWidget
-
-    logger = logging.getLogger("bs_podcasts")
-
-    class Tracer(QObject):
-        def __init__(self, parent):
-            super().__init__(parent)
-            self._t0 = time.monotonic()
-            self._logged = 0
-
-        def eventFilter(self, obj, event):
-            if (
-                event.type() == QEvent.Type.Show
-                and self._logged < 25
-                and isinstance(obj, QWidget)
-                and obj.isWindow()
-            ):
-                elapsed = time.monotonic() - self._t0
-                if elapsed < 15:
-                    self._logged += 1
-                    logger.info(
-                        "window shown +%.2fs: %s title=%r flags=%s size=%dx%d visible=%s",
-                        elapsed, type(obj).__name__, obj.windowTitle(),
-                        hex(int(obj.windowFlags().value)), obj.width(), obj.height(),
-                        obj.isVisible(),
-                    )
-                    if self._logged == 25:
-                        # Say the cap was hit: a silent stop would read as
-                        # "no more windows appeared" while diagnosing the
-                        # exact bug class this tracer exists for.
-                        logger.info("window tracer: 25-event cap reached; further Show events are not logged")
-            return False
-
-    app.installEventFilter(Tracer(app))
+        return None
+    tracer = _WindowTracer(app)
+    app.installEventFilter(tracer)
+    return tracer
 
 
 def _redirect_toolkit_settings():
