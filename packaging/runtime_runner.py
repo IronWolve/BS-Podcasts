@@ -103,6 +103,10 @@ def _run_gui(extra, requested):
                     if quit_window is not None:
                         quit_window()
                         return
+                # No main window yet: a startup error dialog runs its own loop.
+                modal=qt.activeModalWidget()
+                if modal is not None and hasattr(modal,'reject'):
+                    modal.reject()
         timer=QTimer(qt); timer.timeout.connect(poll); timer.start(100)
         qt._project_stop_timer=timer
         return qt
