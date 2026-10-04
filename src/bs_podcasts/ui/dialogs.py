@@ -469,7 +469,9 @@ class AddPodcastDialog(StyledDialog):
         if not self.add.isEnabled():
             return
         value = self.feed_url
-        if not value.startswith(("http://", "https://")):
+        # The shared URL rule: a scheme in capitals is still a web URL, and a
+        # host-less "https://" is not.
+        if not is_web_url(value):
             self.show_error("Enter a complete http:// or https:// URL.")
             return
         self.submit_requested.emit(value)
