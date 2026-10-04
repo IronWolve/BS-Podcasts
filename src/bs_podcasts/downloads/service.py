@@ -936,8 +936,12 @@ class DownloadService:
         """Cancel if active, unlink the files, forget the record. Returns bytes freed.
 
         Bytes count only after a successful unlink, and a record whose file
-        survives is marked error instead of removed — removing it while the
-        file remained left an untracked orphan reported as reclaimed."""
+        survives is kept instead of removed — removing it while the file
+        remained left an untracked orphan reported as reclaimed. A finished
+        file that survives stays a finished download carrying the message:
+        as an error it dropped out of storage totals and automatic cleanup
+        never selected it again (a player still holding it open on Windows
+        was enough), so the next cleanup now retries it."""
         self.cancel(episode_id)
         with self._lock:
             self._queued.pop(episode_id, None)
@@ -948,6 +952,7 @@ class DownloadService:
             return 0
         freed = 0
         failures = []
+        target_kept = False
         for candidate in (record.target_path, record.partial_path):
             path = Path(candidate) if candidate else None
             if path is not None:
@@ -967,12 +972,15 @@ class DownloadService:
                     # overwrite the target's, hiding the message that named
                     # the file the user actually cares about.
                     failures.append(str(exc))
+                    target_kept = target_kept or candidate == record.target_path
         if failures:
+            message = "File could not be deleted: " + "; ".join(failures)
+            finished = record.state == DownloadState.COMPLETE and target_kept
             self.downloads.progress(
-                episode_id, DownloadState.ERROR, record.bytes_done, record.bytes_total,
-                "File could not be deleted: " + "; ".join(failures),
+                episode_id, DownloadState.COMPLETE if finished else DownloadState.ERROR,
+                record.bytes_done, record.bytes_total, message,
             )
-            raise DownloadError("File could not be deleted: " + "; ".join(failures))
+            raise DownloadError(message)
         else:
             self.downloads.remove(episode_id)
         return freed
