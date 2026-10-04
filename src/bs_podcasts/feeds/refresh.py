@@ -6,7 +6,7 @@ import threading
 from ..artwork import ArtworkCache, ArtworkError
 from ..data.repositories import LibraryRepository
 from ..domain import Health
-from .fetch import FeedFetchError, FeedFetcher
+from .fetch import FeedFetchError, FeedFetcher, FeedNetworkError
 from .parser import FeedParseError, parse_feed
 
 
@@ -18,6 +18,8 @@ class RefreshReport:
     message: str = ""
     not_modified: bool = False
     artwork_path: str = ""
+    # The network failed (offline, DNS, timeout), not the feed.
+    network_error: bool = False
 
 
 class RefreshService:
@@ -128,6 +130,11 @@ class RefreshService:
                 n = feed.skipped_video
                 message += (" " if message else "") + f"{n} episode{'s are' if n != 1 else ' is'} video-only and {'were' if n != 1 else 'was'} skipped; this app plays audio."
             return RefreshReport(show_id, health, imported=imported, message=message, artwork_path=artwork_path)
+        except FeedNetworkError as exc:
+            # Says nothing about the feed: show the error, but leave the
+            # failure count alone so an outage never suspends the show.
+            self.repository.set_health(show_id, Health.ERROR)
+            return RefreshReport(show_id, Health.ERROR, message=str(exc), network_error=True)
         except (FeedFetchError, FeedParseError) as exc:
             health = self.repository.record_refresh_failure(show_id)
             return RefreshReport(show_id, health, message=str(exc))

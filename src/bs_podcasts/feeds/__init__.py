@@ -1,4 +1,4 @@
-from .fetch import FeedFetchError, FeedFetcher, FeedResponse
+from .fetch import FeedFetchError, FeedFetcher, FeedNetworkError, FeedResponse
 from .parser import FeedParseError, parse_feed
 from .refresh import RefreshReport, RefreshService
 
@@ -21,6 +21,7 @@ def __getattr__(name):
 __all__ = [
     "FeedFetchError",
     "FeedFetcher",
+    "FeedNetworkError",
     "FeedParseError",
     "FeedResponse",
     "LocalAudioError",

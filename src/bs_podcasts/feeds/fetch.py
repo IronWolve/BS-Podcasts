@@ -5,7 +5,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 from ..net import USER_AGENT, SessionSlot, describe_network_error
-from ..urlguard import ensure_fetchable, UnsafeUrl
+from ..urlguard import ensure_fetchable, UnresolvedHost, UnsafeUrl
 
 
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024
@@ -13,6 +13,31 @@ MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 
 class FeedFetchError(RuntimeError):
     pass
+
+
+class FeedNetworkError(FeedFetchError):
+    """The network failed, not the feed: offline, DNS, connect or timeout
+    failures and a server-requested wait. Refresh does not count these toward
+    suspending the show, so an outage cannot suspend the whole library."""
+
+
+def _fetch_error(exc) -> FeedFetchError:
+    """The HTTP stack's failure as a feed error of the right kind."""
+    import requests
+
+    errors = requests.exceptions
+    message = describe_network_error(exc, "the feed")
+    # A certificate problem belongs to the server and persists.
+    if isinstance(exc, errors.SSLError):
+        return FeedFetchError(message)
+    if isinstance(exc, (errors.ConnectionError, errors.Timeout, errors.RetryError)):
+        return FeedNetworkError(message)
+    return FeedFetchError(message)
+
+
+def _url_error(exc: UnsafeUrl) -> FeedFetchError:
+    kind = FeedNetworkError if isinstance(exc, UnresolvedHost) else FeedFetchError
+    return kind(str(exc))
 
 
 @dataclass(frozen=True)
@@ -110,7 +135,9 @@ class _FeedLinkParser(HTMLParser):
 
 
 class FeedFetcher:
-    session = SessionSlot(max_redirects=5)
+    # The session's byte cap surfaces as a timeout; keep it a backstop above
+    # this fetcher's own cap, so an oversized feed is a feed failure.
+    session = SessionSlot(max_redirects=5, max_response_bytes=MAX_RESPONSE_BYTES + 1024 * 1024)
 
     def __init__(self, session=None):
         self.session = session
@@ -134,14 +161,14 @@ class FeedFetcher:
         try:
             url = ensure_fetchable(url, "Feed URL")
         except UnsafeUrl as exc:
-            raise FeedFetchError(str(exc)) from exc
+            raise _url_error(exc) from exc
         import requests
 
         headers = {"User-Agent": USER_AGENT, "Range": f"bytes=0-{self.PEEK_BYTES - 1}", "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.2"}
         try:
             response = self.session.get(url, headers=headers, timeout=(8, 15), allow_redirects=True, stream=True)
         except requests.RequestException as exc:
-            raise FeedFetchError(describe_network_error(exc, "the feed")) from exc
+            raise _fetch_error(exc) from exc
         try:
             if response.status_code not in (200, 206):
                 return None
@@ -151,7 +178,7 @@ class FeedFetcher:
                 if len(body) >= self.PEEK_BYTES:
                     break
         except requests.RequestException as exc:
-            raise FeedFetchError(describe_network_error(exc, "the feed")) from exc
+            raise _fetch_error(exc) from exc
         finally:
             response.close()
         # A partial document cannot prove which episode is newest: feeds may
@@ -178,7 +205,7 @@ class FeedFetcher:
         try:
             url = ensure_fetchable(url, "Feed URL")
         except UnsafeUrl as exc:
-            raise FeedFetchError(str(exc)) from exc
+            raise _url_error(exc) from exc
         import requests
 
         headers = {
@@ -248,7 +275,7 @@ class FeedFetcher:
         except FeedFetchError:
             raise
         except requests.RequestException as exc:
-            raise FeedFetchError(describe_network_error(exc, "the feed")) from exc
+            raise _fetch_error(exc) from exc
         finally:
             if response is not None:
                 response.close()

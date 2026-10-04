@@ -21,6 +21,14 @@ class UnsafeUrl(ValueError):
     """A URL that must not be fetched, opened, or played."""
 
 
+class UnresolvedHost(UnsafeUrl):
+    """The host name could not be looked up (offline, DNS down, busy resolver).
+
+    Nothing unsafe was found. Callers that track failures per feed may treat
+    this as a network failure rather than a fault of the URL.
+    """
+
+
 def _split(value: str):
     return urlsplit(value.strip())
 
@@ -150,7 +158,9 @@ def _addresses(host: str) -> list:
         deadline = Deadline(8)
         infos = bounded_call(lambda: socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP),
                              deadline, gate=PLAYBACK_DNS if deadline.foreground else DNS)
-    except (OSError, UnicodeError) as exc:
+    except OSError as exc:  # resolver failure, timeout or busy workers
+        raise UnresolvedHost(f"Could not resolve {host} safely: {exc}") from exc
+    except UnicodeError as exc:
         raise UnsafeUrl(f"Could not resolve {host} safely: {exc}") from exc
     found = []
     for info in infos:
