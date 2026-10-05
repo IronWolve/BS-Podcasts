@@ -1117,8 +1117,10 @@ class MainWindow(QMainWindow):
         live = self._live_artwork_paths()
         def preview():
             keep = self._referenced_artwork() | live
-            stale = [path for path in cache.files() if str(path) not in keep]
-            return keep, stale, sum(path.stat().st_size for path in stale)
+            # The same files the clear will remove, not every unreferenced one:
+            # fresh and just-used files are skipped by the clear.
+            stale = cache.candidates(keep)
+            return keep, stale, sum(size for _path, size in stale)
 
         self._run_read(preview, lambda result: self._confirm_clear_artwork_cache(cache, *result), "cache-preview")
 

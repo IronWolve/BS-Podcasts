@@ -137,6 +137,25 @@ class ArtworkCache:
         files = self.files()
         return len(files), sum(path.stat().st_size for path in files)
 
+    def candidates(self, keep: set[str]) -> list[tuple[Path, int]]:
+        """What a full prune would delete right now, as (path, bytes), without deleting.
+
+        The same rules as prune: files in `keep`, files written in the last 15
+        minutes and files just used are never candidates, so a confirmation
+        that quotes this list matches what the clear then removes."""
+        threshold = time.time() - 15 * 60
+        recent_after = time.monotonic() - 15 * 60
+        found = []
+        for path in self.files():
+            stamp = self.signature(path)
+            if stamp is None or str(path) in keep or stamp[2] / 1e9 >= threshold:
+                continue
+            with self._locks_guard:
+                if self._recent.get(str(path), 0) > recent_after:
+                    continue
+            found.append((path, stamp[1]))
+        return found
+
     def prune(self, keep: set[str], max_bytes: int | None = None) -> tuple[int, int]:
         """Delete cached files not in `keep`, oldest first, until under `max_bytes`.
 
