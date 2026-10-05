@@ -304,21 +304,14 @@ def _close_local_server(server):
     server.close()
 
 
-def _rebuild_wait_reason(window):
-    """Why `window` must not be replaced right now, or None when it may be.
+def _window_is_away(window) -> bool:
+    """True while the window is hidden to the tray or minimized.
 
-    A rebuild closes and deletes the window and shows a new one. Run while
-    the window is hidden to the tray or minimized, it pops up in front of
-    the user's work; while a dialog or menu of the window is open, it
-    deletes the window under that event loop; while a Quit is draining, it
-    cancels the Quit. An OS light/dark switch can arrive at any of those."""
-    if getattr(window, "_force_quit", False) or getattr(window, "_quit_drain_started", 0):
-        return "quit"
-    if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
-        return "dialog"
-    if not window.isVisible() or window.isMinimized():
-        return "away"
-    return None
+    A rebuild closes and deletes the window and shows a new one, so run now it
+    would pop up in front of the user's work. An OS light/dark switch can
+    arrive at any time. (A dialog or menu being open and a Quit draining are
+    held back by the window itself, before it asks for the rebuild.)"""
+    return not window.isVisible() or window.isMinimized()
 
 
 class _ShowWatcher(QObject):
@@ -581,9 +574,6 @@ def main() -> int:
         return window
 
     pending = {"rebuild": False}
-    retry = QTimer(app)
-    retry.setSingleShot(True)
-    retry.setInterval(250)
 
     def rebuild_window():
         pending["rebuild"] = True
@@ -593,20 +583,15 @@ def main() -> int:
         if not pending["rebuild"]:
             return
         old = state["window"]
-        reason = _rebuild_wait_reason(old) if old is not None else None
-        if reason is not None:
+        if old is not None and _window_is_away(old):
             # The window asked for an immediate rebuild and marked itself as
             # being replaced; a Quit that arrives while this waits must still quit.
             old._keep_services = False
-            if reason == "away":
-                # Nothing to retry until the user brings it back.
-                if old.findChild(_ShowWatcher) is None:
-                    _ShowWatcher(old, rebuild_when_possible)
-            else:
-                retry.start()
+            # Nothing to retry until the user brings the window back.
+            if old.findChild(_ShowWatcher) is None:
+                _ShowWatcher(old, rebuild_when_possible)
             return
         pending["rebuild"] = False
-        retry.stop()
         view_state = old._capture_view_state() if old is not None else None
         apply_app_stylesheet(app)
         if old is not None:
@@ -624,7 +609,6 @@ def main() -> int:
             old.deleteLater()
         build_window(view_state)
 
-    retry.timeout.connect(rebuild_when_possible)
     build_window()
     logger.info(
         "startup phases: %s (total %.2fs)",
