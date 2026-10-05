@@ -667,15 +667,24 @@ class PlaybackService:
                 return
             self.seek(seconds)
 
+    def _global_skip(self, name: str, default: int, low: int, high: int) -> int:
+        """The Settings skip length, bounded like a new podcast's own."""
+        try:
+            value = int(float(self.repository.get_setting(f"playback.{name}", str(default))))
+        except (TypeError, ValueError):
+            return default
+        return max(low, min(high, value))
+
     def skip_back(self):
         self._guard()
         show = self.repository.get_show(self.snapshot.show_id) if self.snapshot.show_id else None
-        self.skip(-(show.skip_back if show else 15))
+        # A preview has no show of its own, so it follows the Settings length.
+        self.skip(-(show.skip_back if show else self._global_skip("skip_back", 15, 5, 120)))
 
     def skip_forward(self):
         self._guard()
         show = self.repository.get_show(self.snapshot.show_id) if self.snapshot.show_id else None
-        self.skip(show.skip_forward if show else 30)
+        self.skip(show.skip_forward if show else self._global_skip("skip_forward", 30, 5, 300))
 
     def skip(self, seconds: float):
         with self._lock:
