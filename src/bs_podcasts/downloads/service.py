@@ -784,7 +784,10 @@ class DownloadService:
                 if declared > existing:
                     total = declared
             free_budget = max(0, shutil.disk_usage(partial.parent).free - self.MIN_FREE_BYTES)
-            if total and max(0, total - existing) > free_budget:
+            # Only a length the server stated can refuse up front. The feed's
+            # advisory one must not turn a small download away on a full disk;
+            # the per-chunk check below still stops a body that really is big.
+            if authoritative_total and max(0, total - existing) > free_budget:
                 raise DownloadError("Not enough free space for this download while preserving the safety reserve.")
 
             done = existing
