@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 
+from ..config import external_environment
 from ..urlguard import UnsafeUrl, ensure_media_source, ensure_external_media_file, is_web_url
 from .engine import EngineCapabilities, EngineEvent, PlaybackUnavailable
 
@@ -75,6 +76,8 @@ class ExternalPlayerEngine:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            # The player gets the caller's own temp and cache folders, not the project's.
+            env=external_environment(),
         )
         self._handler(EngineEvent("external", target))
 
