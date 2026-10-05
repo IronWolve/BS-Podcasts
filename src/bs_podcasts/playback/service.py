@@ -170,6 +170,9 @@ class PlaybackService:
     START_TOLERANCE = 10.0
     NOTICE_SECONDS = 12.0  # how long the can't-seek notice stays on the player bar
     SEEK_UNSUPPORTED = "This server can’t seek, so playback started from the beginning. Your saved position was kept."
+    # Snapshot fields that belong to the listening session, not to one opening
+    # of the file: a reopen of the same episode (stream recovery) keeps them.
+    REOPEN_KEEPS = ("sleep_deadline", "sleep_expired_count", "sleep_at_end", "ab_start", "ab_end")
 
     def _arm_load_watchdog(self, episode_id: int | None, source: str):
         self._cancel_load_watchdog()
@@ -216,17 +219,22 @@ class PlaybackService:
                 pass
             self._emit()
 
-    def load_episode(self, episode_id: int, autoplay: bool = True, *, cancelled=None, start_position=None, force_stream=False):
+    def load_episode(self, episode_id: int, autoplay: bool = True, *, cancelled=None, start_position=None,
+                     force_stream=False, keep_session=False):
         with self._lock:
             self._guard()
             if cancelled is not None and cancelled():
                 return False
+            # keep_session: this is a reopen of the episode already loaded, so
+            # the sleep timer and the A-B loop carry over (see REOPEN_KEEPS).
+            keep = keep_session and self.snapshot.episode_id == episode_id
             self._flush_listening()
             self._persist_position(force=True)
             self._flush_persistence()
             # Sleep is session-scoped: a new load's snapshot has no deadline,
             # so a still-armed timer would pause the NEXT episode unannounced.
-            self.cancel_sleep_timer()
+            if not keep:
+                self.cancel_sleep_timer()
             self._deferred_episode_id = None
             episode = self.repository.get_episode(episode_id)
             if episode is None:
@@ -267,6 +275,7 @@ class PlaybackService:
             if start_position is not None:
                 start = max(0.0, float(start_position))
             speed = show.playback_speed if show else 1.0
+            kept = {name: getattr(self.snapshot, name) for name in self.REOPEN_KEEPS} if keep else {}
             self._begin_load(start, autoplay)
             if not self._volume_applied:
                 try:
@@ -288,6 +297,7 @@ class PlaybackService:
                 trim_level=show.trim_level if show else "off",
                 silence_saved=self.listening.silence_saved() if self.listening else 0.0,
                 artwork_path=episode.artwork_path,
+                **kept,
             )
             self._set_current_playback(episode.id, PlaybackState.LOADING.value)
             self._last_saved_position = start
@@ -912,6 +922,14 @@ class PlaybackService:
                 if self.snapshot.state in {PlaybackState.LOADING, PlaybackState.ERROR}:
                     # A load that beat the watchdog after all is ready, paused.
                     self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED, message="")
+                if (self.snapshot.ab_start is not None and self.snapshot.ab_end is not None
+                        and self.engine.capabilities.ab_repeat):
+                    # Every engine load drops the A-B loop; a reopen of the
+                    # same item keeps its snapshot, so give the loop back.
+                    try:
+                        self.engine.set_ab_repeat(self.snapshot.ab_start, self.snapshot.ab_end)
+                    except Exception as exc:
+                        logger.warning("Could not restore the A-B loop after reopening: %s", redact(exc))
             elif event.kind == "buffering":
                 previous_buffer = self.snapshot.buffering
                 if event.value is not None and previous_buffer is None:
@@ -1160,7 +1178,7 @@ class PlaybackService:
                 try:
                     if episode_id is not None:
                         self.load_episode(episode_id, autoplay=autoplay, start_position=position,
-                                          force_stream=True)
+                                          force_stream=True, keep_session=True)
                     else:
                         self._replay_current(position=position, autoplay=autoplay)
                 except Exception as exc:
