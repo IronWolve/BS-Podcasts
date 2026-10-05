@@ -118,6 +118,11 @@ _FILTERED_EVENTS = frozenset({
     QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove, QEvent.Type.ContextMenu,
 })
 _HINT_EVENTS = frozenset({QEvent.Type.ToolTip, QEvent.Type.Enter})
+# Set by a real Quit and by nothing else. A window rebuild (theme change) closes
+# the old window as well, so a long copy that must stop for a Quit tests this,
+# never `_closed`. It is shared because the worker of a window that was since
+# rebuilt must still see a Quit made in its replacement.
+_QUITTING = threading.Event()
 
 
 class _JobBridge(QObject):
@@ -315,6 +320,7 @@ class MainWindow(QMainWindow):
         self._history_clock.timeout.connect(self._refresh_history_times)
         self._history_clock.start()
         self._closed = False
+        _QUITTING.clear()  # a window is only built while the app is running
         self._force_quit = False
         self._close_to_tray_notice_shown = False
         self._ui_episode_cache = {}
@@ -2876,27 +2882,29 @@ class MainWindow(QMainWindow):
 
         def work():
             imported, failed = 0, []
-            for path in chosen:
-                if self._closed:
-                    break
+            for position, path in enumerate(chosen):
+                if _QUITTING.is_set():
+                    return imported, failed, len(chosen) - position
                 try:
                     library.import_local_audio(path)
                     imported += 1
                 except Exception as exc:
                     failed.append(f"{Path(path).name}: {exc}")
-            return imported, failed
+            return imported, failed, 0
 
         def apply(result):
-            imported, failed = result
+            imported, failed, left = result
             self.navigation.select(PAGE_PODCASTS)
             self._request_reload()
             message = f"Imported {imported} of {len(chosen)} local audio files"
             if skipped:
                 message += f" · {skipped} more were not imported (at most {self.LOCAL_IMPORT_LIMIT} at a time)"
+            if left:
+                message += f" · {left} more were not imported because the app was closing"
             if failed:
                 self.podcast_page.banner.show_state("error", "Some files could not be imported:\n" + "\n".join(failed[:5])
                                                     + ("\n…" if len(failed) > 5 else ""))
-            self._notify(message, "info" if failed or skipped else "success")
+            self._notify(message, "info" if failed or skipped or left else "success")
 
         self._notify(f"Reading {len(chosen)} local audio files…", "info")
         self._run_read(work, apply, "local-import-batch", coalesce=False)
@@ -4885,7 +4893,7 @@ class MainWindow(QMainWindow):
             # 1 MiB at a time, so a Quit stops a long copy instead of
             # waiting for it (the partial temp file is removed below).
             while chunk := input_file.read(1 << 20):
-                if self._closed:
+                if _QUITTING.is_set():
                     raise Cancelled
                 output.write(chunk)
 
@@ -4925,20 +4933,23 @@ class MainWindow(QMainWindow):
             return str(target)
 
         def work():
-            copied, failed = [], []
-            for item in snapshots:
+            copied, failed, left = [], [], 0
+            for position, item in enumerate(snapshots):
                 source = Path(item.downloaded_path)
                 if not source.is_file():
                     continue
                 try:
+                    if _QUITTING.is_set():
+                        raise Cancelled
                     copied.append(export_one(item, source))
                 except Cancelled:
+                    left = len(snapshots) - position
                     break
                 except OSError as exc:
                     # One unreadable file or a full drive must not hide what
                     # was already copied.
                     failed.append(f"{source.name}: {exc.strerror or exc}")
-            return {"copied": copied, "failed": failed}
+            return {"copied": copied, "failed": failed, "left": left}
 
         self._notify("Exporting media…")
         # File copies run beside downloads, not on the workers serving
@@ -6069,11 +6080,13 @@ class MainWindow(QMainWindow):
         if result.status != JobStatus.OK:
             self._notify(result.message or "Media export failed", "error")
             return
-        paths, failed = list(result.value["copied"]), list(result.value["failed"])
-        if not paths and not failed:
+        paths, failed, left = list(result.value["copied"]), list(result.value["failed"]), result.value.get("left", 0)
+        if not paths and not failed and not left:
             self._notify("No downloaded files were available to export", "error")
             return
         listing = "\n".join(paths[:8]) + ("\n…" if len(paths) > 8 else "")
+        if left:
+            listing += f"\n\nStopped early: {left} more file{'s' if left != 1 else ''} not exported."
         if failed:
             listing += (f"\n\nCould not export {len(failed)} file{'s' if len(failed) != 1 else ''}:\n"
                         + "\n".join(failed[:5]) + ("\n…" if len(failed) > 5 else ""))
@@ -7600,6 +7613,8 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(100, self, self.close)
                 return
         self._closed = True
+        if not self._keep_services:
+            _QUITTING.set()
         getattr(self, '_read_waiting', {}).clear()
         for _token, future in tuple(getattr(self, '_read_active', {}).values()):
             if future is not None:
