@@ -648,6 +648,10 @@ def stylesheet() -> str:
        palette's white viewport (an unnamed one shipped unreadable once). */
     QDialog QScrollArea, QDialog QScrollArea QWidget#qt_scrollarea_viewport {{ background: transparent; border: 0; }}
     QListWidget, QTextEdit, QTextBrowser {{ background: transparent; border: 0; color: {c['text']}; }}
+    QPlainTextEdit#fileListing {{
+        background: transparent; border: 0; padding: 0; color: {c['subtle']}; font-size: {small}px;
+        selection-background-color: {c['accent']}; selection-color: {c['on_accent']};
+    }}
     QListWidget::item {{ padding: {sp(7)}px {sp(8)}px; border-radius: 6px; }}
     QListWidget::item:hover {{ background: {c['surface_raised']}; }}
     QListWidget::item:selected {{ background: {c['surface_soft']}; color: {c['text_strong']}; }}

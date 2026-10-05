@@ -1,5 +1,6 @@
 """Original styled dialogs for BS Podcasts: level-3 surfaces with scrim and shadow."""
 
+import math
 import platform
 from datetime import datetime
 from pathlib import Path
@@ -7,7 +8,7 @@ import re
 import threading
 
 from PySide6.QtCore import QPoint, QSize, QTimer, QUrl, Qt, Signal, qVersion
-from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QKeySequence
+from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QKeySequence, QTextDocument, QTextOption
 
 from ..urlguard import is_web_url
 
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -275,6 +277,54 @@ def podcast_information_text(podcast, feed=None) -> str:
     return "\n".join(text).strip()
 
 
+class FileListing(QPlainTextEdit):
+    """Read-only, wrapped list of paths, as tall as its text up to `cap` pixels.
+
+    A text view lays out only the lines on screen. One wrapped label per path
+    froze the window about half a second per thousand files before the dialog
+    even appeared; a long list is simply the cap, and scrolls.
+    """
+
+    # More lines than this are taller than the cap whatever the width.
+    FIT_LINES = 30
+
+    def __init__(self, lines, cap: int, parent=None):
+        super().__init__(parent)
+        self.setObjectName("fileListing")
+        self.setReadOnly(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.setPlainText("\n".join(lines))
+        self._cap = cap
+        self.setMaximumHeight(cap)
+        policy = self.sizePolicy()
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def minimumSizeHint(self) -> QSize:
+        # The inherited minimum is two scroll bars tall (72 px), taller than
+        # a one-file list.
+        return QSize(0, self.fontMetrics().lineSpacing())
+
+    def heightForWidth(self, width: int) -> int:
+        if self.blockCount() > self.FIT_LINES:
+            return self._cap
+        self.ensurePolished()
+        probe = QTextDocument()
+        probe.setDefaultFont(self.font())
+        probe.setDefaultTextOption(self.document().defaultTextOption())
+        probe.setDocumentMargin(self.document().documentMargin())
+        probe.setPlainText(self.toPlainText())
+        probe.setTextWidth(max(1, width - 2 * self.frameWidth()))
+        # The edit's own layout needs a pixel more than the probe, or it
+        # scrolls by one line.
+        return min(self._cap, math.ceil(probe.size().height()) + 2 + 2 * self.frameWidth())
+
+
 class StyledDialog(QDialog):
     """Frameless, draggable dialog drawn on a translucent window with a soft shadow.
 
@@ -407,22 +457,12 @@ class StyledDialog(QDialog):
             button.setAutoDefault(button is default)
         default.setDefault(True)
 
-    def add_file_listing(self, lines) -> QScrollArea:
+    def add_file_listing(self, lines) -> FileListing:
         """Every exact target of a destructive action, scrolling past 180 px:
         a capped preview let Delete remove files the user never saw."""
-        listing = PlainTextLabel("\n".join(lines))
-        listing.setObjectName("settingHint")
-        listing.setWordWrap(True)
-        listing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        scroll = QScrollArea(self)
-        scroll.setObjectName("dialogScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(listing)
-        scroll.setMaximumHeight(scaled_px(180))
-        self.card_layout.addWidget(scroll)
-        return scroll
+        listing = FileListing(lines, scaled_px(180), self)
+        self.card_layout.addWidget(listing)
+        return listing
 
     def add_buttons(self, primary: QPushButton, cancel_label: str = "Cancel", *, default_primary: bool = True):
         row = QHBoxLayout()
