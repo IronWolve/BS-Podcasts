@@ -300,6 +300,31 @@ def _close_local_server(server):
     server.close()
 
 
+def _rebuild_wait_reason(window):
+    """Why `window` must not be replaced right now, or None when it may be.
+
+    A rebuild closes and deletes the window and shows a new one. Run while
+    the window is hidden to the tray or minimized, it pops up in front of
+    the user's work. An OS light/dark switch can arrive at any time."""
+    if not window.isVisible() or window.isMinimized():
+        return "away"
+    return None
+
+
+class _ShowWatcher(QObject):
+    """Calls `callback` on the next loop turn once its window is shown or restored."""
+
+    def __init__(self, window, callback):
+        super().__init__(window)  # a child, so it goes with the window
+        self._callback = callback
+        window.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.Show, QEvent.Type.WindowStateChange):
+            QTimer.singleShot(0, self._callback)
+        return False
+
+
 def _finalize_unclosed(commands, playback, grace_seconds: float = 2.0) -> int:
     """Finish playback and kept commands when the quit bypassed the window.
 
@@ -542,11 +567,30 @@ def main() -> int:
         QTimer.singleShot(0, _desktop_integration)
         return window
 
+    pending = {"rebuild": False}
+
     def rebuild_window():
+        pending["rebuild"] = True
+        rebuild_when_possible()
+
+    def rebuild_when_possible():
+        if not pending["rebuild"]:
+            return
         old = state["window"]
+        reason = _rebuild_wait_reason(old) if old is not None else None
+        if reason is not None:
+            # The window asked for an immediate rebuild and marked itself as
+            # being replaced; a Quit that arrives while this waits must still quit.
+            old._keep_services = False
+            # Nothing to retry until the user brings the window back.
+            if old.findChild(_ShowWatcher) is None:
+                _ShowWatcher(old, rebuild_when_possible)
+            return
+        pending["rebuild"] = False
         view_state = old._capture_view_state() if old is not None else None
         apply_app_stylesheet(app)
         if old is not None:
+            old._keep_services = True  # the services outlive this window
             if getattr(old, "tray", None) is not None:
                 old.tray.shutdown()
             # Both may still be None: they are now built after first paint,
