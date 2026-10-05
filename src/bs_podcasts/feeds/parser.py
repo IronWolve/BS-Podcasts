@@ -27,6 +27,9 @@ MAX_FEED_ELEMENTS = 1_000_000
 # hundred; long inline XHTML show notes stay far below it.
 MAX_KEPT_ELEMENTS = 20_000
 MIN_ENCLOSURE_BYTES = 16 * 1024
+# Titles are shown in every list; one with megabytes of text would cost every
+# layout pass. Episode identity is taken from the full title before this cap.
+MAX_TITLE_CHARS = 500
 
 
 class FeedParseError(ValueError):
@@ -55,6 +58,12 @@ def _text(element, *names) -> str:
     if child is None:
         return ""
     return "".join(child.itertext()).strip()
+
+
+def _clamp_title(text: str) -> str:
+    if len(text) <= MAX_TITLE_CHARS:
+        return text
+    return text[:MAX_TITLE_CHARS - 1].rstrip() + "\u2026"
 
 
 # Non-audio enclosures seen while parsing the current feed (per thread).
@@ -293,7 +302,7 @@ def _rss_episode(item) -> FeedEpisodeData | None:
     chapters_url = _chapters(item)
     return FeedEpisodeData(
         external_id=external,
-        title=title,
+        title=_clamp_title(title),
         description=_text(item, "description", "summary", "encoded"),
         media_url=media_url,
         mime_type=mime,
@@ -319,7 +328,7 @@ def _parse_rss(root, episodes) -> FeedData:
         raise FeedParseError("RSS feed has no channel.")
 
     return FeedData(
-        title=_text(channel, "title") or "Untitled podcast",
+        title=_clamp_title(_text(channel, "title") or "Untitled podcast"),
         author=_text(channel, "author", "managingeditor"),
         description=_text(channel, "description", "subtitle"),
         website_url=_rss_link(channel),
@@ -360,7 +369,7 @@ def _atom_episode(entry) -> FeedEpisodeData | None:
     author = _first(entry, "author")
     return FeedEpisodeData(
         external_id=external,
-        title=title,
+        title=_clamp_title(title),
         description=_text(entry, "summary", "content"),
         media_url=media_url,
         mime_type=mime,
@@ -384,7 +393,7 @@ def _parse_atom(root, episodes) -> FeedData:
     website_url, _mime, _size = _atom_link(root, "alternate")
     author = _first(root, "author")
     return FeedData(
-        title=_text(root, "title") or "Untitled podcast",
+        title=_clamp_title(_text(root, "title") or "Untitled podcast"),
         author=_text(author, "name") if author is not None else "",
         description=_text(root, "subtitle"),
         website_url=website_url,
