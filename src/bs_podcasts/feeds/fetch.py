@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, replace
 from html.parser import HTMLParser
+import re
 from urllib.parse import urljoin
 
 from ..net import USER_AGENT, SessionSlot, describe_network_error
@@ -97,8 +98,15 @@ def _markup_text(body: bytes, encoding: str | None) -> str:
         return body.decode("utf-8", "replace")
 
 
+# A DOCTYPE that is not HTML's, such as the RSS 0.91 header naming an external
+# DTD. Quoted identifiers and an internal subset may hold ">"; the parser
+# decides about the subset later. Looked for in a bounded window only.
+_XML_DOCTYPE = re.compile(r"""<!doctype\s+(?!html\b)(?:[^>\["']|"[^"]*"|'[^']*'|\[[^\]]*\])*>""", re.IGNORECASE)
+_DOCTYPE_WINDOW = 64 * 1024
+
+
 def _opening_markup(text: str) -> str:
-    """First tag after a BOM, comments, and processing instructions."""
+    """First tag after a BOM, comments, processing instructions and a non-HTML DOCTYPE."""
     index = 0
     length = len(text)
     while True:
@@ -117,6 +125,10 @@ def _opening_markup(text: str) -> str:
             if end < 0:
                 return ""
             index = end + 2
+            continue
+        doctype = _XML_DOCTYPE.match(text, index, index + _DOCTYPE_WINDOW)
+        if doctype:
+            index = doctype.end()
             continue
         return text[index:index + 64].lower()
 
