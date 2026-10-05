@@ -451,11 +451,15 @@ class StyledDialog(QDialog):
             self.card_layout.addWidget(text)
 
     def set_default_button(self, default: QPushButton):
-        """Enter presses `default`. Unset, it pressed the first button in the
-        focus chain: Open website, GitHub, or Copy information."""
-        for button in self.findChildren(QPushButton):
-            button.setAutoDefault(button is default)
+        """Enter presses `default` unless another button has the focus. The
+        dialog opens with the focus on `default`: unset, it opened on the first
+        button in the focus chain (Open website, GitHub, Copy information) and
+        Enter pressed that. The other buttons stay auto-default, so one the
+        user Tabs to becomes the default while it has the focus and Enter
+        activates it instead of closing the dialog."""
+        default.setAutoDefault(True)
         default.setDefault(True)
+        default.setFocus()
 
     def add_file_listing(self, lines) -> FileListing:
         """Every exact target of a destructive action, scrolling past 180 px:
