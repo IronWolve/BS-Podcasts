@@ -196,6 +196,10 @@ class DownloadService:
         self._intent_writer = False
         self._recording = set()
         self._settled = Condition(self._lock)
+        # The newest play-intent ticket handed out, as (episode id, ticket).
+        # The player waits on one episode at a time, so a newer play intent
+        # for another episode pauses it (see queue()).
+        self._play_intent = None
 
     def subscribe(self, listener):
         self._listeners.append(listener)
@@ -220,9 +224,17 @@ class DownloadService:
         `priority` is a play intent bound for the caller's own worker: a
         ticket still waiting behind background downloads is replaced, and
         its job finds itself stale and returns without transferring. A
-        transfer that already started is left to finish (None).
+        transfer that already started is left to finish (None). The last
+        play intent wins: starting one for another episode pauses the
+        previous play-intent transfer, which nobody is waiting on any more
+        and which would otherwise hold the play worker. The pause is the
+        ordinary resumable one; nothing on disk is touched.
         """
         with self._lock:
+            intent = self._play_intent
+            if priority and intent is not None and intent[0] != episode_id:
+                intent[1].set()
+                self._play_intent = None
             if episode_id in self._retiring_episodes or episode_id in self._deleting_episodes:
                 return None
             active, queued = self._cancellations.get(episode_id), self._queued.get(episode_id)
@@ -232,6 +244,10 @@ class DownloadService:
                 return None
             ticket = Event()
             self._queued[episode_id] = ticket
+            if priority:
+                self._play_intent = (episode_id, ticket)
+            elif self._play_intent is not None and self._play_intent[0] == episode_id:
+                self._play_intent = None  # an explicit download of its own now
             self._intents.append((episode_id, ticket))
             start, self._intent_writer = not self._intent_writer, True
         if start:
