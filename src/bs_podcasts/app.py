@@ -368,7 +368,10 @@ def _claim_single_instance(app):
     # bind that actually fails justifies clearing, and only after re-probing
     # confirms nothing is answering there.
     if not server.listen(name):
-        if _probe_running_instance(name, timeout_ms=1500):
+        # Only an answer counts: the lease is held, so a listener that stays
+        # silent is not an instance of this library, and yielding to it would
+        # end the launch with no window and no message.
+        if _probe_running_instance(name, timeout_ms=1500, answered_only=True):
             _close_local_server(server)
             return None
         QLocalServer.removeServer(name)
