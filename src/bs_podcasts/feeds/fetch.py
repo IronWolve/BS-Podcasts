@@ -103,6 +103,7 @@ def _markup_text(body: bytes, encoding: str | None) -> str:
 # decides about the subset later. Looked for in a bounded window only.
 _XML_DOCTYPE = re.compile(r"""<!doctype\s+(?!html\b)(?:[^>\["']|"[^"]*"|'[^']*'|\[[^\]]*\])*>""", re.IGNORECASE)
 _DOCTYPE_WINDOW = 64 * 1024
+_FEED_ROOTS = ("<rss", "<feed", "<rdf", "<channel")
 
 
 def _opening_markup(text: str) -> str:
@@ -174,6 +175,11 @@ class _FeedLinkParser(HTMLParser):
             self.href = values.get("href", "").strip()
 
 
+# What peek_latest answers for a feed it read in full but could not date: no
+# title, no date. A caller must not fetch the same bytes again.
+NOTHING_DATED = ("", "")
+
+
 class FeedFetcher:
     # The session's byte cap surfaces as a timeout; keep it a backstop above
     # this fetcher's own cap, so an oversized feed is a feed failure.
@@ -196,12 +202,17 @@ class FeedFetcher:
     def peek_latest(self, url: str) -> tuple[str, str] | None:
         """(title, published_at) of the newest dated item, in one request.
 
+        NOTHING_DATED, with an empty date, when the feed was read but holds no
+        dated item or is XML that does not parse; None when nothing was read
+        (a non-200 answer) or the body is a page the full fetch may still
+        follow to a feed.
+
         Discover's 'Newest episode' sort needs one date per result (audit
         F-089). A ranged 64 KB peek could not parse any larger feed, since a
         partial document cannot prove which item is newest, so nearly every
         card cost the peek plus a second, full request. The body is read
         once, up to the feed size cap; a caller falls back to the full fetch
-        only when this finds nothing.
+        only when nothing was read.
         """
         try:
             url = ensure_fetchable(url, "Feed URL")
@@ -230,10 +241,13 @@ class FeedFetcher:
         try:
             feed = parse_feed(bytes(body), base_url=response.url)
         except FeedParseError:
-            return None
+            # The same bytes fail again, unless this is a page that the full
+            # fetch can follow to the feed it advertises.
+            lead = _opening_markup(_markup_text(bytes(body), getattr(response, "encoding", None)))
+            return NOTHING_DATED if lead.startswith(_FEED_ROOTS) else None
         dated = [episode for episode in feed.episodes if episode.published_at]
         if not dated:
-            return None
+            return NOTHING_DATED
         latest = max(dated, key=lambda episode: episode.published_at)
         return latest.title, latest.published_at
 
@@ -301,7 +315,7 @@ class FeedFetcher:
             # is actually XML must parse as a feed, not fail HTML discovery.
             text = _markup_text(bytes(body), getattr(response, "encoding", None))
             lead = _opening_markup(text)
-            looks_like_xml = lead.startswith(("<rss", "<feed", "<rdf", "<channel"))
+            looks_like_xml = lead.startswith(_FEED_ROOTS)
             if allow_discovery and not looks_like_xml and (
                 "text/html" in content_type or lead.startswith("<!doctype html")
             ):
