@@ -4068,13 +4068,17 @@ class MainWindow(QMainWindow):
         if record is None:
             self._notify("Nothing to delete for this selection")
             return
-        dialog = DeleteFilesDialog(
-            "Delete download",
-            "The episode stays in your library; only the listed local files are removed.",
-            previews, self._format_bytes, self,
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+        # With no local file listed, clearing only drops the failed record, so
+        # there is nothing destructive to confirm. discard() still refuses if a
+        # file has appeared since the preview was read.
+        if previews:
+            dialog = DeleteFilesDialog(
+                "Delete download",
+                "The episode stays in your library; only the listed local files are removed.",
+                previews, self._format_bytes, self,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
         downloads = self.downloads
 
         def work():
