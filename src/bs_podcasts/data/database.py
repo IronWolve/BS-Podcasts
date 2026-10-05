@@ -483,10 +483,20 @@ class Database:
                     "ON CONFLICT(kind) DO UPDATE SET value=MAX(value, excluded.value)", (kind, highest))
         if "episodes" in lost:
             # Per-show counts are cached (migration 014) and only adjusted by
-            # triggers; recount them for the episodes that were kept.
+            # triggers; recount them for the episodes that were kept. The
+            # cached latest episode goes with them: a lost newest episode
+            # otherwise stays named, and a later insert only replaces it by
+            # sorting after it (the expression is migration 023's).
             destination.execute(
                 "UPDATE shows SET episode_count=(SELECT COUNT(*) FROM episodes e WHERE e.show_id=shows.id), "
                 "new_count=(SELECT COUNT(*) FROM episodes e WHERE e.show_id=shows.id AND e.is_new=1)"
+            )
+            destination.execute(
+                "UPDATE shows SET (latest_key, latest_episode_title, latest_episode_published_at)=("
+                "SELECT COALESCE(NULLIF(published_at,''),'0') || printf('~%012d',id), title, published_at "
+                "FROM (SELECT id,title,published_at FROM episodes WHERE show_id=shows.id "
+                "ORDER BY published_at DESC,id DESC LIMIT 1) "
+                "UNION ALL SELECT '', '', '' LIMIT 1)"
             )
         return lost
 
