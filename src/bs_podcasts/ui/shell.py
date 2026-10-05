@@ -1,5 +1,6 @@
 """Wide responsive application shell."""
 
+from contextlib import contextmanager
 from dataclasses import replace as replace_item
 from collections import OrderedDict
 import json
@@ -2610,6 +2611,19 @@ class MainWindow(QMainWindow):
 
         future.add_done_callback(finished)
 
+    @contextmanager
+    def _page_guard(self, page, what: str):
+        """Run one page's update so its failure stays on that page: the error
+        is logged and shown on that page's banner (`page` None: logged only),
+        and the updates after it still run."""
+        try:
+            yield
+        except Exception as exc:
+            logging.getLogger("bs_podcasts").exception("Updating %s failed", what)
+            banner = getattr(page, "banner", None)
+            if banner is not None:
+                banner.show_state("error", f"Couldn't show {what}: {exc or type(exc).__name__}")
+
     def _reload_library(self, data=None):
         if self.library is None:
             return
@@ -2636,7 +2650,8 @@ class MainWindow(QMainWindow):
         # preserve_scroll: this runs on every background reload, and the
         # default reset yanked the grid back to the top mid-browse whenever a
         # refresh finished.
-        self.podcast_page.set_items(shows, preserve_scroll=True)
+        with self._page_guard(self.podcast_page, "your podcasts"):
+            self.podcast_page.set_items(shows, preserve_scroll=True)
         # A library-wide background reload must not replace a podcast detail
         # view (or an unsubscribed preview) with the global episode list.
         self._episode_total = data["episode_total"]
@@ -2653,52 +2668,61 @@ class MainWindow(QMainWindow):
             self._history_items_shown = history
             if shrunk:
                 self._history_generation += 1
-        if not self._hero_show_id and not self._preview_episodes_url:
-            self.episode_page.set_items(episodes)
-            # The global view is windowed for responsiveness; say how much is
-            # shown and offer the rest instead of silently hiding the tail
-            # (each podcast page is complete).
-            self._set_global_episode_chrome(len(episodes))
-        elif self._hero_show_id and not self._preview_episodes_url and data.get("detail_show_id") == self._hero_show_id:
-            podcast = next((item for item in shows if item.show_id == self._hero_show_id), None)
-            if podcast is not None:
-                detail = data["detail_episodes"]
-                self._show_hero(podcast, len(detail))
-                self.episode_page.set_items(detail, preserve_scroll=True)
-            else:
-                self._apply_all_episodes(episodes)
-        resume_ids = {episode.episode_id for episode in in_progress[:3]}
-        unplayed = [episode for episode in episodes if not episode.played and episode.state != "In progress" and episode.episode_id not in resume_ids]
-        fresh = [episode for episode in unplayed if episode.is_new]
-        # The Home card counts is_new; the section shows the same set, or falls
-        # back to the newest unplayed episodes when nothing is flagged new.
-        self.home_page.set_latest_title("New episodes" if fresh else "Latest episodes")
-        self.home_page.set_sections(in_progress, fresh or unplayed)
-        self.playlist_page.set_items(queued)
-        self._finish_page_load(self.playlist_page)
-        self.context.set_queue(queued)
-        self.player.set_next(self._next_title(queued, self._playing_episode_id))
-        self.history_page.set_items(history)
-        self._finish_page_load(self.history_page)
-        self._set_history_chrome(len(history))
-        self._reload_downloads()
+        with self._page_guard(self.episode_page, "episodes"):
+            if not self._hero_show_id and not self._preview_episodes_url:
+                self.episode_page.set_items(episodes)
+                # The global view is windowed for responsiveness; say how much is
+                # shown and offer the rest instead of silently hiding the tail
+                # (each podcast page is complete).
+                self._set_global_episode_chrome(len(episodes))
+            elif self._hero_show_id and not self._preview_episodes_url and data.get("detail_show_id") == self._hero_show_id:
+                podcast = next((item for item in shows if item.show_id == self._hero_show_id), None)
+                if podcast is not None:
+                    detail = data["detail_episodes"]
+                    self._show_hero(podcast, len(detail))
+                    self.episode_page.set_items(detail, preserve_scroll=True)
+                else:
+                    self._apply_all_episodes(episodes)
+        with self._page_guard(self.home_page, "Home"):
+            resume_ids = {episode.episode_id for episode in in_progress[:3]}
+            unplayed = [episode for episode in episodes if not episode.played and episode.state != "In progress" and episode.episode_id not in resume_ids]
+            fresh = [episode for episode in unplayed if episode.is_new]
+            # The Home card counts is_new; the section shows the same set, or falls
+            # back to the newest unplayed episodes when nothing is flagged new.
+            self.home_page.set_latest_title("New episodes" if fresh else "Latest episodes")
+            self.home_page.set_sections(in_progress, fresh or unplayed)
+        with self._page_guard(self.playlist_page, "Up Next"):
+            self.playlist_page.set_items(queued)
+            self._finish_page_load(self.playlist_page)
+            self.context.set_queue(queued)
+            self.player.set_next(self._next_title(queued, self._playing_episode_id))
+        with self._page_guard(self.history_page, "History"):
+            self.history_page.set_items(history)
+            self._finish_page_load(self.history_page)
+            self._set_history_chrome(len(history))
+        with self._page_guard(self.download_page, "Downloads"):
+            self._reload_downloads()
         active_downloads = sum(record.state.value in {"queued", "downloading", "paused"} for record in data["records"])
         new_total = sum(show.new_count for show in stored_shows)
         self._new_episode_total = new_total
-        self.home_page.set_counts(new_total, len(queued), active_downloads)
-        self.navigation.set_badge(PAGE_EPISODES, new_total)
-        self.navigation.set_badge(PAGE_QUEUE, len(queued))
-        self.navigation.set_badge(PAGE_DOWNLOADS, active_downloads)
         show_count = len(stored_shows)
-        self.home_page.set_empty_context(bool(stored_shows))
-        self.navigation.set_summary(
-            f"{show_count} podcast{'s' if show_count != 1 else ''}" + (f"  ·  {new_total} new" if new_total else "")
-            if show_count else "Library"
-        )
-        self.podcast_page.header.set_subtitle(
-            f"{show_count} podcast{'s' if show_count != 1 else ''}  ·  {episode_total} episode{'s' if episode_total != 1 else ''}" if show_count else ""
-        )
-        self._apply_playing_marker()
+        with self._page_guard(self.home_page, "Home"):
+            self.home_page.set_counts(new_total, len(queued), active_downloads)
+            self.home_page.set_empty_context(bool(stored_shows))
+        with self._page_guard(None, "the navigation counts"):
+            self.navigation.set_badge(PAGE_EPISODES, new_total)
+            self.navigation.set_badge(PAGE_QUEUE, len(queued))
+            self.navigation.set_badge(PAGE_DOWNLOADS, active_downloads)
+            self.navigation.set_summary(
+                f"{show_count} podcast{'s' if show_count != 1 else ''}" + (f"  ·  {new_total} new" if new_total else "")
+                if show_count else "Library"
+            )
+        with self._page_guard(self.podcast_page, "your podcasts"):
+            self.podcast_page.header.set_subtitle(
+                f"{show_count} podcast{'s' if show_count != 1 else ''}  ·  {episode_total} episode{'s' if episode_total != 1 else ''}" if show_count else ""
+            )
+        with self._page_guard(None, "the playing marker"):
+            self._apply_playing_marker()
         self._prime_accents(show.artwork_path for show in stored_shows)
         if self.jobs is not None and not getattr(self, '_preview_warm_started', False):
             self._preview_warm_started = True
@@ -2759,10 +2783,11 @@ class MainWindow(QMainWindow):
         return next((e.title for e in queued if (getattr(e, "episode_id", None) or getattr(e, "id", 0)) != playing_id), "")
 
     def _apply_queue(self, queued):
-        self.playlist_page.set_items(queued)
-        self._finish_page_load(self.playlist_page)
-        self.context.set_queue(queued)
-        self.player.set_next(self._next_title(queued, self._playing_episode_id))
+        with self._page_guard(self.playlist_page, "Up Next"):
+            self.playlist_page.set_items(queued)
+            self._finish_page_load(self.playlist_page)
+            self.context.set_queue(queued)
+            self.player.set_next(self._next_title(queued, self._playing_episode_id))
         self.navigation.set_badge(PAGE_QUEUE, len(queued))
         self.home_page.summary_buttons[1].set_count(len(queued))
 
@@ -5112,10 +5137,11 @@ class MainWindow(QMainWindow):
         with self._samples_lock:
             samples = dict(self._download_samples)
         items = [self._download_item(item, self._download_records_seen[item.episode_id], samples) for item in items]
-        self.download_page.set_items(items)
-        self._finish_page_load(self.download_page)
-        self._update_download_chrome()
-        self._refresh_download_capacity()
+        with self._page_guard(self.download_page, "Downloads"):
+            self.download_page.set_items(items)
+            self._finish_page_load(self.download_page)
+            self._update_download_chrome()
+            self._refresh_download_capacity()
 
     def _update_download_chrome(self):
         records = list(self._download_records_seen.values())
@@ -5178,8 +5204,9 @@ class MainWindow(QMainWindow):
         if self.listening is None or self.library is None:
             return
         def apply(items):
-            self.bookmark_page.set_items(items)
-            self._finish_page_load(self.bookmark_page)
+            with self._page_guard(self.bookmark_page, "Bookmarks"):
+                self.bookmark_page.set_items(items)
+                self._finish_page_load(self.bookmark_page)
         self._run_read(self._read_bookmark_items, apply, "bookmarks")
 
     def _finish_page_load(self, page, error=""):
