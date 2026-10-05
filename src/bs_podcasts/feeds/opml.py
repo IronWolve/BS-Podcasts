@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 
-from .safety import contains_dtd
+from .safety import UnsupportedEncoding, contains_dtd, strip_leading_space
 from ..privacy import feed_label
 
 
@@ -33,7 +33,12 @@ def import_opml(content: bytes) -> list[OpmlEntry]:
     # The whole prolog, read by the XML parser itself: a long comment or a
     # processing instruction holding comment markup was enough to smuggle an
     # entity declaration past text scans and reach internal-entity expansion.
-    if contains_dtd(content):
+    content = strip_leading_space(content)
+    try:
+        refused = contains_dtd(content)
+    except UnsupportedEncoding as exc:
+        raise OpmlError(str(exc)) from exc
+    if refused:
         raise OpmlError("DTD and entity declarations are not allowed.")
     try:
         root = ET.fromstring(content)

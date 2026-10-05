@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 
 from ..domain import FeedData, FeedEpisodeData
 from ..domain.media import BINARY_AUDIO_TYPES
-from .safety import contains_dtd
+from .safety import UnsupportedEncoding, contains_dtd, strip_leading_space
 
 
 MAX_FEED_BYTES = 20 * 1024 * 1024
@@ -612,10 +612,16 @@ def parse_feed(content: bytes, base_url: str = "") -> FeedData:
         raise FeedParseError("Feed response was empty.")
     if len(content) > MAX_FEED_BYTES:
         raise FeedParseError("Feed exceeds the size limit.")
+    # A newline or space before the XML declaration is common and harmless.
+    content = strip_leading_space(content)
     # The XML parser reads the whole prolog itself: text scans missed
     # declarations behind long comments, in UTF-16, or after a processing
     # instruction that contained comment markup.
-    if contains_dtd(content):
+    try:
+        refused = contains_dtd(content)
+    except UnsupportedEncoding as exc:
+        raise FeedParseError(str(exc)) from exc
+    if refused:
         raise FeedParseError("DTD and entity declarations are not allowed.")
     _SKIPPED.take()
     try:
