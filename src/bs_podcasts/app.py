@@ -305,7 +305,13 @@ def _rebuild_wait_reason(window):
 
     A rebuild closes and deletes the window and shows a new one. Run while
     the window is hidden to the tray or minimized, it pops up in front of
-    the user's work. An OS light/dark switch can arrive at any time."""
+    the user's work; while a dialog or menu of the window is open, it
+    deletes the window under that event loop; while a Quit is draining, it
+    cancels the Quit. An OS light/dark switch can arrive at any of those."""
+    if getattr(window, "_force_quit", False) or getattr(window, "_quit_drain_started", 0):
+        return "quit"
+    if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
+        return "dialog"
     if not window.isVisible() or window.isMinimized():
         return "away"
     return None
@@ -568,6 +574,9 @@ def main() -> int:
         return window
 
     pending = {"rebuild": False}
+    retry = QTimer(app)
+    retry.setSingleShot(True)
+    retry.setInterval(250)
 
     def rebuild_window():
         pending["rebuild"] = True
@@ -582,11 +591,15 @@ def main() -> int:
             # The window asked for an immediate rebuild and marked itself as
             # being replaced; a Quit that arrives while this waits must still quit.
             old._keep_services = False
-            # Nothing to retry until the user brings the window back.
-            if old.findChild(_ShowWatcher) is None:
-                _ShowWatcher(old, rebuild_when_possible)
+            if reason == "away":
+                # Nothing to retry until the user brings it back.
+                if old.findChild(_ShowWatcher) is None:
+                    _ShowWatcher(old, rebuild_when_possible)
+            else:
+                retry.start()
             return
         pending["rebuild"] = False
+        retry.stop()
         view_state = old._capture_view_state() if old is not None else None
         apply_app_stylesheet(app)
         if old is not None:
@@ -604,6 +617,7 @@ def main() -> int:
             old.deleteLater()
         build_window(view_state)
 
+    retry.timeout.connect(rebuild_when_possible)
     build_window()
     logger.info(
         "startup phases: %s (total %.2fs)",
