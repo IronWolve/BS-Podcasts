@@ -322,6 +322,7 @@ class MainWindow(QMainWindow):
         self._closed = False
         _QUITTING.clear()  # a window is only built while the app is running
         self._force_quit = False
+        self._quit_drain_started = 0  # monotonic start of a Quit that is draining kept commands
         self._close_to_tray_notice_shown = False
         self._ui_episode_cache = {}
         self._all_episode_items = []
@@ -1139,7 +1140,7 @@ class MainWindow(QMainWindow):
             f"Removes {len(stale)} cached image{'s' if len(stale) != 1 else ''} ({self._format_bytes(total)}) that no podcast or episode uses. Artwork for your library is kept.",
             "Clear cache", destructive=True, parent=self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
         self._run_read(
             lambda: cache.prune(keep, None),
@@ -1173,7 +1174,7 @@ class MainWindow(QMainWindow):
             (title, [(bindings.get(name, ""), label) for name, label in entries if bindings.get(name)])
             for title, entries in SHORTCUT_GROUPS
         ]
-        ShortcutsDialog(groups, self).exec()
+        self._exec_dialog(ShortcutsDialog(groups, self))
 
     # -------------------------------------------------------- scheduled refresh
     def _check_database_if_due(self):
@@ -1387,7 +1388,7 @@ class MainWindow(QMainWindow):
             + data["names"] + file_note,
             "Remove all", destructive=True, parent=self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
         library = self.library
         playback = self.playback
@@ -1435,7 +1436,7 @@ class MainWindow(QMainWindow):
             "Settings and shortcuts are kept. This cannot be undone.",
             "Reset library", destructive=True, parent=self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
         playback = self.playback
         self._previews.clear()
@@ -1497,9 +1498,18 @@ class MainWindow(QMainWindow):
             return info
 
         def apply(info):
-            AboutDialog(info if isinstance(info, dict) else {}, self).exec()
+            self._exec_dialog(AboutDialog(info if isinstance(info, dict) else {}, self))
 
         self._run_read(work, apply, "about")
+
+    @staticmethod
+    def _exec_dialog(dialog):
+        """Run a modal dialog. One destroyed under its own loop (its window
+        went away) counts as declined, so the caller stops instead of raising."""
+        try:
+            return dialog.exec()
+        except RuntimeError:  # the dialog's C++ object is already deleted
+            return QDialog.DialogCode.Rejected
 
     def _notify(self, message: str, tone: str = "info", action: str = "", callback=None):
         self.toast.show_message(message, tone, action, callback)
@@ -1579,7 +1589,7 @@ class MainWindow(QMainWindow):
         if not preview or self.library is None:
             return
         dialog = RemovePodcastDialog(preview, self._format_bytes, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
         show = preview["show"]
         playback = self.playback
@@ -1689,7 +1699,7 @@ class MainWindow(QMainWindow):
             detail or f"This applies to every selected episode ({count}).",
             verb, destructive=destructive, parent=self,
         )
-        return dialog.exec() == QDialog.DialogCode.Accepted
+        return self._exec_dialog(dialog) == QDialog.DialogCode.Accepted
 
     def _queue_many(self, items):
         if self.library is None:
@@ -1736,7 +1746,7 @@ class MainWindow(QMainWindow):
             show.auto_download_override, show.auto_download_limit,
             show.retention_keep, show.retention_days,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
         values = dialog.values()
         retention_changed = (
@@ -1822,7 +1832,7 @@ class MainWindow(QMainWindow):
                     "These downloaded files exceed this podcast’s limits. Favorites are protected.",
                     previews, self._format_bytes, self,
                 )
-                accepted = dialog.exec() == QDialog.DialogCode.Accepted
+                accepted = self._exec_dialog(dialog) == QDialog.DialogCode.Accepted
             finally:
                 self._retention_prompting.discard(show_id)
             again = self._retention_again.pop(show_id, None)
@@ -1944,8 +1954,20 @@ class MainWindow(QMainWindow):
                 apply_theme(resolve_theme(value))
                 self._save_layout()
                 self._save_view_state()
-                self._keep_services = True
-                self.relaunch_requested.emit()
+                self._relaunch_for_theme()
+
+    def _relaunch_for_theme(self):
+        """Rebuild the window for the new appearance, but never under an open
+        dialog or menu (the rebuild deletes the old window and with it whatever
+        it owns) and never while a Quit is draining (services are kept, so the
+        Quit would be dropped). The saved theme applies at the next start."""
+        if self._closed or self._force_quit or self._quit_drain_started:
+            return
+        if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
+            QTimer.singleShot(250, self, self._relaunch_for_theme)
+            return
+        self._keep_services = True
+        self.relaunch_requested.emit()
 
     def _background_paused(self) -> bool:
         return self.library is not None and self.library.setting("background.paused", "0") == "1"
@@ -2522,7 +2544,7 @@ class MainWindow(QMainWindow):
             "A backup is created first. Playback can continue, but library changes wait until maintenance finishes.",
             label, parent=self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
         database = self.library.repository.database
         self.settings_page.set_database_status(f"{label} in progress…")
@@ -2560,7 +2582,7 @@ class MainWindow(QMainWindow):
             "This rebuilds the damaged database and keeps an untouched copy in Backups. Use this only after the health check reports a problem.",
             "Attempt repair", destructive=True, parent=self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             self.settings_page.set_database_status("Damaged · repair not started", repair_available=True)
             return
         self.settings_page.set_database_status("Repair in progress…")
@@ -2772,7 +2794,7 @@ class MainWindow(QMainWindow):
                 self._submit_refresh(show.id)
             self._run_read(work, apply, 'add-subscription', pool=self.commands, coalesce=False)
         dialog.submit_requested.connect(submit)
-        dialog.exec()
+        self._exec_dialog(dialog)
 
     def _show_library_menu(self):
         button = self.podcast_page.header.action
@@ -3419,7 +3441,7 @@ class MainWindow(QMainWindow):
         )
 
     def _show_episode_information(self, episode, show):
-        EpisodeInfoDialog(episode, show, self._format_bytes, self).exec()
+        self._exec_dialog(EpisodeInfoDialog(episode, show, self._format_bytes, self))
 
     def _show_context_information(self, item):
         if isinstance(item, UiEpisode):
@@ -3431,13 +3453,13 @@ class MainWindow(QMainWindow):
                 source = self._stored_show(item.show_id)
             elif item.feed_url:
                 source = self._previews.get(item.feed_url)
-            PodcastInfoDialog(item, source, self).exec()
+            self._exec_dialog(PodcastInfoDialog(item, source, self))
 
     def _show_hero_information(self):
         if self._hero_show_id and self.library is not None:
             show = self._stored_show(self._hero_show_id)
             if show is not None:
-                PodcastInfoDialog(self._ui_podcast(show), show, self).exec()
+                self._exec_dialog(PodcastInfoDialog(self._ui_podcast(show), show, self))
             return
         feed_url = self._preview_episodes_url
         if not feed_url:
@@ -3451,7 +3473,7 @@ class MainWindow(QMainWindow):
                 website_url=feed.website_url, artwork_url=feed.artwork_url,
             )
         if card is not None:
-            PodcastInfoDialog(card, feed, self).exec()
+            self._exec_dialog(PodcastInfoDialog(card, feed, self))
 
     def _open_playing_podcast(self):
         """Player bar show name → that podcast's episode list, playing row selected."""
@@ -4092,7 +4114,7 @@ class MainWindow(QMainWindow):
                 "The episode stays in your library; only the listed local files are removed.",
                 previews, self._format_bytes, self,
             )
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
                 return
         downloads = self.downloads
 
@@ -4118,7 +4140,7 @@ class MainWindow(QMainWindow):
             "Delete download" if len(previews) == 1 else f"Delete {len(previews)} downloads",
             "The episode stays in your library; only the local file is removed.", previews, self._format_bytes, self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
         self._delete_downloads_async(
             previews, "Deleted {count} download{plural}  ·  {size} reclaimed"
@@ -4220,7 +4242,7 @@ class MainWindow(QMainWindow):
         if self.listening is None or not item.bookmark_id:
             return
         dialog = TextInputDialog("Rename bookmark", f"At {self.player._time(item.bookmark_position)} in {item.detail or item.show}.", item.title, "Rename", self)
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.value:
+        if self._exec_dialog(dialog) == QDialog.DialogCode.Accepted and dialog.value:
             value = dialog.value
             def apply(_result):
                 self._bookmarks_changed()
@@ -4280,7 +4302,7 @@ class MainWindow(QMainWindow):
         if not count:
             return
         dialog = ConfirmDialog("Clear all history?", f"Clears the entire History, currently {count} episode{'s' if count != 1 else ''}, including entries outside this page or filter. Playback positions and played marks are kept.", "Clear all history", destructive=True, parent=self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        if self._exec_dialog(dialog) == QDialog.DialogCode.Accepted:
             def apply(_count):
                 self._request_reload()
                 self._notify("History cleared", "success")
@@ -4297,7 +4319,7 @@ class MainWindow(QMainWindow):
         if not queued:
             return
         dialog = ConfirmDialog("Clear Up Next?", f"Removes {len(queued)} episode{'s' if len(queued) != 1 else ''} from the queue. Nothing is deleted.", "Clear Up Next", destructive=True, parent=self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        if self._exec_dialog(dialog) == QDialog.DialogCode.Accepted:
             def work():
                 ids = [episode.id for episode in self.library.queue()]
                 self.library.clear_queue()
@@ -5947,7 +5969,7 @@ class MainWindow(QMainWindow):
                 "Downloads for episodes you've finished. Episodes stay in your library.",
                 previews, self._format_bytes, self,
             )
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
                 return
         self._delete_downloads_async(
             previews,
@@ -6100,7 +6122,7 @@ class MainWindow(QMainWindow):
             listing.strip(),
             "Open folder", parent=self,
         )
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        if self._exec_dialog(dialog) == QDialog.DialogCode.Accepted:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(identifier)))
         return
     def _on_directory(self, kind, identifier, result):
@@ -7587,6 +7609,7 @@ class MainWindow(QMainWindow):
         """Explicit Quit (shortcut, tray, MPRIS) exits even when window-close
         is configured to hide to the tray."""
         self._force_quit = True
+        self._keep_services = False  # a Quit outranks a rebuild that is still pending
         self.close()
 
     def closeEvent(self, event):
