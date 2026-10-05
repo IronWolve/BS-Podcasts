@@ -44,7 +44,7 @@ from ..logging_setup import log_path
 from ..domain import DownloadState, FeedData, Health
 from ..directories.persistent import PersistentDirectoryCache
 from ..downloads import DownloadError
-from ..jobs import JobResult, JobStatus
+from ..jobs import JobResult, JobRunner, JobStatus
 from ..jobs.commands import CommandQueue
 from ..services.library import LibraryService, _bounded_float, _bounded_int
 from ..services.preview_cache import PreviewCache, prepare_preview
@@ -124,6 +124,8 @@ _HINT_EVENTS = frozenset({QEvent.Type.ToolTip, QEvent.Type.Enter})
 # never `_closed`. It is shared because the worker of a window that was since
 # rebuilt must still see a Quit made in its replacement.
 _QUITTING = threading.Event()
+# Export media's own worker (see MainWindow._export_pool).
+_EXPORT_RUNNER = None
 
 
 class _JobBridge(QObject):
@@ -5005,9 +5007,18 @@ class MainWindow(QMainWindow):
             return {"copied": copied, "failed": failed, "left": left}
 
         self._notify("Exporting media…")
-        # File copies run beside downloads, not on the workers serving
-        # library reads, which a long export used to hold up.
-        self._run_task("export-downloads", work, str(target_root), pool=self.download_jobs)
+        self._run_task("export-downloads", work, str(target_root), pool=self._export_pool())
+
+    @staticmethod
+    def _export_pool():
+        """Export media copies on one worker of its own, shared by every
+        window the app builds. On the download pool it waited behind every
+        queued download and then took one of that pool's two workers; on the
+        general pool it held one of the workers that serve library reads."""
+        global _EXPORT_RUNNER
+        if _EXPORT_RUNNER is None:
+            _EXPORT_RUNNER = JobRunner(max_workers=1)
+        return _EXPORT_RUNNER
 
     def _cancel_downloads(self):
         if self.downloads is None:
