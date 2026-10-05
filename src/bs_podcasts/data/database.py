@@ -424,6 +424,11 @@ class Database:
             # Old handles were closed before any snapshot or replacement.
             return damaged
 
+    _SEED_ROWS = (
+        ("playback_state", "INSERT OR IGNORE INTO playback_state(singleton_id, state, updated_at) VALUES (1, 'idle', 0)"),
+        ("playback_metrics", "INSERT OR IGNORE INTO playback_metrics(singleton_id, silence_saved) VALUES (1, 0)"),
+    )
+
     @classmethod
     def _salvage(cls, source, destination) -> dict:
         """Copy the schema and rows table by table into a fresh file.
@@ -452,12 +457,30 @@ class Database:
             except sqlite3.DatabaseError:
                 destination.execute("ROLLBACK TO salvage")
                 lost[name] = cls._copy_readable_ranges(source, destination, table, insert)
+                if name == "schema_migrations" and lost[name] != 0:
+                    # Without its record every migration would run again over
+                    # the built schema and the rebuilt library would not open.
+                    raise DatabaseIntegrityError(
+                        "the record of the library's format (schema_migrations) could not be read, "
+                        "so a rebuilt copy could not be opened")
             destination.execute("RELEASE salvage")
         for (sql,) in source.execute(
             "SELECT sql FROM sqlite_master WHERE type IN ('index', 'trigger', 'view') AND sql NOT NULL"
         ).fetchall():
             destination.execute(sql)
         lost = {table: count for table, count in lost.items() if count != 0}
+        # Rows a migration seeds once and the code only ever updates: left
+        # empty, saving the playing episode, the listening totals and the
+        # never-reused ids all stop working without an error.
+        for table, seed in cls._SEED_ROWS:
+            if table in lost:
+                destination.execute(seed)
+        if "entity_sequences" in lost:
+            for kind, owner in (("show", "shows"), ("episode", "episodes")):
+                highest = destination.execute(f"SELECT COALESCE(MAX(id), 0) FROM {owner}").fetchone()[0]
+                destination.execute(
+                    "INSERT INTO entity_sequences(kind, value) VALUES (?, ?) "
+                    "ON CONFLICT(kind) DO UPDATE SET value=MAX(value, excluded.value)", (kind, highest))
         if "episodes" in lost:
             # Per-show counts are cached (migration 014) and only adjusted by
             # triggers; recount them for the episodes that were kept.
