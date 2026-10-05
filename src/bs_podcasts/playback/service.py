@@ -520,22 +520,22 @@ class PlaybackService:
                     self.engine.play()
                 self._emit()
 
-    def _replay_current(self, position=None, autoplay=True, keep_session=False):
+    def _replay_current(self, position=None, autoplay=True, keep_notice=False):
         """Restart the finished item (library episode or transient stream).
 
         Called with the lock held. load_episode restarts a completed
-        episode from zero via its position≈duration rule. keep_session is a
-        reopen after a lost stream: the reconnect notice stays up."""
+        episode from zero via its position≈duration rule. keep_notice is for
+        a transient stream reopened after it was lost: the reconnect notice
+        stays up (a library episode reopens through load_episode instead)."""
         if self.snapshot.episode_id is not None:
-            self.load_episode(self.snapshot.episode_id, autoplay=autoplay, start_position=position,
-                              keep_session=keep_session)
+            self.load_episode(self.snapshot.episode_id, autoplay=autoplay, start_position=position)
             return
         if position is None:
             position = self.snapshot.position if self.snapshot.state == PlaybackState.ERROR else 0.0
-        self._begin_load(position, autoplay, keep_target=keep_session)
+        self._begin_load(position, autoplay)
         self.snapshot = replace(
             self.snapshot, state=PlaybackState.LOADING, position=position, buffering=None,
-            message=self.snapshot.message if keep_session else ""
+            message=self.snapshot.message if keep_notice else ""
         )
         self._rescued_source = ""
         self._load_autoplay = autoplay
@@ -1195,7 +1195,7 @@ class PlaybackService:
                         self.load_episode(episode_id, autoplay=autoplay, start_position=position,
                                           force_stream=True, keep_session=True)
                     else:
-                        self._replay_current(position=position, autoplay=autoplay, keep_session=True)
+                        self._replay_current(position=position, autoplay=autoplay, keep_notice=True)
                 except Exception as exc:
                     logger.error("Playback stream recovery failed: %s", redact(exc))
                     self._cancel_load_watchdog()
