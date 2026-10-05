@@ -4,6 +4,8 @@ from threading import Condition, Thread
 import logging
 import time
 
+from .engine import LibraryBusy
+
 
 class PlaybackPersistence:
     MAX_PENDING = 32
@@ -47,9 +49,15 @@ class PlaybackPersistence:
                 self._active = True
             try:
                 write(value)
-            except Exception:
+            except Exception as exc:
                 if not self._error:
-                    logging.getLogger('bs_podcasts').exception('Playback save failed; retaining changes for retry')
+                    logger = logging.getLogger('bs_podcasts')
+                    if isinstance(exc, LibraryBusy):
+                        # Routine and short: maintenance (optimize, backup) holds the
+                        # database for a moment. The save is retried within a second.
+                        logger.warning('Playback save waiting: %s', exc)
+                    else:
+                        logger.exception('Playback save failed; retaining changes for retry')
                 with self._condition:
                     self._error = True
                     newer = self._pending.pop(key, None)

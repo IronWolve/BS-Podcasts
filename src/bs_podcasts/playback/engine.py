@@ -15,6 +15,10 @@ class PlaybackUnavailable(RuntimeError):
     pass
 
 
+class LibraryBusy(PlaybackUnavailable):
+    """Library maintenance holds the database; the playback save is retried, not lost."""
+
+
 @dataclass(frozen=True)
 class EngineCapabilities:
     internal: bool = True

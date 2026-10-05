@@ -10,7 +10,7 @@ import time
 from ..data.repositories import LibraryRepository
 from ..urlguard import UnsafeUrl, ensure_media_source, ensure_web_url, ensure_fetchable, is_web_url
 from ..privacy import redact
-from .engine import EngineEvent, PlaybackUnavailable
+from .engine import EngineEvent, LibraryBusy, PlaybackUnavailable
 from .persistence import PlaybackPersistence
 
 # Enclosure hosts that are redirect trackers: their chains routinely exceed
@@ -1318,7 +1318,7 @@ class PlaybackService:
     @staticmethod
     def _require_saved(result):
         if result is False:
-            raise PlaybackUnavailable('Library maintenance is busy; playback changes will be retried.')
+            raise LibraryBusy('Library maintenance is busy; playback changes will be retried.')
         if result is None:
             logger.info('Playback save skipped: the item is gone or a newer save already stands')
 
