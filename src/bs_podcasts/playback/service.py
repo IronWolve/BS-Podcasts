@@ -278,7 +278,7 @@ class PlaybackService:
                 start = max(0.0, float(start_position))
             speed = show.playback_speed if show else 1.0
             kept = {name: getattr(self.snapshot, name) for name in self.REOPEN_KEEPS} if keep else {}
-            self._begin_load(start, autoplay)
+            self._begin_load(start, autoplay, keep_target=keep)
             if not self._volume_applied:
                 try:
                     self.engine.set_volume(self.snapshot.volume)
@@ -532,7 +532,7 @@ class PlaybackService:
             return
         if position is None:
             position = self.snapshot.position if self.snapshot.state == PlaybackState.ERROR else 0.0
-        self._begin_load(position, autoplay)
+        self._begin_load(position, autoplay, keep_target=keep_session)
         self.snapshot = replace(
             self.snapshot, state=PlaybackState.LOADING, position=position, buffering=None,
             message=self.snapshot.message if keep_session else ""
@@ -918,8 +918,11 @@ class PlaybackService:
                 self._metric_seek_target = None  # the load applied any pending seek
                 self._reset_metrics(self.snapshot.position)
                 # A start at 0 needs no seek. Anything later is confirmed by
-                # the first ticks before progress is saved over it.
-                self._start_target = self._desired_position if self._desired_position > 5.0 else None
+                # the first ticks before progress is saved over it. A reopen
+                # after a lost stream keeps a target that was never confirmed,
+                # so a server that cannot seek leaves the saved position alone.
+                if self._start_target is None:
+                    self._start_target = self._desired_position if self._desired_position > 5.0 else None
                 self._start_loaded_at = time.monotonic()
                 self._start_reported = False
                 self._buffering_started_at = None
@@ -1045,7 +1048,7 @@ class PlaybackService:
             self._event_commands = CommandQueue()
         self._event_commands.submit(work, keep=True)
 
-    def _begin_load(self, position: float, autoplay: bool):
+    def _begin_load(self, position: float, autoplay: bool, keep_target: bool = False):
         self._resolve_cancel.set()
         self._resolve_cancel = Event()
         self._cancel_load_watchdog()
@@ -1053,7 +1056,8 @@ class PlaybackService:
         self._load_generation += 1
         self._resolving = True
         self._engine_loaded = False
-        self._start_target = None
+        if not keep_target:
+            self._start_target = None
         self._load_autoplay = bool(autoplay)
         self._desired_position = max(0.0, float(position))
         prepare = getattr(self.engine, "prepare_load", None)
@@ -1136,7 +1140,8 @@ class PlaybackService:
         if not source or not is_web_url(source) or self._rescued_source == source:
             return False
         self._rescued_source = source
-        self._begin_load(self.snapshot.position, self._load_autoplay)
+        # A reopen that failed keeps its unconfirmed resume target (None on a first open).
+        self._begin_load(self.snapshot.position, self._load_autoplay, keep_target=True)
         self._arm_load_watchdog(self.snapshot.episode_id, source)
         thread = threading.Thread(
             target=self._rescue_redirects,
