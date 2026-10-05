@@ -125,6 +125,7 @@ class PlaybackService:
         self._start_target = None
         self._start_loaded_at = 0.0
         self._start_reported = False
+        self._start_reported_at = 0.0
         try:
             saved_volume = float(self.repository.get_setting("playback.volume", "100"))
         except (TypeError, ValueError):
@@ -167,6 +168,7 @@ class PlaybackService:
     STREAM_RECOVERY_LIMIT = 3
     STREAM_RECOVERY_WINDOW = 600.0
     START_TOLERANCE = 10.0
+    NOTICE_SECONDS = 12.0  # how long the can't-seek notice stays on the player bar
     SEEK_UNSUPPORTED = "This server can’t seek, so playback started from the beginning. Your saved position was kept."
 
     def _arm_load_watchdog(self, episode_id: int | None, source: str):
@@ -870,6 +872,11 @@ class PlaybackService:
                 # Never revive that deleted/stopped episode in durable state.
                 if not self.snapshot.source:
                     return
+                if self.snapshot.state == PlaybackState.ERROR:
+                    # Only a new load leaves ERROR (a late open arrives as
+                    # file_loaded). A pause notification now is stale, and
+                    # applying it would keep the error text on a live state.
+                    return
                 state = PlaybackState.PAUSED if event.value else PlaybackState.PLAYING
                 if event.value:
                     self._flush_listening(deferred)
@@ -1187,6 +1194,8 @@ class PlaybackService:
             )
             self._emit()
             return
+        if self.snapshot.message == self.SEEK_UNSUPPORTED:
+            self.snapshot = replace(self.snapshot, message="")
         self._complete_episode(self.snapshot)
         queue = self.repository.list_queue()
         show = self.repository.get_show(self.snapshot.show_id) if self.snapshot.show_id else None
@@ -1296,8 +1305,14 @@ class PlaybackService:
             if self.snapshot.message == self.SEEK_UNSUPPORTED:
                 self.snapshot = replace(self.snapshot, message="")
             return
-        if not self._start_reported and time.monotonic() - self._start_loaded_at >= 1.0:
+        if self._start_reported:
+            if (self.snapshot.message == self.SEEK_UNSUPPORTED
+                    and time.monotonic() - self._start_reported_at >= self.NOTICE_SECONDS):
+                self.snapshot = replace(self.snapshot, message="")
+            return
+        if time.monotonic() - self._start_loaded_at >= 1.0:
             self._start_reported = True
+            self._start_reported_at = time.monotonic()
             logger.warning("Playback resume seek did not land: target=%.1fs position=%.1fs", target, position)
             self.snapshot = replace(self.snapshot, message=self.SEEK_UNSUPPORTED)
 
@@ -1306,6 +1321,8 @@ class PlaybackService:
         # target; a seek to the start means the user chose to begin again.
         if self._start_target is not None:
             self._start_target = target if target > 5.0 else None
+            if self.snapshot.message == self.SEEK_UNSUPPORTED:
+                self.snapshot = replace(self.snapshot, message="")
 
     def _expect_seek(self, target: float):
         self._metric_seek_target = target
