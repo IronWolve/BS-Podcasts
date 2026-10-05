@@ -37,30 +37,35 @@ except BlockingIOError:
     sys.path.insert(0, os.path.dirname(runner)+"/app")
     from bs_podcasts.config import APP_ID
     app = QCoreApplication([])
-    socket = QLocalSocket()
-    socket.connectToServer(APP_ID+"-"+getpass.getuser())
-    if socket.waitForConnected(1000):
-        socket.write(b"raise")
-        socket.waitForBytesWritten(1000)
-        if socket.waitForReadyRead(1500) and socket.readAll().data().startswith(b"ok"):
-            raise SystemExit(0)
+    def raised():
+        socket = QLocalSocket()
+        socket.connectToServer(APP_ID+"-"+getpass.getuser())
+        if socket.waitForConnected(1000):
+            socket.write(b"raise")
+            socket.waitForBytesWritten(1000)
+            if socket.waitForReadyRead(1500) and socket.readAll().data().startswith(b"ok"):
+                return True
         socket.abort()
-    if caller_tmp is None:
-        del os.environ["TMPDIR"]
-    else:
-        os.environ["TMPDIR"] = caller_tmp
-    # Nothing answered. A copy that is quitting stops listening before its
-    # final saves, so wait briefly for it to release the lock.
+        return False
+    # A copy that is still starting begins listening a moment later; one that
+    # is quitting stops listening before its final saves and then frees the
+    # lock. Ask again every round, so either way this ends as soon as it can.
     import time
     deadline = time.monotonic() + 5
     while True:
-        time.sleep(0.2)
+        if raised():
+            raise SystemExit(0)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
         except BlockingIOError:
             if time.monotonic() >= deadline:
                 raise SystemExit("BS Podcasts is still running or closing, or the deployment is busy; use --status or retry.")
+        time.sleep(0.2)
+    if caller_tmp is None:
+        del os.environ["TMPDIR"]
+    else:
+        os.environ["TMPDIR"] = caller_tmp
 os.set_inheritable(fd, True)
 os.environ["BS_PODCASTS_RUNTIME_LOCK_FD"] = str(fd)
 os.execv(sys.executable, [sys.executable, "-B", runner, *sys.argv[3:]])
