@@ -1309,9 +1309,10 @@ class MainWindow(QMainWindow):
         parts = [f"Refreshed {total} podcast{'s' if total != 1 else ''}"]
         if new_episodes:
             parts.append(f"{new_episodes} new episode{'s' if new_episodes != 1 else ''}")
-        if failed and offline >= failed:
-            # Every failure was the connection, not the feeds: one plain
-            # message instead of listing each podcast as unreachable.
+        if failed and offline >= failed and offline * 2 > total:
+            # Every failure was the connection and it took down most of the
+            # batch: one plain message instead of listing each podcast as
+            # unreachable. A slow host among healthy ones is not "offline".
             parts[0] = "You appear to be offline"
             parts.append(f"{failed} podcast{'s' if failed != 1 else ''} could not be reached")
             self._notify("  ·  ".join(parts), "info")
@@ -1323,6 +1324,10 @@ class MainWindow(QMainWindow):
             self._native_notify(APP_NAME, "  ·  ".join(parts), self._show_new_episodes)
         elif not self._refresh_quiet:
             self._notify(parts[0])
+        if failed and new_episodes:
+            # The toast's one action went to the problems; the new episodes
+            # still reach the desktop.
+            self._native_notify(APP_NAME, f"{new_episodes} new episode{'s' if new_episodes != 1 else ''}", self._show_new_episodes)
 
     def _show_problem_podcasts(self):
         self.navigation.select(PAGE_PODCASTS)
