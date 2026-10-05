@@ -177,7 +177,7 @@ class MainWindow(QMainWindow):
     _BUSINESS_STATE = ('_pending_jobs', '_download_tickets', '_play_after_download',
         '_play_after_download_intent', '_play_after_download_request', '_refresh_batch', '_refresh_generation',
         '_refresh_failed', '_refresh_offline', '_refresh_waiting', '_refresh_in_flight',
-        '_manual_refresh_in_flight', '_refresh_quiet', '_refresh_changed', '_details_fetched', '_artwork_fetched',
+        '_manual_refresh_in_flight', '_refresh_quiet', '_refresh_catch_up', '_refresh_changed', '_details_fetched', '_artwork_fetched',
         '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved')
 
     def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None):
@@ -309,6 +309,7 @@ class MainWindow(QMainWindow):
         self._play_after_download_intent = 0
         self._play_after_download_request = 0
         self._refresh_quiet = False
+        self._refresh_catch_up = False  # a Pause dropped feeds of the running batch
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._scheduled_refresh)
         self._cache_timer = QTimer(self)
@@ -1301,6 +1302,8 @@ class MainWindow(QMainWindow):
         if not self._refresh_batch[0] or not self._refresh_quiet or not self._refresh_in_flight:
             return
         total, done, new_episodes = self._refresh_batch
+        if self._refresh_waiting:
+            self._refresh_catch_up = True  # resuming catches up, even if the batch is still running by then
         self._refresh_waiting.clear()
         self._refresh_batch = [done + len(self._refresh_in_flight), done, new_episodes]
 
@@ -6489,6 +6492,14 @@ class MainWindow(QMainWindow):
                 else:
                     self._refresh_show_summaries()
                 self._summarize_refresh(total, new_episodes, len(self._refresh_failed), len(self._refresh_offline))
+                if self._refresh_catch_up:
+                    # Resuming came while the feeds a Pause let finish were
+                    # still fetching, so it found a batch running and queued
+                    # nothing: the feeds the Pause dropped are due now. Still
+                    # paused, or no automatic refresh: nothing to catch up.
+                    self._refresh_catch_up = False
+                    if self._refresh_interval() > 0:
+                        self._scheduled_refresh()
             # Batch: never one message per feed; problems are shown in place.
             return
         viewing_show = self.pages.currentIndex() == PAGE_EPISODES and self._hero_show_id == identifier
