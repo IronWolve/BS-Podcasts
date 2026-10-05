@@ -1311,11 +1311,12 @@ class MainWindow(QMainWindow):
         if new_episodes:
             parts.append(f"{new_episodes} new episode{'s' if new_episodes != 1 else ''}")
         if failed and offline >= failed and offline * 2 > total:
-            # Every failure was the connection and it took down most of the
-            # batch: one plain message instead of listing each podcast as
-            # unreachable. A slow host among healthy ones is not "offline".
-            parts[0] = "You appear to be offline"
-            parts.append(f"{failed} podcast{'s' if failed != 1 else ''} could not be reached")
+            # Every failure was put down to the network and it took down most
+            # of the batch: one neutral message instead of listing each
+            # podcast as unreachable. It is not necessarily "offline": a
+            # captive portal or a proxy fails the same way, and one slow host
+            # among healthy ones never gets here.
+            parts[0] = "Couldn't reach most podcasts. Check your network connection."
             self._notify("  ·  ".join(parts), "info")
         elif failed:
             parts.append(f"{failed} unreachable")
