@@ -210,18 +210,18 @@ def main() -> int:
         if errors:
             report['errors'] = errors
         atomic_write(workspace_tmp/'self-check.json', json.dumps(report, indent=2).encode())
-    paint = _painter(args.plain)
+    colour = _painter(args.plain)
     for name, passed in checks.items():
         reason = f": {errors[name]}" if not passed and name in errors else ""
-        print((paint('32', 'OK  ') if passed else paint('31', 'FAIL')) + f" {name}{reason}")
+        print((colour('32', 'OK  ') if passed else colour('31', 'FAIL')) + f" {name}{reason}")
     if failed:
         parts = [errors[name] for name in failed if name in errors]
         detail = " (" + "; ".join(parts) + ")" if parts else ""
-        print(paint('31', "Self-check failed: ") + ", ".join(failed) + detail)
+        print(colour('31', "Self-check failed: ") + ", ".join(failed) + detail)
     else:
-        print(paint('32', "BS Podcasts self-check passed.")
+        print(colour('32', "BS Podcasts self-check passed.")
               + (" Version agreement: not available in this runtime." if not sources else ""))
-    print(paint('1', 'Stats'))
+    print(colour('1', 'Stats'))
     for label, value in (('checks', f'{len(checks) - len(failed)} passed, {len(failed)} failed'),
                          ('version', f'{__version__} (agreement {version_agreement})'),
                          ('elapsed', f'{time.monotonic() - started:.1f} s')):
