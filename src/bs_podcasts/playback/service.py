@@ -170,9 +170,11 @@ class PlaybackService:
     START_TOLERANCE = 10.0
     NOTICE_SECONDS = 12.0  # how long the can't-seek notice stays on the player bar
     SEEK_UNSUPPORTED = "This server can’t seek, so playback started from the beginning. Your saved position was kept."
+    RECONNECTING = "Reconnecting…"
     # Snapshot fields that belong to the listening session, not to one opening
     # of the file: a reopen of the same episode (stream recovery) keeps them.
-    REOPEN_KEEPS = ("sleep_deadline", "sleep_expired_count", "sleep_at_end", "ab_start", "ab_end")
+    # The reconnect notice rides along until the file has loaded again.
+    REOPEN_KEEPS = ("sleep_deadline", "sleep_expired_count", "sleep_at_end", "ab_start", "ab_end", "message")
 
     def _arm_load_watchdog(self, episode_id: int | None, source: str):
         self._cancel_load_watchdog()
@@ -518,19 +520,22 @@ class PlaybackService:
                     self.engine.play()
                 self._emit()
 
-    def _replay_current(self, position=None, autoplay=True):
+    def _replay_current(self, position=None, autoplay=True, keep_session=False):
         """Restart the finished item (library episode or transient stream).
 
         Called with the lock held. load_episode restarts a completed
-        episode from zero via its position≈duration rule."""
+        episode from zero via its position≈duration rule. keep_session is a
+        reopen after a lost stream: the reconnect notice stays up."""
         if self.snapshot.episode_id is not None:
-            self.load_episode(self.snapshot.episode_id, autoplay=autoplay, start_position=position)
+            self.load_episode(self.snapshot.episode_id, autoplay=autoplay, start_position=position,
+                              keep_session=keep_session)
             return
         if position is None:
             position = self.snapshot.position if self.snapshot.state == PlaybackState.ERROR else 0.0
         self._begin_load(position, autoplay)
         self.snapshot = replace(
-            self.snapshot, state=PlaybackState.LOADING, position=position, buffering=None, message=""
+            self.snapshot, state=PlaybackState.LOADING, position=position, buffering=None,
+            message=self.snapshot.message if keep_session else ""
         )
         self._rescued_source = ""
         self._load_autoplay = autoplay
@@ -922,6 +927,8 @@ class PlaybackService:
                 if self.snapshot.state in {PlaybackState.LOADING, PlaybackState.ERROR}:
                     # A load that beat the watchdog after all is ready, paused.
                     self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED, message="")
+                elif self.snapshot.message == self.RECONNECTING:
+                    self.snapshot = replace(self.snapshot, message="")
                 if (self.snapshot.ab_start is not None and self.snapshot.ab_end is not None
                         and self.engine.capabilities.ab_repeat):
                     # Every engine load drops the A-B loop; a reopen of the
@@ -1014,8 +1021,11 @@ class PlaybackService:
                 elif self._start_redirect_rescue():
                     # One retry with a pre-resolved URL is in flight; stay in
                     # LOADING instead of flashing an error the retry may fix.
+                    # A reopen after a lost stream is still reconnecting.
+                    reconnecting = self.snapshot.message == self.RECONNECTING
                     self.snapshot = replace(
-                        self.snapshot, state=PlaybackState.LOADING, message="", buffering=None
+                        self.snapshot, state=PlaybackState.LOADING, buffering=None,
+                        message=self.RECONNECTING if reconnecting else ""
                     )
                     self._emit()
                     return
@@ -1167,7 +1177,7 @@ class PlaybackService:
                        self._desired_position, len(self._recovery_times),
                        self.STREAM_RECOVERY_LIMIT, self._load_autoplay)
         self.snapshot = replace(self.snapshot, state=PlaybackState.LOADING,
-                                message="Reconnecting…", buffering=None)
+                                message=self.RECONNECTING, buffering=None)
         self._arm_load_watchdog(episode_id, source)
 
         def recover():
@@ -1180,7 +1190,7 @@ class PlaybackService:
                         self.load_episode(episode_id, autoplay=autoplay, start_position=position,
                                           force_stream=True, keep_session=True)
                     else:
-                        self._replay_current(position=position, autoplay=autoplay)
+                        self._replay_current(position=position, autoplay=autoplay, keep_session=True)
                 except Exception as exc:
                     logger.error("Playback stream recovery failed: %s", redact(exc))
                     self._cancel_load_watchdog()
