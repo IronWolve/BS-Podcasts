@@ -532,6 +532,9 @@ class MainWindow(QMainWindow):
         # Until its first read lands a list says it is loading, not "Nothing
         # queued" or "No downloads" about a library that is not empty.
         self._pages_loading = set()
+        # The error a failed list load put on a page's banner, by page, so a
+        # later load that works can take down that error and no other banner.
+        self._page_errors = {}
         if self.library is not None:
             loading = [self.playlist_page, self.history_page]
             loading += [self.download_page] if self.downloads is not None else []
@@ -5222,14 +5225,24 @@ class MainWindow(QMainWindow):
 
     def _finish_page_load(self, page, error=""):
         """End a list's first-load state: clear its loading banner, or show
-        why the read failed instead of an empty list."""
-        if page not in self._pages_loading:
-            return
+        why the read failed instead of an empty list. A later load that works
+        takes that error down again (unless the user dismissed it or another
+        message has replaced it)."""
+        loading = page in self._pages_loading
         self._pages_loading.discard(page)
         if error:
-            page.banner.show_state("error", error)
-        elif page.banner.state == "loading":
+            if loading:
+                self._show_page_error(page, error)
+            return
+        if loading and page.banner.state == "loading":
             page.banner.clear()
+        message = self._page_errors.pop(page, None)
+        if message is not None and page.banner.state == "error" and page.banner.label.text() == message:
+            page.banner.clear()
+
+    def _show_page_error(self, page, message):
+        page.banner.show_state("error", message)
+        self._page_errors[page] = message
 
     def _read_bookmark_items(self):
         items = []
@@ -6206,9 +6219,8 @@ class MainWindow(QMainWindow):
             if page is None:
                 logging.getLogger("bs_podcasts").warning("Background read %s failed: %s", key, message)
                 return
-            banner = getattr(page, "banner", None)
-            if banner is not None:
-                banner.show_state("error", message)
+            if getattr(page, "banner", None) is not None:
+                self._show_page_error(page, message)
             if key not in self._PAGE_READS or page is self.pages.currentWidget():
                 self._notify(message, "error")
             # A failed Load more must not leave its button stuck on
@@ -6229,7 +6241,7 @@ class MainWindow(QMainWindow):
             self.podcast_page.banner.show_state("error", message)
             self.episode_page.banner.show_state("error", message)
             self.home_page.banner.show_state("error", message)
-            for page in (self.playlist_page, self.history_page):
+            for page in (self.playlist_page, self.history_page, self.download_page):
                 self._finish_page_load(page, message)
         if self._reload_again:
             self._request_reload()
