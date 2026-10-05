@@ -213,9 +213,13 @@ def _install_window_tracer(app):
 def _redirect_toolkit_settings():
     """Keep the toolkit's own settings (file dialog history) in the data folder.
 
-    Left alone, file dialogs write them to the per-user config folder on Linux,
-    the registry on Windows and the preferences folder on Mac. The app has no
-    other settings of this kind, so a private INI location covers them all."""
+    The file dialog saves its history through a settings object that always
+    uses the platform's native store, whatever default format is set. On Linux
+    that store is a file, so moving its path moves the history here. On Windows
+    it is the registry and on Mac the preferences folder, which the toolkit
+    does not let an application move: the dialogs still write there (history,
+    last folder, sidebar), and the calls below leave those platforms as they
+    are. The INI default covers any settings object created without a format."""
     folder = str(application_data_dir() / "qt")
     QSettings.setDefaultFormat(QSettings.Format.IniFormat)
     for kind in (QSettings.Format.IniFormat, QSettings.Format.NativeFormat):
