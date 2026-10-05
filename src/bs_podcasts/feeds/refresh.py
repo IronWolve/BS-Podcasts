@@ -6,7 +6,7 @@ import threading
 from ..artwork import ArtworkCache, ArtworkError
 from ..data.repositories import LibraryRepository
 from ..domain import Health
-from .fetch import FeedFetchError, FeedFetcher, FeedNetworkError
+from .fetch import FeedFetchError, FeedFetcher, FeedNetworkError, FeedWrongAnswerError
 from .parser import FeedParseError, parse_feed
 
 
@@ -18,7 +18,10 @@ class RefreshReport:
     message: str = ""
     not_modified: bool = False
     artwork_path: str = ""
-    # The network failed (offline, DNS, timeout), not the feed.
+    # The failure is put down to the network, not the feed, and was not
+    # counted toward suspension: offline, DNS, connect or timeout failures,
+    # and for a show that refreshed before, a failed secure connection or a
+    # web page in place of the feed (sign-in page, intercepting network).
     network_error: bool = False
 
 
@@ -140,6 +143,17 @@ class RefreshService:
             # failure count alone so an outage never suspends the show.
             self.repository.set_health(show_id, Health.ERROR)
             return RefreshReport(show_id, Health.ERROR, message=str(exc), network_error=True)
+        except FeedWrongAnswerError as exc:
+            if show.last_refresh and show.episode_count:
+                # A podcast that worked is far more likely behind a sign-in
+                # page or an intercepting network than gone. Report it, leave
+                # the count alone. A feed that really became a parked page is
+                # reported every refresh but no longer suspended.
+                self.repository.set_health(show_id, Health.ERROR)
+                message = f"{exc} Not counted against this podcast, which refreshed before; check the network connection."
+                return RefreshReport(show_id, Health.ERROR, message=message, network_error=True)
+            health = self.repository.record_refresh_failure(show_id)
+            return RefreshReport(show_id, health, message=str(exc))
         except (FeedFetchError, FeedParseError) as exc:
             health = self.repository.record_refresh_failure(show_id)
             return RefreshReport(show_id, health, message=str(exc))

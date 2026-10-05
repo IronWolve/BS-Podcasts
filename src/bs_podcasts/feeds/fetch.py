@@ -21,15 +21,22 @@ class FeedNetworkError(FeedFetchError):
     suspending the show, so an outage cannot suspend the whole library."""
 
 
+class FeedWrongAnswerError(FeedFetchError):
+    """Something answered, but not with the feed: a failed secure connection or
+    a web page where the feed should be. A captive portal or an intercepting
+    network does exactly this, so does a feed that moved away. Refresh counts
+    it toward suspension only for a show that has never refreshed."""
+
+
 def _fetch_error(exc) -> FeedFetchError:
     """The HTTP stack's failure as a feed error of the right kind."""
     import requests
 
     errors = requests.exceptions
     message = describe_network_error(exc, "the feed")
-    # A certificate problem belongs to the server and persists.
+    # A certificate problem belongs to the server or to the network path.
     if isinstance(exc, errors.SSLError):
-        return FeedFetchError(message)
+        return FeedWrongAnswerError(message)
     if isinstance(exc, (errors.ConnectionError, errors.Timeout, errors.RetryError)):
         return FeedNetworkError(message)
     return FeedFetchError(message)
@@ -289,7 +296,7 @@ class FeedFetcher:
                 parser = _FeedLinkParser()
                 parser.feed(text)
                 if not parser.href:
-                    raise FeedFetchError("HTML page does not advertise a podcast feed.")
+                    raise FeedWrongAnswerError("HTML page does not advertise a podcast feed.")
                 discovered = urljoin(urljoin(response.url, parser.base), parser.href)
             result = FeedResponse(
                 content=bytes(body),
