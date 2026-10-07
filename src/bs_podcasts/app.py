@@ -14,7 +14,7 @@ from PySide6.QtGui import QIcon, QImageReader
 from PySide6.QtWidgets import QApplication, QWidget
 
 from .artwork import ArtworkCache
-from .assets import icon_path
+from .assets import shell_icon_path
 from .config import APP_ID, APP_NAME, app_version
 from .config import cache_dir, data_dir as application_data_dir, default_downloads_dir
 from .data import Database
@@ -253,7 +253,7 @@ def create_application(argv=None) -> QApplication:
         # installed icon with the running window.
         app.setDesktopFileName("bs-podcasts")
     app.setStyle("Fusion")
-    app.setWindowIcon(QIcon(str(icon_path(256))))
+    app.setWindowIcon(QIcon(str(shell_icon_path(256))))
     load_fonts()
     app.setFont(app_font())
     apply_app_stylesheet(app)

@@ -4,14 +4,14 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from ..assets import icon_path
+from ..assets import shell_icon_path
 
 
 APP_TITLE = "BS Podcasts"
 
 
 def _tray_icon() -> QIcon:
-    packaged = QIcon(str(icon_path(64)))
+    packaged = QIcon(str(shell_icon_path(64)))
     if not packaged.isNull():
         return packaged
     pixmap = QPixmap(32, 32)

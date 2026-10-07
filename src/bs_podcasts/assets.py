@@ -11,6 +11,12 @@ def icon_path(size: int = 256) -> Path:
     return candidate if candidate.exists() else BRANDING_DIR / "bs-podcasts-icon-512.png"
 
 
+def shell_icon_path(size: int = 256) -> Path:
+    """OS window, launcher and tray icon; separate from in-app branding."""
+    candidate = BRANDING_DIR / f"bs-podcasts-shell-icon-{size}.png"
+    return candidate if candidate.exists() else BRANDING_DIR / "bs-podcasts-shell-icon-512.png"
+
+
 def logo_path() -> Path:
     return BRANDING_DIR / "bs-podcasts-logo.png"
 

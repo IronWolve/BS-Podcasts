@@ -115,13 +115,14 @@ def main() -> int:
         import requests
         import urllib3
         import mpv
-        from .assets import icon_path, font_paths
+        from .assets import icon_path, shell_icon_path, font_paths
         checks.update({
             'PySide6 available': bool(PySide6.__version__),
             'requests available': bool(requests.__version__),
             'urllib3 patched': tuple(int(x) for x in urllib3.__version__.split('.')[:3]) >= (2,8,0),
             'native library loaded': bool(mpv.backend),
             'bundled branding/fonts': icon_path().is_file() and len(font_paths()) >= 2,
+            'bundled shell/tray icons': all(shell_icon_path(size).is_file() for size in (64, 256)),
         })
         from .playback.engine import MpvEngine
         engine = MpvEngine(ao='null', vo='null')

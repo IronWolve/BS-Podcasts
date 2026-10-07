@@ -10,7 +10,7 @@ ICONS="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
 mkdir -p "$APPS"
 for size in 32 64 128 256 512; do
   mkdir -p "$ICONS/${size}x${size}/apps"
-  cp "$BRANDING/bs-podcasts-icon-$size.png" "$ICONS/${size}x${size}/apps/bs-podcasts.png"
+  cp "$BRANDING/bs-podcasts-shell-icon-$size.png" "$ICONS/${size}x${size}/apps/bs-podcasts.png"
 done
 # Point at deployed code; the checkout is not a runtime dependency.
 # Render Exec with desktop-entry quoting (including literal percent signs).
