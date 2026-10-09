@@ -186,7 +186,7 @@ class MainWindow(QMainWindow):
         '_play_after_download_intent', '_play_after_download_request', '_refresh_batch', '_refresh_generation',
         '_refresh_failed', '_refresh_offline', '_refresh_waiting', '_refresh_in_flight',
         '_manual_refresh_in_flight', '_refresh_quiet', '_refresh_catch_up', '_refresh_changed', '_details_fetched', '_artwork_fetched',
-        '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved', '_settings_desired', '_retained_removals')
+        '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved', '_settings_desired', '_retained_removals', '_refresh_requested_shows')
 
     def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None):
         super().__init__(parent)
@@ -196,6 +196,7 @@ class MainWindow(QMainWindow):
         self._context_revision = 0
         self._settings_desired = {}
         self._retained_removals = set()
+        self._refresh_requested_shows = set()
         self._pending_view_restore = None
         self._restoring_view = False
         self.jobs = jobs
@@ -351,6 +352,7 @@ class MainWindow(QMainWindow):
         self._catalog_search_items = []
         self._catalog_total = 0
         self._catalog_limit = 500
+        self._episode_scope_revision = 0
         self._history_limit = HISTORY_PAGE_SIZE
         self._history_generation = 0
         self._episode_total = 0
@@ -1417,6 +1419,7 @@ class MainWindow(QMainWindow):
         _total, done, new_episodes = self._refresh_batch
         if self._refresh_waiting:
             self._refresh_catch_up = True  # resuming catches up, even if the batch is still running by then
+        self._refresh_requested_shows.difference_update(self._refresh_waiting)
         self._refresh_waiting.clear()
         self._refresh_batch = [done + len(self._refresh_in_flight), done, new_episodes]
 
@@ -2454,6 +2457,7 @@ class MainWindow(QMainWindow):
         """All queries and UI conversion for a reload. Artwork tints are cache
         lookups (compute=False); sampling runs in `_prime_accents` on a worker."""
         sample_accents(())  # Load saved tint metadata on this worker.
+        detail_revision = self._episode_scope_revision
         catalog_query, catalog_limit = self._catalog_query, self._catalog_limit
         stored_shows = self.library.shows()
         episode_total = self.library.episode_count()
@@ -2487,6 +2491,7 @@ class MainWindow(QMainWindow):
             'catalog_items': self._ui_episodes(self.library.search_episodes(catalog_query, catalog_limit), records) if catalog_query else [],
             'catalog_total': self.library.search_episode_count(catalog_query) if catalog_query else 0,
             "detail_show_id": detail_show_id,
+            "detail_revision": detail_revision,
             "detail_episodes": detail_episodes,
             "stored_shows": stored_shows,
             "episode_total": episode_total,
@@ -3035,7 +3040,9 @@ class MainWindow(QMainWindow):
                 # shown and offer the rest instead of silently hiding the tail
                 # (each podcast page is complete).
                 self._set_global_episode_chrome(len(episodes))
-            elif self._hero_show_id and not self._preview_episodes_url and data.get("detail_show_id") == self._hero_show_id:
+            elif (self._hero_show_id and not self._preview_episodes_url
+                  and data.get("detail_show_id") == self._hero_show_id
+                  and data.get('detail_revision', self._episode_scope_revision) == self._episode_scope_revision):
                 podcast = next((item for item in shows if item.show_id == self._hero_show_id), None)
                 if podcast is not None:
                     detail = data["detail_episodes"]
@@ -6333,6 +6340,9 @@ class MainWindow(QMainWindow):
             self._show_library_search(self._catalog_query, navigate=False, limit=self._catalog_limit, force=True)
             return
         if self._hero_show_id:
+            # Read committed local episodes now, even if a long background
+            # batch already fetched this show or still has it queued.
+            self._reload_refreshed_show(self._hero_show_id, reveal_latest=True)
             if self.jobs is None or getattr(self.refresh, "refresh", None) is None:
                 self._notify("Feed refresh is unavailable in this session", "info")
                 return
@@ -6388,6 +6398,11 @@ class MainWindow(QMainWindow):
             or show_id in self._refresh_waiting
             or show_id in self._manual_refresh_in_flight
         ):
+            if show_id in self._refresh_waiting or show_id in self._refresh_in_flight:
+                self._refresh_requested_shows.add(show_id)
+                if show_id in self._refresh_waiting:
+                    self._refresh_waiting.remove(show_id)
+                    self._refresh_waiting.insert(0, show_id)
             # A batch already covers this show, or a manual refresh of it is
             # already running; a concurrent second refresh of the same feed
             # would double fail_count on one outage. (RefreshService also
@@ -6410,6 +6425,47 @@ class MainWindow(QMainWindow):
 
         future.add_done_callback(finished)
         return True
+
+    def _reload_refreshed_show(self, show_id: int, *, reveal_latest=False):
+        """Refresh just the open podcast, independent of a whole-library batch."""
+        if self.library is None or self._hero_show_id != show_id or self._preview_episodes_url:
+            return
+        library = self.library
+        def work():
+            return (library.repository.get_show(show_id),
+                    self._ui_episodes(library.episodes(show_id=show_id, limit=None)))
+        def apply(payload):
+            if self._hero_show_id != show_id or self._preview_episodes_url or self._catalog_query:
+                return
+            show, episodes = payload
+            if show is None:
+                return
+            self._episode_scope_revision += 1
+            self._show_hero(self._ui_podcast(show), len(episodes))
+            self.episode_page.set_items([self._resolved_episode_artwork(item) for item in episodes],
+                                       preserve_scroll=not reveal_latest)
+            if reveal_latest:
+                self.episode_page.view.scrollToTop()
+                if episodes:
+                    latest = max(episodes, key=lambda item: (item.published_at, item.episode_id))
+                    row = self.episode_page.model.row_for_episode(latest.episode_id)
+                    if row != 0:
+                        reason = 'hidden by the current search or filter' if row < 0 else 'below the current sort order'
+                        self._notify(f'The latest episode is {reason}.', 'info', 'Show latest',
+                                     lambda: self._show_refreshed_episode(show_id, latest.episode_id))
+        self._run_read(work, apply, 'episodes')
+
+    def _show_refreshed_episode(self, show_id, episode_id):
+        if self._hero_show_id != show_id or self._preview_episodes_url or self._catalog_query:
+            return
+        page = self.episode_page
+        page.header.search.clear()
+        page.set_filter('All')
+        page._set_sort('newest', 'Newest first')
+        row = page.model.row_for_episode(episode_id)
+        if row >= 0:
+            page.view.setCurrentIndex(page.model.index(row, 0))
+            page.view.scrollToTop()
 
     def _refresh_finished(self, payload):
         kind, identifier, result = payload
@@ -6976,6 +7032,14 @@ class MainWindow(QMainWindow):
             logging.getLogger('bs_podcasts').warning('Ignoring refresh completion with an invalid identifier')
             return
         identifier, batch_refresh, generation = identifier
+        current_batch = not batch_refresh or generation == self._refresh_generation
+        requested = current_batch and identifier in self._refresh_requested_shows
+        if current_batch:
+            self._refresh_requested_shows.discard(identifier)
+        if current_batch and result.status == JobStatus.OK:
+            # A 304 says the server did not change; it does not prove the
+            # visible model contains the episodes already committed locally.
+            self._reload_refreshed_show(identifier, reveal_latest=requested or not batch_refresh)
         content_changed = result.status == JobStatus.OK and (
             not getattr(result.value, 'not_modified', False) or bool(getattr(result.value, 'artwork_path', '')))
         if not batch_refresh:

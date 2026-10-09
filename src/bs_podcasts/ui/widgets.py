@@ -108,6 +108,25 @@ class PlainTextLabel(QLabel):
         super().setToolTip(plain_tooltip(text))
 
 
+def _set_document_content(editor, text, *, rich=False):
+    """Identical metadata updates must not reset a person's text selection."""
+    key = (rich, text)
+    previous = getattr(editor, '_bs_document_content', None)
+    if previous == (key, editor.document().revision()):
+        return False
+    if rich:
+        editor.setHtml(text)
+    else:
+        editor.setPlainText(text)
+    editor._bs_document_content = (key, editor.document().revision())
+    return True
+
+
+def _selectable_labels(*labels):
+    for label in labels:
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+
+
 class _SafeFeedHtml(HTMLParser):
     """Small allow-list sanitizer for untrusted feed descriptions."""
 
@@ -1537,6 +1556,7 @@ class HeroCard(QFrame):
         self.description = PlainTextLabel("")
         self.description.setObjectName("contextBody")
         self.description.setWordWrap(True)
+        _selectable_labels(self.title, self.meta, self.description)
         actions = QHBoxLayout()
         actions.setSpacing(SPACE["sm"])
         self.primary = QPushButton("Play latest")
@@ -2314,6 +2334,7 @@ class ContextPanel(QFrame):
         self.latest_episode = PlainTextLabel("")
         self.latest_episode.setObjectName("latestTitle")
         self.latest_episode.setWordWrap(True)
+        _selectable_labels(self.title, self.meta, self.latest_episode)
         latest_layout.addWidget(self.latest_heading)
         latest_layout.addWidget(self.latest_episode)
         selected_layout.addWidget(self.latest_card)
@@ -2485,7 +2506,7 @@ class ContextPanel(QFrame):
         else:
             body = "\n\n".join(segment.text or "" for segment in segments)
         empty = f"No segments match “{query}”" if query else "No transcript provided"
-        self.transcript_text.setPlainText(body or empty)
+        _set_document_content(self.transcript_text, body or empty)
 
     def show_details_error(self, message: str):
         """A failed chapters/transcript download looked exactly like 'the
@@ -2644,7 +2665,7 @@ class ContextPanel(QFrame):
         if feed_url != self._preview_url:
             return
         text = f"Couldn’t load feed details: {message}\n\nYou can still subscribe; episodes are fetched after subscribing."
-        self.body.setPlainText(text)
+        _set_document_content(self.body, text)
 
     def show_episode(self, episode):
         self._set_current_item(episode)
@@ -2820,7 +2841,7 @@ class ContextPanel(QFrame):
         self.body.setMinimumHeight(int(size.height()) + 12)
 
     def _set_body(self, text: str):
-        self.body.setHtml(safe_feed_html(text))
+        _set_document_content(self.body, safe_feed_html(text), rich=True)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -3028,6 +3049,7 @@ class NowPlayingView(QFrame):
         self.meta = PlainTextLabel("")
         self.meta.setObjectName("meta")
         self.meta.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        _selectable_labels(self.title, self.meta)
         left.addWidget(self.title)
         left.addWidget(self.show_link, 0, Qt.AlignmentFlag.AlignHCenter)
         left.addWidget(self.meta)
@@ -3210,7 +3232,7 @@ class NowPlayingView(QFrame):
         set_button_text_elided(self.show_link, snapshot.show_title, scaled_px(230))
         self.show_link.setVisible(bool(snapshot.show_title))
         self._fit_artwork()
-        self.notes.setHtml(safe_feed_html(description or "No show notes provided for this episode.", source_label="episode website"))
+        _set_document_content(self.notes, safe_feed_html(description or "No show notes provided for this episode.", source_label="episode website"), rich=True)
         self._chapters = sorted(chapters, key=lambda chapter: chapter.start_seconds)
         self._chapter_starts = [chapter.start_seconds for chapter in self._chapters]
         self.chapter_list.clear()
@@ -3298,6 +3320,7 @@ class NowPlayingView(QFrame):
         self.set_position(getattr(self, '_last_position', 0), getattr(self, '_last_duration', 0))
 
     def _fill_transcript(self, segments):
+        previous_user_scroll = self._transcript_user_scrolled
         self._transcript_user_scrolled = False
         self.follow_transcript_button.hide()
         self._ignore_transcript_scroll = True
@@ -3307,7 +3330,7 @@ class NowPlayingView(QFrame):
         self._segment_blocks = []
         self.transcript.setExtraSelections([])
         if not segments:
-            self.transcript.setPlainText("No transcript provided")
+            _set_document_content(self.transcript, "No transcript provided")
             self._ignore_transcript_scroll = False
             return
         parts = []
@@ -3320,7 +3343,10 @@ class NowPlayingView(QFrame):
             text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\u2028", "\n").replace("\u2029", "\n")
             parts.append(text)
             block += text.count("\n") + 1
-        self.transcript.setPlainText("\n".join(parts))
+        changed = _set_document_content(self.transcript, "\n".join(parts))
+        if not changed:
+            self._transcript_user_scrolled = previous_user_scroll
+            self.follow_transcript_button.setVisible(previous_user_scroll and self._transcript_timed)
         self._ignore_transcript_scroll = False
 
     def _seek_item(self, item):
