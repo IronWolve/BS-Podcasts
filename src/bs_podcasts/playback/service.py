@@ -663,6 +663,13 @@ class PlaybackService:
             self.pause()
             ExternalPlayerEngine().load(source, autoplay=True)
 
+    def clear_episode_progress(self, targets):
+        """Ordered reset, excluding the loaded session and draining older saves."""
+        with self._lock:
+            self._guard()
+            self._flush_persistence()
+            return self.repository.clear_progress(targets, exclude_episode_id=self.snapshot.episode_id)
+
     def begin_show_retirement(self, show_id: int):
         """Ordered command phase: bar new loads before stopping this show."""
         with self._lock:

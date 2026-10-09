@@ -936,6 +936,34 @@ class LibraryRepository:
 
     _PLAYED_FIELDS = ("played", "is_new", "position_seconds", "last_played")
 
+    def progress_targets(self, episode_ids, exclude_episode_id=None):
+        """Snapshot exact saved positions for confirmation, in bounded queries."""
+        ids = list(dict.fromkeys(int(value) for value in episode_ids
+                                 if int(value) > 0 and int(value) != exclude_episode_id))
+        targets = []
+        with self.database.connect() as connection:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                placeholders = ','.join('?' for _ in chunk)
+                targets.extend(tuple(row) for row in connection.execute(
+                    f'SELECT id,position_seconds,position_updated_at FROM episodes '
+                    f'WHERE id IN ({placeholders}) AND position_seconds>0 ORDER BY id', chunk))
+        return targets
+
+    def clear_progress(self, targets, exclude_episode_id=None):
+        """Reset only confirmed, unchanged positions; retain flags and history."""
+        count = 0
+        with self.database.connect() as connection:
+            for episode_id, position, stamp in targets:
+                if episode_id == exclude_episode_id:
+                    continue
+                count += connection.execute(
+                    "UPDATE episodes SET position_seconds=0, "
+                    "position_updated_at=MAX(unixepoch('subsec'),position_updated_at+0.000001) "
+                    "WHERE id=? AND position_seconds>0 AND position_seconds IS ? AND position_updated_at IS ?",
+                    (episode_id, position, stamp)).rowcount
+        return count
+
     def new_episode_ids(self):
         with self.database.connect() as connection:
             return [row[0] for row in connection.execute("SELECT id FROM episodes WHERE is_new=1")]

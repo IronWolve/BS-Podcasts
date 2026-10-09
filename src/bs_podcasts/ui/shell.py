@@ -507,7 +507,8 @@ class MainWindow(QMainWindow):
     def _build_pages(self):
         self.home_page = HomePage()
         self.podcast_page = PodcastGridPage()
-        self.episode_page = EpisodeListPage()
+        self.episode_page = EpisodeListPage(clear_progress=True)
+        self.episode_page.clear_progress_requested.connect(self._clear_episode_progress)
         self._catalog_timer = QTimer(self)
         self._catalog_timer.setSingleShot(True)
         self._catalog_timer.setInterval(160)
@@ -2120,6 +2121,48 @@ class MainWindow(QMainWindow):
             self._download_episode(episode_id, quiet=True)
         if ids:
             self._notify(f"Queued {len(ids)} download{'s' if len(ids) != 1 else ''}", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
+
+    def _clear_episode_progress(self):
+        if self.library is None or self._preview_episodes_url:
+            return
+        page = self.episode_page
+        ids = [item.episode_id for item in page.model._items if item.episode_id > 0]
+        if not ids:
+            return
+        scope = (self._hero_show_id, self._catalog_query, page._filter, page.header.search.text())
+        repository = self.library.repository
+        active = self.playback.snapshot.episode_id if self.playback is not None else None
+
+        def apply(targets):
+            if (self.pages.currentWidget() is not page or scope !=
+                    (self._hero_show_id, self._catalog_query, page._filter, page.header.search.text())):
+                return
+            if not targets:
+                self._notify('No saved progress to clear in this list. The loaded episode is left unchanged.', 'info')
+                return
+            count = len(targets)
+            dialog = ConfirmDialog(
+                f'Clear progress for {count} episode{"s" if count != 1 else ""}?',
+                'Reset saved playback positions to the beginning for episodes in this filtered list. '
+                'Played/unplayed status, favorites, history and downloads stay unchanged. '
+                'The currently loaded episode is left alone. This cannot be undone.',
+                'Clear progress', destructive=True, parent=self)
+            if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
+                return
+            playback = self.playback
+            def work():
+                return (playback.clear_episode_progress(targets) if playback is not None
+                        else repository.clear_progress(targets))
+            def cleared(changed):
+                self._invalidate_library_caches()
+                self._request_reload()
+                message = f'Cleared progress for {changed} episode{"s" if changed != 1 else ""}'
+                if changed != count:
+                    message += f' · {count - changed} loaded or changed episodes kept'
+                self._notify(message, 'success' if changed else 'info')
+            self._run_command(work, cleared)
+
+        self._run_read(lambda: repository.progress_targets(ids, active), apply, 'clear-progress-preview')
 
     def _mark_played_many(self, items, played: bool):
         if self.library is None:

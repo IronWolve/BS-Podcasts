@@ -1238,6 +1238,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
     queue_selected_requested = Signal(list)
     download_selected_requested = Signal(list)
     played_selected_requested = Signal(list)
+    clear_progress_requested = Signal()
 
     def __init__(
         self,
@@ -1252,6 +1253,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         empty=("No episodes yet", "Episodes appear here after a podcast refreshes.", ""),
         glyph="episodes",
         parent=None,
+        *, clear_progress=False,
     ):
         super().__init__(title, subtitle, action, show_search, parent)
         self._empty_text = empty
@@ -1271,6 +1273,16 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             self.sort_button.setAccessibleName("Sort episodes")
             self.sort_button.clicked.connect(self._show_sort_menu)
             self.chips.add_trailing(self.sort_button)
+        self.clear_progress_button = None
+        if clear_progress:
+            self.clear_progress_button = QPushButton("Clear progress")
+            self.clear_progress_button.setObjectName("textButton")
+            self.clear_progress_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.clear_progress_button.setAccessibleName("Clear episode progress")
+            self.clear_progress_button.setToolTip("Reset saved playback positions in this filtered list. Confirmation required.")
+            self.clear_progress_button.setEnabled(False)
+            self.clear_progress_button.clicked.connect(self.clear_progress_requested.emit)
+            self.chips.add_trailing(self.clear_progress_button)
         self.hero = HeroCard()
         self.root.addWidget(self.hero)
         self.root.addWidget(self.chips)
@@ -1322,6 +1334,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self._blank_while_loading = True
         self.banner.state_changed.connect(lambda _state: self._update_empty(self.header.search.text().strip().lower()))
         self._update_empty()
+        self._sync_clear_progress()
 
     def set_load_more_state(self, available: bool, loading: bool = False, noun: str | None = None):
         """Mirror of PodcastGridPage.set_load_more_state, for capped lists."""
@@ -1356,6 +1369,12 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         else:
             self._apply_filters(restore_key=self._current_key(), preserve_scroll=True,
                                 selected_keys=self._selected_keys())
+        self._sync_clear_progress()
+
+    def _sync_clear_progress(self):
+        if self.clear_progress_button is not None:
+            self.clear_progress_button.setEnabled(any(
+                item.episode_id > 0 and item.position_seconds > 0 for item in self.model._items))
 
     def set_filter(self, value: str):
         self._filter = value
@@ -1433,6 +1452,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self._update_empty(query)
         self._selection_changed()
         self._update_sort_button()
+        self._sync_clear_progress()
 
     def _update_sort_button(self):
         if self.sort_button is None:
