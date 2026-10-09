@@ -2,7 +2,8 @@
 
 import math
 import platform
-from datetime import datetime
+from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
 import re
 import threading
@@ -11,21 +12,8 @@ from PySide6.QtCore import QPoint, QSize, QTimer, QUrl, Qt, Signal, qVersion
 from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QKeySequence, QTextDocument, QTextOption
 
 from ..urlguard import is_web_url
+from ..domain.times import format_media_time
 
-
-def open_web_url(url):
-    """HTTP(S)-only exit for URLs originating in feed data.
-
-    The rule lives in `urlguard`; this is one of its call sites, not a second
-    copy of it — the duplicates used to drift.
-    """
-    value = url.toString() if isinstance(url, QUrl) else str(url or "")
-    if not is_web_url(value):
-        import logging
-
-        logging.getLogger("bs_podcasts").warning("Refusing to open non-web URL from feed data: %s", value[:120])
-        return
-    QDesktopServices.openUrl(QUrl(value))
 
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -52,7 +40,17 @@ from ..config import APP_NAME, APP_TAGLINE, GITHUB_URL, app_version
 from . import icons
 from .pixmaps import initials
 from .theme import COLORS, SPACE, scaled_px
-from .widgets import Artwork, PlainTextLabel as _PlainTextLabel, fit_combo_width, safe_feed_html
+from .widgets import Artwork, PlainTextLabel as _PlainTextLabel, fit_combo_width, safe_feed_html, exec_menu
+
+
+def open_web_url(url):
+    """HTTP(S)-only exit for URLs originating in feed data."""
+    value = url.toString() if isinstance(url, QUrl) else str(url or "")
+    if not is_web_url(value):
+        import logging
+        logging.getLogger("bs_podcasts").warning("Refusing to open non-web URL from feed data: %s", value[:120])
+        return
+    QDesktopServices.openUrl(QUrl(value))
 
 
 class PlainTextLabel(_PlainTextLabel):
@@ -73,7 +71,7 @@ class PlainTextLabel(_PlainTextLabel):
             action = menu.addAction("Copy", self._copy_selection)
             action.setEnabled(self.hasSelectedText())
             menu.addAction("Select all", lambda: self.setSelection(0, len(self.text())))
-            menu.exec(event.globalPos())
+            exec_menu(menu, event.globalPos())
         else:
             super().contextMenuEvent(event)
 
@@ -82,6 +80,21 @@ SHADOW_MARGIN = 24
 # 36-character runs still overflowed a two-column field at the dialog minimum;
 # 24 (~150 px) fits.
 _LONG_VALUE = re.compile(r"\S{24,}")
+
+
+def _copy_with_feedback(button, text):
+    QApplication.clipboard().setText(text)
+    original = button.text()
+    if original != "Copied":
+        button.setProperty("copyOriginalText", original)
+    button.setText("Copied")
+    timer = getattr(button, '_copy_feedback_timer', None)
+    if timer is None:
+        timer = QTimer(button)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: button.setText(button.property("copyOriginalText") or "Copy"))
+        button._copy_feedback_timer = timer
+    timer.start(1200)
 
 
 def _wrap_long_value(value: str) -> str:
@@ -102,14 +115,17 @@ _MONTHS = (
 
 
 def _episode_date(value: str) -> str:
-    # Spelled out rather than strftime: the month, AM/PM and zone name follow
-    # the user's locale, and locales with no AM/PM marker (German, French)
-    # showed an ambiguous 12-hour time inside English text.
+    # Explicit English month/AM-PM labels avoid ambiguous twelve-hour times
+    # on systems whose locale has no AM/PM marker. Clock and zone are local.
     if not value:
         return ""
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if len(value.strip()) == 10:
+            return f"{_MONTHS[parsed.month - 1]} {parsed.day}, {parsed.year}"
         zone = ""
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
         if parsed.tzinfo is not None:
             parsed = parsed.astimezone()
             name = parsed.tzname() or ""
@@ -126,10 +142,7 @@ def _episode_date(value: str) -> str:
 
 
 def _episode_duration(seconds: int) -> str:
-    seconds = max(0, int(seconds or 0))
-    hours, remainder = divmod(seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+    return format_media_time(seconds)
 
 
 _STAT = object()
@@ -340,6 +353,9 @@ class StyledDialog(QDialog):
         self._drag_origin: QPoint | None = None
         self._scrim: QWidget | None = None
         self._target_size: QSize | None = None
+        # Disposal is deferred until the caller has consumed values after
+        # exec(). WA_DeleteOnClose destroys those fields before that contract.
+        self.finished.connect(lambda _result: QTimer.singleShot(0, self, self.deleteLater))
         outer = QVBoxLayout(self)
         outer.setContentsMargins(SHADOW_MARGIN, SHADOW_MARGIN, SHADOW_MARGIN, SHADOW_MARGIN)
         self.card = QFrame()
@@ -539,7 +555,12 @@ class AddPodcastDialog(StyledDialog):
         self.progress.setVisible(busy)
         self.add.setEnabled(not busy)
         self.url.setEnabled(not busy)
+        self.cancel.setEnabled(not busy)
         self.add.setText("Adding…" if busy else "Add podcast")
+
+    def reject(self):
+        if self.add.isEnabled():
+            super().reject()
 
     def _accept_if_valid(self):
         if not self.add.isEnabled():
@@ -568,7 +589,7 @@ class PodcastSettingsDialog(StyledDialog):
         self.setWindowTitle(f"{title} settings")
         self.set_card_width(680)
         self.add_heading(title, "Simple playback, download and retention settings for this podcast.")
-        from PySide6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QSpinBox
+        from PySide6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QSpinBox
 
         form = QFormLayout()
         form.setHorizontalSpacing(SPACE["xl"])
@@ -665,7 +686,7 @@ class RemovePodcastDialog(StyledDialog):
         show = preview["show"]
         self.setWindowTitle(f"Unsubscribe from {show.title}")
         self.set_card_width(560)
-        self.add_heading(f"Unsubscribe from {show.title}?", "This removes the podcast from your library. It can be added again later, but listening progress, bookmarks and downloads for it are deleted.")
+        self.add_heading(f"Unsubscribe from {show.title}?", "This removes the podcast, listening progress and bookmarks from your library. Downloaded files are deleted only when the box below is checked.")
         rows = QVBoxLayout()
         rows.setSpacing(SPACE["xs"])
         facts = [
@@ -694,6 +715,14 @@ class RemovePodcastDialog(StyledDialog):
         self.delete_files.setChecked(True)
         self.card_layout.addWidget(self.delete_files)
         self.delete_files.setVisible(bool(preview["files"]))
+        self.file_outcome = PlainTextLabel()
+        self.file_outcome.setObjectName("settingHint")
+        self.file_outcome.setWordWrap(True)
+        self.card_layout.addWidget(self.file_outcome)
+        def update_outcome(checked):
+            self.file_outcome.setText("The listed downloaded files will be deleted." if checked and file_count else "Downloaded files stay on disk but are no longer listed in the library.")
+        self.delete_files.toggled.connect(update_outcome)
+        update_outcome(self.delete_files.isChecked())
         remove = QPushButton("Unsubscribe")
         remove.setObjectName("dangerButton")
         remove.clicked.connect(self.accept)
@@ -729,18 +758,26 @@ class TextInputDialog(StyledDialog):
         self.add_heading(title, message)
         self.field = QLineEdit(value)
         self.field.setObjectName("searchField")
+        self.field.setAccessibleName(title)
         self.field.selectAll()
         self.card_layout.addWidget(self.field)
         save = QPushButton(action)
         save.setObjectName("primaryButton")
         save.clicked.connect(self.accept)
         self.add_buttons(save)
+        self._save = save
+        self.field.textChanged.connect(lambda text: save.setEnabled(bool(text.strip())))
+        save.setEnabled(bool(value.strip()))
         self.field.returnPressed.connect(self.accept)
         self.field.setFocus()
 
     @property
     def value(self) -> str:
         return self.field.text().strip()
+
+    def accept(self):
+        if self.value:
+            super().accept()
 
 
 class EpisodeInfoDialog(StyledDialog):
@@ -777,8 +814,8 @@ class EpisodeInfoDialog(StyledDialog):
             [(name, value) for name, value in rows if name in source_names],
         )
         # Two columns only when there is room: at the 560 px minimum the
-        # second column was squeezed to ~90 px and hard-clipped its URLs
-        #. The grid is re-placed on resize (see resizeEvent).
+        # second column was squeezed to ~90 px and hard-clipped its URLs.
+        # The grid is re-placed on resize (see resizeEvent).
         columns = QGridLayout()
         columns.setSpacing(SPACE["xl"])
         self._column_holders = []
@@ -815,7 +852,7 @@ class EpisodeInfoDialog(StyledDialog):
         buttons = QHBoxLayout()
         copy = QPushButton("Copy information")
         copy.setObjectName("quietButton")
-        copy.clicked.connect(lambda: QApplication.clipboard().setText(self.information_text))
+        copy.clicked.connect(lambda: _copy_with_feedback(copy, self.information_text))
         close = QPushButton("Close")
         close.setObjectName("primaryButton")
         close.clicked.connect(self.accept)
@@ -949,7 +986,7 @@ class PodcastInfoDialog(StyledDialog):
         refreshed = getattr(podcast, "last_refresh_text", "")
         summary_text = "  ·  ".join(
             part for part in (
-                f"{episode_count} episodes" if episode_count else "",
+                f"{episode_count} episode{'s' if episode_count != 1 else ''}" if episode_count else "",
                 f"Refreshed {refreshed}" if refreshed else "",
             ) if part
         )
@@ -974,7 +1011,7 @@ class PodcastInfoDialog(StyledDialog):
         copy_feed.setIcon(icons.icon("rss", COLORS["text"], 16))
         copy_feed.setEnabled(bool(feed_url))
         copy_feed.setToolTip(feed_url or "Feed URL unavailable")
-        copy_feed.clicked.connect(lambda: QApplication.clipboard().setText(feed_url))
+        copy_feed.clicked.connect(lambda: _copy_with_feedback(copy_feed, feed_url))
         actions.addWidget(open_website)
         actions.addWidget(copy_feed)
         actions.addStretch(1)
@@ -996,7 +1033,7 @@ class PodcastInfoDialog(StyledDialog):
         about.setOpenLinks(False)
         about.anchorClicked.connect(open_web_url)
         about.document().setDefaultStyleSheet(f"a {{ color: {COLORS['blue']}; text-decoration: underline; }}")
-        about.setHtml(safe_feed_html(description or "No description provided by this feed."))
+        about.setHtml(safe_feed_html(description or "No description provided by this feed.", source_label="podcast website"))
         about.setMinimumHeight(130)
         about.setMaximumHeight(220)
         content_layout.addWidget(about)
@@ -1069,7 +1106,7 @@ class PodcastInfoDialog(StyledDialog):
         copy = QPushButton("Copy information")
         self.copy_button = copy
         copy.setObjectName("quietButton")
-        copy.clicked.connect(lambda: QApplication.clipboard().setText(self.information_text))
+        copy.clicked.connect(lambda: _copy_with_feedback(copy, self.information_text))
         close = QPushButton("Close")
         self.close_button = close
         close.setObjectName("primaryButton")
@@ -1090,13 +1127,13 @@ class ShortcutsDialog(StyledDialog):
         ("Delete", "Remove from Up Next · delete download · delete bookmark"),
         ("Esc", "Close overlay · clear filter · clear selection"),
         ("↑ ↓", "Move through lists and search results"),
-        ("Drag", "Drop episodes on Up Next in the rail"),
+        ("Drag", "Reorder episodes within Up Next"),
     )
 
     def __init__(self, groups, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Keyboard shortcuts")
-        self.set_card_width(620)
+        self.set_card_width(scaled_px(780))
         self.add_heading("Keyboard shortcuts", "Change the bindable ones in Settings › Keyboard shortcuts.")
         columns = QHBoxLayout()
         columns.setSpacing(SPACE["xl"])
@@ -1104,16 +1141,23 @@ class ShortcutsDialog(StyledDialog):
         from .shortcuts import display_text
 
         bindable = [(title, [(display_text(key), label) for key, label in entries]) for title, entries in groups]
-        for index, (title, entries) in enumerate(bindable + [("Fixed keys", self.FIXED)]):
-            target = left if index % 2 == 0 else right
+        heights = [0, 0]
+        for title, entries in bindable + [("Fixed keys", self.FIXED)]:
+            column = 0 if heights[0] <= heights[1] else 1
+            target = (left, right)[column]
+            heights[column] += len(entries) + 2
             heading = PlainTextLabel(title.upper())
             heading.setObjectName("eyebrow")
             target.addWidget(heading)
             for key, label in entries:
                 row = QHBoxLayout()
-                key_label = PlainTextLabel(key)
+                key_label = PlainTextLabel(_wrap_long_value(key))
                 key_label.setObjectName("cardTitle")
-                key_label.setFixedWidth(scaled_px(110))
+                key_label.setToolTip(key)
+                key_label.setAccessibleName(key or 'Not assigned')
+                key_label.setWordWrap(True)
+                key_label.setMinimumWidth(scaled_px(110))
+                key_label.setMaximumWidth(scaled_px(200))
                 text = PlainTextLabel(label)
                 text.setObjectName("muted")
                 text.setWordWrap(True)
@@ -1169,7 +1213,7 @@ class MigrationNotice(StyledDialog):
 
 
 class StartupErrorDialog(StyledDialog):
-    def __init__(self, title: str, message: str, parent=None):
+    def __init__(self, title: str, message: str, parent=None, *, repair=None, repair_path=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.set_card_width(560)
@@ -1179,13 +1223,88 @@ class StartupErrorDialog(StyledDialog):
         body.setWordWrap(True)
         body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.card_layout.addWidget(body)
+        self.repaired = False
+        self._repair = repair
+        self._repair_busy = False
+        self._repair_confirmed = False
+        self.repair_status = PlainTextLabel("")
+        self.repair_status.setWordWrap(True)
+        self.repair_status.setObjectName("settingHint")
+        self.card_layout.addWidget(self.repair_status)
         close = QPushButton("Close")
+        self.close_button = close
         close.setObjectName("primaryButton")
         close.clicked.connect(self.accept)
         row = QHBoxLayout()
+        self.repair_button = QPushButton("Repair from backup…")
+        self.repair_button.setObjectName("quietButton")
+        self.repair_button.clicked.connect(self._request_repair)
+        row.addWidget(self.repair_button)
         row.addStretch(1)
         row.addWidget(close)
         self.card_layout.addLayout(row)
+        self._repair_path = str(repair_path or "")
+        self.repair_button.setVisible(callable(repair))
+
+    def _request_repair(self):
+        if self._repair_busy or not callable(self._repair):
+            return
+        if not self._repair_confirmed:
+            target = f"\nLibrary: {self._repair_path}" if self._repair_path else ""
+            self.repair_status.setText("Restore the library using a backup? The original library is kept as a recovery copy. This may lose changes newer than the backup." + target)
+            self.repair_button.setText("Confirm repair")
+            self._repair_confirmed = True
+            return
+        self._repair_busy = True
+        self.close_button.setEnabled(False)
+        self.repair_button.setEnabled(False)
+        self.repair_status.setText("Repairing the library… Please wait; the original data is preserved.")
+        outcome = {}
+        repair = self._repair
+        def work():
+            try:
+                repair()
+                outcome['ok'] = True
+            except Exception as exc:
+                from ..privacy import redact
+                outcome['error'] = redact(exc)
+        self._repair_worker = threading.Thread(target=work, name="bs-startup-repair", daemon=True)
+        self._repair_poll = QTimer(self)
+        self._repair_poll.setInterval(50)
+        def poll():
+            if self._repair_worker.is_alive():
+                return
+            self._repair_poll.stop()
+            self._repair_busy = False
+            if outcome.get('ok'):
+                self.repaired = True
+                self.accept()
+            else:
+                self.close_button.setEnabled(True)
+                self.repair_button.setEnabled(True)
+                self._repair_confirmed = False
+                self.repair_button.setText("Repair from backup…")
+                self.repair_status.setText("Repair failed. " + outcome.get('error', 'The repair worker could not start.'))
+        self._repair_poll.timeout.connect(poll)
+        try:
+            self._repair_worker.start()
+        except Exception:
+            self._repair_busy = False
+            self.close_button.setEnabled(True)
+            self.repair_button.setEnabled(True)
+            self.repair_status.setText("Could not start the repair worker. No repair was performed.")
+            return
+        self._repair_poll.start()
+
+    def done(self, result):
+        if not self._repair_busy:
+            super().done(result)
+
+    def closeEvent(self, event):
+        if self._repair_busy:
+            event.ignore()
+        else:
+            super().closeEvent(event)
 
 
 class AboutDialog(StyledDialog):
@@ -1201,7 +1320,7 @@ class AboutDialog(StyledDialog):
             logo.setPixmap(pixmap.scaledToWidth(360, Qt.TransformationMode.SmoothTransformation))
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.card_layout.addWidget(logo)
-        name = QLabel(f"{APP_NAME}  <span style='color:{COLORS['muted']}; font-weight:400'>v{app_version()}</span>")
+        name = QLabel(f"{escape(APP_NAME)}  <span style='color:{COLORS['muted']}; font-weight:400'>v{escape(app_version())}</span>")
         name.setObjectName("cardTitle")
         name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tagline = PlainTextLabel(APP_TAGLINE)

@@ -47,14 +47,20 @@ def _retry_after_seconds(response) -> float | None:
     if raw is None:
         return None
     text = str(raw).strip()
-    if text.isdigit():
-        return float(text)
+    if text.isascii() and text.isdigit():
+        try:
+            return min(float(text), _RATE_LIMIT_CAP)
+        except (ValueError, OverflowError):
+            return None
     import email.utils
     import time
-    parsed = email.utils.parsedate_tz(text)
-    if parsed is None:
+    try:
+        parsed = email.utils.parsedate_tz(text)
+        if parsed is None:
+            return None
+        return max(0.0, min(_RATE_LIMIT_CAP, email.utils.mktime_tz(parsed) - time.time()))
+    except (ValueError, OverflowError, TypeError):
         return None
-    return max(0.0, email.utils.mktime_tz(parsed) - time.time())
 
 
 def _request_host(url) -> str:
@@ -72,6 +78,11 @@ def _fail_long_retry_after(response, state, request_host: str) -> None:
     seconds = _retry_after_seconds(response)
     if seconds is None:
         return
+    response_host = _request_host(getattr(response, "url", "") or "")
+    # Short waits also apply to subsequent requests for the same host. Never
+    # sleep/drain the error body here; callers can retry after the cooldown.
+    _remember_rate_limit(request_host, seconds)
+    _remember_rate_limit(response_host, seconds)
     from .netlimits import NetworkDeadline
     try:
         left = state.remaining()
@@ -79,9 +90,6 @@ def _fail_long_retry_after(response, state, request_host: str) -> None:
         left = 0
     if seconds <= left:
         return
-    response_host = _request_host(getattr(response, "url", "") or "")
-    _remember_rate_limit(request_host, seconds)
-    _remember_rate_limit(response_host, seconds)
     from .netlimits import abort_response
     abort_response(response)
     from requests.exceptions import RetryError
@@ -162,16 +170,17 @@ class SessionSlot:
 def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_retries: bool = True, max_redirects: int = 8, total_timeout: float = 60, max_response_bytes=20 * 1024 * 1024, foreground=False):
     """A Session safe to share across the job pool.
 
-    `retries` covers connection errors and 429/5xx responses with backoff;
-    long streaming transfers pass `read_retries=False` so a mid-body failure
-    is reported (and resumed by the caller) rather than replayed from zero.
+    `retries` covers connection errors and optional read retries, not status
+    answers. 429/5xx fail without draining/retrying their bodies; Retry-After
+    sets a bounded host cooldown. Long streaming transfers pass
+    `read_retries=False` so a mid-body failure is reported for caller resume.
     """
     from requests import Session
     from .safe_transport import guarded_adapter
     from urllib3.util.retry import Retry
 
-    from requests.exceptions import Timeout
-    from .netlimits import Deadline, NetworkDeadline, bounded_call, bounded_chunks, abort_response, is_foreground, request_scope
+    from requests.exceptions import RequestException, Timeout
+    from .netlimits import Deadline, NetworkDeadline, ResponseTooLarge, bounded_call, bounded_chunks, abort_response, is_foreground, request_scope
 
     class DeadlineRetry(Retry):
         def increment(self, *args, **kwargs):
@@ -241,6 +250,8 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
                 return
             try:
                 yield from bounded_chunks(response, original, state, max_response_bytes, chunk_size, decode_unicode)
+            except ResponseTooLarge as exc:
+                raise RequestException(str(exc), response=response) from exc
             except NetworkDeadline as exc:
                 raise Timeout(str(exc), response=response) from exc
         response.iter_content = chunks

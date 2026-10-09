@@ -13,7 +13,10 @@ def prepare_preview(feed):
             for field in fields(record):
                 value = getattr(record, field.name)
                 if isinstance(value, str):
-                    cost += 4 * len(value)
+                    cost += 64 + 4 * len(value)
+                elif isinstance(value, tuple) and field.name != 'episodes':
+                    cost += 64 + 8 * len(value)
+                    cost += sum(64 + 4 * len(item) for item in value if isinstance(item, str))
         object.__setattr__(feed, '_preview_bytes', cost)
     return feed
 

@@ -9,6 +9,7 @@ from ..data.files import (
     FILE_PRESENT,
     FILE_UNAVAILABLE,
     FILE_UNCONFIRMED,
+    _root_key,
     inspect_download_file,
     note_completed_download,
     open_private,
@@ -40,6 +41,10 @@ class DownloadError(RuntimeError):
     pass
 
 
+class AutomaticCleanupSkipped(DownloadError):
+    """A delayed housekeeping target is now protected; nothing was deleted."""
+
+
 class _TruncatedDownload(DownloadError):
     """The transfer ended before the expected Content-Length; safe to retry."""
 
@@ -50,6 +55,10 @@ class _RangeContinuation(DownloadError):
 
 class _StaleResume(DownloadError):
     """The partial no longer matches what the server serves; discard and retry."""
+
+
+class _InvalidMedia(DownloadError):
+    """Known document/executable bytes; never retain them as resumable audio."""
 
 
 def _looks_like_document(head: bytes, final: bool = False) -> bool:
@@ -222,8 +231,8 @@ class DownloadService:
         download the next start parks as Paused, instead of nothing at all.
 
         `priority` is a play intent bound for the caller's own worker: a
-        ticket still waiting behind background downloads is replaced, and
-        its job finds itself stale and returns without transferring. A
+        ticket still waiting behind background downloads is cancelled, and
+        its job records a resumable Paused row without transferring. A
         transfer that already started is left to finish (None). The last
         play intent wins: starting one for another episode pauses the
         previous play-intent transfer, which nobody is waiting on any more
@@ -350,6 +359,16 @@ class DownloadService:
             prepared = self.downloads.prepare(episode_id, episode.media_url, target, partial)
             if prepared is None:
                 raise DownloadError("The download record is no longer available.")
+            if prepared.state == DownloadState.COMPLETE:
+                kind, _size = inspect_download_file(prepared.target_path, completed=True)
+                if kind == FILE_PRESENT:
+                    return prepared
+                if kind != FILE_MISSING:
+                    raise DownloadError("The completed download cannot be verified. Check its folder before retrying.")
+                self.downloads.mark_missing(prepared, self.MISSING_FILE_MESSAGE)
+                prepared = self.downloads.prepare(episode_id, episode.media_url, target, partial)
+                if prepared is None or prepared.state == DownloadState.COMPLETE:
+                    return prepared
             target = Path(prepared.target_path)
             partial = Path(prepared.partial_path) if prepared.partial_path else target.with_suffix(target.suffix + ".part")
             if self._left_behind(target, partial):
@@ -530,7 +549,7 @@ class DownloadService:
     STALL_MIN_BYTES = 8 * 1024  # under ~270 B/s for 30 s counts as stalled
     MAX_TRANSFER_SECONDS = 4 * 3600
 
-    def reconcile_missing(self) -> int:
+    def reconcile_missing(self, limit: int | None = None) -> int:
         """Complete records whose file is gone become retryable errors.
 
         A file deleted outside the app (or by a failed removal) left the row
@@ -545,9 +564,16 @@ class DownloadService:
             record for record in self.downloads.list()
             if record.state == DownloadState.COMPLETE and record.target_path
         ]
+        if limit is not None and eligible:
+            count = min(len(eligible), max(1, int(limit)))
+            offset = getattr(self, "_missing_check_offset", 0) % len(eligible)
+            eligible = (eligible[offset:] + eligible[:offset])[:count]
+            self._missing_check_offset = offset + count
         checked = []
         for record in eligible:
             kind, _size = inspect_download_file(record.target_path, seen, completed=True)
+            if kind == FILE_PRESENT:
+                note_completed_download(Path(record.target_path), seen)
             checked.append((record, kind))
         fixed = 0
         for record, kind in checked:
@@ -834,7 +860,7 @@ class DownloadService:
                         # marked complete. Let the first bytes veto it.
                         head += chunk[: 512 - len(head)]
                         if _looks_like_document(head) or unsafe_media_payload(head):
-                            raise DownloadError(
+                            raise _InvalidMedia(
                                 "Server sent a document or executable instead of audio."
                             )
                     handle.write(chunk)
@@ -874,7 +900,10 @@ class DownloadService:
                     raise _TruncatedDownload("Download ended before the expected size.")
             if authoritative_total and done != total:
                 raise DownloadError("Download size does not match the response.")
-            return self._finish(episode_id, partial, target, done, cancellation)
+            verified = authoritative_total
+            if not verified and episode.duration_seconds > 0:
+                verified = self._duration_matches(partial, episode.duration_seconds)
+            return self._finish(episode_id, partial, target, done, cancellation, length_verified=verified)
         except _RangeContinuation:
             if cancellation.is_set():
                 return self._park(episode_id, partial)
@@ -891,6 +920,11 @@ class DownloadService:
         except DownloadError as exc:
             if cancellation.is_set():
                 return self._park(episode_id, partial)
+            if isinstance(exc, _InvalidMedia):
+                try:
+                    partial.unlink(missing_ok=True)
+                except OSError:
+                    _log.warning("Could not remove rejected media partial for episode %s", episode_id)
             done = partial.stat().st_size if partial.exists() else 0
             total = 0
             self.downloads.progress(episode_id, DownloadState.ERROR, done, total, str(exc))
@@ -928,7 +962,7 @@ class DownloadService:
             if response is not None:
                 response.close()
 
-    def _finish(self, episode_id: int, partial: Path, target: Path, done: int, cancellation: Event):
+    def _finish(self, episode_id: int, partial: Path, target: Path, done: int, cancellation: Event, *, length_verified=True):
         """Verify the finished partial and rename it into place as complete."""
         if cancellation.is_set():
             return self._park(episode_id, partial)
@@ -938,16 +972,46 @@ class DownloadService:
         with partial.open("rb") as verification:
             complete_head = verification.read(512)
         if _looks_like_document(complete_head, final=True) or unsafe_media_payload(complete_head):
-            raise DownloadError("Server sent a document or executable instead of audio.")
+            raise _InvalidMedia("Server sent a document or executable instead of audio.")
         os.replace(partial, target)
         sync_directory(target.parent)
         # `done` is the transfer's own byte count and equals the file size.
         # Calling stat() here let a concurrent delete turn a complete,
         # correctly-named file into an ERROR record at 0/0.
-        self.downloads.complete(episode_id, str(target), done)
+        self.downloads.complete(episode_id, str(target), done, length_verified=length_verified)
         note_completed_download(target)
-        self._emit(episode_id, DownloadState.COMPLETE, done, done)
+        self._emit(episode_id, DownloadState.COMPLETE, done, done,
+                   "" if length_verified else "Audio length is unverified; automatic cleanup will keep this file.")
         return self.downloads.get(episode_id)
+
+    @staticmethod
+    def _duration_matches(path: Path, expected: float) -> bool:
+        """Use the bounded silent reader without refusing lengthless audio."""
+        from ..feeds.local import read_metadata, LocalAudioError
+        try:
+            observed = read_metadata(Path(path).resolve()).get("duration", 0)
+            tolerance = max(10.0, min(60.0, float(expected) * 0.02))
+            return float(expected) > 0 and float(observed) > 0 and abs(float(observed) - float(expected)) <= tolerance
+        except (LocalAudioError, OSError, ValueError, TypeError):
+            return False
+
+    def verify_length(self, episode_id: int) -> bool:
+        """Explicit worker action for an existing playable, unverified file."""
+        record = self.downloads.get(episode_id)
+        episode = self.library.get_episode(episode_id)
+        if record is None or episode is None or record.state != DownloadState.COMPLETE:
+            return False
+        path = Path(record.target_path)
+        try:
+            before = path.stat()
+            if not self._duration_matches(path, episode.duration_seconds):
+                return False
+            after = path.stat()
+            if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns) != (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns):
+                return False
+        except OSError:
+            return False
+        return self.downloads.verify_length(record)
 
     def cancel(self, episode_id: int) -> bool:
         with self._lock:
@@ -1011,20 +1075,26 @@ class DownloadService:
             if episode.id not in keep and not (episode.position_seconds > 0 and not episode.played)
         ]
 
-    def played_previews(self):
+    def played_previews(self, episode_ids=None):
         """Exact targets for every completed download whose episode is played."""
         previews = []
-        for episode_id in self.downloads.played_complete():
-            preview = self.downloads.cleanup_preview(episode_id)
+        self.played_cleanup_skipped = 0
+        for record in self.downloads.played_complete_records(episode_ids):
+            try:
+                preview = self.downloads.cleanup_preview(record.episode_id, record=record)
+            except OSError:
+                self.played_cleanup_skipped += 1
+                continue
             if preview is not None:
                 previews.append(preview)
         return previews
 
-    def delete(self, episode_id: int) -> int:
+    def delete(self, episode_id: int, *, confirmed_paths, automatic=False, played_only=False) -> int:
         with self._retire_episode(episode_id):
-            return self._delete_retired(episode_id)
+            return self._delete_retired(episode_id, confirmed_paths=confirmed_paths,
+                                        automatic=automatic, played_only=played_only)
 
-    def _delete_retired(self, episode_id: int) -> int:
+    def _delete_retired(self, episode_id: int, *, confirmed_paths, automatic=False, played_only=False) -> int:
         """Cancel if active, unlink the files, forget the record. Returns bytes freed.
 
         Bytes count only after a successful unlink, and a record whose file
@@ -1042,6 +1112,54 @@ class DownloadService:
         record = self.downloads.get(episode_id)
         if record is None:
             return 0
+        # Cancellation/persistence unwind is finished before the writer lock:
+        # a download worker must not wait on this transaction while we join it.
+        with self._automatic_cleanup_guard(record, automatic, played_only):
+            return self._delete_confirmed_record(record, confirmed_paths)
+
+    @contextmanager
+    def _automatic_cleanup_guard(self, record, automatic, played_only=False):
+        if not automatic:
+            yield
+            return
+        with self.library.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT d.*,e.favorite,e.played FROM downloads d JOIN episodes e ON e.id=d.episode_id "
+                "WHERE d.episode_id=?", (record.episode_id,)).fetchone()
+            if (row is None or row["favorite"] or row["state"] != "complete" or not row["length_verified"]
+                    or (played_only and not row["played"])
+                    or (row["id"],row["created_at"],row["updated_at"],row["target_path"],row["partial_path"]) !=
+                       (record.id,record.created_at,record.updated_at,record.target_path,record.partial_path)):
+                raise AutomaticCleanupSkipped("This download changed or is now protected from automatic cleanup; it was kept.")
+            # This one-episode transaction spans unlink and row retirement, so
+            # a concurrent favorite/verification write cannot overtake deletion.
+            yield
+
+    def _delete_confirmed_record(self, record, confirmed_paths):
+        episode_id = record.episode_id
+        if isinstance(confirmed_paths, (str, Path)):
+            confirmed_paths = [confirmed_paths]
+        confirmed = {str(path) for path in confirmed_paths or ()}
+        roots = set()
+        checked = []
+        # Validate the entire set before deleting anything: a transfer may
+        # finish while the confirmation is open, creating a new target.
+        for candidate in dict.fromkeys(path for path in (record.target_path, record.partial_path) if path):
+            kind, _size = inspect_download_file(candidate, roots,
+                completed=record.state == DownloadState.COMPLETE and candidate == record.target_path)
+            if kind == FILE_PRESENT and candidate not in confirmed:
+                raise DownloadError("Download files changed after confirmation. Review the current targets and retry.")
+            if kind == FILE_PRESENT:
+                # A confirmed owned partial also proves its directory is
+                # online for this pass; no marker is written by a preview.
+                roots.add(_root_key(Path(candidate).parent))
+            checked.append((candidate, kind))
+        for candidate, kind in checked:
+            if kind == FILE_UNCONFIRMED:
+                kind, _size = inspect_download_file(candidate, roots)
+            if kind in {FILE_IRREGULAR, FILE_UNAVAILABLE, FILE_UNCONFIRMED}:
+                raise DownloadError("A download path is unavailable or unconfirmed. No files were deleted.")
         freed = 0
         failures = []
         target_kept = False
@@ -1049,7 +1167,7 @@ class DownloadService:
             path = Path(candidate) if candidate else None
             if path is not None:
                 try:
-                    kind, size = inspect_download_file(path, completed=False)
+                    kind, size = inspect_download_file(path, roots, completed=False)
                     if kind == FILE_PRESENT:
                         self._unlink_settled(path)
                         freed += size

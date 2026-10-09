@@ -78,7 +78,7 @@ meson setup "${BS_RECONFIGURE[@]}" "$BS_NATIVE_ROOT/build-mpv" "$BS_SRC/mpv-0.41
     "-Dc_link_args=['-Wl,--no-undefined','-Wl,--no-as-needed','-lstdc++','-Wl,--as-needed']" >> "$BS_NATIVE_ROOT/build.log" 2>&1
 "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --sanitize "$BS_NATIVE_ROOT/build-mpv/config.h" --root "$BS_NATIVE_ROOT"
 ninja -C "$BS_NATIVE_ROOT/build-mpv" -j "$BS_JOBS" >> "$BS_NATIVE_ROOT/build.log" 2>&1
-mkdir "$BS_NATIVE_ROOT/out"
+mkdir -p "$BS_NATIVE_ROOT/out"
 cp -L "$BS_NATIVE_ROOT/build-mpv/libmpv.so.2" "$BS_NATIVE_ROOT/out/libmpv.so.2"
 strip --strip-unneeded "$BS_NATIVE_ROOT/out/libmpv.so.2"
 "$BS_PYTHON" -B -c 'import ctypes,sys; ctypes.CDLL(sys.argv[1])' "$BS_NATIVE_ROOT/out/libmpv.so.2"

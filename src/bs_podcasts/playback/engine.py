@@ -188,8 +188,17 @@ class MpvEngine:
             self._activated = True
             self._expected_entry_id = None
             generation = self._generation
-        self._cancel_http()
-        self._player.command("stop")
+        try:
+            self._cancel_http()
+            self._player.command("stop")
+        except BaseException:
+            with self._state_lock:
+                if self._generation == generation:
+                    self._loading = False
+                    self._resolving = False
+                    self._expected_entry_id = None
+                    self._event_entry_id = None
+            raise
         return generation
 
     def load(self, source: str, start_position: float = 0.0, autoplay: bool = True):
@@ -202,8 +211,14 @@ class MpvEngine:
             self._pending_position = max(0.0, float(start_position))
             self._pending_autoplay = bool(autoplay)
             self._last_error = ""
-            self._player.ab_loop_a = "no"
-            self._player.ab_loop_b = "no"
+            try:
+                self._player.ab_loop_a = "no"
+                self._player.ab_loop_b = "no"
+            except BaseException:
+                self._loading = False
+                self._expected_entry_id = None
+                self._event_entry_id = None
+                raise
             # Playlist replacement returns before native loading/events finish.
             # Bind this load to its unique entry before releasing the callback
             # lock. Start paused until the matching FILE_LOADED applies intent.
@@ -216,11 +231,17 @@ class MpvEngine:
             cache = 'yes' if is_web_url(source) else self._local_cache_policy
             if isinstance(cache, bool):
                 cache = 'yes' if cache else 'no'
-            self._player.loadfile(native_source, "replace", pause="yes", cache=cache)
-            entries = self._player.playlist
-            if len(entries) != 1 or "id" not in entries[0]:
-                raise PlaybackUnavailable("Could not identify the native playback entry.")
-            self._expected_entry_id = entries[0]["id"]
+            try:
+                self._player.loadfile(native_source, "replace", pause="yes", cache=cache)
+                entries = self._player.playlist
+                if len(entries) != 1 or "id" not in entries[0]:
+                    raise PlaybackUnavailable("Could not identify the native playback entry.")
+                self._expected_entry_id = entries[0]["id"]
+            except BaseException:
+                self._loading = False
+                self._expected_entry_id = None
+                self._event_entry_id = None
+                raise
         self._emit("loading", source)
 
     def unload(self):
@@ -392,9 +413,9 @@ class MpvEngine:
         player.pause = not autoplay
 
     def _apply_file_loaded(self, player, generation, events):
-        # python-mpv seek blocks. A scrub during it only stores pending intent
-        # while _loading stays true, so re-read after each apply. Never hold
-        # _state_lock across that native call.
+        # Serialize native opening commands with prepare/load so a retired
+        # seek cannot land on a replacement file. Re-read intent between
+        # applies; never call the service handler while holding this lock.
         applied_position = None
         applied_autoplay = None
         while True:
@@ -407,8 +428,16 @@ class MpvEngine:
                     self._accept_file_loaded(generation, autoplay, events)
                     return
             try:
-                self._push_opening_media(player, position, autoplay, applied_position)
+                with self._state_lock:
+                    if not self._opening_current(generation):
+                        return
+                    self._push_opening_media(player, position, autoplay, applied_position)
             except Exception as exc:
+                with self._state_lock:
+                    if self._generation == generation:
+                        self._loading = False
+                        self._expected_entry_id = None
+                        self._event_entry_id = None
                 events.append(EngineEvent("error", str(exc), generation))
                 return
             applied_position = position
@@ -463,6 +492,8 @@ class MpvEngine:
                     except Exception:
                         message = self._last_error
                     events.append(EngineEvent("error", message or "Unknown playback error", generation))
+                elif reason == getattr(event.data, "REDIRECT", 5):
+                    events.append(EngineEvent("error", "The episode redirect did not contain a playable audio entry.", generation))
                 else:
                     events.append(EngineEvent("eof" if reason == event.data.EOF else "stopped", reason, generation))
         if opening is not None:
@@ -477,8 +508,7 @@ class LazyMpvEngine:
     """MpvEngine that defers libmpv player construction to first use.
 
     Importing python-mpv (which loads the libmpv library) happens here in the
-    constructor so the external-player fallback decision is still made at
-    startup; the mpv core itself — threads, audio init — is only built when
+    constructor; the mpv core itself — threads, audio init — is only built when
     playback first needs it. `PlaybackService` already defers media loading to
     the first play, so on a normal launch nothing constructs the core at all.
     """
@@ -488,7 +518,7 @@ class LazyMpvEngine:
         # library) cost 59 ms on the main thread before the first paint
         #. The import happens in _real(), i.e. in the deferred
         # warm-up or on the first real playback call, and a machine without
-        # libmpv falls back to the external player there.
+        # libmpv reports an error there; an external player is an explicit action.
         self._options = options
         self._engine = None
         self._handler: Callable[[EngineEvent], None] = lambda event: None
@@ -497,8 +527,7 @@ class LazyMpvEngine:
 
     @property
     def capabilities(self):
-        # Until construction, advertise the internal engine; if construction
-        # fell back to the external player, its narrower capabilities apply.
+        # Until construction, advertise the internal engine's capabilities.
         return self._engine.capabilities if self._engine is not None else MpvEngine.capabilities
 
     @property
@@ -540,7 +569,7 @@ class LazyMpvEngine:
         try:
             self._real()
         except Exception:
-            pass  # _real already downgraded to the external player
+            pass  # first explicit Play reports the failure; no automatic handoff
 
     def _real(self):
         with self._construct_lock:

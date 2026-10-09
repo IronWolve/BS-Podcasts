@@ -24,6 +24,41 @@ def app_version() -> str:
     return __version__
 
 
+def system_reduced_motion() -> bool | None:
+    """Read native animation preference; None means unsupported/unavailable.
+    Call once on a startup worker, never during a paint or wheel event."""
+    if sys.platform.startswith('linux'):
+        desktop = (os.environ.get('XDG_CURRENT_DESKTOP', '') + ':' + os.environ.get('XDG_SESSION_DESKTOP', '')).casefold()
+        if 'gnome' not in desktop:
+            return None  # Do not guess which preference a different desktop uses.
+        import shutil
+        import subprocess
+        executable = shutil.which('gsettings')
+        if executable is None:
+            return None
+        try:
+            result = subprocess.run([executable, 'get', 'org.gnome.desktop.interface', 'enable-animations'],
+                                    capture_output=True, text=True, timeout=0.75)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        value = result.stdout.strip().casefold()
+        return value == 'false' if result.returncode == 0 and value in {'true', 'false'} else None
+    if not sys.platform.startswith('win'):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        query = ctypes.WinDLL('user32', use_last_error=True).SystemParametersInfoW
+        query.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.POINTER(wintypes.BOOL), wintypes.UINT]
+        query.restype = wintypes.BOOL
+        enabled = wintypes.BOOL()
+        if not query(0x1042, 0, ctypes.byref(enabled), 0):
+            return None
+        return not bool(enabled.value)
+    except (AttributeError, OSError):
+        return None
+
+
 # Per-platform locations, none created here.
 #   library/settings, logs -> data_dir()
 #   artwork, icons, temp   -> cache_dir()

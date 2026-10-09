@@ -75,7 +75,8 @@ function Remove-BuildRoot {
 }
 
 function Publish-Application {
-    param([string]$Application, [string]$Manifest, [string]$Target, [string]$MetadataRoot, [switch]$PruneOldDeployments)
+    param([string]$Application, [string]$Manifest, [string]$Target, [string]$MetadataRoot,
+          [string]$InstallerPath = "", [switch]$PruneOldDeployments)
     New-Item -ItemType Directory -Path $MetadataRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $Target -Force | Out-Null
     $lease = [System.IO.File]::Open((Join-Path $MetadataRoot ".publish.lock"), "OpenOrCreate", "ReadWrite", "None")
@@ -84,6 +85,10 @@ function Publish-Application {
     $previous = Join-Path $MetadataRoot (".previous-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + $token)
     $names = @("BS Podcasts", "BS-Podcasts-Windows.manifest.json")
     $sources = @($Application, $Manifest)
+    if ($InstallerPath) {
+        $names += [System.IO.Path]::GetFileName($InstallerPath)
+        $sources += $InstallerPath
+    }
     $retired = @()
     $published = @()
     try {
@@ -270,14 +275,40 @@ try {
     & $python -B (Join-Path $stageRoot "packaging\check_frozen.py") $sourceDir --private-root $workspace
     if ($LASTEXITCODE -ne 0) { throw "Frozen privacy check failed; previous application unchanged" }
     $notices = Join-Path $sourceDir "_internal\THIRD-PARTY-NOTICES.txt"
-    if (Test-Path -LiteralPath $notices) {
-        Copy-Item -LiteralPath $notices -Destination (Join-Path $sourceDir "THIRD-PARTY-NOTICES.txt")
-    }
+    if (-not (Test-Path -LiteralPath $notices -PathType Leaf)) { throw "Required bundled notices are missing; previous application unchanged" }
+    Copy-Item -LiteralPath $notices -Destination (Join-Path $sourceDir "THIRD-PARTY-NOTICES.txt")
     $preparedManifest = Join-Path $buildRoot "BS-Podcasts-Windows.manifest.json"
     & $python -B (Join-Path $stageRoot "packaging\build_manifest.py") --artifact $sourceDir --output $preparedManifest
     if ($LASTEXITCODE -ne 0) { throw "Artifact manifest generation failed; previous application unchanged" }
+    $reportLog = Join-Path $workspace ("logs\windows-package-self-check-" + [System.IO.Path]::GetFileName($checkDir) + ".json")
+    New-Item -ItemType Directory -Path (Join-Path $workspace "logs") -Force | Out-Null
+    Copy-Item -LiteralPath $checkReport -Destination $reportLog
+    $setup = ""
+    if ($Installer) {
+        $iscc = @(
+            (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+            (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+        ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+        if (-not $iscc) { throw "-Installer requested, but Inno Setup 6 was not found; previous artifacts unchanged" }
+        $installerDir = Join-Path $buildRoot "installer"
+        $installerSpec = Join-Path $stageRoot "packaging\bs-podcasts.iss"
+        Write-State info "Preparing installer for version $projectVersion before publication"
+        & $iscc "/DSourceDir=$sourceDir" "/DOutputDir=$installerDir" "/DMyAppVersion=$projectVersion" $installerSpec
+        if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE; previous artifacts unchanged" }
+        $setup = Join-Path $installerDir "BS-Podcasts-$projectVersion-Setup.exe"
+        if (-not (Test-Path -LiteralPath $setup -PathType Leaf) -or (Get-Item -LiteralPath $setup).Length -le 0) {
+            throw "Inno Setup produced no non-empty installer; previous artifacts unchanged"
+        }
+        $manifestRecord = Get-Content -LiteralPath $preparedManifest -Raw | ConvertFrom-Json
+        $manifestRecord | Add-Member -NotePropertyName installer -NotePropertyValue ([ordered]@{
+            path = [System.IO.Path]::GetFileName($setup)
+            bytes = (Get-Item -LiteralPath $setup).Length
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash.ToLowerInvariant()
+        })
+        [System.IO.File]::WriteAllText($preparedManifest, ($manifestRecord | ConvertTo-Json -Depth 100), (New-Object System.Text.UTF8Encoding($false)))
+    }
     $metadataRoot = Join-Path $workspace ".cache\previous-deployments"
-    Publish-Application -Application $sourceDir -Manifest $preparedManifest -Target $Destination -MetadataRoot $metadataRoot -PruneOldDeployments:$PruneOldDeployments
+    Publish-Application -Application $sourceDir -Manifest $preparedManifest -Target $Destination -MetadataRoot $metadataRoot -InstallerPath $setup -PruneOldDeployments:$PruneOldDeployments
     $copiedDir = Join-Path $Destination "BS Podcasts"
 
     $copiedExe = Join-Path $copiedDir "BS Podcasts.exe"
@@ -294,29 +325,20 @@ try {
         "rollbacks pruned" = $(if ($PruneOldDeployments) { "older than the newest 3" } else { "none (opt-in)" })
     }
 
-    if ($Installer) {
-        $iscc = @(
-            (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
-            (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
-        ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
-        if (-not $iscc) {
-            throw "-Installer was requested, but Inno Setup 6 was not found. The application was still copied to $copiedDir"
-        }
-        $installerSpec = Join-Path $stageRoot "packaging\bs-podcasts.iss"
-        # One source of truth for the version. The .iss used to carry its own
-        # literal, so the installer advertised a stale version the moment
-        # pyproject.toml was bumped without it.
-        $appVersion = $projectVersion
-        Write-State info "Installer version: $appVersion"
-        & $iscc "/DSourceDir=$copiedDir" "/DOutputDir=$Destination" "/DMyAppVersion=$appVersion" $installerSpec
-        if ($LASTEXITCODE -ne 0) {
-            throw "Inno Setup failed with exit code $LASTEXITCODE"
-        }
-        $setup = Join-Path $Destination "BS-Podcasts-Setup.exe"
-        $stats["installer"] = $(if (Test-Path -LiteralPath $setup) { "$setup, " + (Format-Size (Get-Item -LiteralPath $setup).Length) } else { "built in $Destination" })
+    if ($setup) {
+        $publishedSetup = Join-Path $Destination ([System.IO.Path]::GetFileName($setup))
+        $stats["installer"] = "$publishedSetup, " + (Format-Size (Get-Item -LiteralPath $publishedSetup).Length)
     }
     Write-Stats $stats
     $buildSucceeded = $true
+    # Preserve the report on the build host, then clean only this run's approved
+    # disposable profile. Failed profiles remain available for diagnosis.
+    if ((Get-Item -LiteralPath $checkDir).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        Write-Warning "Diagnostic profile became a link; retained for inspection: $checkDir"
+    } else {
+        try { Remove-Item -LiteralPath $checkDir -Recurse -Force }
+        catch { Write-Warning "Disposable diagnostic profile could not be removed: $checkDir" }
+    }
 } finally {
     if ($buildSucceeded) {
         Remove-BuildRoot -Root $buildRoot -Workspace $workspace

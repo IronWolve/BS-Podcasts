@@ -5,6 +5,7 @@ from enum import StrEnum
 from pathlib import Path
 from threading import Event, RLock, Timer
 import logging
+import math
 import time
 
 from ..data.repositories import LibraryRepository
@@ -93,6 +94,7 @@ class PlaybackService:
         self._revision = 0
         self.snapshot = PlaybackSnapshot()
         self._listeners = []
+        self._listener_failures = set()
         self._lock = RLock()
         self._last_saved_position = -10.0
         self._sleep_timer: Timer | None = None
@@ -117,6 +119,7 @@ class PlaybackService:
         self._desired_position = 0.0
         self._engine_loaded = False
         self._deferred_episode_id = None
+        self._retiring_shows = set()
         self._dead = False
         self._last_metric_time = None
         self._last_metric_position = None
@@ -163,8 +166,10 @@ class PlaybackService:
             self._listeners.remove(listener)
         except ValueError:
             pass
+        self._listener_failures.discard(id(listener))
 
     LOAD_TIMEOUT = 25.0
+    RESOLVE_TIMEOUT = 55.0  # HTTP resolver has its own 45-second total budget
     STREAM_RECOVERY_LIMIT = 3
     STREAM_RECOVERY_WINDOW = 600.0
     START_TOLERANCE = 10.0
@@ -183,7 +188,8 @@ class PlaybackService:
         # retried load of the SAME episode+source would otherwise be killed
         # instantly by the previous attempt's already-running watchdog.
         self._load_token += 1
-        timer = Timer(self.LOAD_TIMEOUT, self._load_timed_out, args=(self._load_token,))
+        timeout = self.RESOLVE_TIMEOUT if self._resolving else self.LOAD_TIMEOUT
+        timer = Timer(timeout, self._load_timed_out, args=(self._load_token,))
         timer.daemon = True
         timer.start()
         self._load_watchdog = timer
@@ -227,6 +233,10 @@ class PlaybackService:
             self._guard()
             if cancelled is not None and cancelled():
                 return False
+            if self._retiring_shows:
+                candidate = self.repository.get_episode(episode_id)
+                if candidate is not None and candidate.show_id in self._retiring_shows:
+                    raise PlaybackUnavailable("This podcast is being removed. Choose another episode.")
             # keep_session: this is a reopen of the episode already loaded, so
             # the sleep timer and the A-B loop carry over (see REOPEN_KEEPS).
             keep = keep_session and self.snapshot.episode_id == episode_id
@@ -241,6 +251,8 @@ class PlaybackService:
             episode = self.repository.get_episode(episode_id)
             if episode is None:
                 raise PlaybackUnavailable("Episode was not found.")
+            if episode.show_id in self._retiring_shows:
+                raise PlaybackUnavailable("This podcast is being removed. Choose another episode.")
             show = self.repository.get_show(episode.show_id)
             self._raise_write_floor(episode.id)
             source = episode.media_url
@@ -303,10 +315,14 @@ class PlaybackService:
             )
             self._set_current_playback(episode.id, PlaybackState.LOADING.value)
             self._last_saved_position = start
-            if self.engine.capabilities.speed:
-                self.engine.set_speed(speed)
-            if self.engine.capabilities.silence_trim:
-                self.engine.set_silence_trim(self.snapshot.trim_level)
+            try:
+                if self.engine.capabilities.speed:
+                    self.engine.set_speed(speed)
+                if self.engine.capabilities.silence_trim:
+                    self.engine.set_silence_trim(self.snapshot.trim_level)
+            except Exception as exc:
+                self._failed_load(exc)
+                raise
             self._rescued_source = ""
             self._load_autoplay = autoplay
             if (not force_stream and not local and is_web_url(source)
@@ -319,7 +335,11 @@ class PlaybackService:
                                         state=PlaybackState.LOADING if autoplay else PlaybackState.PAUSED)
                 self._emit()
                 return
-            self._load_source(source, start, autoplay)
+            try:
+                self._load_source(source, start, autoplay)
+            except Exception as exc:
+                self._failed_load(exc)
+                raise
             if self.snapshot.state == PlaybackState.LOADING:
                 self._arm_load_watchdog(episode.id, source)
             self._emit()
@@ -410,13 +430,21 @@ class PlaybackService:
                 volume=self.snapshot.volume,
                 artwork_path=artwork_path,
             )
-            if self.engine.capabilities.speed:
-                self.engine.set_speed(1.0)
-            if self.engine.capabilities.silence_trim:
-                self.engine.set_silence_trim("off")
+            try:
+                if self.engine.capabilities.speed:
+                    self.engine.set_speed(1.0)
+                if self.engine.capabilities.silence_trim:
+                    self.engine.set_silence_trim("off")
+            except Exception as exc:
+                self._failed_load(exc)
+                raise
             self._rescued_source = ""
             self._load_autoplay = autoplay
-            self._load_source(source, 0.0, autoplay)
+            try:
+                self._load_source(source, 0.0, autoplay)
+            except Exception as exc:
+                self._failed_load(exc)
+                raise
             if self.snapshot.state == PlaybackState.LOADING:
                 self._arm_load_watchdog(None, source)
             self._emit()
@@ -427,11 +455,8 @@ class PlaybackService:
         The source is opened on the first play/seek/skip, so an offline launch
         never produces a stream error and startup does no media I/O.
         """
-        # Every window build calls this on the UI thread. A held lock means a
-        # command or native event is changing playback right now and will
-        # publish it; waiting could stall the window behind maintenance.
-        if not self._lock.acquire(timeout=0.25):
-            return self.snapshot.episode_id is not None
+        # Called on the ordered command worker, not on the GUI thread.
+        self._lock.acquire()
         try:
             if self._load_generation or self._engine_loaded or self.snapshot.state in {PlaybackState.PLAYING, PlaybackState.LOADING}:
                 # A live session (e.g. the theme-change window rebuild re-wiring
@@ -539,7 +564,11 @@ class PlaybackService:
         )
         self._rescued_source = ""
         self._load_autoplay = autoplay
-        self._load_source(self.snapshot.source, position, autoplay)
+        try:
+            self._load_source(self.snapshot.source, position, autoplay)
+        except Exception as exc:
+            self._failed_load(exc)
+            raise
         self._arm_load_watchdog(None, self.snapshot.source)
         self._emit()
 
@@ -560,6 +589,12 @@ class PlaybackService:
     def stop(self):
         """Unload the current episode: pause, persist position, go idle."""
         with self._lock:
+            # Refuse before retiring the resolver/native session. Removal
+            # callers require durable writes, and a refusal must leave a
+            # recoverable playing/loading session rather than a dead spinner.
+            self._persist_position(force=True)
+            self._flush_listening()
+            self._flush_persistence()
             self._resolve_cancel.set()
             self.intent_revision += 1
             self._deferred_episode_id = None
@@ -598,8 +633,54 @@ class PlaybackService:
             self.snapshot = PlaybackSnapshot(speed=self.snapshot.speed, volume=self.snapshot.volume)
             if episode_id is not None:
                 self._set_current_playback(None, PlaybackState.IDLE.value)
-            self._flush_persistence()
             self._emit()
+            self._flush_persistence()
+
+    def open_external(self, episode_id: int):
+        """Explicit user action only: validate a library episode and hand it off.
+
+        Does not change the internal engine or silently choose another player.
+        System-player controls/position are independent of this application.
+        """
+        from .external import ExternalPlayerEngine
+        with self._lock:
+            self._guard()
+            episode = self.repository.get_episode(episode_id)
+            if episode is None:
+                raise PlaybackUnavailable("Episode was not found.")
+            if episode.show_id in self._retiring_shows:
+                raise PlaybackUnavailable("This podcast is being removed. Choose another episode.")
+            show = self.repository.get_show(episode.show_id)
+            local = Path(episode.downloaded_path).expanduser() if episode.downloaded_path else None
+            if local is not None and local.is_file():
+                source = str(local)
+            elif show is not None and show.source == "local":
+                source = ensure_media_source(episode.media_url, "Local audio path", allow_file_url=True)
+            else:
+                source = ensure_web_url(episode.media_url, "Episode media URL")
+            from ..urlguard import ensure_external_media_file
+            source = ensure_external_media_file(source)
+            self.pause()
+            ExternalPlayerEngine().load(source, autoplay=True)
+
+    def begin_show_retirement(self, show_id: int):
+        """Ordered command phase: bar new loads before stopping this show."""
+        with self._lock:
+            self._guard()
+            if show_id in self._retiring_shows:
+                raise PlaybackUnavailable("This podcast is already being removed.")
+            self._retiring_shows.add(show_id)
+            try:
+                if self.snapshot.show_id == show_id:
+                    self.stop()
+            except BaseException:
+                self._retiring_shows.discard(show_id)
+                raise
+
+    def end_show_retirement(self, show_id: int):
+        """Removal worker/finalizer phase; no native-player operation."""
+        with self._lock:
+            self._retiring_shows.discard(show_id)
 
     def next(self):
         with self._lock:
@@ -607,7 +688,8 @@ class PlaybackService:
             self.intent_revision += 1
             if self.snapshot.episode_id is not None:
                 self.repository.dequeue(self.snapshot.episode_id)
-            queue = self.repository.list_queue()
+            queue = [episode for episode in self.repository.list_queue()
+                     if episode.show_id not in self._retiring_shows]
             if queue:
                 self.load_episode(queue[0].id, autoplay=True)
 
@@ -651,7 +733,14 @@ class PlaybackService:
         with self._lock:
             if cancelled is not None and cancelled():
                 return
-            if self.snapshot.episode_id == episode_id and self.snapshot.source:
+            same = self.snapshot.episode_id == episode_id and bool(self.snapshot.source)
+            if same and self.snapshot.download_request:
+                # Preserve the in-flight download ticket, but make this chapter
+                # action the current play intent and update its resume target.
+                self._load_autoplay = True
+                self.snapshot = replace(self.snapshot, state=PlaybackState.LOADING)
+                self.seek(seconds, autoplay=True)
+            elif same and self._engine_loaded:
                 self.seek(seconds, autoplay=True)
             else:
                 self.load_episode(episode_id, start_position=seconds, autoplay=True, cancelled=cancelled)
@@ -669,6 +758,8 @@ class PlaybackService:
     def seek_current(self, identity, seconds: float, relative: bool = False):
         """Native-control seeks retain the track identity through command queuing."""
         with self._lock:
+            if not math.isfinite(float(seconds)):
+                return
             current = (self.snapshot.episode_id, self.snapshot.source, self._load_generation)
             if (tuple(identity) != current or not self.snapshot.source or self._dead
                     or not self.engine.capabilities.seek):
@@ -678,7 +769,7 @@ class PlaybackService:
                 if self.snapshot.duration and seconds > self.snapshot.duration:
                     self.next()
                     return
-            elif not 0 <= seconds <= self.snapshot.duration:
+            elif seconds < 0 or (self.snapshot.duration > 0 and seconds > self.snapshot.duration):
                 return
             self.seek(seconds)
 
@@ -911,8 +1002,9 @@ class PlaybackService:
                     episode_id = self.snapshot.episode_id
                     self._set_current_playback(episode_id, state.value, deferred)
             elif event.kind == "file_loaded":
-                logger.info("Playback source loaded: generation=%s source=%s autoplay=%s",
-                            self._engine_generation, source_kind, self._load_autoplay)
+                logger.info("Playback source loaded: generation=%s source=%s autoplay=%s seconds=%.3f",
+                            self._engine_generation, source_kind, self._load_autoplay,
+                            max(0.0, time.monotonic() - getattr(self, "_load_started_at", time.monotonic())))
                 self._engine_loaded = True
                 self._cancel_load_watchdog()
                 self._metric_seek_target = None  # the load applied any pending seek
@@ -960,6 +1052,20 @@ class PlaybackService:
             elif event.kind == "loading":
                 pass
             elif event.kind == "eof":
+                duration = self.snapshot.duration
+                tolerance = max(10.0, min(60.0, duration * 0.02))
+                if duration > 0 and self.snapshot.position + tolerance < duration:
+                    # A clean close-delimited HTTP EOF cannot prove that a
+                    # server delivered the whole episode. Keep queue/progress
+                    # intact when known duration clearly says it ended early.
+                    self._engine_loaded = False
+                    self._cancel_load_watchdog()
+                    self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR,
+                                            message="The stream ended before the episode finished. Retry or download it.",
+                                            buffering=None)
+                    self._persist_position(force=True)
+                    self._emit()
+                    return
                 self._engine_loaded = False
                 generation = self._load_generation
                 intent = self.intent_revision
@@ -1049,23 +1155,44 @@ class PlaybackService:
         self._event_commands.submit(work, keep=True)
 
     def _begin_load(self, position: float, autoplay: bool, keep_target: bool = False):
+        self._load_started_at = time.monotonic()
         self._resolve_cancel.set()
         self._resolve_cancel = Event()
         self._cancel_load_watchdog()
         self._close_silence_window()
         self._load_generation += 1
-        self._resolving = True
+        self._resolving = False
         self._engine_loaded = False
         if not keep_target:
             self._start_target = None
         self._load_autoplay = bool(autoplay)
         self._desired_position = max(0.0, float(position))
         prepare = getattr(self.engine, "prepare_load", None)
-        self._engine_generation = prepare() if callable(prepare) else None
-        if prepare is None:
-            pause = getattr(self.engine, "pause", None)
-            if pause is not None:
-                pause()
+        try:
+            self._engine_generation = prepare() if callable(prepare) else None
+            if prepare is None:
+                pause = getattr(self.engine, "pause", None)
+                if pause is not None:
+                    pause()
+        except Exception as exc:
+            self._failed_load(exc)
+            raise
+        self._resolving = True
+        logger.info("Playback preparation finished: generation=%s seconds=%.3f",
+                    self._engine_generation, time.monotonic() - self._load_started_at)
+
+    def _failed_load(self, error):
+        self._cancel_load_watchdog()
+        self._resolve_cancel.set()
+        self._resolving = False
+        self._engine_loaded = False
+        self._load_autoplay = False
+        try:
+            self.engine.pause()
+        except Exception:
+            pass
+        self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR, message=str(error), buffering=None)
+        self._emit()
 
     def _load_source(self, source: str, position: float, autoplay: bool):
         if not is_web_url(source):
@@ -1084,6 +1211,7 @@ class PlaybackService:
 
     def _resolve_then_load(self, source: str, position: float, autoplay: bool, generation=None, tracker=True, cancel=None):
         from ..netlimits import request_scope
+        started = time.monotonic()
         final, error = "", ""
         try:
             # DNS screening belongs off the GUI thread, for every web source.
@@ -1099,10 +1227,14 @@ class PlaybackService:
             if self._dead or self.snapshot.source != source or generation != self._load_generation:
                 return
             self._resolving = False
+            logger.info("Playback URL resolution finished: generation=%s tracker=%s seconds=%.3f success=%s",
+                        self._engine_generation, tracker, time.monotonic() - started, not bool(error))
             try:
                 if error:
                     raise PlaybackUnavailable(error)
                 self.engine.load(final, self._desired_position, self._load_autoplay)
+                if self.snapshot.state == PlaybackState.LOADING:
+                    self._arm_load_watchdog(self.snapshot.episode_id, source)
             except Exception as exc:
                 self._cancel_load_watchdog()
                 self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR, message=str(exc), buffering=None)
@@ -1117,8 +1249,10 @@ class PlaybackService:
 
         try:
             with request_scope(cancel, foreground=True):
-                source = ensure_fetchable(source, "Episode media URL")
                 with make_session(max_redirects=20, foreground=True) as session:
+                    source = (ensure_web_url(source, "Episode media URL")
+                              if getattr(session, "supports_deadlines", False)
+                              else ensure_fetchable(source, "Episode media URL"))
                     with session.get(source, stream=True, timeout=(8, 15), allow_redirects=True) as response:
                         return str(response.url) if response.status_code < 400 else ""
         except Exception:
@@ -1221,6 +1355,8 @@ class PlaybackService:
             else:
                 try:
                     self.engine.load(final, self._desired_position, self._load_autoplay)
+                    if self.snapshot.state == PlaybackState.LOADING:
+                        self._arm_load_watchdog(self.snapshot.episode_id, source)
                 except Exception as exc:
                     self._cancel_load_watchdog()
                     self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR,
@@ -1239,7 +1375,8 @@ class PlaybackService:
         if self.snapshot.message == self.SEEK_UNSUPPORTED:
             self.snapshot = replace(self.snapshot, message="")
         self._complete_episode(self.snapshot)
-        queue = self.repository.list_queue()
+        queue = [episode for episode in self.repository.list_queue()
+                 if episode.show_id not in self._retiring_shows]
         show = self.repository.get_show(self.snapshot.show_id) if self.snapshot.show_id else None
         if self.snapshot.sleep_at_end:
             # The sleep timer was 'end of this episode': finish it, do not advance.
@@ -1265,12 +1402,15 @@ class PlaybackService:
 
     def _complete_episode(self, snapshot):
         episode_id = snapshot.episode_id
-        if episode_id is None:
+        if episode_id is None or snapshot.show_id in self._retiring_shows:
             return
         # Runs under the service lock. Waiting here for maintenance to free
         # the database would hold every native event and transport command.
         if self.repository.database.maintenance_active:
             raise PlaybackUnavailable("Library maintenance is running; play the episode again when it finishes.")
+        episode = self.repository.get_episode(episode_id)
+        if episode is None or episode.show_id != snapshot.show_id:
+            return  # A late outgoing EOF cannot save into an unsubscribed show.
         end = snapshot.duration or snapshot.position
         if self.snapshot.episode_id == episode_id:
             self.snapshot = replace(self.snapshot, position=end, buffering=None)
@@ -1465,7 +1605,12 @@ class PlaybackService:
                 try:
                     listener(self.snapshot)
                 except Exception:
-                    continue
+                    key = id(listener)
+                    if key not in self._listener_failures:
+                        self._listener_failures.add(key)
+                        logger.exception("Playback listener failed")
+                else:
+                    self._listener_failures.discard(id(listener))
 
     def _restore_snapshot(self):
         episode_id, _state = self.repository.current_playback()

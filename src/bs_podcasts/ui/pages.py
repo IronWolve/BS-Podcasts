@@ -38,7 +38,7 @@ from . import icons
 from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
 from .widgets import combo_chrome_px as widgets_combo_chrome_px
-from .widgets import PlainTextLabel, wheel_needs_focus
+from .widgets import PlainTextLabel, wheel_needs_focus, exec_menu, FlowLayout
 from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, reduced_motion, scaled_px, system_theme, theme_name
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 
@@ -237,9 +237,14 @@ class _ListPageMixin:
             self._episode_artwork_timer.timeout.connect(self._request_visible_artwork)
             for signal in (view.verticalScrollBar().valueChanged, model.modelReset, model.dataChanged):
                 signal.connect(lambda *_: self._episode_artwork_timer.start(60))
-        delete = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.view)
-        delete.setContext(Qt.ShortcutContext.WidgetShortcut)
-        delete.activated.connect(self._remove_selected)
+
+    def enable_remove_shortcut(self):
+        """Only a controller with a real removal handler opts into Delete."""
+        if getattr(self, '_delete_shortcut', None) is None:
+            delete = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.view)
+            delete.setContext(Qt.ShortcutContext.WidgetShortcut)
+            delete.activated.connect(self._remove_selected)
+            self._delete_shortcut = delete
 
     def _begin_artwork_scroll(self, *_args):
         if not hasattr(self, '_artwork_scroll_timer'):
@@ -361,7 +366,12 @@ class _ListPageMixin:
             QTimer.singleShot(0, self, lambda: self._finish_episode_scroll(False))
 
     def saved_scroll_value(self, saved):
-        value = max(0, int(saved.get('scroll', 0)))
+        if not isinstance(saved, dict):
+            return 0
+        try:
+            value = max(0, int(saved.get('scroll', 0)))
+        except (ValueError, TypeError, OverflowError):
+            value = 0
         if self._row_aligned_scroll and saved.get('scroll_units') != 'items':
             value //= max(1, self.view.sizeHintForRow(0))
         return value
@@ -436,13 +446,14 @@ class _ListPageMixin:
             self._ignore_inline_release = False
             self._pressed_queue_id = item.episode_id if over_queue else None
             self._pressed_show_id = item.show_id if over_show else None
-            if over_queue or over_show:
+            self._pressed_play_key = self._key(item) if over_play and visible else None
+            if over_queue or over_show or (over_play and visible):
                 hide_hover_bubble()
                 QToolTip.hideText()
             # Consume the press too: queueing must not change selection/details.
-            return over_queue or over_show
+            return over_queue or over_show or (over_play and visible)
         if kind == QEvent.Type.MouseButtonDblClick:
-            handled = over_queue or over_show or (over_play and not visible) or time.monotonic() - getattr(self, '_last_inline_action', 0) < 0.4
+            handled = over_queue or over_show or over_play or time.monotonic() - getattr(self, '_last_inline_action', 0) < 0.4
             self._ignore_inline_release = handled
             return handled
         if getattr(self, '_ignore_inline_release', False):
@@ -455,6 +466,14 @@ class _ListPageMixin:
         show = getattr(self, "_pressed_show_id", None)
         self._pressed_queue_id = None
         self._pressed_show_id = None
+        played = getattr(self, "_pressed_play_key", None)
+        self._pressed_play_key = None
+        if played is not None:
+            if over_play and visible and self._key(item) == played:
+                self._last_inline_action = time.monotonic()
+                self._last_activation = (played, self._last_inline_action)
+                self.play_requested.emit(item)
+            return True
         if pressed is None and show is None:
             return False
         if over_queue and item.episode_id == pressed:
@@ -473,7 +492,8 @@ class _ListPageMixin:
     def _activated_once(self, index):
         key = self._key(index.data(ItemRoles.ITEM)) if index.isValid() else None
         now = time.monotonic()
-        if key is not None and self._last_activation[0] == key and now - self._last_activation[1] < 0.25:
+        gesture_seconds = max(0.25, QApplication.doubleClickInterval() / 1000 + 0.05)
+        if key is not None and self._last_activation[0] == key and now - self._last_activation[1] < gesture_seconds:
             return
         self._last_activation = (key, now)
         self._activated(index)
@@ -900,7 +920,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             return
         columns = max(2, available // (156 if getattr(self, "_compact", False) else 196))
         width = available // columns
-        grid = (columns, width, getattr(self, "_compact", False))
+        grid = (columns, width, getattr(self, "_compact", False), self.delegate.sizeHint(None, None).height())
         if grid == getattr(self, "_card_grid", None):
             return  # same grid: every resize step re-laid out all cards
         self._card_grid = grid
@@ -1015,7 +1035,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
 
     def _show_discover_sort_menu(self):
         menu = self._create_discover_sort_menu()
-        menu.exec(self.discover_sort.mapToGlobal(self.discover_sort.rect().bottomLeft()))
+        exec_menu(menu, self.discover_sort.mapToGlobal(self.discover_sort.rect().bottomLeft()))
 
     def _create_discover_sort_menu(self):
         """Build the menu separately so its QAction wiring can be regression-tested."""
@@ -1069,7 +1089,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         modifiers = QApplication.keyboardModifiers()
         selecting = modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
         if not selecting:
-            self._activated(index)
+            self._activated_once(index)
 
     def set_loading(self, loading: bool):
         if loading and self.model.rowCount() == 0:
@@ -1137,6 +1157,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         self.load_more.setVisible(available or loading)
         self.load_more.setEnabled(available and not loading)
         self.load_more.setText("Loading more podcasts…" if loading else "Load more podcasts")
+        self.load_more.setAccessibleName(self.load_more.text())
 
     def set_category_topics(self, category: str):
         if self.topic is None:
@@ -1308,9 +1329,13 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             self._load_more_noun = noun
         label = f"Loading more {self._load_more_noun}…" if loading else f"Load more {self._load_more_noun}"
         self.load_more.setText(label)
-        self.load_more.setAccessibleName(f"Load more {self._load_more_noun}")
+        self.load_more.setAccessibleName(label)
         self.load_more.setVisible(available or loading)
         self.load_more.setEnabled(available and not loading)
+
+    def apply_metrics(self):
+        super().apply_metrics()
+        self.load_more.setFixedHeight(scaled_px(38))
 
     def _selection_changed(self, *_args):
         self.selection_bar.set_count(len(_selected_rows(self.view.selectionModel())))
@@ -1343,7 +1368,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
 
     def _show_sort_menu(self):
         menu = self._create_sort_menu()
-        menu.exec(self.sort_button.mapToGlobal(self.sort_button.rect().bottomLeft()))
+        exec_menu(menu, self.sort_button.mapToGlobal(self.sort_button.rect().bottomLeft()))
 
     def _create_sort_menu(self):
         """Build the menu separately so its QAction wiring can be regression-tested."""
@@ -1375,7 +1400,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             selected = self._selected_keys()
         items = list(self._all_items)
         query = self.header.search.text().strip().lower()
-        if query:
+        if query and query != getattr(self, '_catalog_query', ''):
             items = [item for item in items if query in item.title.lower() or query in item.show.lower()]
         if self._filter == "New":
             items = [item for item in items if item.is_new]
@@ -1464,18 +1489,6 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             else:
                 cursor = Qt.CursorShape.ArrowCursor
             self.view.viewport().setCursor(cursor)
-        if (
-            watched is self.view.viewport()
-            and event.type() == QEvent.Type.MouseButtonRelease
-            and event.button() == Qt.MouseButton.LeftButton
-        ):
-            position = event.position().toPoint()
-            index = self.view.indexAt(position)
-            if index.isValid() and self.delegate.play_rect(self.view.visualRect(index)).contains(position):
-                item = index.data(ItemRoles.ITEM)
-                if item is not None:
-                    self.play_requested.emit(item)
-                return True
         return super().eventFilter(watched, event)
 
 
@@ -1591,7 +1604,7 @@ class HomePage(BasePage, _ListPageMixin):
 
     def _finish_initial_load(self):
         self._awaiting_load = False
-        if self.banner.state in {"loading", "error"}:
+        if self.banner.state == "loading":
             self.banner.clear()
 
     @staticmethod
@@ -1710,14 +1723,6 @@ class HomePage(BasePage, _ListPageMixin):
                     view.setCurrentIndex(index)
                 self.menu_requested.emit(index.data(ItemRoles.ITEM), view.viewport().mapToGlobal(event.pos()))
             return True
-        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-            position = event.position().toPoint()
-            index = view.indexAt(position)
-            if index.isValid() and delegate.play_rect(view.visualRect(index)).contains(position):
-                item = index.data(ItemRoles.ITEM)
-                if item is not None:
-                    self.play_requested.emit(item)
-                return True
         return super().eventFilter(watched, event)
 
 
@@ -1767,6 +1772,7 @@ class SettingsPage(BasePage):
     import_opml_requested = Signal()
     export_opml_requested = Signal()
     cleanup_played_requested = Signal()
+    retry_orphans_requested = Signal()
     change_download_folder_requested = Signal()
     open_log_requested = Signal()
     clear_artwork_requested = Signal()
@@ -2025,6 +2031,9 @@ class SettingsPage(BasePage):
         self.data_root = PlainTextLabel("—")
         self.library_path = PlainTextLabel("—")
         self.backup_path = PlainTextLabel("—")
+        self.backup_usage = PlainTextLabel("Not measured")
+        self.backup_usage.setObjectName('meta')
+        self.backup_usage.setWordWrap(True)
         self.download_path = PlainTextLabel("—")
         self.download_usage = PlainTextLabel("—")
         self.artwork_path = PlainTextLabel("—")
@@ -2053,6 +2062,7 @@ class SettingsPage(BasePage):
         open_backups.clicked.connect(self.open_backups_requested)
         backup_layout.addWidget(open_backups, 0, Qt.AlignmentFlag.AlignTop)
         storage_layout.addRow("Library backups", backup_row)
+        storage_layout.addRow("Backup usage", self.backup_usage)
         backup_hint = PlainTextLabel("Upgrade backups may also be beside the database. Close BS Podcasts before restoring files; keep a copy of the current data first.")
         backup_hint.setObjectName("settingHint")
         backup_hint.setWordWrap(True)
@@ -2071,6 +2081,12 @@ class SettingsPage(BasePage):
         download_row_layout.addWidget(self.change_folder_button, 0, Qt.AlignmentFlag.AlignTop)
         storage_layout.addRow("Downloads folder", download_row)
         storage_layout.addRow("Downloads usage", self.download_usage)
+        self.retry_orphans_button = QPushButton('Review files not deleted…')
+        self.retry_orphans_button.setObjectName('quietButton')
+        self.retry_orphans_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.retry_orphans_button.setToolTip('Review failed file removals. Nothing is deleted without confirmation.')
+        self.retry_orphans_button.clicked.connect(self.retry_orphans_requested)
+        storage_layout.addRow('', self.retry_orphans_button)
         storage_layout.addRow("Artwork folder", self.artwork_path)
         storage_layout.addRow("Artwork usage", self.artwork_usage)
         storage_layout.addRow("Temporary files", self.temp_path)
@@ -2184,7 +2200,7 @@ class SettingsPage(BasePage):
             "Files & storage": "Storage",
         }
         nav = QWidget()
-        row = QHBoxLayout(nav)
+        row = FlowLayout(nav, spacing=SPACE["xs"])
         row.setContentsMargins(0, 0, 0, SPACE["sm"])
         row.setSpacing(SPACE["xs"])
         for title, card in self._setting_sections:
@@ -2197,7 +2213,7 @@ class SettingsPage(BasePage):
             button.setToolTip(title)
             button.clicked.connect(lambda _checked=False, target=card: self._scroll_to_setting(target))
             row.addWidget(button)
-        row.addStretch(1)
+        self._settings_nav_layout = row
         self.root.insertWidget(self.root.indexOf(self.settings_scroll), nav)
 
     def _scroll_to_setting(self, card: QWidget):
@@ -2254,8 +2270,16 @@ class SettingsPage(BasePage):
         self.density.blockSignals(False)
 
     def load_search_depth(self, value: str):
+        try:
+            value = str(max(50, min(200, int(value))))
+        except (ValueError, TypeError, OverflowError):
+            value = "200"
         self.search_depth.blockSignals(True)
-        self.search_depth.setCurrentIndex(max(0, self.search_depth.findData(value)))
+        index = self.search_depth.findData(value)
+        if index < 0:
+            self.search_depth.addItem(f"{value} results", value)
+            index = self.search_depth.findData(value)
+        self.search_depth.setCurrentIndex(index)
         self.search_depth.blockSignals(False)
 
     def load_episode_lines(self, value: int):
@@ -2284,7 +2308,8 @@ class SettingsPage(BasePage):
 
     def load_text_size(self, value: str):
         self.text_size.blockSignals(True)
-        self.text_size.setCurrentIndex(max(0, self.text_size.findData(value)))
+        index = self.text_size.findData(value)
+        self.text_size.setCurrentIndex(index if index >= 0 else self.text_size.findData("comfortable"))
         self.text_size.blockSignals(False)
 
     def load_font(self, value: str):
@@ -2319,6 +2344,10 @@ class SettingsPage(BasePage):
     def apply_metrics(self):
         super().apply_metrics()
         width = scaled_px(self.FIELD_WIDTH)
+        nav = getattr(self, '_settings_nav_layout', None)
+        if nav is not None:
+            nav.setContentsMargins(0, 0, 0, SPACE['sm'])
+            nav.setSpacing(SPACE['xs'])
         for field in (
             self.speed, self.skip_back, self.skip_forward, self.refresh_interval,
             self.auto_download_limit, self.theme, self.density, self.text_size,
@@ -2395,11 +2424,12 @@ class SettingsPage(BasePage):
         self.shortcut_error.setText(message)
         self.shortcut_error.show()
 
-    def set_storage_info(self, data_root, library_path, download_path, downloads, artwork_path, artwork, temp_path, log_path=""):
+    def set_storage_info(self, data_root, library_path, download_path, downloads, artwork_path, artwork, temp_path, log_path="", backups=""):
         self.log_path.setText(log_path or "—")
         self.data_root.setText(data_root)
         self.library_path.setText(library_path)
         self.backup_path.setText(str(Path(library_path).parent / "backups") if library_path else "—")
+        self.backup_usage.setText(backups or 'Not measured')
         self.download_path.setText(download_path)
         self.download_usage.setText(downloads)
         self.artwork_path.setText(artwork_path)

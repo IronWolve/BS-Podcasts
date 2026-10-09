@@ -6,8 +6,12 @@ import sys
 import threading
 import sqlite3
 import time
+import json
+import hashlib
+from pathlib import Path
+import re
 
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSettings, QTimer, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QObject, QSettings, QTimer, Qt
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 import getpass
 from PySide6.QtGui import QIcon, QImageReader
@@ -15,9 +19,10 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from .artwork import ArtworkCache
 from .assets import shell_icon_path
-from .config import APP_ID, APP_NAME, app_version
+from .config import APP_ID, APP_NAME, app_version, system_reduced_motion
 from .config import cache_dir, data_dir as application_data_dir, default_downloads_dir
 from .data import Database
+from .data.database import DatabaseIntegrityError, is_corruption_error
 from .data.repositories import DownloadRepository, LibraryRepository, ListeningRepository
 from .directories import DirectoryService, PublicDirectory
 from .downloads import DownloadService
@@ -27,7 +32,7 @@ from .jobs.commands import CommandQueue
 from .logging_setup import configure_logging
 from .playback import LazyMpvEngine, PlaybackService
 from .services import LibraryService, ListeningService
-from .ui.shell import MainWindow
+from .ui.shell import MainWindow, shutdown_exports
 from .ui.theme import app_font, apply_app_stylesheet, apply_theme, apply_typography, load_fonts, resolve_theme
 
 
@@ -260,35 +265,178 @@ def create_application(argv=None) -> QApplication:
     QCoreApplication.setApplicationVersion(app_version())
     if os.environ.get("BS_PODCASTS_TRACE"):
         _install_stall_monitor(app)
+    from .ui.theme import set_system_reduced_motion
+    _load_system_motion_preference(set_system_reduced_motion)
     return app
+
+
+_MOTION_PREFERENCE_STARTED = False
+
+
+def _load_system_motion_preference(cache):
+    """One optional native read off Qt. Frames only consult the cached flag.
+    A slow/unavailable native read never delays startup or changes preferences."""
+    global _MOTION_PREFERENCE_STARTED
+    if _MOTION_PREFERENCE_STARTED or 'BS_PODCASTS_REDUCE_MOTION' in os.environ:
+        return None
+    _MOTION_PREFERENCE_STARTED = True
+    def work():
+        began = time.monotonic()
+        try:
+            value = system_reduced_motion()
+        except Exception:
+            value = None
+        # Windows' synchronous API has no timeout parameter. Keep it off Qt,
+        # daemonized, and discard a late result rather than applying stale data.
+        cache(value if time.monotonic() - began <= 1.0 else None)
+    worker = threading.Thread(target=work, name='bs-motion-preference', daemon=True)
+    try:
+        worker.start()
+    except RuntimeError:
+        _MOTION_PREFERENCE_STARTED = False
+        return None
+    return worker
 
 
 def _instance_name() -> str:
     return f"{APP_ID}-{getpass.getuser()}"
 
 
-def _probe_running_instance(name: str, timeout_ms: int = 300, answered_only: bool = False) -> bool:
-    """True when a live instance answered the raise request.
+_FILE_SUFFIXES = frozenset({'.opml', '.xml', '.mp3', '.m4a', '.ogg', '.opus', '.wav', '.flac', '.aac', '.m4b'})
+_IPC_LIMIT = 8192
 
-    A peer that accepts but stays silent also counts unless `answered_only`:
-    callers that hold or still need the library lease ask for an answer,
-    because only the lease proves who owns the library. Another local
-    account can create a listener under this name on Windows."""
+
+def _incoming_paths(values, *, absolute=False, cwd=None):
+    """Lexical validation only. No existence check, symlink resolution or I/O."""
+    if not isinstance(values, (list, tuple)) or not 1 <= len(values) <= 10:
+        raise ValueError('Choose between one and ten local audio or OPML/XML files.')
+    result = []
+    for value in values:
+        if not isinstance(value, str) or not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError('File arguments contain unsupported control characters.')
+        drive = os.name == 'nt' and re.match(r'^[A-Za-z]:[\\/]', value)
+        if (value.startswith(('-', '//', '\\\\')) or '://' in value
+                or (':' in value and not drive) or drive and ':' in value[2:]):
+            raise ValueError('Only local file paths are supported; options, URLs and network shares are refused.')
+        if Path(value).suffix.casefold() not in _FILE_SUFFIXES:
+            raise ValueError('Only supported audio or OPML/XML files may be opened.')
+        if absolute and not os.path.isabs(value):
+            raise ValueError('The file request must contain absolute local paths.')
+        normalized = os.path.normpath(value if os.path.isabs(value) else os.path.join(cwd or os.getcwd(), value))
+        if normalized not in result:
+            result.append(normalized)
+    if len(json.dumps(result, ensure_ascii=False).encode('utf-8')) > _IPC_LIMIT - 160:
+        raise ValueError('The file request is too large.')
+    return result
+
+
+def _cli_file_args(arguments):
+    if not arguments:
+        return []
+    return _incoming_paths(list(arguments))
+
+
+def _profile_key():
+    # A profile discriminator, not a secret or proof of sender identity.
+    value = os.path.normcase(os.path.abspath(str(application_data_dir() / 'library.db')))
+    return hashlib.sha256(os.fsencode(value)).hexdigest()
+
+
+def _file_request(paths):
+    message = json.dumps({'kind': 'file-arguments', 'profile': _profile_key(),
+                          'paths': _incoming_paths(paths, absolute=True)}, ensure_ascii=False,
+                         separators=(',', ':')).encode('utf-8') + b'\n'
+    if len(message) > _IPC_LIMIT:
+        raise ValueError('The file request is too large.')
+    return message
+
+
+def _read_file_request(raw):
+    if len(raw) > _IPC_LIMIT:
+        raise ValueError('The file request is too large.')
+    value = json.loads(raw.decode('utf-8'))
+    if not isinstance(value, dict) or value.get('kind') != 'file-arguments' or value.get('profile') != _profile_key():
+        raise ValueError('File request is not for this library profile.')
+    return _incoming_paths(value.get('paths'), absolute=True)
+
+
+def _probe_instance_status(name: str, timeout_ms: int = 300, files=()) -> str:
+    """Transport observation only; an answer never substitutes for a lease."""
     probe = QLocalSocket()
     probe.connectToServer(name)
     if not probe.waitForConnected(timeout_ms):
         probe.abort()
-        return False
-    probe.write(b"raise")
+        return 'missing'
+    probe.write(_file_request(files) if files else b"raise")
     probe.waitForBytesWritten(300)
-    if probe.waitForReadyRead(1500) and probe.readAll().data().startswith(b"ok"):
+    if probe.waitForReadyRead(1500):
+        reply = probe.read(32).data()
+        accepted = reply.startswith(b'files-queued') if files else reply.startswith(b'ok')
         probe.disconnectFromServer()
-        return True
+        if accepted:
+            return 'answered'
+        if reply.startswith((b'err', b'ok')):
+            return 'rejected'  # Older peers must not silently discard file arguments.
     probe.abort()
-    # Connected but silent: something IS listening. Treating that as dead
-    # used to removeServer() a live-but-busy first instance's socket, after
-    # which BOTH processes listened and shared one library.
-    return not answered_only
+    return 'silent'
+
+
+def _probe_running_instance(name: str, timeout_ms: int = 300, files=()) -> bool:
+    """An answered raise request, consulted only after library contention."""
+    return _probe_instance_status(name, timeout_ms, files) == 'answered'
+
+
+def _set_instance_callbacks(server, on_raise, on_files):
+    """Bounded asynchronous IPC. File acceptance only queues a future UI prompt."""
+    callbacks = getattr(server, '_ipc_callbacks', None)
+    if callbacks is not None:
+        callbacks.update(raise_=on_raise, files=on_files)
+        return
+    callbacks = {'raise_': on_raise, 'files': on_files}
+    server._ipc_callbacks = callbacks
+    server._ipc_sockets = set()
+    def accept():
+        socket = server.nextPendingConnection()
+        if socket is None:
+            return
+        if len(server._ipc_sockets) >= 16:
+            socket.abort(); socket.deleteLater(); return
+        server._ipc_sockets.add(socket)
+        timer = QTimer(socket); timer.setSingleShot(True); timer.setInterval(2000)
+        data = bytearray()
+        def finish(reply=None):
+            timer.stop()
+            server._ipc_sockets.discard(socket)
+            if reply is not None:
+                socket.write(reply); socket.flush(); socket.disconnectFromServer()
+            else:
+                socket.abort()
+            socket.deleteLater()
+        def ready():
+            if socket not in server._ipc_sockets:
+                return
+            data.extend(socket.read(_IPC_LIMIT + 1 - len(data)).data())
+            if len(data) > _IPC_LIMIT:
+                finish(b'err'); return
+            if data == b'raise':
+                callbacks['raise_'](); finish(b'ok'); return
+            if b'\n' not in data:
+                return
+            try:
+                paths = _read_file_request(bytes(data))
+                accepted = callbacks['files'](paths)
+            except (ValueError, TypeError, UnicodeError):
+                accepted = False
+            if accepted:
+                callbacks['raise_']()
+            finish(b'files-queued' if accepted else b'err')
+        socket.readyRead.connect(ready)
+        socket.disconnected.connect(lambda: finish() if socket in server._ipc_sockets else None)
+        timer.timeout.connect(finish)
+        timer.start()
+        ready()
+    server._early_ok = accept  # Existing close helper disconnects this exact slot.
+    server.newConnection.connect(accept)
 
 
 def _close_local_server(server):
@@ -301,6 +449,12 @@ def _close_local_server(server):
             server.newConnection.disconnect(early)
         except (RuntimeError, TypeError):
             pass
+    for socket in tuple(getattr(server, '_ipc_sockets', ())):
+        try:
+            socket.abort(); socket.deleteLater()
+        except RuntimeError:
+            pass
+    getattr(server, '_ipc_sockets', set()).clear()
     server.close()
 
 
@@ -328,6 +482,14 @@ class _ShowWatcher(QObject):
         return False
 
 
+def _join_playback_shutdown(commands, playback, deadline) -> int:
+    """Reserve writer grace even when native teardown exhausts its share."""
+    remaining = max(0.0, deadline - time.monotonic())
+    writer_grace = min(0.5, remaining / 4)
+    busy = commands.join(max(0.0, remaining - writer_grace))
+    return busy + playback.join_persistence(max(0.0, deadline - time.monotonic()))
+
+
 def _finalize_unclosed(commands, playback, grace_seconds: float = 2.0) -> int:
     """Finish playback and kept commands when the quit bypassed the window.
 
@@ -341,21 +503,16 @@ def _finalize_unclosed(commands, playback, grace_seconds: float = 2.0) -> int:
 
     commands.finish(playback.shutdown)
     deadline = time.monotonic() + grace_seconds
-    busy = commands.join(max(0.0, deadline - time.monotonic()))
-    return busy + playback.join_persistence(max(0.0, deadline - time.monotonic()))
+    return _join_playback_shutdown(commands, playback, deadline)
 
 
 def _claim_single_instance(app):
-    """Listen after the library lease is held, or yield to a live instance.
+    """Listen while holding the library lease. Never yield to an unowned peer.
 
-    A successful listen is not probed again: on Windows two servers can bind
-    one pipe name, so the re-probe only runs when listen() returns false.
-    Returns None when a live instance took over, otherwise a server (which
-    may not be listening — running unguarded beats not launching)."""
+    An answering/silent endpoint may belong to a different profile or local
+    process. Preserve it; the lease still protects this library even if IPC is
+    unavailable. Only a non-connecting stale socket may be retired."""
     name = _instance_name()
-    # The lease is held, so a silent listener cannot own this library.
-    if _probe_running_instance(name, answered_only=True):
-        return None
     server = QLocalServer(app)
     server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
     # Do NOT clear the socket path before trying to bind it. Removing it up
@@ -365,31 +522,99 @@ def _claim_single_instance(app):
     # bind that actually fails justifies clearing, and only after re-probing
     # confirms nothing is answering there.
     if not server.listen(name):
-        # Only an answer counts: the lease is held, so a listener that stays
-        # silent is not an instance of this library, and yielding to it would
-        # end the launch with no window and no message.
-        if _probe_running_instance(name, timeout_ms=1500, answered_only=True):
-            _close_local_server(server)
-            return None
-        QLocalServer.removeServer(name)
-        server.listen(name)
+        if _probe_instance_status(name, timeout_ms=1500) == 'missing':
+            QLocalServer.removeServer(name)
+            server.listen(name)
+        if not server.isListening():
+            logging.getLogger('bs_podcasts').warning('Instance endpoint is unavailable; the library lease remains active and startup continues.')
     if server.isListening():
         # Serve the "ok" handshake IMMEDIATELY: heavy init (database,
         # services, window) runs for seconds, and a second launch probing in
         # that window used to read silence, assume a dead peer, and steal
         # the socket. main() swaps this for the full raise handler later.
         # Only this process reaches here, and it already holds the lease.
-        def _early_ok():
-            socket = server.nextPendingConnection()
-            if socket is not None:
-                socket.write(b"ok")
-                socket.flush()
-                socket.disconnectFromServer()
-                socket.deleteLater()
-
-        server._early_ok = _early_ok
-        server.newConnection.connect(_early_ok)
+        def queued(paths):
+            pending = getattr(app, '_incoming_file_args', [])
+            combined = list(dict.fromkeys([*pending, *paths]))
+            if len(combined) > 10:
+                return False
+            app._incoming_file_args = combined
+            return True
+        _set_instance_callbacks(server, lambda: None, queued)
     return server
+
+
+def _open_pending_database(app, path):
+    """Pending migrations run off Qt while paint/timers/instance replies work.
+    Do not release ownership or allow input to dismiss startup mid-migration."""
+    outcome = {}
+    def work():
+        try:
+            outcome['database'] = Database(path)
+        except BaseException as exc:
+            outcome['error'] = exc
+    worker = threading.Thread(target=work, name='bs-library-update')
+    loop = QEventLoop(app)
+    poll = QTimer(app)
+    poll.setInterval(25)
+    poll.timeout.connect(lambda: loop.quit() if not worker.is_alive() else None)
+    try:
+        try:
+            worker.start()
+        except RuntimeError as exc:
+            raise OSError('Could not start the library update worker; no update was performed.') from exc
+        poll.start()
+        while worker.is_alive():
+            loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        worker.join()
+        if 'error' in outcome:
+            raise outcome['error']
+        return outcome['database']
+    finally:
+        poll.stop()
+        poll.deleteLater()
+        loop.deleteLater()
+
+
+def _watch_accessibility_contrast(app, current_window, current_theme):
+    """Use the same modal/tray/quit-safe appearance route as user theme changes."""
+    try:
+        accessibility = app.styleHints().accessibility()
+        signal = accessibility.contrastPreferenceChanged
+    except (AttributeError, RuntimeError):
+        return None  # Older platform bindings do not expose this preference.
+    def changed(*_args):
+        window = current_window()
+        if (window is None or getattr(window, '_closed', False) or getattr(window, '_force_quit', False)
+                or getattr(window, '_quit_drain_started', False)):
+            return
+        apply_theme(resolve_theme(current_theme()))
+        window._relaunch_for_theme()
+    signal.connect(changed)
+    return changed
+
+
+def _close_busy_database(database, grace_seconds=0.1):
+    """Bound the whole cleanup attempt, including implicit SQLite close I/O.
+    Surviving work may reopen handles; its library lease stays until process death."""
+    outcome = {}
+    def work():
+        try:
+            outcome['closed'] = database.try_close(grace_seconds=grace_seconds)
+        except Exception:
+            outcome['closed'] = False
+    worker = threading.Thread(target=work, name='bs-final-storage-close', daemon=True)
+    try:
+        worker.start()
+    except RuntimeError:
+        return False
+    worker.join(grace_seconds)
+    return outcome.get('closed', False) and not worker.is_alive()
+
+
+def _startup_repair_callback(path, error):
+    """Never label I/O, lock, permissions or unsupported formats as damage."""
+    return (lambda: Database.recover(path)) if is_corruption_error(error) else None
 
 
 def main() -> int:
@@ -405,23 +630,29 @@ def main() -> int:
 
     app = create_application()
     _mark("qt-app")
+    try:
+        incoming = _cli_file_args(sys.argv[1:])
+    except (ValueError, TypeError, UnicodeError) as exc:
+        from .ui.dialogs import StartupErrorDialog
+        dialog = StartupErrorDialog('File arguments not accepted', str(exc))
+        dialog.exec(); dialog.deleteLater()
+        return 1
+    app._incoming_file_args = incoming
     root = application_data_dir()
     name = _instance_name()
-    # An instance that is already listening owns the lease and answers here.
-    # A silent listener does not end this launch: the lease decides below.
-    if _probe_running_instance(name, answered_only=True):
-        return 0
-    from .data.lease import LibraryLease
+    # Probing a predictable pipe name is not proof that the library is owned.
+    # Acquire the lease first; only actual contention can justify yielding.
+    from .data.lease import LibraryLease, LibraryInUseError
 
     lease = None
-    lease_wait_until = _time.monotonic() + 5.0
+    lease_wait_until = _time.monotonic() + 30.0
     while lease is None:
         try:
             lease = LibraryLease(root / "library.db")
         except OSError as exc:
             from .ui.dialogs import StartupErrorDialog
 
-            if "Close BS Podcasts before migrating it." not in str(exc):
+            if not isinstance(exc, LibraryInUseError):
                 dialog = StartupErrorDialog(
                     "Library could not be opened",
                     "Close the app and inspect "
@@ -432,13 +663,20 @@ def main() -> int:
             # Ordinary second launch: the peer holds the library and raises
             # its window. A peer that no longer answers is finishing its quit
             # (it stops listening first), so give its lease a moment to free.
-            if _probe_running_instance(name, timeout_ms=1500, answered_only=True):
+            reply = _probe_instance_status(name, timeout_ms=1500, files=incoming)
+            if reply == 'answered':
                 return 0
+            if reply == 'rejected':
+                dialog = StartupErrorDialog('Files were not accepted',
+                    'The existing instance could not queue this file request (or is an older build). '
+                    'No files were imported. Retry after closing its dialog or restarting the updated app.')
+                dialog.exec(); dialog.deleteLater()
+                return 1
             if _time.monotonic() >= lease_wait_until:
                 dialog = StartupErrorDialog(
-                    "BS Podcasts is still closing",
-                    "The library is still in use, most likely by a window that is "
-                    "finishing its shutdown or not responding. Try again in a moment.",
+                    "BS Podcasts is starting or closing",
+                    "The library is still in use by another instance. It may be "
+                    "starting, finishing shutdown, or not responding. Try again in a moment.",
                 )
                 dialog.exec()
                 return 1
@@ -450,31 +688,44 @@ def main() -> int:
         return 0
     _mark("single-instance")
     notice = None
-    if Database.migration_pending(root / "library.db"):
-        # Something visible before the backup + migration blocks.
-        from .ui.dialogs import MigrationNotice
-
-        notice = MigrationNotice()
-        notice.show()
-        app.processEvents()
-        app.processEvents()
     try:
-        database = Database(root / "library.db")
-    except (sqlite3.DatabaseError, OSError) as exc:
-        if lease is not None:
-            lease.close()
-        _close_local_server(server)
+        if Database.migration_pending(root / "library.db"):
+            from .ui.dialogs import MigrationNotice
+            notice = MigrationNotice()
+            notice.show()
+            app.processEvents()
+            app.processEvents()
+        database = (_open_pending_database(app, root / 'library.db') if notice is not None
+                    else Database(root / 'library.db'))
+    except (sqlite3.DatabaseError, DatabaseIntegrityError, OSError) as exc:
         if notice is not None:
             notice.close()
         from .ui.dialogs import StartupErrorDialog
 
         dialog = StartupErrorDialog(
             "Library could not be opened",
-            "Close the app and inspect "
-            f"the library at {root / 'library.db'}.\n\n{exc}",
+            f"The library at {root / 'library.db'} could not be opened.\n\n{exc}",
+            repair=_startup_repair_callback(root / 'library.db', exc),
+            repair_path=str(root / "library.db"),
         )
         dialog.exec()
-        return 1
+        if dialog.repaired:
+            try:
+                database = Database(root / "library.db")
+            except (sqlite3.DatabaseError, DatabaseIntegrityError, OSError) as retry_error:
+                failure = StartupErrorDialog("Library still unavailable", str(retry_error))
+                failure.exec()
+                failure.deleteLater()
+                dialog.deleteLater()
+                lease.close()
+                _close_local_server(server)
+                return 1
+        else:
+            dialog.deleteLater()
+            lease.close()
+            _close_local_server(server)
+            return 1
+        dialog.deleteLater()
     _mark("database")
     if notice is not None:
         notice.close()
@@ -610,6 +861,8 @@ def main() -> int:
         build_window(view_state)
 
     build_window()
+    _contrast_watcher = _watch_accessibility_contrast(
+        app, lambda: state['window'], lambda: library.setting('ui.theme', 'system'))
     logger.info(
         "startup phases: %s (total %.2fs)",
         "  ".join(
@@ -627,29 +880,46 @@ def main() -> int:
         QTimer.singleShot(2000, lambda: jobs.submit(warm))
 
     def raise_existing():
-        socket = server.nextPendingConnection()
-        if socket is not None:
-            socket.write(b"ok")
-            socket.flush()
-            socket.disconnectFromServer()
-            socket.deleteLater()
         window = state["window"]
-        if window is not None:
+        if window is not None and not window._closed and not window._force_quit:
             window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
             window.show()
             window.raise_()
             window.activateWindow()
 
-    early = getattr(server, "_early_ok", None)
-    if early is not None:
-        try:
-            server.newConnection.disconnect(early)
-        except (RuntimeError, TypeError):
-            pass
-    server.newConnection.connect(raise_existing)
+    file_delivery = {'scheduled': False}
+    def schedule_files(delay=0):
+        if not file_delivery['scheduled']:
+            file_delivery['scheduled'] = True
+            QTimer.singleShot(delay, app, deliver_files)
+    def deliver_files():
+        file_delivery['scheduled'] = False
+        paths = getattr(app, '_incoming_file_args', [])
+        window = state['window']
+        if not paths or window is None:
+            return
+        if window._force_quit or window._quit_drain_started or window._closed and not window._keep_services:
+            app._incoming_file_args = []
+            return  # Accepted as queued, never interpreted as permission to import.
+        if window._closed or QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
+            schedule_files(100)
+            return
+        app._incoming_file_args = []
+        raise_existing()
+        window._confirm_incoming_file_args(paths)  # Only explicit acceptance performs I/O.
+    def queue_files(paths):
+        combined = list(dict.fromkeys([*getattr(app, '_incoming_file_args', []), *paths]))
+        if len(combined) > 10:
+            return False
+        app._incoming_file_args = combined
+        schedule_files()
+        return True
+    _set_instance_callbacks(server, raise_existing, queue_files)
+    schedule_files()  # Initial command-line arguments and requests received during startup.
     # Stop answering before the final saves: a relaunch during that drain
     # then sees no instance and waits for the lease instead of exiting.
     app.aboutToQuit.connect(lambda: _close_local_server(server))
+    app.aboutToQuit.connect(lambda: shutdown_exports(0.2))
     app.aboutToQuit.connect(lambda: state["window"]._save_layout() if state["window"] is not None else None)
     # window.mpris is None until desktop integration ran.
     app.aboutToQuit.connect(
@@ -673,14 +943,18 @@ def main() -> int:
     # One deadline for all pools: four independent 3 s joins let a quit take
     # up to 12 s while background work drained.
     deadline = _time.monotonic() + 3.0
-    busy = commands.join(max(0.0, deadline - _time.monotonic()))
-    busy += playback.join_persistence(max(0.0, deadline - _time.monotonic()))
+    busy = _join_playback_shutdown(commands, playback, deadline)
     for pool in (jobs, download_jobs, play_download_jobs, refresh_jobs, network_jobs, artwork_jobs):
         busy += pool.join(max(0.0, deadline - _time.monotonic()))
+    busy += shutdown_exports(max(0.0, deadline - _time.monotonic()))
     from .ui.pixmaps import shutdown_decodes
     busy += shutdown_decodes(max(0.0, deadline - _time.monotonic()))
     if busy:
         logging.getLogger("bs_podcasts").warning("Exiting with %d background job(s) still running.", busy)
+        if not _close_busy_database(database, grace_seconds=0.1):
+            logging.getLogger("bs_podcasts").warning("Library workers remain active; committed WAL data will recover on the next start.")
+        # Handles can be reopened by still-alive workers, even after a clean
+        # idle-handle close. Never expose this library to a new owner until exit.
         logging.shutdown()
         os._exit(code)
     database.close()

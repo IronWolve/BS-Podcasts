@@ -67,7 +67,7 @@ def parse_chapters(content: bytes) -> list[ChapterData]:
     """Podcast Namespace JSON chapters: {"chapters": [{"startTime": 0, "title": ...}]}."""
     if len(content) > MAX_BYTES:
         raise ListeningFetchError("Chapters exceed the size limit.")
-    entries = _json_entries(content.decode('utf-8', 'replace'), 'chapters', 'Chapters')
+    entries = _json_entries(_decoded_text(content), 'chapters', 'Chapters')
     chapters = []
     for entry in entries or ():
         if not isinstance(entry, dict):
@@ -78,7 +78,7 @@ def parse_chapters(content: bytes) -> list[ChapterData]:
         chapters.append(
             ChapterData(
                 start_seconds=start,
-                title=str(entry.get("title") or "").strip(),
+                title=_chapter_title(str(entry.get("title") or "").strip()),
                 end_seconds=end,
                 artwork_url=str(entry.get("img") or ""),
             )
@@ -93,6 +93,7 @@ def fetch_transcript(url: str, declared_type: str = "", session=None) -> list[Se
 
 
 _TIMESTAMP = re.compile(r"(?<!\d)(?:(\d{1,6}):)?(\d{1,2}):(\d{2})[.,](\d{1,3})(?!\d)")
+_TIMING_LINE = re.compile(r"^\s*(?:\d{1,6}:)?\d{1,2}:\d{2}[.,]\d{1,3}\s+-->\s+(?:\d{1,6}:)?\d{1,2}:\d{2}[.,]\d{1,3}(?:\s.*)?$", re.M)
 _TAGS = re.compile(r"<[^<>]+>")
 _SKIP_HTML = {"script", "style"}
 
@@ -123,10 +124,31 @@ class _TranscriptHTML(HTMLParser):
 
 
 def _html_text(value: str) -> str:
+    # HTMLParser intentionally treats script/style as raw text. Recover a
+    # malformed missing close only at a subsequent block tag, discarding the
+    # script/style body rather than displaying it as transcript prose.
+    def repair(match):
+        name = match[1]
+        tail = match[2]
+        if re.search(rf"</{name}\s*>$", match[0], re.I):
+            return ""
+        block = re.search(r"<(?:p|div|section|article|h[1-6]|li|table)\b", tail, re.I)
+        return tail[block.start():] if block else ""
+    value = re.sub(r"<(script|style)\b[^>]*>(.*?)(?:</\1\s*>|$)", repair, value, flags=re.I | re.S)
     parser = _TranscriptHTML()
     parser.feed(value)
     parser.close()
-    return unescape("".join(parser.parts)).strip()
+    return "".join(parser.parts).strip()
+
+
+def _decoded_text(content: bytes) -> str:
+    from .fetch import _markup_text
+    return _markup_text(content, "utf-8").replace("\r\n", "\n")
+
+
+def _chapter_title(text: str) -> str:
+    maximum = 500
+    return text if len(text) <= maximum else text[:maximum - 1].rstrip() + "…"
 
 
 def _stamp(text: str) -> float | None:
@@ -143,13 +165,15 @@ def _stamp(text: str) -> float | None:
 def parse_transcript(content: bytes, kind: str = "", url: str = "") -> list[SegmentData]:
     if len(content) > MAX_BYTES:
         raise ListeningFetchError("Transcript exceeds the size limit.")
-    text = content.decode("utf-8", "replace").replace("\r\n", "\n")
+    text = _decoded_text(content)
     kind = (kind or "").lower()
     lowered_url = url.lower()
     if "json" in kind or lowered_url.endswith(".json"):
         return _parse_json_transcript(text)
-    if "vtt" in kind or "srt" in kind or "subrip" in kind or lowered_url.endswith((".vtt", ".srt")) or "-->" in text[:2000]:
-        return _parse_cues(text)
+    if "vtt" in kind or "srt" in kind or "subrip" in kind or lowered_url.endswith((".vtt", ".srt")) or _TIMING_LINE.search(text[:2000]):
+        segments = _parse_cues(text)
+        if segments:
+            return segments
     if "html" in kind:
         text = _html_text(text)
     return _parse_plain(text)
@@ -194,7 +218,7 @@ def _parse_cues(text: str) -> list[SegmentData]:
         lines = [line.strip() for line in block.split("\n") if line.strip()]
         if not lines:
             continue
-        timing = next((line for line in lines if "-->" in line), None)
+        timing = next((line for line in lines if _TIMING_LINE.fullmatch(line)), None)
         if timing is None:
             continue
         start_text, _arrow, end_text = timing.partition("-->")

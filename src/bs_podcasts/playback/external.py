@@ -40,8 +40,8 @@ class ExternalPlayerEngine:
         # os.startfile and xdg-open resolve whatever they are handed, and
         # os.startfile follows file:// UNC paths — enough for a feed to launch
         # a remote executable through the shell's "open" verb. Only a web URL,
-        # or a path this app produced, may reach them; a file:// source is
-        # refused outright rather than passed through as it used to be.
+        # or a path this app produced, may reach them. Local file:// URLs are
+        # accepted only with empty/localhost authority; remote UNC is refused.
         # The service has already settled provenance; what must still be
         # refused here is a remote UNC authority, which stays dangerous no
         # matter which caller produced it.

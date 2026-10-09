@@ -38,6 +38,8 @@ def _fetch_error(exc) -> FeedFetchError:
     # A certificate problem belongs to the server or to the network path.
     if isinstance(exc, errors.SSLError):
         return FeedWrongAnswerError(message)
+    if getattr(getattr(exc, "response", None), "status_code", None) in (429, 503):
+        return FeedNetworkError("The feed server is temporarily busy or rate limiting requests. Retry later.")
     if isinstance(exc, (errors.ConnectionError, errors.Timeout, errors.RetryError)):
         return FeedNetworkError(message)
     return FeedFetchError(message)
@@ -103,7 +105,12 @@ def _markup_text(body: bytes, encoding: str | None) -> str:
 # decides about the subset later. Looked for in a bounded window only.
 _XML_DOCTYPE = re.compile(r"""<!doctype\s+(?!html\b)(?:[^>\["']|"[^"]*"|'[^']*'|\[[^\]]*\])*>""", re.IGNORECASE)
 _DOCTYPE_WINDOW = 64 * 1024
-_FEED_ROOTS = ("<rss", "<feed", "<rdf", "<channel")
+_FEED_ROOT = re.compile(r"^<(?:[\w.-]+:)?(?:rss|feed|rdf|channel)(?=[\s/>])", re.IGNORECASE)
+_SNIFF_BYTES = 64 * 1024
+
+
+def _looks_like_feed(lead: str) -> bool:
+    return _FEED_ROOT.match(lead) is not None
 
 
 def _opening_markup(text: str) -> str:
@@ -132,6 +139,15 @@ def _opening_markup(text: str) -> str:
             index = doctype.end()
             continue
         return text[index:index + 64].lower()
+
+
+def _body_lead(body, encoding) -> str:
+    lead = _opening_markup(_markup_text(bytes(body[:_SNIFF_BYTES]), encoding))
+    if not lead and len(body) > _SNIFF_BYTES:
+        # Rare long comments/prologs still deserve the old correct answer;
+        # ordinary feeds never allocate a full-body text copy for sniffing.
+        lead = _opening_markup(_markup_text(bytes(body), encoding))
+    return lead
 
 
 def _permanent_canonical(response) -> str:
@@ -181,8 +197,8 @@ NOTHING_DATED = ("", "")
 
 
 class FeedFetcher:
-    # The session's byte cap surfaces as a timeout; keep it a backstop above
-    # this fetcher's own cap, so an oversized feed is a feed failure.
+    # The fetcher gives the concise feed-specific size error. The transport
+    # backstop is also a response error, never a network timeout.
     session = SessionSlot(max_redirects=5, max_response_bytes=MAX_RESPONSE_BYTES + 1024 * 1024)
 
     def __init__(self, session=None):
@@ -243,8 +259,8 @@ class FeedFetcher:
         except FeedParseError:
             # The same bytes fail again, unless this is a page that the full
             # fetch can follow to the feed it advertises.
-            lead = _opening_markup(_markup_text(bytes(body), getattr(response, "encoding", None)))
-            return NOTHING_DATED if lead.startswith(_FEED_ROOTS) else None
+            lead = _body_lead(body, getattr(response, "encoding", None))
+            return NOTHING_DATED if _looks_like_feed(lead) else None
         dated = [episode for episode in feed.episodes if episode.published_at]
         if not dated:
             return NOTHING_DATED
@@ -296,6 +312,8 @@ class FeedFetcher:
                     response.close()
                     response = None
                     return self._fetch(url, etag, last_modified, allow_discovery, validator_url, conditional=False)
+                if not any(headers.get(name) for name in ("If-None-Match", "If-Modified-Since")):
+                    raise FeedWrongAnswerError("Feed server returned not-modified without a conditional request.")
                 return FeedResponse(
                     final_url=response.url,
                     etag=response.headers.get("ETag", etag),
@@ -313,14 +331,13 @@ class FeedFetcher:
             discovered = ""
             # Many hosts serve RSS with a text/html Content-Type; a body that
             # is actually XML must parse as a feed, not fail HTML discovery.
-            text = _markup_text(bytes(body), getattr(response, "encoding", None))
-            lead = _opening_markup(text)
-            looks_like_xml = lead.startswith(_FEED_ROOTS)
+            lead = _body_lead(body, getattr(response, "encoding", None))
+            looks_like_xml = _looks_like_feed(lead)
             if allow_discovery and not looks_like_xml and (
                 "text/html" in content_type or lead.startswith("<!doctype html")
             ):
                 parser = _FeedLinkParser()
-                parser.feed(text)
+                parser.feed(_markup_text(bytes(body), getattr(response, "encoding", None)))
                 if not parser.href:
                     raise FeedWrongAnswerError("HTML page does not advertise a podcast feed.")
                 discovered = urljoin(urljoin(response.url, parser.base), parser.href)

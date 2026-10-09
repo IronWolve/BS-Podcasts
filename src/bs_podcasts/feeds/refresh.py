@@ -1,6 +1,7 @@
 """Canonical feed refresh pipeline and crash-budget application."""
 
 from dataclasses import dataclass
+import logging
 import threading
 
 from ..artwork import ArtworkCache, ArtworkError
@@ -71,6 +72,9 @@ class RefreshService:
                 self.repository.set_artwork_path(show_id, path, expected_url=url)
             return path if path != previous_path or stamp(path) != before else ''
         except ArtworkError:
+            return ''
+        except Exception:
+            logging.getLogger(__name__).exception("Artwork refresh failed for podcast %s", show_id)
             return ''
 
     def _refresh_locked(self, show_id: int) -> RefreshReport:

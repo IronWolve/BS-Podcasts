@@ -137,6 +137,9 @@
 !/src/bs_podcasts/data/migrations/021_latest_episode_delete.sql
 !/src/bs_podcasts/data/migrations/022_finite_listening_times.sql
 !/src/bs_podcasts/data/migrations/023_cache_sources_latest.sql
+!/src/bs_podcasts/data/migrations/024_latest_key_order.sql
+!/src/bs_podcasts/data/migrations/025_episode_search.sql
+!/src/bs_podcasts/data/migrations/026_download_length_verification.sql
 !/src/bs_podcasts/data/repositories/__init__.py
 !/src/bs_podcasts/data/repositories/downloads.py
 !/src/bs_podcasts/data/repositories/library.py

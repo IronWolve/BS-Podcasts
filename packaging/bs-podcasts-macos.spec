@@ -16,7 +16,8 @@ analysis = Analysis(
            (str(ROOT/'packaging/THIRD-PARTY-NOTICES.txt'), '.')],
     hiddenimports=[], hookspath=[], hooksconfig={},
     runtime_hooks=[str(ROOT/'packaging/runtime_macos.py')],
-    excludes=['mutagen','PIL','Pillow','PySide6.QtDBus','PySide6.QtQml','PySide6.QtQuick','PySide6.QtPdf'],
+    excludes=['mutagen','PIL','Pillow','setuptools','pkg_resources','_distutils_hack','distutils',
+              'PySide6.QtDBus','PySide6.QtQml','PySide6.QtQuick','PySide6.QtPdf'],
     noarchive=False, optimize=1,
 )
 UNUSED = ('qtqml','qtquick','qtpdf','qtvirtualkeyboard','qtvirtualkeyboardplugin','imageformats/qpdf','imageformats/libqpdf')
@@ -27,6 +28,8 @@ def _dropped_payload(name):
     if normalized.endswith('.qm') or 'translations' in parts:
         return True
     if any(part == 'pil' or part.startswith('pil.') or part == 'pillow' or part.startswith('pillow.') for part in parts):
+        return True
+    if any(part in {'setuptools', 'pkg_resources', '_distutils_hack', 'distutils'} for part in parts):
         return True
     return any(marker in normalized for marker in UNUSED)
 

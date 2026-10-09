@@ -5,19 +5,19 @@ from email.utils import parsedate_to_datetime
 from hashlib import sha256
 from io import BytesIO
 import xml.etree.ElementTree as ET
+import re
+from typing import NamedTuple
 
 from ..domain import FeedData, FeedEpisodeData
 from ..domain.media import BINARY_AUDIO_TYPES
-from .safety import UnsupportedEncoding, contains_dtd, strip_leading_space
+from .safety import UnsupportedEncoding, contains_dtd, normalize_xml, normalize_html_entities
 
 
 MAX_FEED_BYTES = 20 * 1024 * 1024
 MAX_EPISODES = 5000
-# _cap_newest keeps the newest MAX_EPISODES *of what was materialized*; this
-# bounds materialization itself, so a byte-capped feed of hundreds of
-# thousands of minimal items cannot balloon memory building dataclasses that
-# are about to be thrown away. Generous on purpose: at 4x the keep-cap, any
-# feed it truncates is pathological, not a real back catalogue.
+# Retain a bounded head-plus-tail window before selecting the newest records.
+# Every unique item is inspected so oldest-first feeds retain their latest
+# episodes; the window bounds retained records, not total parsing work.
 MAX_SCANNED_EPISODES = MAX_EPISODES * 4
 # A flat flood is rejected while it is parsed, not after the tree exists.
 MAX_FEED_ELEMENTS = 1_000_000
@@ -30,6 +30,7 @@ MIN_ENCLOSURE_BYTES = 16 * 1024
 # Titles are shown in every list; one with megabytes of text would cost every
 # layout pass. Episode identity is taken from the full title before this cap.
 MAX_TITLE_CHARS = 500
+MAX_DESCRIPTION_CHARS = 128 * 1024
 
 
 class FeedParseError(ValueError):
@@ -64,6 +65,13 @@ def _clamp_title(text: str) -> str:
     if len(text) <= MAX_TITLE_CHARS:
         return text
     return text[:MAX_TITLE_CHARS - 1].rstrip() + "\u2026"
+
+
+def _description(text: str) -> str:
+    if len(text) <= MAX_DESCRIPTION_CHARS:
+        return text
+    marker = "\n\n[These show notes were shortened because they exceed the supported size.]"
+    return text[:MAX_DESCRIPTION_CHARS - len(marker)].rstrip() + marker
 
 
 # Non-audio enclosures seen while parsing the current feed (per thread).
@@ -110,6 +118,8 @@ def _date(value: str) -> str:
             return ""
     if parsed is None:
         return ""
+    if len(value) == 10:
+        return parsed.date().isoformat()
     # Stored text is compared lexically by SQLite; only a normalized UTC
     # representation makes that ordering chronological across feeds that mix
     # timezone offsets.
@@ -287,6 +297,10 @@ def _atom_link(element, relation: str) -> tuple[str, str, int]:
 def _external_id(title: str, published: str, media_url: str, explicit: str) -> str:
     if explicit.strip():
         return explicit.strip()
+    if len(published) == 10:
+        # Date-only feeds historically hashed the normalized midnight value.
+        # Preserve those identities while displaying the honest date-only form.
+        published += "T00:00:00"
     stable = "\n".join((title.strip(), published.strip(), media_url.strip()))
     return sha256(stable.encode("utf-8")).hexdigest()
 
@@ -303,7 +317,7 @@ def _rss_episode(item) -> FeedEpisodeData | None:
     return FeedEpisodeData(
         external_id=external,
         title=_clamp_title(title),
-        description=_text(item, "description", "summary", "encoded"),
+        description=_description(_text(item, "description", "summary", "encoded")),
         media_url=media_url,
         mime_type=mime,
         published_at=published,
@@ -330,7 +344,7 @@ def _parse_rss(root, episodes) -> FeedData:
     return FeedData(
         title=_clamp_title(_text(channel, "title") or "Untitled podcast"),
         author=_text(channel, "author", "managingeditor"),
-        description=_text(channel, "description", "subtitle"),
+        description=_description(_text(channel, "description", "subtitle")),
         website_url=_rss_link(channel),
         artwork_url=_artwork(channel),
         categories=_categories(channel),
@@ -370,7 +384,7 @@ def _atom_episode(entry) -> FeedEpisodeData | None:
     return FeedEpisodeData(
         external_id=external,
         title=_clamp_title(title),
-        description=_text(entry, "summary", "content"),
+        description=_description(_text(entry, "summary", "content")),
         media_url=media_url,
         mime_type=mime,
         published_at=published,
@@ -395,7 +409,7 @@ def _parse_atom(root, episodes) -> FeedData:
     return FeedData(
         title=_clamp_title(_text(root, "title") or "Untitled podcast"),
         author=_text(author, "name") if author is not None else "",
-        description=_text(root, "subtitle"),
+        description=_description(_text(root, "subtitle")),
         website_url=website_url,
         artwork_url=_text(root, "logo", "icon"),
         categories=_categories(root),
@@ -456,31 +470,6 @@ def _rewrite_text(element, base, under, bounded):
         element.text = bounded(urljoin(base, text))
 
 
-def _apply_xml_base(root, document_base: str):
-    """Absolutize URL-bearing nodes against their nearest xml:base.
-
-    Atom permits xml:base on any element, inherited downward; resolving only
-    against the document URL mis-resolved every URL under one. Runs before
-    the parse proper — resolve_feed_urls then finds those values already
-    absolute and leaves them alone. Iterative on purpose: recursion here
-    would reintroduce the nesting-depth hazard the category walker just had
-    fixed."""
-    # `under` is True once any ancestor (or the element itself) declared
-    # xml:base — inheritance is the whole point. Elements not under one are
-    # left for resolve_feed_urls, exactly as before.
-    stack = [(root, document_base, False, 0)]
-    bounded = _url_budget()
-    while stack:
-        element, base, under, depth = stack.pop()
-        if depth > 128:
-            raise FeedParseError("Feed nesting exceeds the safety limit.")
-        base, under = _next_base(element, base, under, bounded)
-        _rewrite_attributes(element, base, under, bounded)
-        _rewrite_text(element, base, under, bounded)
-        for child in element:
-            stack.append((child, base, under, depth + 1))
-
-
 _STRUCTURAL = {"rss", "rdf", "channel", "feed"}
 _METADATA = {
     "title", "author", "managingeditor", "description", "subtitle", "summary",
@@ -488,17 +477,41 @@ _METADATA = {
 }
 
 
+class _EpisodeSlot(NamedTuple):
+    external_id: str
+    position: int
+
+
+def _episode_slot(element, local: str, position: int):
+    """Identity only; avoid building show notes/metadata outside a large window."""
+    title = _text(element, "title") or "Untitled episode"
+    if local == "item":
+        media_url, _mime, _length = _rss_enclosure(element)
+        published = _date(_text(element, "pubdate", "published", "date"))
+        explicit = _text(element, "guid", "id") or element.attrib.get("{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about", "")
+    else:
+        media_url, _mime, _length = _atom_link(element, "enclosure")
+        published = _date(_text(element, "published", "updated"))
+        explicit = _text(element, "id", "guid")
+    return _EpisodeSlot(_external_id(title, published, media_url, explicit), position) if media_url else None
+
+
 def _remember_episode(head, tail, seen, episode):
-    if episode is None or episode.external_id in seen:
+    if episode is None:
         return
-    seen.add(episode.external_id)
+    # Fixed-size digests prevent a large publisher GUID being retained for
+    # every scanned item, including records outside the kept window.
+    identity = sha256(episode.external_id.encode("utf-8")).digest()
+    if identity in seen:
+        return
+    seen.add(identity)
     if len(head) < MAX_SCANNED_EPISODES // 2:
         head.append(episode)
     else:
         tail.append(episode)
 
 
-def _stream_feed(content: bytes, base_url: str):
+def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=None):
     """Parse without keeping every element. Items are dropped once read.
 
     The kept episodes are the head and the tail of the document, so an
@@ -518,6 +531,7 @@ def _stream_feed(content: bytes, base_url: str):
     root_kind = ""
     count = 0
     kept = 0
+    item_position = 0
     source = BytesIO(content)
 
     def episode_tag(local):
@@ -560,8 +574,15 @@ def _stream_feed(content: bytes, base_url: str):
             local = _local(current.tag)
             parent = stack[-1][0] if stack else None
             if episode_tag(local):
-                read = _rss_episode if local == "item" else _atom_episode
-                _remember_episode(head, tail, seen, read(current))
+                if slots_only:
+                    episode = _episode_slot(current, local, item_position)
+                elif positions is None or item_position in positions:
+                    read = _rss_episode if local == "item" else _atom_episode
+                    episode = read(current)
+                else:
+                    episode = None
+                _remember_episode(head, tail, seen, episode)
+                item_position += 1
                 if parent is not None:
                     parent.remove(current)
                 current.clear()
@@ -593,7 +614,7 @@ def resolve_feed_urls(feed: FeedData, base_url: str) -> FeedData:
 
     def fix(value: str) -> str:
         value = (value or "").strip()
-        if not value or "://" in value.split("?", 1)[0][:12]:
+        if not _is_relative(value):
             return value
         return urljoin(base_url, value)
 
@@ -622,19 +643,33 @@ def parse_feed(content: bytes, base_url: str = "") -> FeedData:
     if len(content) > MAX_FEED_BYTES:
         raise FeedParseError("Feed exceeds the size limit.")
     # A newline or space before the XML declaration is common and harmless.
-    content = strip_leading_space(content)
     # The XML parser reads the whole prolog itself: text scans missed
     # declarations behind long comments, in UTF-16, or after a processing
     # instruction that contained comment markup.
     try:
+        content = normalize_xml(content, MAX_FEED_BYTES)
         refused = contains_dtd(content)
     except UnsupportedEncoding as exc:
         raise FeedParseError(str(exc)) from exc
     if refused:
         raise FeedParseError("DTD and entity declarations are not allowed.")
+    content = normalize_html_entities(content)
+    if len(content) > MAX_FEED_BYTES:
+        raise FeedParseError("Normalized feed exceeds the size limit.")
     _SKIPPED.take()
     try:
-        root, episodes = _stream_feed(content, base_url)
+        # Normal feeds keep their single pass. Only a document larger than
+        # the retained window needs a cheap identity pass and a second pass
+        # that fully materializes selected distinct head/tail records.
+        count = sum(1 for _ in re.finditer(br"<(?:[\w.-]+:)?(?:item|entry)(?=[\s/>])", content, re.I))
+        if count > MAX_SCANNED_EPISODES:
+            _root, slots = _stream_feed(content, base_url, slots_only=True)
+            skipped_video = _SKIPPED.take()
+            del _root
+            root, episodes = _stream_feed(content, base_url, positions={slot.position for slot in slots})
+            _skipped_local.items = [None] * skipped_video
+        else:
+            root, episodes = _stream_feed(content, base_url)
     except ET.ParseError as exc:
         raise FeedParseError(f"Invalid XML: {exc}") from exc
     kind = _local(root.tag)

@@ -36,7 +36,8 @@ def prune_previous_deployments(root, keep=3, retain=None):
     return removed
 
 
-def install_entrypoints(workspace, destination, previous, report=None):
+def install_entrypoints(workspace, destination, previous, report=None, changed=None):
+    changed = [] if changed is None else changed
     template = '''#!/usr/bin/env bash
 set -euo pipefail
 BS_PROJECT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -60,6 +61,7 @@ exec bash "$BS_PROJECT/dists/linux/COMMAND.sh" "$@"
                 handle.write(content)
             temporary.chmod(0o755)
             os.replace(temporary,target)
+            changed.append(command)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -114,7 +116,7 @@ def _deploy_staged(workspace, destination, temporary, prune, report):
     previous.mkdir(parents=True)
     with runtime_lock(workspace):
         retire_stale(workspace)
-        retired, published = [], []
+        retired, published, launchers = [], [], []
         try:
             for name in ('app','native','licenses','THIRD-PARTY-NOTICES.txt','runner.py','runtime_state.py','runtime_linux.py','start.sh','stop.sh','requirements-linux.lock','deployment.json'):
                 current = destination/name
@@ -125,14 +127,21 @@ def _deploy_staged(workspace, destination, temporary, prune, report):
                 if built.exists():
                     built.rename(current)
                     published.append(name)
+            snapshot.rename(previous/'source-inputs')
+            install_entrypoints(workspace, destination, previous, report, changed=launchers)
         except BaseException:
+            for command in reversed(launchers):
+                current = workspace / (command + '.sh')
+                saved = previous / ('root-' + command + '.sh')
+                if saved.exists():
+                    os.replace(saved, current)
+                else:
+                    current.rename(previous / ('unpublished-root-' + command + '.sh'))
             for name in reversed(published):
                 (destination/name).rename(temporary/name)
             for name in reversed(retired):
                 (previous/name).rename(destination/name)
             raise
-        snapshot.rename(previous/'source-inputs')
-        install_entrypoints(workspace, destination, previous, report)
     # Rollbacks are user recovery data: pruning is an explicit opt-in, as on Windows.
     pruned = prune_previous_deployments(workspace/'.cache/previous-deployments', retain=previous) if prune else None
     deployed_bytes = sum((destination/relative).stat().st_size for relative in deployed)
@@ -167,5 +176,8 @@ if __name__ == '__main__':
         report.stats([('source files', str(count)), ('gates', f'{len(ran) - len(skipped)} checked, {len(skipped)} skipped')])
     else:
         with (ROOT.parent/'.cache/linux-build.lock').open('a+b') as lock:
-            fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise SystemExit('Linux build is busy (.cache/linux-build.lock); retry after it finishes.') from None
             deploy(prune=args.prune_old_deployments, report=report)

@@ -52,6 +52,9 @@ def denied_constant(constant, views):
 
 def check(root, private_root):
     root=root.resolve()
+    payload = root / ('Contents/Resources' if root.suffix == '.app' else '_internal')
+    if not (payload / 'THIRD-PARTY-NOTICES.txt').is_file() or not (payload / 'licenses').is_dir():
+        raise ValueError('Bundled notices or their supporting text folder are missing.')
     if not private_root:
         raise ValueError('The frozen privacy check needs the project root and its private deny file.')
     tokens=[str(private_root),str(private_root/'repo')]

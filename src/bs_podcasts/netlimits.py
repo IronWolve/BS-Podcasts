@@ -41,6 +41,10 @@ class NetworkDeadline(TimeoutError):
     pass
 
 
+class ResponseTooLarge(ValueError):
+    """A response exceeds its byte budget, not its network deadline."""
+
+
 class Deadline:
     def __init__(self, seconds, user_cancel=None, foreground=None):
         self.started = time.monotonic()
@@ -266,7 +270,12 @@ def bounded_chunks(response, original, deadline, maximum, chunk_size, decode_uni
         finally:
             gate.release()
 
-    threading.Thread(target=read, name="bs-http-body", daemon=True).start()
+    try:
+        threading.Thread(target=read, name="bs-http-body", daemon=True).start()
+    except BaseException:
+        gate.release()
+        abort_response(response)
+        raise
     finished = False
     size = 0
     try:
@@ -283,7 +292,7 @@ def bounded_chunks(response, original, deadline, maximum, chunk_size, decode_uni
                 raise value
             size += len(value)
             if maximum is not None and size > maximum:
-                raise NetworkDeadline(f"Response exceeds the {maximum}-byte limit.")
+                raise ResponseTooLarge(f"Response exceeds the {maximum}-byte limit.")
             yield value
     finally:
         stopped.set()

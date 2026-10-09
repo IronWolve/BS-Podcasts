@@ -1,7 +1,12 @@
 """Cooperative process ownership for app/migration access to one library."""
 import os
+import errno
 from pathlib import Path
 from .files import _private_descriptor
+
+
+class LibraryInUseError(OSError):
+    """The library lease is held, rather than unavailable or unsupported."""
 
 
 class LibraryLease:
@@ -23,7 +28,12 @@ class LibraryLease:
         except OSError as exc:
             self._handle.close()
             self._handle = None
-            raise OSError("The library is in use. Close BS Podcasts before migrating it.") from exc
+            busy = (getattr(exc, "winerror", None) in {32, 33}
+                    or exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK} if os.name == "nt"
+                    else exc.errno in {errno.EAGAIN, errno.EWOULDBLOCK})
+            if busy:
+                raise LibraryInUseError("The library is in use. Close BS Podcasts before migrating it.") from exc
+            raise OSError(f"Could not acquire the library lock: {exc}") from exc
 
     def close(self):
         handle, self._handle = getattr(self, "_handle", None), None

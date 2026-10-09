@@ -54,6 +54,7 @@ def atomic_write(path: Path, content: bytes) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
     return path
@@ -154,7 +155,7 @@ def inspect_download_file(path, seen: set | None = None, *, completed: bool = Fa
     ``missing`` is a confirmed deletion: the file is absent, its parent is a
     directory, and the download root is confirmed. ``unconfirmed`` and
     ``unavailable`` mean the row must stay. A present completed file records
-    the root for the rest of this pass.
+    the root in memory for this pass only; inspection never writes a marker.
     """
     path = Path(path)
     try:
@@ -166,7 +167,8 @@ def inspect_download_file(path, seen: set | None = None, *, completed: bool = Fa
     if not stat.S_ISREG(info.st_mode):
         return FILE_IRREGULAR, 0
     if completed:
-        note_completed_download(path, seen)
+        if seen is not None:
+            seen.add(_root_key(path.parent))
     return FILE_PRESENT, info.st_size
 
 

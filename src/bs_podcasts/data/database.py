@@ -10,6 +10,8 @@ import sqlite3
 import threading
 import weakref
 import tempfile
+import time
+import stat
 from .files import private_file
 
 _log = logging.getLogger("bs_podcasts")
@@ -21,6 +23,16 @@ class _Connection(sqlite3.Connection):
 
 class DatabaseIntegrityError(RuntimeError):
     pass
+
+
+def is_corruption_error(error) -> bool:
+    """Only SQLite corruption codes or an explicit app format validator."""
+    if isinstance(error, DatabaseIntegrityError):
+        return True
+    if not isinstance(error, sqlite3.DatabaseError):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    return isinstance(code, int) and (code & 0xff) in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}
 
 
 class _SharedExclusiveLock:
@@ -65,19 +77,24 @@ class _SharedExclusiveLock:
                 self._cond.notify_all()
 
     @contextmanager
-    def exclusive(self):
+    def exclusive(self, timeout=None):
         if getattr(self._held, "depth", 0):
             # Waiting on exclusive while holding shared would deadlock this
             # thread AND (via writer preference) freeze every other one.
             raise RuntimeError("exclusive() requested while holding a shared database lock")
         with self._cond:
+            deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
             self._exclusive_waiting += 1
             try:
                 while self._exclusive or self._shared:
-                    self._cond.wait()
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        raise TimeoutError("Database queries are still active.")
+                    self._cond.wait(remaining)
                 self._exclusive = True
             finally:
                 self._exclusive_waiting -= 1
+                self._cond.notify_all()
         try:
             yield
         finally:
@@ -88,6 +105,8 @@ class _SharedExclusiveLock:
 
 class Database:
     def __init__(self, path: str | Path):
+        if sqlite3.sqlite_version_info < (3, 43, 0):
+            raise sqlite3.DatabaseError("BS Podcasts requires SQLite 3.43 or newer. Update this application's Python runtime.")
         self.path = Path(path)
         self._lock = _SharedExclusiveLock()
         # One connection per thread instead of one per query. Reopening meant
@@ -109,7 +128,7 @@ class Database:
             # Only when no backup exists at all is "start empty" the safe call.
             backup = self._recovery_backup()
             if backup is not None:
-                raise sqlite3.DatabaseError(
+                raise DatabaseIntegrityError(
                     f"The library file is empty (0 bytes): {self.path}\n\n"
                     f"A backup exists: {backup}\n"
                     "To recover, close the app, rename the backup to library.db in the same folder, "
@@ -199,6 +218,19 @@ class Database:
         with self._lock.exclusive():
             self._retire_connections()
 
+    def try_close(self, grace_seconds=0.1) -> bool:
+        """Close only after active queries leave; bounded lock acquisition.
+
+        Never close a handle in use by a surviving worker. This does not add
+        a potentially blocking explicit checkpoint to forced-exit cleanup.
+        """
+        try:
+            with self._lock.exclusive(timeout=grace_seconds):
+                self._retire_connections()
+            return True
+        except TimeoutError:
+            return False
+
     @contextmanager
     def connect(self):
         with self._lock.shared():
@@ -206,7 +238,7 @@ class Database:
             try:
                 yield connection
                 connection.commit()
-            except Exception:
+            except BaseException:
                 try:
                     connection.rollback()
                 except sqlite3.Error:
@@ -248,14 +280,24 @@ class Database:
         pending = [migration for migration in migrations if int(migration.name.split("_", 1)[0]) not in applied_versions]
         for migration in pending:
             version = int(migration.name.split("_", 1)[0])
-            with self.connect() as connection:
-                script = migration.read_text(encoding="utf-8")
-                connection.executescript(
-                    "BEGIN IMMEDIATE;\n"
-                    + script
-                    + f"\nINSERT INTO schema_migrations(version) VALUES ({version});\n"
-                    + "COMMIT;"
-                )
+            try:
+                with self.connect() as connection:
+                    script = migration.read_text(encoding="utf-8")
+                    connection.executescript(
+                        "BEGIN IMMEDIATE;\n" + script
+                        + f"\nINSERT INTO schema_migrations(version) VALUES ({version});\nCOMMIT;"
+                    )
+            except sqlite3.OperationalError as exc:
+                optional_search = migration.name == "025_episode_search.sql"
+                unavailable = any(text in str(exc).lower() for text in
+                                  ("no such module: fts5", "no such tokenizer: trigram"))
+                if not optional_search or not unavailable:
+                    raise
+                # Builds without optional FTS support keep the literal search
+                # path. Do not fail startup or repeat a full upgrade backup.
+                with self.connect() as connection:
+                    connection.execute("INSERT INTO schema_migrations(version) VALUES (?)", (version,))
+                _log.info("Indexed episode search is unavailable in this SQLite runtime; using literal search")
 
     @staticmethod
     def _refuse_newer_schema(applied, shipped):
@@ -284,22 +326,34 @@ class Database:
         versions = {int(m.name.split("_", 1)[0]) for m in migrations_dir.glob("[0-9][0-9][0-9]_*.sql")}
         probe = cls.__new__(cls)
         probe.path = path
-        return bool(versions - probe._applied_versions_readonly())
+        try:
+            return bool(versions - probe._applied_versions_readonly())
+        except (sqlite3.Error, DatabaseIntegrityError):
+            # This is only the optional startup-status hint. A real open
+            # reports unknown/unreadable schema without taking a blind backup.
+            return False
 
     def _applied_versions_readonly(self) -> set:
         """Applied migration versions, read without writing to the file."""
+        connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
         try:
-            connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
-        except sqlite3.Error:
-            return set()
-        try:
-            return {
+            applied = {
                 row[0]
                 for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
             }
-        except sqlite3.Error:
-            # No schema_migrations table: everything is pending.
-            return set()
+            if any(not isinstance(value, int) or value < 1 for value in applied):
+                raise DatabaseIntegrityError("The library's format record contains invalid migration versions.")
+            if not applied and connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('shows','episodes')").fetchone():
+                raise DatabaseIntegrityError("The library's format record has no migration versions. Restore a library backup.")
+            return applied
+        except sqlite3.OperationalError as exc:
+            if "no such table: schema_migrations" in str(exc):
+                if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('shows','episodes')").fetchone():
+                    raise DatabaseIntegrityError("The library's format record is missing. Restore a library backup.") from exc
+                return set()
+            if "no such column: version" in str(exc):
+                raise DatabaseIntegrityError("The library's format record has an invalid schema.") from exc
+            raise
         finally:
             connection.close()
 
@@ -387,7 +441,7 @@ class Database:
             replace_error = None
             try:
                 with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(temporary)) as destination:
-                    lost = self._salvage(source, destination)
+                    lost = self._salvage(source, destination, self._backup_sequence_floors())
                     destination.commit()
                     self.last_repair_lost = lost
                     if lost:
@@ -398,9 +452,21 @@ class Database:
                     report = destination.execute("PRAGMA quick_check").fetchone()[0]
                     if report != "ok":
                         raise DatabaseIntegrityError(report)
-                # Replace first, sidecars after: unlinking the WAL before a failed
-                # replace would damage the live library too.
-                os.replace(temporary, self.path)
+                # Source handles are closed. Isolate any remaining old WAL
+                # before replacement; never let it attach to the rebuilt file.
+                moved_sidecars = []
+                try:
+                    for suffix in ("-wal", "-shm"):
+                        sidecar = Path(str(self.path) + suffix)
+                        if sidecar.exists():
+                            saved = Path(str(damaged) + ".retired" + suffix)
+                            os.replace(sidecar, saved)
+                            moved_sidecars.append((sidecar, saved))
+                    os.replace(temporary, self.path)
+                except BaseException:
+                    for sidecar, saved in reversed(moved_sidecars):
+                        os.replace(saved, sidecar)
+                    raise
             except Exception as exc:
                 replace_error = exc
             finally:
@@ -419,10 +485,33 @@ class Database:
                             ) from replace_error
             if replace_error is not None:
                 raise replace_error
-            for sidecar in ("-wal", "-shm"):
-                Path(str(self.path) + sidecar).unlink(missing_ok=True)
             # Old handles were closed before any snapshot or replacement.
             return damaged
+
+    @classmethod
+    def recover(cls, path: str | Path) -> Path:
+        """Owner-confirmed startup repair, without requiring a successful open.
+
+        The caller must hold this library's lease and display the exact path.
+        The damaged file and any old sidecars are retained beside backups.
+        """
+        database = cls.__new__(cls)
+        database.path = Path(path)
+        info = database.path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError("Library repair requires a regular, unshared file.")
+        if info.st_size == 0:
+            raise DatabaseIntegrityError("An empty library cannot be repaired from itself. Restore a non-empty library backup.")
+        database._lock = _SharedExclusiveLock()
+        database._connections = threading.local()
+        database._handles = weakref.WeakSet()
+        database._handles_lock = threading.Lock()
+        database._generation = 0
+        database.last_repair_lost = {}
+        try:
+            return database.repair()
+        finally:
+            database.close()
 
     _SEED_ROWS = (
         ("playback_state", "INSERT OR IGNORE INTO playback_state(singleton_id, state, updated_at) VALUES (1, 'idle', 0)"),
@@ -430,7 +519,7 @@ class Database:
     )
 
     @classmethod
-    def _salvage(cls, source, destination) -> dict:
+    def _salvage(cls, source, destination, sequence_floors=None) -> dict:
         """Copy the schema and rows table by table into a fresh file.
 
         Rows stream in batches rather than as one dump script held in
@@ -444,9 +533,17 @@ class Database:
         tables = source.execute(
             "SELECT name, sql FROM sqlite_master WHERE type='table' AND sql NOT NULL ORDER BY name"
         ).fetchall()
+        if not any(name == "schema_migrations" for name, _sql in tables):
+            raise DatabaseIntegrityError("The library's format record is missing; a backup is needed to recover safely.")
+        search_schema = next((sql for name, sql in tables if name == "episode_search"), None)
+        search_shadows = ({row[1] for row in source.execute("PRAGMA main.table_list")
+                           if row[2] == "shadow" and row[1].startswith("episode_search_")}
+                          if search_schema else set())
         for name, sql in tables:
             if name.startswith("sqlite_"):
                 continue  # statistics only; no table uses AUTOINCREMENT sequences
+            if search_schema and (name == "episode_search" or name in search_shadows):
+                continue  # derived virtual index + shadows are rebuilt, not salvaged
             destination.execute(sql)
             table = '"' + name.replace('"', '""') + '"'
             width = len(destination.execute(f"PRAGMA table_info({table})").fetchall())
@@ -464,6 +561,13 @@ class Database:
                         "the record of the library's format (schema_migrations) could not be read, "
                         "so a rebuilt copy could not be opened")
             destination.execute("RELEASE salvage")
+        applied = [row[0] for row in destination.execute("SELECT version FROM schema_migrations")]
+        if not applied or any(not isinstance(value, int) or value < 1 for value in applied):
+            raise DatabaseIntegrityError("The library's format record could not be recovered; a backup is needed.")
+        if search_schema:
+            destination.execute(search_schema)
+            destination.execute("INSERT INTO episode_search(rowid,title,description,show_title) "
+                                "SELECT e.id,e.title,e.description,s.title FROM episodes e JOIN shows s ON s.id=e.show_id")
         for (sql,) in source.execute(
             "SELECT sql FROM sqlite_master WHERE type IN ('index', 'trigger', 'view') AND sql NOT NULL"
         ).fetchall():
@@ -478,6 +582,7 @@ class Database:
         if "entity_sequences" in lost:
             for kind, owner in (("show", "shows"), ("episode", "episodes")):
                 highest = destination.execute(f"SELECT COALESCE(MAX(id), 0) FROM {owner}").fetchone()[0]
+                highest = max(highest, (sequence_floors or {}).get(kind, 0))
                 destination.execute(
                     "INSERT INTO entity_sequences(kind, value) VALUES (?, ?) "
                     "ON CONFLICT(kind) DO UPDATE SET value=MAX(value, excluded.value)", (kind, highest))
@@ -493,12 +598,37 @@ class Database:
             )
             destination.execute(
                 "UPDATE shows SET (latest_key, latest_episode_title, latest_episode_published_at)=("
-                "SELECT COALESCE(NULLIF(published_at,''),'0') || printf('~%012d',id), title, published_at "
+                "SELECT COALESCE(NULLIF(published_at,''),'0') || printf('!%012d',id), title, published_at "
                 "FROM (SELECT id,title,published_at FROM episodes WHERE show_id=shows.id "
                 "ORDER BY published_at DESC,id DESC LIMIT 1) "
                 "UNION ALL SELECT '', '', '' LIMIT 1)"
             )
         return lost
+
+    def _backup_sequence_floors(self) -> dict:
+        """Recover retired-ID high-water marks from a few recent safe snapshots."""
+        directory = self.path.parent / "backups"
+        candidates = [self.path.with_suffix(self.path.suffix + ".pre-migration.bak")]
+        if directory.is_dir():
+            candidates.extend(path for path in directory.glob("library-*.db")
+                              if not path.name.startswith("library-damaged-"))
+        usable = []
+        for path in candidates:
+            try:
+                if path.is_file() and not path.is_symlink():
+                    usable.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        floors = {}
+        for _stamp, path in sorted(usable, reverse=True)[:3]:
+            try:
+                with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+                    for kind, value in connection.execute("SELECT kind,value FROM entity_sequences"):
+                        if kind in {"show", "episode"}:
+                            floors[kind] = max(floors.get(kind, 0), int(value))
+            except (sqlite3.Error, ValueError, TypeError):
+                continue
+        return floors
 
     @staticmethod
     def _copy_rows(source, destination, query, params, insert):

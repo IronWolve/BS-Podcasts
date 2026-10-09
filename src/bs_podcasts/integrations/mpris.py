@@ -1,8 +1,23 @@
 """Optional Linux MPRIS service implemented with bundled QtDBus."""
 
-from PySide6.QtCore import ClassInfo, Property, QObject, Qt, Slot
+from PySide6.QtCore import ClassInfo, Property, QObject, Qt, Slot, QUrl
 from PySide6.QtDBus import QDBusAbstractAdaptor, QDBusConnection, QDBusMessage, QDBusObjectPath
 from hashlib import sha256
+from pathlib import Path
+import stat
+import time
+
+
+def _local_artwork_path(value):
+    """Worker-only local regular-file validation; never follow remote URLs."""
+    text = str(value or "")
+    path = Path(text)
+    if not path.is_absolute() or text.startswith(("//", "\\\\")):
+        return ""
+    try:
+        return str(path) if stat.S_ISREG(path.lstat().st_mode) else ""
+    except (OSError, ValueError):
+        return ""
 
 
 def track_path(snapshot):
@@ -79,12 +94,16 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
     @Property("QVariantMap")
     def Metadata(self):
         snapshot = self.host.playback.snapshot
-        return {
+        metadata = {
             "mpris:trackid": QDBusObjectPath(track_path(snapshot)),
             "mpris:length": int(snapshot.duration * 1_000_000),
             "xesam:title": snapshot.title,
             "xesam:album": snapshot.show_title,
         }
+        artwork = getattr(self.host, "_artwork_uri", "")
+        if artwork:
+            metadata["mpris:artUrl"] = artwork
+        return metadata
 
     @Property(float)
     def Volume(self):
@@ -181,6 +200,11 @@ class MprisController(QObject):
         self.window = window
         self.playback = playback
         self.available = False
+        self._artwork_key = None
+        self._artwork_uri = ""
+        self._artwork_pending = False
+        self._artwork_retry_after = 0.0
+        self._artwork_token = 0
         self.root_adaptor = _RootAdaptor(self)
         self.player_adaptor = _PlayerAdaptor(self)
         bus = QDBusConnection.sessionBus()
@@ -191,6 +215,9 @@ class MprisController(QObject):
             self,
             QDBusConnection.RegisterOption.ExportAdaptors,
         )
+        if not self.available:
+            bus.unregisterService(self.service_name)
+            return
         self._bridge = getattr(window, "_bridge", None)
         if self.available and self._bridge is not None:
             self._bridge.playback_event.connect(self._playback_changed)
@@ -198,6 +225,7 @@ class MprisController(QObject):
     def _playback_changed(self, _snapshot):
         if not self.available:
             return
+        self._refresh_artwork(self.playback.snapshot)
         # Emit on change only. Every 10 Hz position tick used to broadcast
         # the full property map; the spec also says Position
         # is never signalled through PropertiesChanged.
@@ -220,7 +248,36 @@ class MprisController(QObject):
         message.setArguments(["org.mpris.MediaPlayer2.Player", changed, []])
         QDBusConnection.sessionBus().send(message)
 
+    def _refresh_artwork(self, snapshot):
+        key = (snapshot.artwork_path, snapshot.load_generation)
+        if key == self._artwork_key and (self._artwork_uri or self._artwork_pending
+                                        or time.monotonic() < self._artwork_retry_after):
+            return
+        self._artwork_key = key
+        self._artwork_token += 1
+        token = self._artwork_token
+        self._artwork_uri = ""
+        self._artwork_pending = bool(snapshot.artwork_path)
+        if not snapshot.artwork_path:
+            return
+        submit = getattr(self.window, "_run_read", None)
+        if not callable(submit) or getattr(self.window, "jobs", None) is None:
+            self._artwork_pending = False
+            self._artwork_retry_after = time.monotonic() + 5.0
+            return
+        def apply(path):
+            if not self.available or token != self._artwork_token:
+                return
+            self._artwork_pending = False
+            self._artwork_retry_after = time.monotonic() + 5.0
+            self._artwork_uri = QUrl.fromLocalFile(path).toString(QUrl.ComponentFormattingOption.FullyEncoded) if path else ""
+            self._playback_changed(self.playback.snapshot)
+        # Reuse the window's isolated read workers; no stat/decode at every
+        # native position tick and no new executor/desktop service.
+        submit(lambda: _local_artwork_path(snapshot.artwork_path), apply, "mpris-artwork")
+
     def shutdown(self):
+        self._artwork_token += 1
         if getattr(self, "_bridge", None) is not None:
             try:
                 self._bridge.playback_event.disconnect(self._playback_changed)

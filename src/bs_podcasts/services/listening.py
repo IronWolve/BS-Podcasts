@@ -1,6 +1,7 @@
 """Application operations for chapters, transcripts, bookmarks, and lists."""
 
 from ..data.repositories import ListeningRepository
+import logging
 
 
 class ListeningService:
@@ -23,7 +24,9 @@ class ListeningService:
                         episode.id, [(c.start_seconds, c.end_seconds, c.title, c.artwork_url) for c in chapters],
                         source_url=episode.chapters_url,
                     )
-            except (ListeningFetchError, OSError, Exception) as exc:
+            except Exception as exc:
+                if not isinstance(exc, (ListeningFetchError, OSError)):
+                    logging.getLogger(__name__).exception('Unexpected chapters failure for episode %s', episode.id)
                 result["error"] = f"Chapters: {exc}"
         if episode.transcript_url and not self.repository.transcript(episode.id):
             try:
@@ -33,7 +36,11 @@ class ListeningService:
                         episode.id, [(s.start_seconds, s.end_seconds, s.text) for s in segments],
                         source_url=episode.transcript_url, source_type=episode.transcript_type,
                     )
-            except (ListeningFetchError, OSError, Exception) as exc:
+                else:
+                    raise ListeningFetchError("The transcript file had no readable text.")
+            except Exception as exc:
+                if not isinstance(exc, (ListeningFetchError, OSError)):
+                    logging.getLogger(__name__).exception('Unexpected transcript failure for episode %s', episode.id)
                 result["error"] = (result["error"] + "  " if result["error"] else "") + f"Transcript: {exc}"
         return result
 

@@ -181,5 +181,8 @@ if __name__=='__main__':
         raise SystemExit(0)
     workspace=Path(os.environ.get('BS_PODCASTS_BUILD_ROOT',ROOT.parent)).resolve()
     with (workspace/'.cache/macos-build.lock').open('a+b') as lease:
-        fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        try:
+            fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit('macOS build is busy (.cache/macos-build.lock); retry after it finishes.') from None
         build(workspace, prune=args.prune_old_deployments, report=report)

@@ -5,18 +5,47 @@ Delegates read the same dictionaries so painted lists match styled widgets.
 """
 
 import os
+import threading
 
 from PySide6.QtGui import QFont, QFontDatabase
+
+
+_system_motion_lock = threading.Lock()
+_system_reduced_motion = None
+
+
+def set_system_reduced_motion(value: bool | None) -> None:
+    global _system_reduced_motion
+    with _system_motion_lock:
+        _system_reduced_motion = value if isinstance(value, bool) else None
 
 
 def reduced_motion() -> bool:
     """Honour a reduce-motion request.
 
-    Qt exposes no cross-platform OS hint for this, so the app-level switch
-    is an environment variable; every animation in the app asks here rather
-    than deciding for itself.
+    Explicit environment choices override a cached, supported OS hint.
+    Every animation asks here; this path never queries the platform or blocks.
     """
-    return os.environ.get("BS_PODCASTS_REDUCE_MOTION", "") not in ("", "0", "false")
+    override = os.environ.get("BS_PODCASTS_REDUCE_MOTION")
+    if override is not None:
+        return override.strip().lower() not in ("", "0", "false", "off", "no")
+    with _system_motion_lock:
+        return _system_reduced_motion is True
+
+
+def high_contrast() -> bool:
+    override = os.environ.get("BS_PODCASTS_HIGH_CONTRAST")
+    if override is not None:
+        return override.strip().lower() not in ("", "0", "false", "off", "no")
+    try:
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtCore import Qt
+        if QGuiApplication.instance() is None:
+            return False
+        hints = QGuiApplication.styleHints().accessibility()
+        return hints.contrastPreference() == Qt.ContrastPreference.HighContrast
+    except (AttributeError, RuntimeError):
+        return False  # An older/unsupported platform simply keeps the normal palette.
 
 
 def _rgba(hex_color: str, alpha: float) -> str:
@@ -25,8 +54,7 @@ def _rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({red}, {green}, {blue}, {alpha})"
 
 
-# Tonal ramp: each layer is >= 1.25:1 from its neighbour so surfaces read
-# without relying on borders.
+# Tonal ramp is deliberately subtle; hairlines also separate adjacent surfaces.
 DARK = {
     "canvas": "#0B0F18",
     "nav": "#121827",
@@ -38,7 +66,7 @@ DARK = {
     "text": "#E4E8F0",
     "text_strong": "#FFFFFF",
     "muted": "#9AA7BD",
-    "subtle": "#8593AB",
+    "subtle": "#8795AD",
     # Disabled text and glyphs: >= 3:1 on canvas, surface and surface_raised
     # (the `border` token used before sat at 1.4-2.1:1, audit F-069).
     "disabled": "#6B7A96",
@@ -71,7 +99,7 @@ LIGHT = {
     # draw accent on accent_soft, and primary buttons draw white on accent.
     # The previous values (subtle #75819A, accent #D9770F, teal #148F7C,
     # success #1F9D5A, warning #B7791F, danger #D1445A) sat between 2.7 and
-    # 4.0:1. Ratios are asserted by tools/smoke_contrast.py.
+    # 4.0:1. Ratios are asserted by the private contrast check.
     "subtle": "#646E83",
     "disabled": "#7F899D",
     "accent": "#A1580B",
@@ -91,30 +119,13 @@ THEMES = {"dark": DARK, "light": LIGHT}
 
 # Mutated in place by apply_theme() so every module sharing the dict follows.
 COLORS = dict(DARK)
+ARTWORK_OVERLAY = "#960B0F18"
+ARTWORK_LIGHT_INK = "#FFFFFF"
+ARTWORK_DARK_INK = "#000000"
 
 # Semantic colours for episode/download states.
-STATE_COLORS = {
-    "New": COLORS["accent"],
-    "Unplayed": COLORS["subtle"],
-    "In progress": COLORS["blue"],
-    "Downloaded": COLORS["success"],
-    "Downloading": COLORS["blue"],
-    "Queued": COLORS["muted"],
-    "Paused": COLORS["warning"],
-    "Error": COLORS["danger"],
-    "Played": COLORS["subtle"],
-    "Bookmark": COLORS["teal"],
-    "Cancelled": COLORS["subtle"],
-    "Preview": COLORS["muted"],
-}
-
-HEALTH_COLORS = {
-    "ok": COLORS["success"],
-    "partial": COLORS["warning"],
-    "error": COLORS["danger"],
-    "suspended": COLORS["muted"],
-    "loading": COLORS["blue"],
-}
+STATE_COLORS = {}
+HEALTH_COLORS = {}
 
 def _rebuild_semantic():
     STATE_COLORS.update({
@@ -140,6 +151,7 @@ def _rebuild_semantic():
     })
 
 
+_rebuild_semantic()
 _current_theme = "dark"
 
 
@@ -175,6 +187,9 @@ def apply_theme(name: str):
     _current_theme = name if name in THEMES else "dark"
     COLORS.clear()
     COLORS.update(palette)
+    if high_contrast():
+        ink = COLORS['text_strong']
+        COLORS.update(text=ink, muted=ink, subtle=ink, border=ink, hairline=ink)
     _rebuild_semantic()
 
 
@@ -255,6 +270,7 @@ def load_fonts() -> list[str]:
     Returns the family names that were registered; safe to call more than once.
     """
     _forget_families()
+    _resolved_families.clear()
     from ..assets import font_paths
 
     families = []
@@ -335,7 +351,9 @@ def css_font_family() -> str:
     installed = set(_installed_families()) if QApplication.instance() is not None else set(FONT_STACK)
     extras = [name for name in FONT_STACK if name and name != primary and name in installed]
     names = [primary, *extras] if primary else extras
-    quoted = ", ".join(f'"{name}"' for name in names if name)
+    safe_names = [name.replace("\\", "\\\\").replace('"', '\\"') for name in names
+                  if name and not any(character in '{};' or ord(character) < 32 for character in name)]
+    quoted = ", ".join(f'"{name}"' for name in safe_names)
     # No generic fallback when real families resolved: macOS treats the
     # trailing "sans-serif" as a missing family and pays a ~230 ms alias
     # scan for it at every launch.
@@ -447,12 +465,6 @@ def stylesheet() -> str:
         border-radius: {sp(9)}px; padding: 1px {sp(6)}px; min-width: {sp(10)}px;
         font-size: {micro}px; font-weight: 700;
     }}
-    QPushButton#railToggle {{
-        background: transparent; border: 1px solid transparent; border-radius: {r['sm']}px;
-        color: {c['subtle']}; padding: 4px;
-    }}
-    QPushButton#railToggle:hover {{ background: {c['surface']}; color: {c['text']}; }}
-    QPushButton#railToggle:focus {{ border: {focus_ring}; }}
 
     /* ---------- Page header ---------- */
     QFrame#pageHeader {{ background: transparent; }}
@@ -469,6 +481,7 @@ def stylesheet() -> str:
         selection-background-color: {c['accent']}; selection-color: {c['on_accent']};
     }}
     QLineEdit#searchField:hover {{ border-color: {c['border']}; }}
+    QLineEdit {{ placeholder-text-color: {c['subtle']}; }}
     QLineEdit#searchField:focus {{ border: 1px solid {c['accent']}; background: {c['surface_raised']}; }}
     QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QKeySequenceEdit {{
         background: {c['surface']}; color: {c['text']};

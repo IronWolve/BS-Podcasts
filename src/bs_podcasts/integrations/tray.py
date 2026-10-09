@@ -48,7 +48,7 @@ class TrayController:
         show = QAction(f"Show {APP_TITLE}", menu)
         show.triggered.connect(self._show_window)
         self.toggle = QAction("Play / Pause", menu)
-        self.toggle.triggered.connect(window._play_pause)
+        self.toggle.triggered.connect(self._toggle_playback)
         # Skip lengths follow the per-podcast settings via the playback service.
         self.back = QAction("Skip back", menu)
         self.back.triggered.connect(window._skip_back)
@@ -106,6 +106,13 @@ class TrayController:
         self.now_playing.setText(texts[0])
         self.tray.setToolTip(texts[1])
         self.toggle.setText(texts[2])
+        self.toggle.setEnabled(bool(snapshot.source))
+
+    def _toggle_playback(self):
+        # Submit the action the menu displays, not a deferred toggle whose
+        # meaning may reverse while a stream is still opening.
+        action = "pause" if self.toggle.text() == "Pause" else "play"
+        self.window._playback_command(action)
 
     def _show_window(self):
         self.window.setWindowState(self.window.windowState() & ~Qt.WindowState.WindowMinimized)

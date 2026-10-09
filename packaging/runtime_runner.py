@@ -7,7 +7,7 @@ import re
 import signal
 import sys
 import time
-from runtime_state import process_stamp, read_record, process_state, runtime_lock, retire_stale
+from runtime_state import process_stamp, read_record, process_state, runtime_lock, retire_stale, write_record
 
 DEPLOYMENT = Path(__file__).resolve().parent
 PROJECT = DEPLOYMENT.parent.parent
@@ -243,8 +243,7 @@ def main():
         value={'kind':'bs-podcasts-runtime','project':str(PROJECT),'pid':os.getpid(),'started':process_stamp(os.getpid())}
         signals={}
         try:
-            with PID_FILE.open('x') as handle:
-                json.dump(value,handle)
+            write_record(PROJECT, value, PID_FILE)
             requested=[False]
             for kind in (signal.SIGTERM,signal.SIGINT):
                 signals[kind]=signal.signal(kind,lambda *_:requested.__setitem__(0,True))

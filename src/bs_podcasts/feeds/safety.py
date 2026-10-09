@@ -1,6 +1,60 @@
 """Shared guards for untrusted XML: feeds and OPML answer to the same rules."""
 
 from xml.parsers import expat
+import codecs
+import re
+
+
+_DECLARATION = re.compile(br"^(?:\xef\xbb\xbf)?<\?xml\s+[^?]*\?>", re.IGNORECASE)
+_ENCODING = re.compile(br"(\bencoding\s*=\s*)(['\"])([^'\"]+)(\2)", re.IGNORECASE)
+_TRANSCODE_XML = {'gb2312', 'gbk', 'big5', 'shift_jis', 'euc_jp', 'euc_kr'}
+
+
+def normalize_xml(content: bytes, maximum=20 * 1024 * 1024) -> bytes:
+    """Normalize UTF-8 aliases and known multibyte publisher encodings safely."""
+    content = strip_leading_space(content)
+    declaration = _DECLARATION.match(content)
+    if declaration is None:
+        return content
+    encoding = _ENCODING.search(declaration.group())
+    if encoding is None:
+        return content
+    try:
+        codec = codecs.lookup(encoding[3].decode("ascii"))
+    except (LookupError, UnicodeError):
+        return content  # The real XML parser reports unknown encodings.
+    if codec.name in _TRANSCODE_XML:
+        try:
+            content = content.decode(codec.name).encode('utf-8')
+        except UnicodeError as exc:
+            raise UnsupportedEncoding('The XML body does not match its declared character encoding.') from exc
+        if len(content) > maximum:
+            raise UnsupportedEncoding('Normalized XML exceeds the size limit.')
+    elif codec.name != "utf-8":
+        return content
+    begin, end = encoding.span(3)
+    return content[:begin] + b"utf-8" + content[end:]
+
+
+def normalize_html_entities(content: bytes) -> bytes:
+    """Accept known HTML entities, leaving comments, CDATA and PIs literal.
+
+    Called only after the original document passes the DTD/entity guard.
+    Unknown names still fail XML parsing; external declarations are not loaded.
+    """
+    from html.entities import html5
+    tokens = re.compile(br"<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|&([A-Za-z][A-Za-z0-9]+);", re.S)
+    def replace(match):
+        name = match[1]
+        if name is None:
+            return match[0]
+        if name in (b"amp", b"lt", b"gt", b"quot", b"apos"):
+            return match[0]  # XML already knows these; avoid needless expansion.
+        value = html5.get(name.decode("ascii") + ";")
+        if value is None:
+            return match[0]
+        return b"".join(f"&#{ord(character)};".encode("ascii") for character in value)
+    return tokens.sub(replace, content)
 
 
 class _Refused(Exception):
@@ -13,7 +67,7 @@ class _RootStarted(Exception):
 
 class UnsupportedEncoding(ValueError):
     """The declared character encoding is unknown or one the XML parser
-    cannot read (multi-byte encodings such as GBK, Shift_JIS or UTF-32)."""
+    cannot read, or the publisher's body does not match its declaration."""
 
 
 def strip_leading_space(content: bytes) -> bytes:

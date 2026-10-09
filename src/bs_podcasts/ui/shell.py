@@ -6,7 +6,7 @@ from collections import OrderedDict
 import json
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import os
 import re
@@ -43,7 +43,7 @@ from ..config import APP_NAME, RELEASES_URL, RELEASES_API_URL, app_version
 from ..logging_setup import log_path
 from ..domain import DownloadState, FeedData, Health
 from ..directories.persistent import PersistentDirectoryCache
-from ..downloads import DownloadError
+from ..downloads import DownloadError, AutomaticCleanupSkipped
 from ..jobs import JobResult, JobRunner, JobStatus
 from ..jobs.commands import CommandQueue
 from ..services.library import LibraryService, _bounded_float, _bounded_int
@@ -88,13 +88,13 @@ RemovePodcastDialog = _lazy_dialog("RemovePodcastDialog")
 ShortcutsDialog = _lazy_dialog("ShortcutsDialog")
 TextInputDialog = _lazy_dialog("TextInputDialog")
 episode_information_text = _lazy_dialog("episode_information_text")
-from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, Podcast as UiPodcast, plain_snippet, set_item_tooltips
+from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, ItemRoles, Podcast as UiPodcast, plain_snippet, set_item_tooltips
 from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, prepare_previews, install_previews
 from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_accent_token
-from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage
+from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage, _KeyboardMenu
 from .shortcuts import ShortcutManager
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
-from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe
+from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu
 
 
 PAGE_HOME, PAGE_PODCASTS, PAGE_EPISODES, PAGE_QUEUE, PAGE_DOWNLOADS, PAGE_DISCOVER, PAGE_BOOKMARKS, PAGE_HISTORY, PAGE_SETTINGS = range(9)
@@ -128,6 +128,14 @@ _QUITTING = threading.Event()
 _EXPORT_RUNNER = None
 
 
+def shutdown_exports(grace_seconds=0.0):
+    """Cancel copies on every real exit and join the existing worker only."""
+    _QUITTING.set()
+    if _EXPORT_RUNNER is None:
+        return 0
+    return _EXPORT_RUNNER.join(max(0.0, grace_seconds))
+
+
 class _JobBridge(QObject):
     completed = Signal(object)
     playback_event = Signal(object)
@@ -143,7 +151,7 @@ class _BusinessBridge(QObject):
         'database-maintenance', 'database-health', 'integrity', 'export-downloads',
         # Previews that open a confirmation: a theme change must not drop it.
         'unsubscribe-preview', 'remove-preview', 'reset-preview', 'played-previews',
-        'delete-downloads-preview'})
+        'delete-downloads-preview', 'settings-save', 'unsubscribe-ready'})
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -178,7 +186,7 @@ class MainWindow(QMainWindow):
         '_play_after_download_intent', '_play_after_download_request', '_refresh_batch', '_refresh_generation',
         '_refresh_failed', '_refresh_offline', '_refresh_waiting', '_refresh_in_flight',
         '_manual_refresh_in_flight', '_refresh_quiet', '_refresh_catch_up', '_refresh_changed', '_details_fetched', '_artwork_fetched',
-        '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved')
+        '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved', '_settings_desired', '_retained_removals')
 
     def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None):
         super().__init__(parent)
@@ -186,6 +194,8 @@ class MainWindow(QMainWindow):
         self.library = library
         self._incoming_view_state = view_state
         self._context_revision = 0
+        self._settings_desired = {}
+        self._retained_removals = set()
         self._pending_view_restore = None
         self._restoring_view = False
         self.jobs = jobs
@@ -336,6 +346,11 @@ class MainWindow(QMainWindow):
         # widens the window by one page, and background reloads re-read at the
         # widened size so the list never silently springs back to the cap.
         self._episodes_limit = EPISODES_PAGE_SIZE
+        self._catalog_query = ''
+        self._catalog_cache_query = ''
+        self._catalog_search_items = []
+        self._catalog_total = 0
+        self._catalog_limit = 500
         self._history_limit = HISTORY_PAGE_SIZE
         self._history_generation = 0
         self._episode_total = 0
@@ -411,6 +426,7 @@ class MainWindow(QMainWindow):
         self.queue_model = EpisodeModel(())
         self.context.attach_queue_model(self.queue_model, EpisodeDelegate(self.context.queue_view, compact=True, reorder=True))
         self.context.queue_view.viewport().installEventFilter(self)
+        self._queue_menu_filter = _KeyboardMenu(self.context.queue_view, self._queue_keyboard_menu)
         self.splitter.addWidget(self.pages)
         self.splitter.addWidget(self.context)
         # Both collapse handles live inside the centre area, hugging its
@@ -464,6 +480,7 @@ class MainWindow(QMainWindow):
         self.search_overlay.podcast_chosen.connect(self._open_podcast)
         self.search_overlay.episode_chosen.connect(self._open_search_episode)
         self.search_overlay.directory_chosen.connect(self._directory_search_from_overlay)
+        self.search_overlay.show_all_requested.connect(self._show_library_search)
         self.search_overlay.menu_requested.connect(self._show_search_result_menu)
         self.pages.installEventFilter(self)
 
@@ -489,6 +506,11 @@ class MainWindow(QMainWindow):
         self.home_page = HomePage()
         self.podcast_page = PodcastGridPage()
         self.episode_page = EpisodeListPage()
+        self._catalog_timer = QTimer(self)
+        self._catalog_timer.setSingleShot(True)
+        self._catalog_timer.setInterval(160)
+        self._catalog_timer.timeout.connect(self._requery_library_search)
+        self.episode_page.header.search.textChanged.connect(self._catalog_query_changed)
         self.playlist_page = EpisodeListPage(
             "Up Next", "", items=(), reorder=True, filters=(), action="Clear Up Next", sortable=False,
             empty=("Nothing queued", "Add episodes to Up Next and they play in this order. Drag rows to reorder.", "Browse episodes"),
@@ -505,7 +527,7 @@ class MainWindow(QMainWindow):
         self.discover_page = PodcastGridPage("Discover", "", discover=True)
         self.bookmark_page = EpisodeListPage(
             "Bookmarks", "", items=(), filters=(), action="", sortable=False,
-            empty=("No bookmarks yet", "Press the bookmark button in the player (Ctrl+B) to keep a moment.", ""), glyph="bookmark",
+            empty=("No bookmarks yet", "Press the bookmark button in the player to keep a moment.", ""), glyph="bookmark",
         )
         self.history_page = EpisodeListPage(
             "History", "", items=(), filters=(), action="Clear history", sortable=False,
@@ -553,8 +575,6 @@ class MainWindow(QMainWindow):
             page.open_podcast_requested.connect(self._open_episode_podcast)
         for page in (self.playlist_page, self.history_page):
             page.header.action.setObjectName("dangerButton")
-        self.playlist_page._hide_action_when_empty = True
-        self.history_page._hide_action_when_empty = True
         self.playlist_page.header.action.clicked.connect(self._clear_queue)
         self.history_page.header.action.clicked.connect(self._clear_history)
         self.home_page.empty_action_requested.connect(lambda: self.navigation.select(PAGE_DISCOVER))
@@ -585,6 +605,8 @@ class MainWindow(QMainWindow):
         self.podcast_page.sort_changed.connect(lambda key: self._save_setting("ui.podcast_sort", key))
         self.home_page.resume_all_requested.connect(self._show_in_progress)
         self.home_page.resume_remove_requested.connect(self._remove_from_continue_listening)
+        for page in (self.home_page, self.download_page, self.bookmark_page, self.history_page, self.playlist_page):
+            page.enable_remove_shortcut()
         self.episode_page.hero.settings_requested.connect(self._podcast_settings)
         self.episode_page.hero.unsubscribe_requested.connect(lambda: self._unsubscribe(self._hero_show_id))
         self.episode_page.hero.information_requested.connect(self._show_hero_information)
@@ -643,6 +665,7 @@ class MainWindow(QMainWindow):
         self.settings_page.reset_shortcuts_requested.connect(self._reset_shortcuts)
         self.settings_page.open_data_requested.connect(self._open_data_folder)
         self.settings_page.open_backups_requested.connect(self._open_backups_folder)
+        self.settings_page.retry_orphans_requested.connect(self._review_orphan_files)
         self.settings_page.refresh_storage_requested.connect(self._refresh_storage_settings)
         self.settings_page.import_opml_requested.connect(self._import_opml)
         self.settings_page.export_opml_requested.connect(self._export_opml)
@@ -804,7 +827,10 @@ class MainWindow(QMainWindow):
             self._pane_user_width = 0
         self._context_user_closed = self.library.setting("ui.context_closed", "0") == "1"
         geometry = self.library.setting("ui.geometry", "")
-        restored = bool(geometry) and self.restoreGeometry(QByteArray.fromHex(geometry.encode("ascii")))
+        try:
+            restored = isinstance(geometry, str) and bool(geometry) and self.restoreGeometry(QByteArray.fromHex(geometry.encode("ascii")))
+        except (ValueError, UnicodeError):
+            restored = False
         if not restored:
             self.resize(1440, 900)
         try:
@@ -817,11 +843,12 @@ class MainWindow(QMainWindow):
         raw = self.library.setting("ui.view_state", "")
         state = self._incoming_view_state
         if raw:
-            self._persist_ui_settings({"ui.view_state": ""})
             if state is None:
                 try:
                     state = json.loads(raw)
-                except ValueError:
+                    if isinstance(state, dict):
+                        state = {key: value for key, value in state.items() if not key.startswith('_')}
+                except (ValueError, TypeError, RecursionError):
                     state = None
         if isinstance(state, dict):
             self._reload_callbacks.append(lambda: self._restore_view_state(state))
@@ -842,12 +869,32 @@ class MainWindow(QMainWindow):
         if self.library is None:
             return
         repository = self.library.repository
+        values = dict(values)
         if self.commands is None:
-            repository.persist_settings(values)
+            try:
+                repository.persist_settings(values)
+            except Exception:
+                self._notify('Changes applied for this session were not saved; retry to keep them.', 'error', 'Retry', lambda: self._persist_ui_settings(values))
         elif not self.commands.closing:
             revisions = repository.stage_settings(values)
+            self._settings_desired.update({key: (revisions[key], value) for key, value in values.items()})
             future = self.commands.submit(lambda: repository.persist_settings(values, revisions), keep=True)
-            future.add_done_callback(lambda done: self._emit_completed(("command", None, done.result())))
+            def finished(done):
+                result = done.result()
+                if result.status == JobStatus.ERROR:
+                    logging.getLogger('bs_podcasts').warning('Settings changes were not saved: %s', result.message)
+                self._emit_completed(('settings-save', (values, revisions), result))
+            future.add_done_callback(finished)
+
+    def _on_settings_save(self, kind, identifier, result):
+        values, revisions = identifier
+        current = {key: value for key, value in values.items()
+                   if self._settings_desired.get(key) == (revisions.get(key), value)}
+        if result.status in {JobStatus.OK, JobStatus.EMPTY}:
+            for key in current:
+                self._settings_desired.pop(key, None)
+        elif current:
+            self._notify('Changes applied for this session were not saved; retry to keep them.', 'error', 'Retry', lambda: self._persist_ui_settings(current))
 
     def _capture_view_state(self):
         views = {}
@@ -866,6 +913,8 @@ class MainWindow(QMainWindow):
         return {
             "page": self.pages.currentIndex(), "hero_show_id": self._hero_show_id,
             "preview_url": self._preview_episodes_url, "views": views,
+            'catalog_query': self.episode_page.header.search.text().strip() if self._catalog_query else '',
+            'catalog_limit': self._catalog_limit,
             "episodes_limit": self._episodes_limit, "history_limit": self._history_limit,
             "back": list(self._back_stack), "forward": list(self._forward_stack),
             "context_mode": self.context.mode(), "now_playing": self.now_playing.isVisible(),
@@ -892,15 +941,24 @@ class MainWindow(QMainWindow):
                 {key: value for key, value in state.items() if not key.startswith("_")})})
 
     def _restore_view_state(self, state: dict):
+        state = dict(state)
+        for flag in ('now_playing', 'search_open', 'discover_visited', 'discover_loading'):
+            state[flag] = state.get(flag) is True
+        for name in ('preview_url', 'search_query', 'discover_summary', 'discover_sort', 'catalog_query'):
+            if not isinstance(state.get(name, ''), str):
+                state[name] = ''
         try:
             target = int(state.get("page", 0))
             hero = int(state.get("hero_show_id", 0))
             limits = (max(EPISODES_PAGE_SIZE, int(state.get("episodes_limit", EPISODES_PAGE_SIZE))),
                       max(HISTORY_PAGE_SIZE, int(state.get("history_limit", HISTORY_PAGE_SIZE))))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return
         if not 0 <= target < self.page_count:
             return
+        hero = hero if 0 <= hero < 2**63 else 0
+        limits = (min(limits[0], max(EPISODES_PAGE_SIZE, getattr(self, '_episode_total', 0))),
+                  min(limits[1], max(HISTORY_PAGE_SIZE, getattr(self, '_history_total', 0))))
         if limits != (self._episodes_limit, self._history_limit):
             self._episodes_limit, self._history_limit = limits
             self._request_reload(lambda: self._restore_view_state(state))
@@ -914,11 +972,12 @@ class MainWindow(QMainWindow):
              self._discover_limit, self._discover_exhausted) = state["_discover_request"]
             self._discover_displayed_key = (self._discover_operation, repr(self._discover_value))
         controls = state.get("discover_controls")
-        if controls:
+        if (isinstance(controls, (tuple, list)) and len(controls) == 3
+                and isinstance(controls[0], int) and isinstance(controls[1], str) and isinstance(controls[2], str)):
             page = self.discover_page
             for widget in (page.chart, page.category, page.topic):
                 widget.blockSignals(True)
-            page.chart.setCurrentIndex(int(controls[0]))
+            page.chart.setCurrentIndex(max(0, min(page.chart.count() - 1, controls[0])))
             page.category.setCurrentText(controls[1])
             page.set_category_topics(controls[1])
             page.topic.setCurrentText(controls[2])
@@ -933,6 +992,9 @@ class MainWindow(QMainWindow):
         self._pending_view_restore = state
         self._restoring_view = True
         try:
+            if state.get('catalog_query'):
+                self._show_library_search(state['catalog_query'], navigate=False, limit=state.get('catalog_limit', 500))
+                return
             if hero:
                 show = self._stored_show(hero)
                 if show is not None:
@@ -957,41 +1019,63 @@ class MainWindow(QMainWindow):
             self.navigation.select(int(state.get("page", 0)))
         finally:
             self._history_navigation = False
-        for key, saved in state.get("views", {}).items():
-            page = self.pages.widget(int(key))
+        views = state.get("views", {})
+        for key, saved in (views.items() if isinstance(views, dict) else ()):
+            if not isinstance(saved, dict):
+                continue
+            try:
+                page_index = int(key)
+            except (ValueError, TypeError, OverflowError):
+                continue
+            if not 0 <= page_index < self.page_count:
+                continue
+            page = self.pages.widget(page_index)
             if page is None or not hasattr(page, "_apply_filters"):
                 continue
             search = page.header.search
             search.blockSignals(True)
-            search.setText(saved.get("query", ""))
+            query = saved.get("query", "")
+            search.setText(query if isinstance(query, str) else "")
             search.blockSignals(False)
-            page._sort = saved.get("sort", getattr(page, "_sort", ""))
+            restored_sort = saved.get("sort", getattr(page, "_sort", ""))
+            if isinstance(restored_sort, str):
+                page._sort = restored_sort
             if hasattr(page, "_filter"):
-                page._filter = saved.get("filter", "All")
+                value = saved.get("filter", "All")
+                page._filter = value if isinstance(value, str) else "All"
             if hasattr(page, "chips"):
-                page.chips.select(saved.get("filter", "All"))
+                value = saved.get("filter", "All")
+                page.chips.select(value if isinstance(value, str) else "All")
             if page is self.discover_page:
-                page._discover_sort = state.get("discover_sort", "rank")
+                value = state.get("discover_sort", "rank")
+                page._discover_sort = value if isinstance(value, str) else "rank"
             button = getattr(page, "sort_button", None)
             if button is not None and page is not self.podcast_page:
                 from .pages import SORT_OPTIONS
                 button.setText(dict(SORT_OPTIONS).get(page._sort, button.text()))
-            current = tuple(saved["current"]) if saved.get("current") else None
-            selected = [tuple(value) for value in saved.get("selected", ())]
+            def item_key(value):
+                return tuple(value) if isinstance(value, (list, tuple)) and all(isinstance(part, (str, int)) for part in value) else None
+            current = item_key(saved.get('current'))
+            values = saved.get("selected", ())
+            selected = [key for value in values if (key := item_key(value)) is not None] if isinstance(values, (list, tuple)) else []
             page._apply_filters(restore_key=current, preserve_scroll=True, selected_keys=selected)
             if not selected:
                 page.view.clearSelection()
             page.view.doItemsLayout()
-            value = page.saved_scroll_value(saved)
+            value = min(2**31 - 1, page.saved_scroll_value(saved))
             page.view.verticalScrollBar().setValue(value)
             # Run after the list mixin\'s own queued scroll restoration.
             self._later(0, lambda p=page, v=value: p.view.verticalScrollBar().setValue(v))
         if self.podcast_page._sort in {"name", "date"}:
             self.podcast_page.set_sort(self.podcast_page._sort)
-        self._back_stack = list(state.get("back", ()))
-        self._forward_stack = list(state.get("forward", ()))
+        self._back_stack = self._validated_navigation_history(state.get('back'))
+        self._forward_stack = self._validated_navigation_history(state.get('forward'))
         self._update_navigation_controls()
-        self.context.set_mode(int(state.get("context_mode", 0)))
+        try:
+            context_mode = int(state.get("context_mode", 0))
+        except (ValueError, TypeError, OverflowError):
+            context_mode = 0
+        self.context.set_mode(context_mode if context_mode in (0, 1) else 0)
         if state.get("now_playing") and self.playback is not None:
             self._show_now_playing()
         elif state.get("search_open"):
@@ -1001,6 +1085,27 @@ class MainWindow(QMainWindow):
             self._start_directory_request(self._discover_operation, self._discover_value)
         else:
             self._queue_directory_artwork()
+
+    def _validated_navigation_history(self, entries):
+        if not isinstance(entries, (list, tuple)):
+            return []
+        result = []
+        for entry in entries:
+            if isinstance(entry, int) and 0 <= entry < self.page_count:
+                result.append(entry)
+            elif isinstance(entry, dict) and entry.get('episode_view') is True:
+                required = {'show_id': int, 'query': str, 'filter': str, 'sort': str, 'scroll': int}
+                if not all(isinstance(entry.get(name), kind) for name, kind in required.items()):
+                    continue
+                key = entry.get('current')
+                selected = entry.get('selected', [])
+                valid = lambda value: isinstance(value, (tuple, list)) and all(isinstance(part, (str, int)) for part in value)
+                if key is not None and not valid(key):
+                    continue
+                if not isinstance(selected, (tuple, list)) or not all(valid(value) for value in selected):
+                    continue
+                result.append({**entry, 'selected': [tuple(value) for value in selected]})
+        return result
 
     def _rail_toggled(self, compact: bool):
         self._rail_user_compact = compact
@@ -1192,10 +1297,18 @@ class MainWindow(QMainWindow):
             last_check = float(self.library.setting("database.last_quick_check", "0"))
         except (TypeError, ValueError):
             last_check = 0.0
-        if time.time() - last_check < 24 * 60 * 60:
+        if 0 <= time.time() - last_check < 24 * 60 * 60:
             return
         database = self.library.repository.database
-        future = self.jobs.submit(database.check_integrity)
+        def work():
+            from ..data.database import is_corruption_error
+            try:
+                return database.check_integrity()
+            except Exception as exc:
+                if is_corruption_error(exc):
+                    return {'problem': str(exc)}
+                raise
+        future = self.jobs.submit(work)
         self._pending_jobs.add(future)
 
         def finished(completed):
@@ -1301,7 +1414,7 @@ class MainWindow(QMainWindow):
         the user started (Refresh all) carries on."""
         if not self._refresh_batch[0] or not self._refresh_quiet or not self._refresh_in_flight:
             return
-        total, done, new_episodes = self._refresh_batch
+        _total, done, new_episodes = self._refresh_batch
         if self._refresh_waiting:
             self._refresh_catch_up = True  # resuming catches up, even if the batch is still running by then
         self._refresh_waiting.clear()
@@ -1492,7 +1605,7 @@ class MainWindow(QMainWindow):
         def work():
             # The show aggregate (85 ms on a large library) and the disk-usage
             # call ran on the click thread before the dialog could appear
-            #; both belong on a worker.
+            # Both belong on a worker.
             info = {}
             if library is not None:
                 shows = library.shows()
@@ -1570,6 +1683,94 @@ class MainWindow(QMainWindow):
             return
         self._open_show_id(episode.show_id, select_episode_id=episode.episode_id)
 
+    def _show_library_search(self, query: str, navigate=True, limit=500, force=False):
+        query = query.strip()
+        if self.library is None or not query:
+            return
+        self._catalog_timer.stop()
+        if navigate and self.pages.currentIndex() == PAGE_EPISODES and not self._history_navigation:
+            self._back_stack.append(self._episode_navigation_entry())
+            self._forward_stack.clear()
+        try:
+            limit = max(500, min(int(limit), max(500, self._episode_total)))
+        except (TypeError, ValueError, OverflowError):
+            limit = 500
+        self._catalog_query, self._catalog_limit = query, limit
+        self._hero_show_id, self._preview_episodes_url = 0, ''
+        self.episode_page._catalog_query = query
+        self.episode_page.hero.hide()
+        self.episode_page.header.set_title('Search results')
+        self.episode_page.header.search.blockSignals(True)
+        self.episode_page.header.search.setText(query)
+        self.episode_page.header.search.blockSignals(False)
+        self.episode_page.set_filter('All')
+        if self.episode_page.header.action:
+            self.episode_page.header.action.setToolTip('Refresh these search results')
+        self.episode_page.banner.show_state('loading', 'Searching the complete episode library…')
+        if navigate:
+            self._episode_navigation_prepared = True
+            self.navigation.select(PAGE_EPISODES)
+        if not force and query == self._catalog_cache_query and len(self._catalog_search_items) >= min(limit, self._catalog_total):
+            self._display_library_search()
+            if self._pending_view_restore:
+                self._finish_view_restore()
+            else:
+                self._restore_episode_navigation()
+            return
+        def work():
+            return self._ui_episodes(self.library.search_episodes(query, limit)), self.library.search_episode_count(query)
+        def apply(found):
+            if self._catalog_query != query:
+                return
+            self._catalog_search_items, self._catalog_total = found
+            self._catalog_cache_query = query
+            self._display_library_search()
+            if self._pending_view_restore:
+                self._finish_view_restore()
+            else:
+                self._restore_episode_navigation()
+        self._run_read(work, apply, 'catalog-search')
+
+    def _display_library_search(self):
+        self.episode_page._catalog_query = self._catalog_query
+        self.episode_page.header.set_title('Search results')
+        self.episode_page.hero.hide()
+        if not self._catalog_timer.isActive():
+            self.episode_page.header.search.blockSignals(True)
+            self.episode_page.header.search.setText(self._catalog_query)
+            self.episode_page.header.search.blockSignals(False)
+        self.episode_page.set_items(self._catalog_search_items, preserve_scroll=True)
+        shown = len(self._catalog_search_items)
+        self.episode_page.header.set_subtitle(f'Loaded {shown:,} of {self._catalog_total:,} matching episodes')
+        self.episode_page.set_load_more_state(shown < self._catalog_total, noun='matching episodes')
+        if self.episode_page.banner.state == 'loading':
+            self.episode_page.banner.clear()
+
+    def _leave_library_search(self):
+        if self._catalog_query:
+            self.episode_page.header.search.blockSignals(True)
+            self.episode_page.header.search.clear()
+            self.episode_page.header.search.blockSignals(False)
+        self._catalog_query = ''
+        self.episode_page._catalog_query = ''
+        self._catalog_timer.stop()
+        self._read_tokens['catalog-search'] = self._read_tokens.get('catalog-search', 0) + 1
+        self._read_tokens['catalog-search-more'] = self._read_tokens.get('catalog-search-more', 0) + 1
+
+    def _catalog_query_changed(self, text):
+        if self._catalog_query and text.strip() != self._catalog_query:
+            self._catalog_timer.start()
+
+    def _requery_library_search(self):
+        if self._closed or not self._catalog_query:
+            return
+        query = self.episode_page.header.search.text().strip()
+        if query:
+            self._show_library_search(query, navigate=False)
+        else:
+            self._leave_library_search()
+            self._show_all_episodes()
+
     def _directory_search_from_overlay(self, query: str):
         self.navigation.select(PAGE_DISCOVER)
         self.discover_page.header.search.setText(query)
@@ -1586,6 +1787,9 @@ class MainWindow(QMainWindow):
         """
         if self.library is None or not show_id:
             return
+        if show_id in self._retained_removals:
+            self._notify('This podcast is already being removed.', 'info')
+            return
         # The preview is a round-trip now, so a second click before the dialog
         # appears would raise a second one over it.
         if show_id in self._unsubscribing:
@@ -1598,12 +1802,20 @@ class MainWindow(QMainWindow):
         """Phase two: confirm exact targets, then remove on a worker."""
         if not preview or self.library is None:
             return
+        if show_id in self._retained_removals:
+            self._notify('This podcast is already being removed.', 'info')
+            return
+        if self.commands is None or self.jobs is None:
+            self._notify('Podcast removal is unavailable in this session.', 'error')
+            return
         dialog = RemovePodcastDialog(preview, self._format_bytes, self)
         if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
+        if show_id in self._retained_removals:
+            self._notify('This podcast is already being removed.', 'info')
+            return
         show = preview["show"]
         playback = self.playback
-        library = self.library
         delete_files = dialog.delete_files.isChecked()
         confirmed_paths = [path for path, _size in preview.get("files", ())] if delete_files else []
         self._previews.pop(show.feed_url, None)
@@ -1617,15 +1829,41 @@ class MainWindow(QMainWindow):
             self.navigation.select(PAGE_PODCASTS)
         self.context.show_empty()
 
+        self._retained_removals.add(show_id)
+        def prepare():
+            if playback is not None:
+                playback.begin_show_retirement(show_id)
+            return True
+        identity = (show_id, preview, delete_files, confirmed_paths)
+        self._run_task('unsubscribe-ready', prepare, identity, pool=self.commands, keep=True)
+
+    def _on_unsubscribe_ready(self, kind, identifier, result):
+        show_id, preview, delete_files, confirmed_paths = identifier
+        playback, library = self.playback, self.library
+        if result.status != JobStatus.OK or self.jobs is None:
+            self._unsubscribe_start_failed(show_id, result.message or 'Podcast removal could not start.')
+            return
         def work():
-            if playback is not None and playback.snapshot.show_id == show_id:
-                playback.stop()
-            result = library.remove_subscription(show_id, delete_files, confirmed_paths)
+            try:
+                result = library.remove_subscription(show_id, delete_files, confirmed_paths)
+            finally:
+                if playback is not None:
+                    playback.end_show_retirement(show_id)
             removed = set(result.get("removed_files", ()))
             reclaimed = sum(size for path, size in preview["files"] if path in removed)
-            return show.title, reclaimed, len(result.get("failed_files", ()))
+            return preview['show'].title, reclaimed, len(result.get("failed_files", ()))
+        try:
+            self._run_task('unsubscribe', work, show_id, pool=self.jobs, keep=True)
+        except Exception as exc:
+            self._unsubscribe_start_failed(show_id, str(exc))
 
-        self._run_task("unsubscribe", work, show_id, pool=self.commands, keep=True)
+    def _unsubscribe_start_failed(self, show_id, message):
+        playback = self.playback
+        def cleanup():
+            if playback is not None:
+                playback.end_show_retirement(show_id)
+            raise RuntimeError(message)
+        self._run_task('unsubscribe', cleanup, show_id, pool=self.commands, keep=True)
 
     def _focus_regions(self):
         """Focus targets for F6 cycling: rail, page, pane, player. Tab alone
@@ -1659,7 +1897,8 @@ class MainWindow(QMainWindow):
             if current >= 0:
                 break
         for step in range(1, len(regions) + 1):
-            owner, target = regions[(current + direction * step) % len(regions)]
+            base = current if current >= 0 else (len(regions) if direction < 0 else -1)
+            owner, target = regions[(base + direction * step) % len(regions)]
             widget = self._first_focusable(owner, target)
             if widget is None:
                 continue
@@ -1731,7 +1970,7 @@ class MainWindow(QMainWindow):
         if self.library is None:
             return
         ids = [episode_id for episode_id in ids if episode_id]
-        if ids:
+        if ids and self._confirm_bulk(len(ids), "Add to Up Next"):
             def apply(_count):
                 self._reload_queue()
                 self._notify(f"Added {len(ids)} episode{'s' if len(ids) != 1 else ''} to Up Next", "success", "Show", self._show_queue)
@@ -1812,8 +2051,8 @@ class MainWindow(QMainWindow):
         self._run_read(work, apply, f"retention-{show_id}")
 
     def _confirm_retention(self, show, previews, preview_required: bool, keep=(), background=False):
-        """Delete what exceeds a podcast's limits; the first time (or when
-        asked to preview) list the files first.
+        """Delete what exceeds a podcast's limits; list the files first
+        before the owner approves those retention settings.
 
         Background checks after downloads never stack a second dialog, never
         raise one over a hidden window, and do not ask again for limits the
@@ -1872,6 +2111,8 @@ class MainWindow(QMainWindow):
             and is_web_url(item.media_url)
             and not (self.downloads is not None and self.downloads.is_active(item.episode_id))
         ]
+        if ids and not self._confirm_bulk(len(ids), "Download"):
+            return
         for episode_id in ids:
             self._download_episode(episode_id, quiet=True)
         if ids:
@@ -2027,7 +2268,7 @@ class MainWindow(QMainWindow):
 
         def work():
             try:
-                return downloads.reconcile_missing()
+                return downloads.reconcile_missing(limit=50)
             finally:
                 self._download_reconcile_inflight = False
 
@@ -2063,17 +2304,57 @@ class MainWindow(QMainWindow):
             else:
                 download_text = "Calculating…"
         artwork_bytes = 0
+        backups_text = "Calculating…"
+        if include_usage:
+            backups = self.library.repository.database.path.parent / "backups"
+            count = total = 0
+            try:
+                for path in backups.glob("*.db"):
+                    if path.is_file() and not path.is_symlink():
+                        total += path.stat().st_size
+                        count += 1
+                backups_text = f"{count} backup{'s' if count != 1 else ''} · {self._format_bytes(total)} — retained for recovery"
+            except OSError:
+                backups_text = "Backup folder unavailable — recovery files retained"
         artwork_path = "—"
         if self.refresh is not None and self.refresh.artwork is not None:
             directory = self.refresh.artwork.directory
             artwork_path = str(directory)
             if include_usage and directory.exists():
-                artwork_bytes = sum(path.stat().st_size for path in directory.iterdir() if path.is_file())
+                artwork_bytes = self.refresh.artwork.usage()[1]
         return (
             data_root, database_path, download_path, download_text, artwork_path,
             self._format_bytes(artwork_bytes) if include_usage else "Calculating…",
             os.environ.get("TMPDIR", "System temporary directory"), str(log_path()),
+            backups_text,
         )
+
+    def _review_orphan_files(self):
+        if self.library is None:
+            return
+        repository = self.library.repository
+        self._run_read(repository.orphan_previews, self._confirm_orphan_retry,
+                       "orphan-preview", coalesce=False)
+
+    def _confirm_orphan_retry(self, previews):
+        if not previews or self.library is None:
+            self._notify("No available, current-library files await removal; unavailable files remain tracked")
+            return
+        dialog = DeleteFilesDialog("Retry files not deleted",
+            "These exact paths were left behind by earlier removals. Other files and unavailable folders are preserved.",
+            previews, self._format_bytes, self)
+        if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
+            return
+        repository = self.library.repository
+        paths = [preview.path for preview in previews]
+        def work():
+            cleared = repository.sweep_orphans(confirmed_paths=paths)
+            return len(cleared), len(repository.orphaned_files())
+        def apply(result):
+            cleared, remaining = result
+            self._notify(f"Cleared {cleared} pending removal record{'s' if cleared != 1 else ''} · {remaining} remain tracked")
+            self._refresh_storage_settings()
+        self._run_command(work, apply, keep=True)
 
     def _open_data_folder(self):
         if self.library is None:
@@ -2109,7 +2390,7 @@ class MainWindow(QMainWindow):
         try:
             self.shortcuts.rebind(name, sequence)
             self.settings_page.shortcut_error.hide()
-            self.navigation.select(self.navigation.current_index)  # refresh tooltips
+            self._refresh_shortcut_hints()
         except Exception as exc:
             self.settings_page.show_shortcut_error(name, str(exc), previous)
 
@@ -2117,6 +2398,18 @@ class MainWindow(QMainWindow):
         self.shortcuts.reset_all()
         self.settings_page.set_shortcuts(self.shortcuts.bindings())
         self._notify("Shortcuts reset to defaults", "success")
+
+    def _refresh_shortcut_hints(self):
+        for widget in self.findChildren(QWidget):
+            tip = widget.toolTip()
+            previous = widget.property('bsFormattedHint')
+            template = widget.property('bsHintTemplate') if tip == previous else tip
+            if template:
+                formatted = self.shortcuts.format_hint(template)
+                widget.setProperty('bsHintTemplate', template)
+                widget.setProperty('bsFormattedHint', formatted)
+                if formatted != tip:
+                    widget.setToolTip(formatted)
 
     # ------------------------------------------------------------------ library
     def _prime_accents(self, artwork_paths=None):
@@ -2161,6 +2454,7 @@ class MainWindow(QMainWindow):
         """All queries and UI conversion for a reload. Artwork tints are cache
         lookups (compute=False); sampling runs in `_prime_accents` on a worker."""
         sample_accents(())  # Load saved tint metadata on this worker.
+        catalog_query, catalog_limit = self._catalog_query, self._catalog_limit
         stored_shows = self.library.shows()
         episode_total = self.library.episode_count()
         stored_episodes = self.library.episodes(limit=self._episodes_limit)
@@ -2189,6 +2483,9 @@ class MainWindow(QMainWindow):
             previews = prepare_saved_previews(paths, limit=32, budget_ms=100)
         return {
             "artwork_previews": previews,
+            'catalog_query': catalog_query, 'catalog_limit': catalog_limit,
+            'catalog_items': self._ui_episodes(self.library.search_episodes(catalog_query, catalog_limit), records) if catalog_query else [],
+            'catalog_total': self.library.search_episode_count(catalog_query) if catalog_query else 0,
             "detail_show_id": detail_show_id,
             "detail_episodes": detail_episodes,
             "stored_shows": stored_shows,
@@ -2248,6 +2545,27 @@ class MainWindow(QMainWindow):
     def _load_more_episodes(self):
         """Widen the global Episodes window by one page (P2-39)."""
         if self._hero_show_id or self._preview_episodes_url or self.library is None:
+            return
+        if self._catalog_query:
+            if self._catalog_timer.isActive():
+                self._catalog_timer.stop()
+                self._requery_library_search()
+                return
+            query, offset = self._catalog_query, len(self._catalog_search_items)
+            self.episode_page.set_load_more_state(True, loading=True, noun='matching episodes')
+            def apply(chunk):
+                if self._catalog_query != query:
+                    return
+                chunk, total = chunk
+                known = {item.episode_id for item in self._catalog_search_items}
+                self._catalog_search_items.extend(item for item in chunk if item.episode_id not in known)
+                self._catalog_total = max(len(self._catalog_search_items), total)
+                if not chunk:
+                    self._catalog_total = len(self._catalog_search_items)
+                self._catalog_limit = max(500, len(self._catalog_search_items))
+                self._display_library_search()
+            self._run_read(lambda: (self._ui_episodes(self.library.search_episodes(query, 500, offset)),
+                                   self.library.search_episode_count(query)), apply, 'catalog-search-more')
             return
         self.episode_page.set_load_more_state(True, loading=True)
         offset = self._episodes_limit
@@ -2331,6 +2649,7 @@ class MainWindow(QMainWindow):
             or self._reload_timer.isActive()
             or self._download_reload_timer.isActive()
             or self.search_overlay._timer.isActive()
+            or self._catalog_timer.isActive()
         )
 
     # Reads that keep a page's data current report a failure on that page;
@@ -2346,7 +2665,11 @@ class MainWindow(QMainWindow):
             return getattr(self, self._PAGE_READS[key])
         if key.startswith(self._BACKGROUND_READS):
             return None
-        return self.pages.currentWidget()
+        if key in {'episodes', 'episodes-more', 'show-open', 'catalog-search', 'catalog-search-more'}:
+            return self.episode_page
+        if key == 'history-more':
+            return self.history_page
+        return None  # Dialog/action/overlay failures belong to feedback, not an unrelated page.
 
     def _run_read(self, work, apply, key: str, pool=None, *, coalesce=True):
         """Run `work()` on a worker, then `apply(result)` on the main thread.
@@ -2406,7 +2729,7 @@ class MainWindow(QMainWindow):
 
         future.add_done_callback(finished)
 
-    def _delete_downloads_async(self, previews, template: str, *, retention_show=None, retention_keep=()):
+    def _delete_downloads_async(self, previews, template: str, *, retention_show=None, retention_keep=(), automatic=False, played_only=False):
         """Unlink confirmed download targets on a worker.
 
         `DownloadService.delete()` stats and unlinks per file; looping it in a
@@ -2418,6 +2741,7 @@ class MainWindow(QMainWindow):
             return
         downloads = self.downloads
         episode_ids = [preview.episode_id for preview in previews]
+        confirmed_paths = {preview.episode_id: {preview.path} for preview in previews}
         playback = self.playback
 
         def work():
@@ -2432,15 +2756,19 @@ class MainWindow(QMainWindow):
             elif playback is not None and playback.snapshot.episode_id in eligible:
                 playback.stop()
             # One file that cannot go must not strand the rest unreported.
-            deleted = freed = failed = 0
+            deleted = freed = failed = protected = 0
             for episode_id in eligible:
                 try:
-                    freed += downloads.delete(episode_id)
+                    freed += downloads.delete(episode_id, confirmed_paths=confirmed_paths[episode_id],
+                                              automatic=automatic or retention_show is not None,
+                                              played_only=played_only)
                     deleted += 1
-                except (DownloadError, OSError):
+                except AutomaticCleanupSkipped:
+                    protected += 1
+                except Exception:
                     logging.getLogger("bs_podcasts").warning("Could not delete the download for episode %s", episode_id, exc_info=True)
                     failed += 1
-            return deleted, freed, failed
+            return deleted, freed, failed, protected
 
         self._run_task("delete-downloads", work, (len(episode_ids), template), pool=self.commands, keep=True)
 
@@ -2500,7 +2828,13 @@ class MainWindow(QMainWindow):
         # still lands. A superseded seek_episode still cancels itself, because
         # the drain runs before finish() retires the current token.
         keep = name in {"seek", "seek_current", "seek_episode", "previous", "skip", "skip_back", "skip_forward"}
-        self._run_command(lambda: getattr(playback, name)(*args, **kwargs), keep=keep)
+        queued_at = time.monotonic()
+        def work():
+            if name in {"play", "pause", "play_pause", "stop", "next", "previous"}:
+                logging.getLogger("bs_podcasts").info(
+                    "Playback command started: action=%s queued=%.3fs", name, time.monotonic() - queued_at)
+            return getattr(playback, name)(*args, **kwargs)
+        self._run_command(work, keep=keep)
 
     def _on_command(self, kind, apply, result):
         if result.status in {JobStatus.OK, JobStatus.EMPTY}:
@@ -2534,7 +2868,7 @@ class MainWindow(QMainWindow):
                 last = float(self.library.setting("updates.last_check", "0"))
             except (TypeError, ValueError):
                 last = 0.0
-            if time.time() - last < 24 * 60 * 60:
+            if 0 <= time.time() - last < 24 * 60 * 60:
                 return
         self.settings_page.set_update_status("Checking…")
         self._run_task("update-check", lambda: __import__("bs_podcasts.services.updates", fromlist=["check_for_update"]).check_for_update(app_version()), manual)
@@ -2543,7 +2877,16 @@ class MainWindow(QMainWindow):
         if self.library is None:
             return
         self.settings_page.set_database_status("Checking…")
-        self._run_task("database-health", self.library.repository.database.check_integrity)
+        from ..data.database import is_corruption_error
+        database = self.library.repository.database
+        def work():
+            try:
+                return database.check_integrity()
+            except Exception as exc:
+                if is_corruption_error(exc):
+                    return {'problem': str(exc)}
+                raise
+        self._run_task("database-health", work)
 
     def _database_maintenance(self, operation: str):
         if self.library is None:
@@ -2624,13 +2967,15 @@ class MainWindow(QMainWindow):
         """Run one page's update so its failure stays on that page: the error
         is logged and shown on that page's banner (`page` None: logged only),
         and the updates after it still run."""
+        outcome = {"ok": False}
         try:
-            yield
+            yield outcome
+            outcome["ok"] = True
         except Exception as exc:
             logging.getLogger("bs_podcasts").exception("Updating %s failed", what)
             banner = getattr(page, "banner", None)
             if banner is not None:
-                banner.show_state("error", f"Couldn't show {what}: {exc or type(exc).__name__}")
+                self._show_page_error(page, f"Couldn't show {what}: {exc or type(exc).__name__}")
 
     def _reload_library(self, data=None):
         if self.library is None:
@@ -2660,6 +3005,7 @@ class MainWindow(QMainWindow):
         # refresh finished.
         with self._page_guard(self.podcast_page, "your podcasts"):
             self.podcast_page.set_items(shows, preserve_scroll=True)
+            self._finish_page_load(self.podcast_page)
         # A library-wide background reload must not replace a podcast detail
         # view (or an unsubscribed preview) with the global episode list.
         self._episode_total = data["episode_total"]
@@ -2677,7 +3023,13 @@ class MainWindow(QMainWindow):
             if shrunk:
                 self._history_generation += 1
         with self._page_guard(self.episode_page, "episodes"):
-            if not self._hero_show_id and not self._preview_episodes_url:
+            if self._catalog_query:
+                if data.get('catalog_query') == self._catalog_query and data.get('catalog_limit') == self._catalog_limit:
+                    self._catalog_search_items = data['catalog_items']
+                    self._catalog_total = data['catalog_total']
+                    self._catalog_cache_query = self._catalog_query
+                    self._display_library_search()
+            elif not self._hero_show_id and not self._preview_episodes_url:
                 self.episode_page.set_items(episodes)
                 # The global view is windowed for responsiveness; say how much is
                 # shown and offer the rest instead of silently hiding the tail
@@ -2691,7 +3043,9 @@ class MainWindow(QMainWindow):
                     self.episode_page.set_items(detail, preserve_scroll=True)
                 else:
                     self._apply_all_episodes(episodes)
-        with self._page_guard(self.home_page, "Home"):
+            if not self._preview_episodes_url:
+                self._finish_page_load(self.episode_page)
+        with self._page_guard(self.home_page, "Home") as home_sections:
             resume_ids = {episode.episode_id for episode in in_progress[:3]}
             unplayed = [episode for episode in episodes if not episode.played and episode.state != "In progress" and episode.episode_id not in resume_ids]
             fresh = [episode for episode in unplayed if episode.is_new]
@@ -2714,9 +3068,11 @@ class MainWindow(QMainWindow):
         new_total = sum(show.new_count for show in stored_shows)
         self._new_episode_total = new_total
         show_count = len(stored_shows)
-        with self._page_guard(self.home_page, "Home"):
+        with self._page_guard(self.home_page, "Home") as home_counts:
             self.home_page.set_counts(new_total, len(queued), active_downloads)
             self.home_page.set_empty_context(bool(stored_shows))
+        if home_sections['ok'] and home_counts['ok']:
+            self._finish_page_load(self.home_page)
         with self._page_guard(None, "the navigation counts"):
             self.navigation.set_badge(PAGE_EPISODES, new_total)
             self.navigation.set_badge(PAGE_QUEUE, len(queued))
@@ -2841,7 +3197,7 @@ class MainWindow(QMainWindow):
         menu.addAction(icons.icon("refresh", COLORS["text"], 16), "Refresh all podcasts", self._refresh_all)
         self._add_resume_suspended_action(menu)
         menu.addAction(icons.icon("external", COLORS["text"], 16), "Export OPML…", self._export_opml)
-        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+        exec_menu(menu, button.mapToGlobal(button.rect().bottomLeft()))
 
     def _add_resume_suspended_action(self, menu):
         suspended = sum(1 for show in self._stored_shows if show.suspended)
@@ -2862,14 +3218,26 @@ class MainWindow(QMainWindow):
         library = self.library
 
         def work():
+            resumed, failed = [], 0
             for show_id in ids:
-                library.rearm(show_id)
-            return len(ids)
+                try:
+                    library.rearm(show_id)
+                    resumed.append(show_id)
+                except Exception:
+                    failed += 1
+                    logging.getLogger('bs_podcasts').warning('Could not resume podcast %s', show_id, exc_info=True)
+            return resumed, failed
 
-        def apply(count):
+        def apply(outcome):
+            resumed, failed = outcome
+            count = len(resumed)
             self._request_reload()
-            self._notify(f"Resumed {count} podcast{'s' if count != 1 else ''} — refreshing them now", "success")
-            self._refresh_shows([SimpleNamespace(id=show_id) for show_id in ids])
+            message = f"Resumed {count} podcast{'s' if count != 1 else ''}"
+            if failed:
+                message += f"; {failed} could not be resumed"
+            self._notify(message, "error" if failed else "success")
+            if resumed:
+                self._refresh_shows([SimpleNamespace(id=show_id) for show_id in resumed])
 
         self._run_command(work, apply)
 
@@ -2897,7 +3265,7 @@ class MainWindow(QMainWindow):
         if result.status != JobStatus.OK:
             self._notify(result.message or 'OPML import failed', 'error')
             return
-        added = result.value or []
+        added = result.value if result.value is not None else []
         self._request_reload()
         if added:
             # Joins a running batch; nothing starts while background work is
@@ -2905,7 +3273,14 @@ class MainWindow(QMainWindow):
             self._refresh_shows(added, quiet=True)
         if added and self._refresh_batch[0]:
             self.podcast_page.banner.show_state("loading", f"Imported {len(added)} podcast{'s' if len(added) != 1 else ''} — fetching episodes in the background…")
-        self._notify(f"Imported {len(added)} subscription{'s' if len(added) != 1 else ''}", "success")
+        message = f"Imported {len(added)} subscription{'s' if len(added) != 1 else ''}"
+        skipped = getattr(added, 'skipped', 0)
+        errors = getattr(added, 'errors', ())
+        if skipped:
+            message += f" · {skipped} skipped (already saved or unsupported)"
+        if errors:
+            message += f" · {len(errors)} failed: {errors[0]}"
+        self._notify(message, "error" if errors else "success")
 
     def _export_opml(self):
         if self.library is None:
@@ -3011,19 +3386,30 @@ class MainWindow(QMainWindow):
     # before, and only its own episode rows.
     def _dropped_payload(self, mime):
         if mime.hasUrls():
-            audio = []
+            audio, opml, feeds, unsupported = [], [], [], 0
             for url in mime.urls():
                 if url.isLocalFile():
                     path = url.toLocalFile()
                     suffix = Path(path).suffix.lower()
-                    if suffix in (".opml", ".xml") and not audio:
-                        return ("opml", path)
-                    if suffix in self.AUDIO_SUFFIXES:
+                    if suffix in (".opml", ".xml"):
+                        opml.append(path)
+                    elif suffix in self.AUDIO_SUFFIXES:
                         audio.append(path)  # every dropped audio file, not just the first
-                elif url.scheme() in ("http", "https") and not audio:
-                    return ("feed", url.toString())
+                    else:
+                        unsupported += 1
+                elif url.scheme().lower() in ("http", "https"):
+                    feeds.append(url.toString())
+                else:
+                    unsupported += 1
+            kinds = sum(bool(values) for values in (audio, opml, feeds))
+            if kinds and (kinds > 1 or unsupported or len(opml) > 1 or len(feeds) > 1):
+                return ('mixed', 'This drop mixes input types or includes unsupported items. Drop audio files together, or one feed URL/OPML file at a time. Nothing was imported.')
             if audio:
                 return ("audio", audio)
+            if opml:
+                return ('opml', opml[0])
+            if feeds:
+                return ('feed', feeds[0])
         text = mime.text().strip() if mime.hasText() else ""
         if text.startswith(("http://", "https://")) and " " not in text:
             return ("feed", text)
@@ -3048,11 +3434,18 @@ class MainWindow(QMainWindow):
             return
         event.acceptProposedAction()
         kind, value = payload
-        if kind == "opml":
+        if kind == 'mixed':
+            self._notify(value, 'info')
+        elif kind == "opml":
             self._import_opml_path(value)
         elif kind == "audio":
             self._import_local_audio_paths(value)
         else:
+            dialog = ConfirmDialog('Subscribe to this podcast?',
+                f'This will add {feed_label(value)} and contact its feed server to fetch episodes.',
+                'Subscribe', parent=self)
+            if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
+                return
             self._add_podcast_url(value)
 
     def _add_podcast_url(self, feed_url: str):
@@ -3080,6 +3473,48 @@ class MainWindow(QMainWindow):
 
         self._run_read(work, apply, "add-feed-url", pool=self.commands, coalesce=False)
 
+    def _confirm_incoming_file_args(self, paths):
+        """Incoming file arguments are requests, never permission to read them."""
+        if self._closed:
+            return False
+        if not isinstance(paths, (list, tuple)) or not 1 <= len(paths) <= 10:
+            self._notify('Open one to ten supported audio or OPML files at a time.', 'error')
+            return False
+        from ..urlguard import ensure_media_source, UnsafeUrl
+        checked = []
+        for path in paths:
+            if not isinstance(path, str) or not path or path.startswith('-') or any(ord(character) < 32 for character in path):
+                self._notify('A file argument is invalid; nothing was imported.', 'error')
+                return False
+            try:
+                source = ensure_media_source(path, 'File argument')
+            except UnsafeUrl:
+                self._notify('Use local audio or OPML paths, not URLs or network shares.', 'error')
+                return False
+            if is_web_url(source) or Path(path).suffix.lower() not in (*self.AUDIO_SUFFIXES, '.opml', '.xml'):
+                self._notify('Only supported local audio and OPML files can be imported.', 'error')
+                return False
+            checked.append(path)
+        try:
+            bounded = len(json.dumps(checked, ensure_ascii=False).encode('utf-8')) <= 8192
+        except UnicodeError:
+            bounded = False
+        if not bounded:
+            self._notify('File arguments exceed the supported message size; nothing was imported.', 'error')
+            return False
+        dialog = ConfirmDialog('Import these files?',
+            '\n'.join(checked) + '\n\nAudio is imported without autoplay. OPML adds subscriptions and may contact their feed servers after confirmation.',
+            'Import', parent=self)
+        if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
+            return False
+        audio = [path for path in checked if Path(path).suffix.lower() in self.AUDIO_SUFFIXES]
+        if audio:
+            self._import_local_audio_paths(audio)
+        for path in checked:
+            if Path(path).suffix.lower() in ('.opml', '.xml'):
+                self._import_opml_path(path)
+        return True
+
     def _subscribe_url(self, feed_url: str):
         if self.library is None:
             return
@@ -3103,7 +3538,7 @@ class MainWindow(QMainWindow):
         def apply(outcome):
             show, error = outcome
             if show is None:
-                self.discover_page.banner.show_state("error", error)
+                self._notify(error or "Could not subscribe to this podcast", "error")
                 return
             self._request_reload()
             self._submit_refresh(show.id)
@@ -3148,10 +3583,10 @@ class MainWindow(QMainWindow):
         self.navigation.select(PAGE_EPISODES)
 
     def _show_episodes_nav_menu(self, global_position):
-        self._create_episodes_nav_menu().exec(global_position)
+        exec_menu(self._create_episodes_nav_menu(), global_position)
 
     def _show_navigation_menu(self, index: int, global_position):
-        self._create_navigation_menu(index).exec(global_position)
+        exec_menu(self._create_navigation_menu(index), global_position)
 
     def _create_navigation_menu(self, index: int):
         if index == PAGE_EPISODES:
@@ -3234,17 +3669,7 @@ class MainWindow(QMainWindow):
             library, repository = self.library, self.library.repository
 
             def work():
-                # Snapshot in the same command, so Undo restores exactly the
-                # badges this cleared (in chunks: an import can add thousands).
-                ids = repository.new_episode_ids()
-                rows = {}
-                for start in range(0, len(ids), 500):
-                    rows.update(repository.episodes_by_ids(ids[start:start + 500]))
-                library.clear_all_new(False)
-                # The played-state snapshot contract: Undo re-badges only rows
-                # nothing has played or changed since.
-                return [((e.id, e.show_id, e.external_id, e.played, True, e.position_seconds, e.last_played),
-                         (e.played, False, e.position_seconds, e.last_played)) for e in rows.values() if e.is_new]
+                return repository.clear_new_with_undo()
 
             def apply(changes):
                 self._request_reload()
@@ -3290,11 +3715,15 @@ class MainWindow(QMainWindow):
                     self._open_podcast(self._ui_podcast(show), select_episode_id)
                 finally:
                     self._history_navigation = old_history
+            else:
+                self._episode_navigation_restore = None
+                self._notify("That podcast is no longer in your library", "info")
         self._run_read(lambda: (repository.get_show(show_id),), apply, "show-open")
 
     def _episode_navigation_entry(self):
         page = self.episode_page
         return {'episode_view': True, 'show_id': self._hero_show_id,
+                'catalog_query': self._catalog_query, 'catalog_limit': self._catalog_limit,
                 'query': page.header.search.text(), 'filter': page._filter, 'sort': page._sort,
                 'scroll': page.scroll_position(), 'scroll_units': 'items', 'current': page._current_key(),
                 'selected': page._selected_keys()}
@@ -3327,11 +3756,17 @@ class MainWindow(QMainWindow):
         page._apply_filters(restore_key=tuple(saved['current']) if saved['current'] else None,
                             preserve_scroll=True, selected_keys=saved['selected'])
         revision = page._scroll_restore_revision
-        value = page.saved_scroll_value(saved)
+        value = min(2**31 - 1, page.saved_scroll_value(saved))
         self._later(0, lambda: page.view.verticalScrollBar().setValue(value)
                     if revision == page._scroll_restore_revision else None)
 
     def _open_podcast(self, podcast, select_episode_id: int = 0):
+        if self._catalog_query and self.pages.currentIndex() == PAGE_EPISODES and not self._history_navigation:
+            entry = self._episode_navigation_entry()
+            if not self._back_stack or self._back_stack[-1] != entry:
+                self._back_stack.append(entry)
+            self._forward_stack.clear()
+        self._leave_library_search()
         self._pending_episodes_url = ""
         self._read_tokens["show-open"] = self._read_tokens.get("show-open", 0) + 1
         if not self._restoring_view:
@@ -3403,7 +3838,7 @@ class MainWindow(QMainWindow):
             if episodes:
                 self._play_or_toggle(episodes[0].id)
             else:
-                self.podcast_page.banner.show_state("partial", "This podcast has no playable episodes yet.")
+                self._notify("This podcast has no playable episodes yet.", "info")
         self._run_read(lambda: library.episodes(show_id=show_id, limit=1), apply, "play-latest")
 
     def _podcast_menu(self, podcast, global_position):
@@ -3442,12 +3877,12 @@ class MainWindow(QMainWindow):
             menu.addAction(icons.icon("external", COLORS["text"], 16), "Open website", lambda: self._open_url(website))
         if podcast.feed_url:
             menu.addAction(icons.icon("rss", COLORS["text"], 16), "Copy feed URL", lambda: QApplication.clipboard().setText(podcast.feed_url))
-        menu.exec(global_position)
+        exec_menu(menu, global_position)
 
     def _episode_menu(self, episode, global_position):
         menu = self._create_episode_menu(episode)
         if menu is not None:
-            menu.exec(global_position)
+            exec_menu(menu, global_position)
 
     def _stored_show(self, show_id):
         """A show from the library mirror. Only one the last reload has not
@@ -3530,11 +3965,13 @@ class MainWindow(QMainWindow):
             episode, show = data
             if episode is not None:
                 self._show_episode_information(self._ui_episode(episode), show)
+            else:
+                self._notify("That episode is no longer in your library", "info")
 
         self._run_read(work, apply, "playing-information")
 
     def _show_search_result_menu(self, payload, global_position):
-        self._create_search_result_menu(payload).exec(global_position)
+        exec_menu(self._create_search_result_menu(payload), global_position)
 
     def _create_search_result_menu(self, payload):
         kind, value = payload
@@ -3578,9 +4015,10 @@ class MainWindow(QMainWindow):
         copy.addSeparator()
         copy.addAction(
             "All episode information",
-            lambda: QApplication.clipboard().setText(
-                episode_information_text(episode, show, self._format_bytes)
-            ),
+            lambda: self._run_read(
+                lambda: episode_information_text(episode, show, self._format_bytes),
+                lambda text: (QApplication.clipboard().setText(text), self._notify("Episode information copied")),
+                "copy-episode-information", coalesce=False),
         )
 
     def _create_episode_menu(self, episode):
@@ -3626,6 +4064,8 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
             play = menu.addAction(icons.icon("play", COLORS["text"], 16), "Resume" if 0 < episode.progress < 1 else "Play", lambda: self._play_episode(episode.episode_id))
             play.setShortcut(QKeySequence(Qt.Key.Key_Return))
+            menu.addAction(icons.icon("external", COLORS["text"], 16), "Open in external player…",
+                           lambda: self._open_external_episode(episode.episode_id))
         menu.addAction(
             icons.icon("favorite", COLORS["accent"] if episode.favorite else COLORS["text"], 16),
             "Remove from favorites" if (not many and episode.favorite) else "Add to favorites",
@@ -3806,10 +4246,28 @@ class MainWindow(QMainWindow):
             return []
         limit = show.auto_download_limit or self._int_setting("downloads.auto_limit", 3, 1, 10)
         active = {record.episode_id for record in self.downloads.records()}
-        candidates = [
-            episode for episode in self.library.episodes(show_id=show_id, limit=limit * 3)
-            if episode.is_new and not episode.downloaded_path and episode.id not in active and episode.media_url
-        ][:limit]
+        recent = self.library.episodes(show_id=show_id, limit=max(limit * 3, show.retention_keep or 0))
+        candidates, ordinary_rank = [], 0
+        cutoff = time.time() - max(0, show.retention_days or 0) * 86400
+        for episode in recent:
+            protected = episode.favorite or (episode.position_seconds > 0 and not episode.played)
+            if not episode.favorite:
+                ordinary_rank += 1
+            if not protected and show.retention_keep and ordinary_rank > show.retention_keep:
+                continue
+            if not protected and show.retention_days:
+                try:
+                    parsed = datetime.fromisoformat(episode.published_at.replace('Z', '+00:00'))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    if parsed.timestamp() < cutoff:
+                        continue
+                except (ValueError, TypeError, OverflowError, OSError):
+                    pass  # Unknown dates cannot justify excluding a new episode.
+            if episode.is_new and not episode.downloaded_path and episode.id not in active and episode.media_url:
+                candidates.append(episode)
+            if len(candidates) >= limit:
+                break
         return [episode.id for episode in candidates]
 
     def _start_auto_downloads(self, candidates):
@@ -4027,32 +4485,46 @@ class MainWindow(QMainWindow):
         return item
 
     def _apply_episode_artwork(self, item):
-        key = (item.episode_id, item.artwork_url)
-        self._episode_artwork_resolved[key] = (item.artwork_path, item.episode_artwork_path, item.accent)
-        self._episode_artwork_resolved.move_to_end(key)
+        pending = self.__dict__.setdefault("_pending_episode_artwork", {})
+        pending[(item.episode_id, item.artwork_url)] = item
+        if not getattr(self, "_episode_artwork_apply_scheduled", False):
+            self._episode_artwork_apply_scheduled = True
+            self._later(16, self._flush_episode_artwork)
+
+    def _flush_episode_artwork(self):
+        self._episode_artwork_apply_scheduled = False
+        changes, self._pending_episode_artwork = getattr(self, "_pending_episode_artwork", {}), {}
+        if self._closed or not changes:
+            return
+        for key, item in changes.items():
+            self._episode_artwork_resolved[key] = (item.artwork_path, item.episode_artwork_path, item.accent)
+            self._episode_artwork_resolved.move_to_end(key)
         while len(self._episode_artwork_resolved) > 2048:
             self._episode_artwork_resolved.popitem(last=False)
         def update(current):
-            if (current.episode_id, current.artwork_url) != key:
+            item = changes.get((current.episode_id, current.artwork_url))
+            if item is None:
                 return current
             return replace_item(current, artwork_path=item.artwork_path,
                                 episode_artwork_path=item.episode_artwork_path, accent=item.accent)
         for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.bookmark_page, self.history_page):
             page._all_items = [update(current) for current in page._all_items]
-            page.model.update_artwork(*key, item.artwork_path, item.episode_artwork_path, item.accent)
+            page.model.update_artwork_batch(changes)
         queue_model = self.context.queue_view.model()
         if queue_model is not None:
-            queue_model.update_artwork(*key, item.artwork_path, item.episode_artwork_path, item.accent)
+            queue_model.update_artwork_batch(changes)
         self._all_episode_items = [update(current) for current in self._all_episode_items]
+        self._catalog_search_items = [update(current) for current in getattr(self, "_catalog_search_items", ())]
         self._history_items_shown = [update(current) for current in self._history_items_shown]
         if self._last_library_data is not None:
             for name in ('episodes', 'detail_episodes', 'in_progress', 'queued', 'history'):
                 self._last_library_data[name] = [update(current) for current in self._last_library_data.get(name, ())]
         with self._convert_lock:
-            self._ui_episode_cache.pop(item.episode_id, None)
+            for episode_id, _url in changes:
+                self._ui_episode_cache.pop(episode_id, None)
             self._convert_revision += 1
         current = self.context._current_item
-        if isinstance(current, UiEpisode) and (current.episode_id, current.artwork_url) == key:
+        if isinstance(current, UiEpisode) and (current.episode_id, current.artwork_url) in changes:
             self._refresh_context_item(current, update(current))
 
     def _delete_played_quietly(self, episode_ids=None, confirm=False):
@@ -4067,13 +4539,8 @@ class MainWindow(QMainWindow):
         downloads = self.downloads
         wanted = None if episode_ids is None else set(episode_ids)
 
-        # played_previews() stats every completed-and-played download; on a
-        # large library that is a filesystem walk, and this runs from ordinary
-        # playback-state changes.
         def work():
-            previews = downloads.played_previews()
-            if wanted is not None:
-                previews = [p for p in previews if p.episode_id in wanted]
+            previews = downloads.played_previews(episode_ids=wanted)
             return previews, confirm and bool(previews)
 
         self._run_task("played-previews", work)
@@ -4113,10 +4580,34 @@ class MainWindow(QMainWindow):
         elif state == "paused":
             menu.addAction(icons.icon("play", COLORS["text"], 16), "Resume download", lambda: self._download_episode(episode_id))
             menu.addAction(icons.icon("close", COLORS["text"], 16), "Discard paused download", lambda: self._discard_download(episode_id))
-        else:
+        elif state == "complete" and item.downloaded_path:
             menu.addAction(icons.icon("folder", COLORS["text"], 16), "Open file location", lambda: self._open_location(item.downloaded_path))
             menu.addAction(icons.icon("trash", COLORS["text"], 16), "Remove download", lambda: self._delete_downloads([item]))
-        menu.exec(global_position)
+            if not getattr(record, "length_verified", False):
+                menu.addAction("Verify download length…", lambda: self._verify_download_length(episode_id))
+        else:
+            menu.addAction(icons.icon("download", COLORS["text"], 16), "Download episode", lambda: self._download_episode(episode_id))
+        exec_menu(menu, global_position)
+
+    def _open_external_episode(self, episode_id: int):
+        if self.playback is None or not episode_id:
+            return
+        playback = self.playback
+        self._run_command(lambda: playback.open_external(episode_id),
+                          lambda _result: self._notify("Opened audio with your system's default handler"))
+
+    def _verify_download_length(self, episode_id: int):
+        if self.downloads is None or not episode_id:
+            return
+        downloads = self.downloads
+        self._notify("Verifying download length…")
+        def apply(verified):
+            self._reload_downloads()
+            self._notify("Download length verified" if verified else
+                         "Length could not be confirmed; this file remains protected from automatic cleanup",
+                         "success" if verified else "info")
+        self._run_read(lambda: downloads.verify_length(episode_id), apply,
+                       f"verify-download-{episode_id}", coalesce=False)
 
     def _discard_download(self, episode_id: int):
         """Clear a failed or paused download so the row is plain again."""
@@ -4270,7 +4761,7 @@ class MainWindow(QMainWindow):
         menu.addAction(icons.icon("play", COLORS["text"], 16), f"Play from {self.player._time(seconds)}", lambda: self._play_bookmark(item))
         menu.addAction("Rename bookmark…", lambda: self._rename_bookmark(item))
         menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete bookmark", lambda: self._delete_bookmarks([item]))
-        menu.exec(global_position)
+        exec_menu(menu, global_position)
 
     def _rename_bookmark(self, item):
         if self.listening is None or not item.bookmark_id:
@@ -4488,16 +4979,28 @@ class MainWindow(QMainWindow):
         if self.library is None or not episode_id:
             return
         library = self.library
-        def apply(_result):
+        def apply(added):
             self._reload_queue()
             if not quiet:
-                self._notify("Added to Up Next", "success", "Show", self._show_queue)
+                self._notify("Added to Up Next" if added else "Already in Up Next", "success" if added else "info", "Show", self._show_queue)
         self._run_command(lambda: library.enqueue(episode_id), apply)
 
     def _queue_reordered(self, episode_ids: list[int]):
         if self.library is not None:
             library, ids = self.library, list(episode_ids)
             self._run_command(lambda: library.reorder_queue(ids), lambda _: self._reload_queue())
+
+    def _queue_keyboard_menu(self):
+        view = self.context.queue_view
+        index = view.currentIndex()
+        item = index.data(ItemRoles.ITEM) if index.isValid() else None
+        if item is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("Go to podcast", lambda: self._open_show_id(item.show_id))
+        menu.addAction("Remove from Up Next", lambda: self._remove_from_queue(item.episode_id))
+        menu.addAction("Clear queue…", self._clear_queue)
+        exec_menu(menu, view.viewport().mapToGlobal(view.visualRect(index).center()))
 
     def _play_pause(self):
         self._play_after_download = 0
@@ -4527,19 +5030,21 @@ class MainWindow(QMainWindow):
         if snapshot.episode_id is None:
             return
         finder = self.listening.next_chapter if direction > 0 else self.listening.previous_chapter
-        playback, commands = self.playback, self.commands
-        token = commands.supersede() if commands else None
+        playback = self.playback
+        identity = playback.current_identity()
         def work():
-            chapter = finder(snapshot.episode_id, float(snapshot.position))
-            if commands is not None and not commands.current(token):
+            if playback.current_identity() != identity:
                 return ""
+            if str(playback.snapshot.state) == 'loading':
+                return "This episode is still opening; try the chapter control when it is ready."
+            chapter = finder(snapshot.episode_id, float(snapshot.position))
             if chapter is None:
                 return "No next chapter" if direction > 0 else "No previous chapter"
-            if playback.snapshot.episode_id == snapshot.episode_id:
-                playback.seek(float(chapter.start_seconds))
+            if playback.current_identity() == identity:
+                playback.seek_current(identity, float(chapter.start_seconds))
                 return chapter.title
             return ""
-        self._run_command(work, lambda message: self._notify(message) if message else None)
+        self._run_command(work, lambda message: self._notify(message) if message else None, keep=True)
 
     def _seek(self, seconds: float):
         if self.playback is not None:
@@ -4936,6 +5441,7 @@ class MainWindow(QMainWindow):
         value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", value or "")
         value = re.sub(r"\s+", " ", value).strip(" .")
         value = value[:120].rstrip(" .") or fallback
+        value = value.encode('utf-8')[:200].decode('utf-8', 'ignore').rstrip(' .') or fallback
         if re.fullmatch(r"(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])", value.split(".")[0]):
             value = "_" + value
         return value
@@ -4963,7 +5469,7 @@ class MainWindow(QMainWindow):
             show_dir.mkdir(parents=True, exist_ok=True)
             date = (item.published_at or "")[:10]
             stem = self._safe_filename(f"{date} {item.title}".strip(), f"Episode {item.episode_id}")
-            suffix = source.suffix or ".media"
+            suffix = source.suffix if source.suffix and len(source.suffix.encode('utf-8')) <= 20 else '.media'
             target = show_dir / f"{stem}{suffix}"
             counter = 2
             descriptor, temporary_name = tempfile.mkstemp(prefix=".export-", suffix=".tmp", dir=show_dir)
@@ -4972,10 +5478,14 @@ class MainWindow(QMainWindow):
             try:
                 with os.fdopen(descriptor, "wb") as output, source.open("rb") as input_file:
                     copy_chunks(input_file, output)
+                    if _QUITTING.is_set():
+                        raise Cancelled
                     output.flush()
                     os.fsync(output.fileno())
                 shutil.copystat(source, temporary)
                 while True:
+                    if _QUITTING.is_set():
+                        raise Cancelled
                     try:
                         with target.open("xb"):
                             pass
@@ -4994,10 +5504,11 @@ class MainWindow(QMainWindow):
             return str(target)
 
         def work():
-            copied, failed, left = [], [], 0
+            copied, failed, left, skipped = [], [], 0, []
             for position, item in enumerate(snapshots):
                 source = Path(item.downloaded_path)
                 if not source.is_file():
+                    skipped.append(item.title or source.name)
                     continue
                 try:
                     if _QUITTING.is_set():
@@ -5010,7 +5521,7 @@ class MainWindow(QMainWindow):
                     # One unreadable file or a full drive must not hide what
                     # was already copied.
                     failed.append(f"{source.name}: {exc.strerror or exc}")
-            return {"copied": copied, "failed": failed, "left": left}
+            return {"copied": copied, "failed": failed, "left": left, "skipped": skipped}
 
         self._notify("Exporting media…")
         self._run_task("export-downloads", work, str(target_root), pool=self._export_pool())
@@ -5135,9 +5646,12 @@ class MainWindow(QMainWindow):
             detail = f"{self._format_bytes(record.bytes_total)} on disk"
         elif record.error_message:
             detail = record.error_message
+        if state == "Downloaded" and not getattr(record, "length_verified", False):
+            detail += ("  ·  " if detail else "") + "Length unverified — automatic cleanup keeps this file"
         return replace_item(
             item, progress=(record.bytes_done / record.bytes_total) if record.bytes_total and state != "Downloaded" else 0.0,
             state=state, detail=detail, downloaded_path=record.target_path if state == "Downloaded" else "",
+            length_verified=getattr(record, "length_verified", False) if state == "Downloaded" else None,
         )
 
     def _apply_download_items(self, payload):
@@ -5234,8 +5748,7 @@ class MainWindow(QMainWindow):
         loading = page in self._pages_loading
         self._pages_loading.discard(page)
         if error:
-            if loading:
-                self._show_page_error(page, error)
+            self._show_page_error(page, error)
             return
         if loading and page.banner.state == "loading":
             page.banner.clear()
@@ -5295,8 +5808,10 @@ class MainWindow(QMainWindow):
             values = json.loads(self.library.setting("discover.search_history", "[]"))
         except (TypeError, ValueError, json.JSONDecodeError):
             values = []
+        if not isinstance(values, list):
+            values = []
         self._discover_search_history = [
-            str(value).strip() for value in values if str(value).strip()
+            value.strip() for value in values if isinstance(value, str) and value.strip()
         ][:10]
 
     def _save_discover_search_history(self):
@@ -5324,7 +5839,7 @@ class MainWindow(QMainWindow):
     def _show_discover_search_history(self):
         menu = self._create_discover_search_history_menu()
         field = self.discover_page.header.search
-        menu.exec(field.mapToGlobal(field.rect().bottomLeft()))
+        exec_menu(menu, field.mapToGlobal(field.rect().bottomLeft()))
 
     def _create_discover_search_history_menu(self):
         menu = QMenu(self)
@@ -5641,8 +6156,7 @@ class MainWindow(QMainWindow):
         self._directory_waiting = None
         def work():
             from ..netlimits import request_scope, Deadline
-            with request_scope(cancel):
-                Deadline(60).remaining()
+            with request_scope(cancel, deadline=Deadline(60, cancel)):
                 snapshot = self._discover_snapshot_cache.load(
                     request[0], request[1], getattr(self.refresh, "artwork", None)
                 )
@@ -5728,8 +6242,7 @@ class MainWindow(QMainWindow):
             self._directory_artwork_active.add(identity)
             def work(url=url, cancel=cancel):
                 from ..netlimits import request_scope, Deadline
-                with request_scope(cancel):
-                    Deadline(60).remaining()
+                with request_scope(cancel, deadline=Deadline(60, cancel)):
                     before = cache.signature(cache.path_for(url))
                     path = str(cache.fetch(url))
                     changed = before != cache.signature(Path(path))
@@ -5816,8 +6329,12 @@ class MainWindow(QMainWindow):
 
     def _refresh_episode_view(self):
         """Refresh the scope represented by the Episodes page."""
+        if self._catalog_query:
+            self._show_library_search(self._catalog_query, navigate=False, limit=self._catalog_limit, force=True)
+            return
         if self._hero_show_id:
             if self.jobs is None or getattr(self.refresh, "refresh", None) is None:
+                self._notify("Feed refresh is unavailable in this session", "info")
                 return
             if self._submit_refresh(self._hero_show_id):
                 self.episode_page.banner.show_state("loading", "Refreshing this podcast…")
@@ -5850,7 +6367,7 @@ class MainWindow(QMainWindow):
         elif self._submit_refresh(show_id):
             self.podcast_page.banner.show_state("loading", "Refreshing this podcast…")
         else:
-            self.podcast_page.banner.clear()
+            self._podcast_banner_show_id = show_id
             self._notify("This podcast is already refreshing")
 
     def _refresh_all(self):
@@ -5923,8 +6440,10 @@ class MainWindow(QMainWindow):
             'library-changed': lambda *_: self._request_reload(),
             'opml-import': self._on_opml_import,
             "command": self._on_command,
+            'settings-save': self._on_settings_save,
             "unsubscribe-preview": self._on_unsubscribe_preview,
             "unsubscribe": self._on_unsubscribe,
+            'unsubscribe-ready': self._on_unsubscribe_ready,
             "discard-download": self._on_discard_download,
             "delete-downloads": self._on_delete_downloads,
             "played-previews": self._on_played_previews,
@@ -5968,8 +6487,12 @@ class MainWindow(QMainWindow):
             self._confirm_unsubscribe(identifier, result.value)
         elif result.status != JobStatus.OK:
             self._notify(result.message or "Could not read what would be removed", "error")
+        else:
+            self._request_reload()
+            self._notify("That podcast is already gone from the library", "info")
         return
     def _on_unsubscribe(self, kind, identifier, result):
+        self._retained_removals.discard(identifier)
         self._request_reload()
         self._refresh_storage_settings()
         if result.status != JobStatus.OK:
@@ -5996,10 +6519,15 @@ class MainWindow(QMainWindow):
         self._request_reload()
         self._refresh_storage_settings()
         if result.status == JobStatus.OK:
-            count, freed, failed = result.value
+            count, freed, failed, *extra = result.value
+            protected = extra[0] if extra else 0
             message = template.format(count=count, plural="" if count == 1 else "s", size=self._format_bytes(freed))
             if not count and not failed:
-                return  # a re-check found nothing left to remove
+                message = f"Kept {protected} protected download{'s' if protected != 1 else ''}" if protected else "No downloads were deleted; the eligible targets changed."
+                self._notify(message, "info")
+                return
+            if protected:
+                message += f" · {protected} protected and kept"
             if failed and not count:
                 self._notify(f"Could not delete {failed} download{'s' if failed != 1 else ''}", "error")
             elif failed:
@@ -6021,7 +6549,7 @@ class MainWindow(QMainWindow):
         if confirm:
             dialog = DeleteFilesDialog(
                 "Delete played downloads",
-                "Downloads for episodes you've finished. Episodes stay in your library.",
+                "Verified downloads for finished episodes. Favorites and unverified files are protected; episodes stay in your library.",
                 previews, self._format_bytes, self,
             )
             if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
@@ -6030,6 +6558,7 @@ class MainWindow(QMainWindow):
             previews,
             "Deleted {count} download{plural}  ·  {size} reclaimed" if confirm
             else "Removed {count} played download{plural}  ·  {size} reclaimed",
+            automatic=True, played_only=True,
         )
         return
     def _on_statistics(self, kind, identifier, result):
@@ -6118,28 +6647,31 @@ class MainWindow(QMainWindow):
         if result.status == JobStatus.OK and result.value == "ok":
             self.settings_page.set_database_status("Healthy · quick check passed")
             self._persist_ui_settings({"database.last_quick_check": str(time.time())})
-        else:
+        elif result.status == JobStatus.OK and isinstance(result.value, dict) and 'problem' in result.value:
             self.settings_page.set_database_status(
-                f"Problem found: {result.message or result.value}. Repair is now available.",
+                f"Problem found: {result.value['problem']}. Repair is now available.",
                 repair_available=True,
             )
+        else:
+            self.settings_page.set_database_status(f"Could not check right now: {result.message or result.value}", repair_available=False)
         return
     def _on_database_repair(self, kind, identifier, result):
         if result.status == JobStatus.OK:
             self.library.repository.invalidate_settings_cache()
-            self._run_read(self.library.repository.reload_settings, lambda _: self._request_reload(), 'settings-reload')
             lost = getattr(self.library.repository.database, "last_repair_lost", None) or {}
             # Rows the repair could not read are gone from the new library;
             # say which, instead of a plain "complete".
             missing = ", ".join(f"{table}: {'all rows' if count is None else f'{count} row' + ('s' if count != 1 else '')}"
                                 for table, count in sorted(lost.items()))
-            self.settings_page.set_database_status(
-                f"Repair complete · damaged original saved at {result.value}"
-                + (f" · could not recover {missing}" if missing else "")
-            )
-            if missing:
-                self._notify(f"Repair could not recover every row ({missing}); the damaged original was kept", "error")
-            self._request_reload()
+            self.settings_page.set_database_status('Repair finished — reloading settings…')
+            def reloaded(_settings):
+                self.settings_page.set_database_status(
+                    f"Repair complete · damaged original saved at {result.value}"
+                    + (f" · could not recover {missing}" if missing else ""))
+                if missing:
+                    self._notify(f"Repair could not recover every row ({missing}); the damaged original was kept", "error")
+                self._request_reload()
+            self._run_read(self.library.repository.reload_settings, reloaded, 'settings-reload')
         else:
             self.settings_page.set_database_status(
                 f"Repair failed: {result.message}. The original database was not replaced.",
@@ -6163,12 +6695,15 @@ class MainWindow(QMainWindow):
             self._notify(result.message or "Media export failed", "error")
             return
         paths, failed, left = list(result.value["copied"]), list(result.value["failed"]), result.value.get("left", 0)
-        if not paths and not failed and not left:
+        skipped = result.value.get('skipped', [])
+        if not paths and not failed and not left and not skipped:
             self._notify("No downloaded files were available to export", "error")
             return
         listing = "\n".join(paths[:8]) + ("\n…" if len(paths) > 8 else "")
         if left:
             listing += f"\n\nStopped early: {left} more file{'s' if left != 1 else ''} not exported."
+        if skipped:
+            listing += f"\n\nSkipped {len(skipped)} missing local file{'s' if len(skipped) != 1 else ''}:\n" + '\n'.join(skipped[:5])
         if failed:
             listing += (f"\n\nCould not export {len(failed)} file{'s' if len(failed) != 1 else ''}:\n"
                         + "\n".join(failed[:5]) + ("\n…" if len(failed) > 5 else ""))
@@ -6181,15 +6716,15 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(identifier)))
         return
     def _on_directory(self, kind, identifier, result):
-        if identifier and isinstance(identifier[0], int):
-            generation, request, running = identifier
-            if running:
-                self._directory_future = None
-            if generation == self._directory_generation:
-                self._directory_finished(request, result)
-            self._pump_directory_request()
-        else:
-            self._directory_finished(identifier, result)
+        if not isinstance(identifier, tuple) or len(identifier) != 3 or not isinstance(identifier[0], int):
+            logging.getLogger('bs_podcasts').warning('Ignoring directory completion with an invalid identifier')
+            return
+        generation, request, running = identifier
+        if running:
+            self._directory_future = None
+        if generation == self._directory_generation:
+            self._directory_finished(request, result)
+        self._pump_directory_request()
         return
 
     def _on_directory_cache(self, kind, identifier, result):
@@ -6221,6 +6756,11 @@ class MainWindow(QMainWindow):
             page = owners[0] if owners else self.pages.currentWidget()
             if page is None:
                 logging.getLogger("bs_podcasts").warning("Background read %s failed: %s", key, message)
+                if key == 'settings-reload':
+                    self.settings_page.set_database_status(f"Settings could not be reloaded: {message}", repair_available=False)
+                    self._notify(message, "error")
+                elif not key.startswith(self._BACKGROUND_READS):
+                    self._notify(message, "error")
                 return
             if getattr(page, "banner", None) is not None:
                 self._show_page_error(page, message)
@@ -6230,20 +6770,21 @@ class MainWindow(QMainWindow):
             # "Loading…"; recompute availability so it can be retried.
             if key == "episodes-more":
                 self._set_global_episode_chrome(len(self._all_episode_items))
+            elif key == 'catalog-search-more':
+                self.episode_page.set_load_more_state(len(self._catalog_search_items) < self._catalog_total, noun='matching episodes')
             elif key == "history-more":
                 self._set_history_chrome(len(self._history_items_shown))
         return
     def _on_library(self, kind, identifier, result):
         self._reload_in_flight = False
         if result.status == JobStatus.OK and not self._closed:
-            self.episode_page.banner.clear()
             self._reload_library(result.value)
         elif not self._closed:
             message = result.message or "The library could not be loaded."
             self.podcast_page.set_loading(False)
-            self.podcast_page.banner.show_state("error", message)
-            self.episode_page.banner.show_state("error", message)
-            self.home_page.banner.show_state("error", message)
+            self._show_page_error(self.podcast_page, message)
+            self._show_page_error(self.episode_page, message)
+            self._show_page_error(self.home_page, message)
             for page in (self.playlist_page, self.history_page, self.download_page):
                 self._finish_page_load(page, message)
         if self._reload_again:
@@ -6251,15 +6792,18 @@ class MainWindow(QMainWindow):
         elif result.status == JobStatus.OK:
             callbacks, self._reload_callbacks = self._reload_callbacks, []
             for callback in callbacks:
-                callback()
+                try:
+                    callback()
+                except Exception:
+                    logging.getLogger("bs_podcasts").exception("Could not restore a library view")
         else:
             self._reload_callbacks.clear()
         return
     def _on_integrity(self, kind, identifier, result):
         if result.status == JobStatus.OK and result.value == "ok":
             self._persist_ui_settings({"database.last_quick_check": str(time.time())})
-        else:
-            message = result.message or str(result.value or "unknown database error")
+        elif result.status == JobStatus.OK and isinstance(result.value, dict) and 'problem' in result.value:
+            message = str(result.value['problem'])
             logging.getLogger("bs_podcasts").error("Library integrity check failed: %s", message)
             self._notify(
                 "Library integrity check failed — inspect the data folder before making changes.",
@@ -6267,6 +6811,8 @@ class MainWindow(QMainWindow):
                 "Open folder",
                 self._open_data_folder,
             )
+        else:
+            logging.getLogger('bs_podcasts').warning('Background library check could not run: %s', result.message or result.value)
         return
     def _on_accents(self, kind, identifier, result):
         self._accents_priming = False
@@ -6289,6 +6835,9 @@ class MainWindow(QMainWindow):
                 model.replace([tint(item) for item in model._items])
             if self._last_library_data is not None:
                 self._last_library_data = self._retinted(self._last_library_data)
+            self._all_episode_items = [tint(item) for item in self._all_episode_items]
+            self._history_items_shown = [tint(item) for item in self._history_items_shown]
+            self._catalog_search_items = [tint(item) for item in self._catalog_search_items]
         return
     def _on_details(self, kind, identifier, result):
         identity = identifier
@@ -6307,10 +6856,13 @@ class MainWindow(QMainWindow):
                 self._read_playback_metadata(self.playback.snapshot, follow=False)
                 if self.now_playing.isVisible():
                     self._populate_now_playing()
-        elif outcome and outcome.get("error"):
-            logging.getLogger("bs_podcasts").info("Listening details unavailable for episode %s: %s", identifier, outcome["error"])
+        message = (outcome or {}).get('error') or (result.message if result.status != JobStatus.OK else '')
+        if message:
+            logging.getLogger("bs_podcasts").info("Listening details unavailable for episode %s: %s", identifier, message)
             if self.context._episode_id == identifier:
-                self.context.show_details_error(outcome["error"])
+                self.context.show_details_error(message)
+                if outcome and (outcome.get('chapters') or outcome.get('transcript')):
+                    self._notify(message, 'error')  # Partial successes must not hide the failed part.
         return
     def _on_artwork(self, kind, identifier, result):
         episode_id, artwork_url = identifier
@@ -6420,7 +6972,10 @@ class MainWindow(QMainWindow):
             self._native_notify(APP_NAME, result.message or "Download failed", lambda: self.navigation.select(PAGE_DOWNLOADS))
         return
     def _on_refresh(self, kind, identifier, result):
-        identifier, batch_refresh, generation = identifier if isinstance(identifier, tuple) else (identifier, False, 0)
+        if not isinstance(identifier, tuple) or len(identifier) != 3:
+            logging.getLogger('bs_podcasts').warning('Ignoring refresh completion with an invalid identifier')
+            return
+        identifier, batch_refresh, generation = identifier
         content_changed = result.status == JobStatus.OK and (
             not getattr(result.value, 'not_modified', False) or bool(getattr(result.value, 'artwork_path', '')))
         if not batch_refresh:
@@ -6782,6 +7337,10 @@ class MainWindow(QMainWindow):
     def _show_all_episodes(self, filter_value: str = "All"):
         if self.library is None:
             return
+        if self._catalog_query and filter_value == 'All':
+            self._display_library_search()
+            return
+        self._leave_library_search()
         if not self._restoring_view:
             self._pending_view_restore = None
         # A cache hit is a new navigation intent too: retire older async reads.
@@ -6857,6 +7416,9 @@ class MainWindow(QMainWindow):
             self.navigation.select(target)
             return
         self._episode_navigation_restore = target
+        if isinstance(target.get('catalog_query'), str) and target['catalog_query']:
+            self._show_library_search(target['catalog_query'], limit=target.get('catalog_limit', 500))
+            return
         if target['show_id']:
             self._open_show_id(target['show_id'])
         else:
@@ -6970,7 +7532,7 @@ class MainWindow(QMainWindow):
                 menu.addSeparator()
                 menu.addAction(icons.icon("close", COLORS["text"], 16), "Remove from Up Next", lambda: self._remove_from_queue(item.episode_id))
                 menu.addAction("Clear Up Next…", self._clear_queue)
-                menu.exec(self.context.queue_view.viewport().mapToGlobal(event.pos()))
+                exec_menu(menu, self.context.queue_view.viewport().mapToGlobal(event.pos()))
                 return True
         return super().eventFilter(watched, event)
 
@@ -7043,8 +7605,7 @@ class MainWindow(QMainWindow):
 
     def _discover_sort_changed(self, key: str):
         if key != "newest":
-            if self._discover_newest_total:
-                self._cancel_discover_newest_scan()
+            self._finish_discover_newest_scan()
             return
         current_items = {
             item.feed_url: item
@@ -7141,8 +7702,8 @@ class MainWindow(QMainWindow):
             from ..feeds.parser import parse_feed
             from ..netlimits import Deadline, NetworkDeadline, request_scope
 
-            with request_scope(cancel):
-                deadline = Deadline(60)
+            deadline = Deadline(60, cancel)
+            with request_scope(cancel, deadline=deadline):
                 deadline.remaining()
                 peek = None
                 try:
@@ -7179,9 +7740,8 @@ class MainWindow(QMainWindow):
         scanned = self._discover_newest_total
         cancelled = self._discover_scan_cancelled
         self._discover_scan_cancelled = False
-        if self._discover_scan_toast:
-            self._discover_scan_toast = False
-            self.toast.dismiss_owner("discover-scan")
+        self._discover_scan_toast = False
+        self.toast.dismiss_owner("discover-scan")
         self._discover_newest_pending.clear()
         self._discover_newest_waiting.clear()
         self._discover_newest_active.clear()
@@ -7222,6 +7782,7 @@ class MainWindow(QMainWindow):
     def _show_preview_episodes(self, feed_url: str, navigate: bool = True, feed=None):
         if not feed_url:
             return
+        self._leave_library_search()
         self._read_tokens["episodes"] = self._read_tokens.get("episodes", 0) + 1
         feed = feed if feed is not None else self._previews.get(feed_url)
         if feed is None:
@@ -7457,7 +8018,7 @@ class MainWindow(QMainWindow):
             if self.context._episode_id != episode_id:
                 return
             self.context.set_chapters(data[0])
-            self.context.set_transcript(data[1])
+            self.context.set_transcript(data[1], query=query)
             self.context.set_bookmarks(data[2])
         self._run_read(work, apply, "context-listening")
 
@@ -7689,8 +8250,9 @@ class MainWindow(QMainWindow):
             if not getattr(self, "_quit_drain_started", 0):
                 self._quit_drain_started = time.monotonic()
                 self._save_layout()
+                self._save_view_state()
                 self._layout_save_timer.stop()
-            if self.commands.retained_pending():
+            if self.commands.retained_pending() or self._retained_removals:
                 event.ignore()
                 if time.monotonic() - self._quit_drain_started > 30:
                     self._quit_drain_started = 0
@@ -7719,6 +8281,7 @@ class MainWindow(QMainWindow):
         self._business_bridge.bind(None, closing=not self._keep_services)
         if not getattr(self, "_quit_drain_started", 0):
             self._save_layout()
+            self._save_view_state()
         self._refresh_timer.stop()
         self._cache_timer.stop()
         self._download_reload_timer.stop()

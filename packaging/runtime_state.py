@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
+import tempfile
 
 
 def process_stamp(pid):
@@ -113,6 +115,23 @@ def retire_stale(project, path=None):
     if not path.exists() and not path.is_symlink():
         return False
     value = read_record(project,path)
+    if value is None and not path.is_symlink() and path.is_file():
+        # The exclusive runtime lease excludes a launched owner. Preserve a
+        # torn record for diagnosis instead of blocking every future launch.
+        try:
+            json.loads(path.read_text())
+        except (ValueError, UnicodeError):
+            recovery = project / '.cache/runtime-record-recovery'
+            recovery.mkdir(mode=0o700, parents=True, exist_ok=True)
+            descriptor, saved = tempfile.mkstemp(prefix='pid-', suffix='.json', dir=recovery)
+            os.close(descriptor)
+            try:
+                os.replace(path, saved)
+            except BaseException:
+                Path(saved).unlink(missing_ok=True)
+                raise
+            print('Recovered an incomplete PID record; original retained under .cache/runtime-record-recovery.', file=sys.stderr)
+            return True
     state = process_state(project,value)
     if state != 'stale':
         raise RuntimeError(f'PID ownership is {state}; no record was removed. Inspect {path}.')
@@ -120,3 +139,25 @@ def retire_stale(project, path=None):
         raise RuntimeError('PID record changed while checking ownership.')
     path.unlink()
     return True
+
+
+def write_record(project, value, path=None):
+    """Publish a complete PID record atomically while holding runtime_lock."""
+    path = path or project / 'tmp/bs-podcasts.pid.json'
+    if path.exists() or path.is_symlink():
+        raise RuntimeError('PID record already exists; nothing was replaced.')
+    descriptor, name = tempfile.mkstemp(prefix='.pid-', suffix='.json', dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, 'w') as handle:
+            json.dump(value, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)

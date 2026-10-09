@@ -167,6 +167,21 @@ def generator_metadata(raw, markers=(), root=ROOT):
     return any(needle in folded for needle in needles)
 
 
+def denied_source_literals(raw, markers=(), root=ROOT):
+    """Read constant values without executing source; adjacent literals are one
+    AST constant, so splitting a private marker cannot bypass the source gate."""
+    try:
+        tree = ast.parse(raw)
+    except (SyntaxError, ValueError, UnicodeError):
+        return False  # Syntax/import checks still reject malformed source.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+            value = node.value.encode('utf-8', 'surrogatepass') if isinstance(node.value, str) else node.value
+            if generator_metadata(value, markers, root):
+                return True
+    return False
+
+
 def deny_file(root):
     return Path(root).resolve().parent / '.config/source-deny.txt'
 
@@ -217,6 +232,17 @@ def tracking_difference(root, files):
     tracked = git_tracked(root)
     if tracked is None:
         return None
+    ignored = subprocess.run(
+        ['git', '-C', str(root), 'ls-files', '--others', '--ignored',
+         '--exclude-standard', '-z', '--', 'src', 'packaging'],
+        capture_output=True, text=True, timeout=5, check=True)
+    source_suffixes = {'.py', '.sh', '.ps1', '.sql', '.spec', '.iss', '.plist',
+                       '.patch', '.lock', '.json', '.desktop'}
+    hidden = sorted(name for name in ignored.stdout.split('\0') if name
+                    and PurePosixPath(name).suffix.lower() in source_suffixes)
+    if hidden:
+        raise ValueError('Unlisted ignored source files: ' + ', '.join(hidden)
+                         + '. Approve them in the allowlist/manifest or move them outside the checkout.')
     manifest = set(files)
     if tracked != manifest:
         extra = sorted(tracked - manifest)
@@ -287,8 +313,11 @@ def check(root=ROOT, require_deny=True, ran=None):
         if any(contains_denied(blob, denied, root) or generator_metadata(blob, denied, root) for blob in blobs):
             failures.append(name)
             continue
-        text = b''.join(blobs).decode('utf-8', 'replace')
-        if secrets.search(text):
+        if name.endswith(('.py', '.spec')) and any(denied_source_literals(blob, denied, root) for blob in blobs):
+            failures.append(name)
+            continue
+        raw = b''.join(blobs)
+        if any(secrets.search(raw.decode(encoding, 'replace')) for encoding in _DENIED_ENCODINGS):
             failures.append(name)
     if failures:
         raise ValueError('Private references, credential patterns, or generator metadata in: ' + ', '.join(failures))

@@ -69,6 +69,7 @@ _BLOCKED = (
     ("is_reserved", "a reserved address"),
 )
 _METADATA = frozenset({ipaddress.ip_address('fd00:ec2::254'), ipaddress.ip_address('100.100.100.200')})
+_THIS_NETWORK = ipaddress.IPv4Network("0.0.0.0/8")
 # Well-known DNS64 is IPv4-only. The local prefix may embed a private IPv4 address.
 _NAT64_WELL_KNOWN = ipaddress.IPv6Network("64:ff9b::/96")
 _NAT64_LOCAL = ipaddress.IPv6Network("64:ff9b:1::/48")
@@ -112,6 +113,8 @@ def _nat64_ipv4(ip):
 
 
 def _address_reason(ip) -> str:
+    if isinstance(ip, ipaddress.IPv4Address) and ip in _THIS_NETWORK:
+        return "a current-network address"
     if ip in _METADATA:
         return "a cloud metadata address"
     for attribute, reason in _BLOCKED:
@@ -193,12 +196,13 @@ def ensure_fetchable(value, what: str = "URL") -> str:
 
 
 def _is_unc_path(text: str, parts) -> bool:
-    if text.startswith("\\\\") or text.startswith("//"):
+    from urllib.parse import unquote
+    if text.replace("\\", "/").startswith("//"):
         return True
     if not parts.scheme and parts.netloc:
         return True
-    path = parts.path or ""
-    return path.startswith("//") or path.startswith("\\\\")
+    path = unquote(parts.path or "").replace("\\", "/")
+    return path.startswith("//")
 
 
 def ensure_media_source(value, what: str = "Media source", allow_file_url: bool = False, allow_unc: bool = False) -> str:
@@ -261,6 +265,8 @@ def ensure_external_media_file(value: str) -> str:
         return text
     parts = urlsplit(text)
     path = Path(url2pathname(parts.path) if parts.scheme.lower() == "file" else text).expanduser()
+    if _is_unc_path(str(path), urlsplit(str(path))):
+        raise UnsafeUrl("The media file points at a network path.")
     if path.suffix.lower() not in SAFE_MEDIA_SUFFIXES:
         raise UnsafeUrl("This file type cannot be opened through the external player.")
     try:

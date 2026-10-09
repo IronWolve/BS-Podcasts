@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QToolTip
 
 from . import icons
 from .pixmaps import cover, initials
-from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, app_font, scaled_dim, scaled_px
+from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, ARTWORK_OVERLAY, ARTWORK_LIGHT_INK, app_font, scaled_dim, scaled_px
 
 # Widest an episode row's title/meta column is allowed to grow. Rows span the
 # full pane, so without a cap a title on a maximised window trails off across
@@ -87,13 +87,14 @@ class Episode:
     played: bool = False
     favorite: bool = False
     position_seconds: float = 0.0
+    length_verified: bool | None = None
 
 
 class ItemRoles:
     ITEM = Qt.ItemDataRole.UserRole + 1
 
 
-_TAG = re.compile(r"<[^<>]+>")
+_TAG = re.compile(r"</?[A-Za-z][A-Za-z0-9:-]*(?:\s+[A-Za-z_:][\w:.-]*\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s<>]+))*\s*/?>|<!--.*?-->|<![A-Za-z][^<>]*>|<\?.*?\?>", re.S)
 _WS = re.compile(r"\s+")
 _LONG_TOKEN = re.compile(r"\S{32,}")
 
@@ -174,7 +175,7 @@ class PodcastModel(QAbstractListModel):
 
     def replace(self, items):
         items = list(items)
-        if self._items == items:
+        if not self._items and not items:
             return
         if self._items and _same_rows(self._items, items, self._key):
             # Same rows, possibly new data: update in place so selection and scroll survive.
@@ -252,7 +253,7 @@ class EpisodeModel(QAbstractListModel):
 
     def replace(self, items):
         items = list(items)
-        if self._items == items:
+        if not self._items and not items:
             return
         if self._items and _same_rows(self._items, items, self._key):
             changed = [row for row, (old, new) in enumerate(zip(self._items, items)) if old != new]
@@ -282,6 +283,21 @@ class EpisodeModel(QAbstractListModel):
                 self._items[row] = updated
                 self.dataChanged.emit(self.index(row, 0), self.index(row, 0))
 
+    def update_artwork_batch(self, changes):
+        from dataclasses import replace
+        changed = []
+        for row, item in enumerate(self._items):
+            candidate = changes.get((item.episode_id, item.artwork_url))
+            if candidate is None:
+                continue
+            updated = replace(item, artwork_path=candidate.artwork_path,
+                              episode_artwork_path=candidate.episode_artwork_path,
+                              accent=candidate.accent)
+            if updated != item:
+                self._items[row] = updated
+                changed.append(row)
+        _notify_changed_rows(self, changed)
+
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._items)
 
@@ -308,8 +324,9 @@ class EpisodeModel(QAbstractListModel):
             return item.title
         if role == Qt.ItemDataRole.ToolTipRole:
             if not item_tooltips_enabled():
-                return None
-            return "\n".join(part for part in (item.title, item.show, plain_snippet(item.description, 180)) if part)
+                return "Length unverified — automatic cleanup keeps this file." if item.downloaded_path and item.length_verified is False else None
+            warning = "Length unverified — automatic cleanup keeps this file." if item.downloaded_path and item.length_verified is False else ""
+            return "\n".join(part for part in (item.title, item.show, plain_snippet(item.description, 180), warning) if part)
         if role == ItemRoles.ITEM:
             return item
         return None
@@ -348,17 +365,22 @@ class EpisodeModel(QAbstractListModel):
             except (ValueError, UnicodeError):
                 return False
             selected = [item for item in self._items if item.episode_id in ids]
-            if selected:
+            if selected and {item.episode_id for item in selected} == ids:
                 destination = row if row >= 0 else parent.row()
                 destination = len(self._items) if destination < 0 else min(destination, len(self._items))
                 before = sum(item.episode_id in ids for item in self._items[:destination])
                 rest = [item for item in self._items if item.episode_id not in ids]
                 insertion = destination - before
-                self.beginResetModel()
+                old_indexes = self.persistentIndexList()
+                identities = [self._key(self._items[index.row()]) for index in old_indexes]
+                self.layoutAboutToBeChanged.emit()
                 self._items = rest[:insertion] + selected + rest[insertion:]
-                self.endResetModel()
+                rows = {self._key(item): number for number, item in enumerate(self._items)}
+                self.changePersistentIndexList(old_indexes, [self.index(rows[key], 0) for key in identities])
+                self.layoutChanged.emit()
                 self.order_changed.emit([item.episode_id for item in self._items])
                 return True
+            return False  # A stale identity must never fall back to moving a different row.
         try:
             source = int(bytes(data.data("application/x-bs-podcasts-episode-row")))
         except (TypeError, ValueError):
@@ -609,6 +631,7 @@ class EpisodeDelegate(QStyledItemDelegate):
         self.playing_source = ""
         self.playing_active = False
         self._snippets: dict[tuple[int, str], str] = {}
+        self._wrapped_snippets = {}
 
     def set_playing(self, episode_id: int, active: bool, source: str = ""):
         self.playing_id = episode_id or 0
@@ -740,9 +763,9 @@ class EpisodeDelegate(QStyledItemDelegate):
                                     notify=_repaint_target(option), presentation_key=identity))
         if playing:
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(11, 15, 24, 150))
+            painter.setBrush(QColor(ARTWORK_OVERLAY))
             painter.drawRoundedRect(art, 8, 8)
-            icons.paint(painter, "playing" if self.playing_active else "pause", "#FFFFFF", art.adjusted(art_size // 4, art_size // 4, -art_size // 4, -art_size // 4), scale)
+            icons.paint(painter, "playing" if self.playing_active else "pause", ARTWORK_LIGHT_INK, art.adjusted(art_size // 4, art_size // 4, -art_size // 4, -art_size // 4), scale)
 
         text_left = art.right() + scaled_px(14)
         play_zone = scaled_px(self.PLAY_ZONE + 8)
@@ -858,7 +881,15 @@ class EpisodeDelegate(QStyledItemDelegate):
             return
         metrics = painter.fontMetrics()
         line_height = scaled_px(self.SNIPPET_LINE)
-        pieces, more = self._wrap_snippet(text, painter.font(), rect.width(), max_lines)
+        key = (text, painter.font().toString(), rect.width(), max_lines)
+        wrapped = self._wrapped_snippets.get(key)
+        if wrapped is None:
+            wrapped = self._wrap_snippet(text, painter.font(), rect.width(), max_lines)
+            if len(text) <= 2048:
+                self._wrapped_snippets[key] = wrapped
+                if len(self._wrapped_snippets) > 512:
+                    del self._wrapped_snippets[next(iter(self._wrapped_snippets))]
+        pieces, more = wrapped
         for row, piece in enumerate(pieces):
             last = row == len(pieces) - 1
             if last and more:
@@ -893,12 +924,12 @@ class EpisodeDelegate(QStyledItemDelegate):
         limit = max(240, self.SNIPPET_LINES * 130)
         from hashlib import blake2b
         bounded = item.description[:16384]
-        key = (item.episode_id or id(item), limit, blake2b(bounded.encode("utf-8"), digest_size=16).digest())
+        identity = item.episode_id or item.media_url or item.external_id or item.title
+        key = (identity, limit, blake2b(bounded.encode("utf-8"), digest_size=16).digest())
         cached = self._snippets.get(key)
         if cached is None:
             cached = plain_snippet(bounded, limit)
-            if item.episode_id:
-                self._snippets[key] = cached
-                if len(self._snippets) > 5000:
-                    del self._snippets[next(iter(self._snippets))]
+            self._snippets[key] = cached
+            if len(self._snippets) > 5000:
+                del self._snippets[next(iter(self._snippets))]
         return cached

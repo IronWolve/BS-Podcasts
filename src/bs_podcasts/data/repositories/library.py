@@ -192,6 +192,7 @@ class LibraryRepository:
                    COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path
                    FROM episodes e JOIN shows s ON s.id=e.show_id
                    WHERE e.show_id=? AND e.downloaded_path != '' AND e.favorite=0
+                   AND EXISTS (SELECT 1 FROM downloads d WHERE d.episode_id=e.id AND d.state='complete' AND d.length_verified=1)
                    ORDER BY e.published_at DESC, e.id DESC""",
                 (show_id,),
             ).fetchall()
@@ -328,19 +329,20 @@ class LibraryRepository:
         return imported
 
     def episodes_by_ids(self, episode_ids) -> dict[int, Episode]:
-        """Fetch a set of episodes in one query for download/bookmark views."""
+        """Fetch episodes in bounded batches for download/bookmark views."""
         ids = list(dict.fromkeys(int(value) for value in episode_ids if value))
         if not ids:
             return {}
-        placeholders = ",".join("?" for _ in ids)
+        rows = []
         with self.database.connect() as connection:
-            rows = connection.execute(
-                f"""SELECT e.*, s.title AS show_title,
-                    COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path
-                    FROM episodes e JOIN shows s ON s.id=e.show_id
-                    WHERE e.id IN ({placeholders})""",
-                ids,
-            ).fetchall()
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                rows.extend(connection.execute(
+                    f"""SELECT e.*, s.title AS show_title,
+                        COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path
+                        FROM episodes e JOIN shows s ON s.id=e.show_id
+                        WHERE e.id IN ({placeholders})""", batch).fetchall())
         return {row["id"]: self._episode(row) for row in rows}
 
     def episode_count(self) -> int:
@@ -441,6 +443,28 @@ class LibraryRepository:
             return []
         return [path for path in stored if isinstance(path, str)]
 
+    def orphan_previews(self):
+        """Read exact retry targets only after this profile's ownership check."""
+        from .downloads import DeletionPreview
+        with self.database.connect() as connection:
+            values = dict(connection.execute("SELECT key,value FROM settings WHERE key IN (?,?)",
+                                             (self.ORPHAN_OWNER, self.ORPHAN_SETTING)))
+        if values.get(self.ORPHAN_OWNER) != str(self.database.path.resolve()):
+            return []  # Never stat paths belonging to a copied/legacy profile.
+        try:
+            stored = json.loads(values.get(self.ORPHAN_SETTING, "[]"))
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(stored, list):
+            return []
+        paths = list(dict.fromkeys(path for path in stored if isinstance(path, str) and path))
+        previews = []
+        for path in paths:
+            kind, size = inspect_download_file(path)
+            if kind in {FILE_PRESENT, FILE_MISSING}:
+                previews.append(DeletionPreview(0, path, size))
+        return previews
+
     def _remember_orphans(self, paths):
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -456,9 +480,17 @@ class LibraryRepository:
             if existing and (owner is None or owner[0] != current_owner):
                 # A copied/legacy database cannot authorize deletion at its old
                 # absolute paths. Preserve those records for manual inspection.
+                retired_row = connection.execute("SELECT value FROM settings WHERE key=?",
+                                                 (self.ORPHAN_SETTING + ".retired",)).fetchone()
+                try:
+                    retired = json.loads(retired_row[0]) if retired_row else []
+                except (ValueError, TypeError):
+                    retired = []
+                retired = retired if isinstance(retired, list) else []
+                retained = list(dict.fromkeys(p for p in [*retired, *existing] if isinstance(p, str)))
                 connection.execute("INSERT INTO settings(key,value) VALUES (?,?) "
                                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                                   (self.ORPHAN_SETTING + ".retired", json.dumps(existing)))
+                                   (self.ORPHAN_SETTING + ".retired", json.dumps(retained)))
                 existing = []
             merged = list(dict.fromkeys([p for p in existing if isinstance(p, str)] + list(paths)))
             connection.execute("INSERT INTO settings(key,value) VALUES (?,?) "
@@ -470,7 +502,7 @@ class LibraryRepository:
         self.invalidate_settings_cache()
         self.reload_settings()
 
-    def sweep_orphans(self) -> list[str]:
+    def sweep_orphans(self, *, confirmed_paths) -> list[str]:
         """Retry a bounded batch while protecting concurrent live references.
 
         The write transaction deliberately spans filesystem checks/unlinks: a
@@ -478,6 +510,7 @@ class LibraryRepository:
         Limiting each pass bounds the amount of filesystem work under SQLite's
         writer lock without discarding retry records.
         """
+        confirmed = set(_confirmed_path_list(confirmed_paths))
         cleared = []
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -494,10 +527,10 @@ class LibraryRepository:
             if not isinstance(paths, list):
                 paths = []
             paths = [path for path in paths if isinstance(path, str)]
-            pending = paths[:self.MAX_ORPHANS_PER_SWEEP]
+            pending = [path for path in paths if path in confirmed][:self.MAX_ORPHANS_PER_SWEEP]
             if not pending:
                 return []
-            deferred = paths[self.MAX_ORPHANS_PER_SWEEP:]
+            deferred = [path for path in paths if path not in pending]
             failed_paths = []
             placeholders = ",".join("?" for _ in pending)
             referenced = {row[0] for row in connection.execute(
@@ -693,10 +726,17 @@ class LibraryRepository:
                 if revisions is not None:
                     values = {key: value for key, value in values.items()
                               if self._settings_pending.get(key) == (revisions.get(key), value)}
-            with self.database.connect() as connection:
-                connection.executemany(
-                    "INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    values.items())
+            try:
+                with self.database.connect() as connection:
+                    connection.executemany(
+                        "INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        values.items())
+            except BaseException:
+                with self._settings_lock:
+                    for key, value in values.items():
+                        if revisions is not None and self._settings_pending.get(key) == (revisions.get(key), value):
+                            self._settings_pending.pop(key, None)
+                raise
             with self._settings_lock:
                 if self._settings_cache is not None:
                     self._settings_cache.update(values)
@@ -849,6 +889,15 @@ class LibraryRepository:
             return connection.executemany('UPDATE episodes SET favorite=? WHERE id=?',
                 ((int(favorite), value) for value in dict.fromkeys(episode_ids))).rowcount
 
+    def clear_new_with_undo(self) -> list:
+        """Capture and clear exactly this transaction's unread rows."""
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute("SELECT id,show_id,external_id,played,is_new,position_seconds,last_played "
+                                      "FROM episodes WHERE is_new=1").fetchall()
+            connection.execute("UPDATE episodes SET is_new=0 WHERE is_new=1")
+        return [(tuple(row), (row["played"], False, row["position_seconds"], row["last_played"])) for row in rows]
+
     def clear_all_new(self, played: bool = False) -> int:
         with self.database.connect() as connection:
             if played:
@@ -860,8 +909,10 @@ class LibraryRepository:
     def mark_show_played(self, show_id: int, played: bool = True) -> int:
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=?, is_new=0 WHERE show_id=? AND played!=?",
-                (int(played), show_id, int(played)),
+                "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), "
+                "position_seconds=CASE WHEN ?=0 AND duration_seconds>0 AND position_seconds>=duration_seconds-2 "
+                "THEN 0 ELSE position_seconds END, played=?, is_new=0 WHERE show_id=? AND played!=?",
+                (int(played), int(played), show_id, int(played)),
             )
             return cursor.rowcount
 
@@ -1024,9 +1075,33 @@ class LibraryRepository:
                 (*values.values(), show_id),
             )
 
-    def search(self, query: str, limit: int = 100) -> tuple[list[Show], list[Episode]]:
+    @staticmethod
+    def _search_pattern(query):
         escaped = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        pattern = f"%{escaped}%"
+        return f"%{escaped}%"
+
+    @classmethod
+    def _episode_search_predicate(cls, connection, query):
+        # Trigram MATCH only narrows candidates; literal LIKE remains the
+        # final authority. Non-ASCII/short strings retain the old path to
+        # avoid tokenizer/SQLite case-fold differences changing results.
+        text = query.strip()
+        pattern = cls._search_pattern(text)
+        indexed = bool(len(text) >= 3 and text.isascii() and "\0" not in text and
+                       connection.execute("SELECT 1 FROM sqlite_master WHERE name='episode_search' AND type='table'").fetchone())
+        candidate = "e.id IN (SELECT rowid FROM episode_search WHERE episode_search MATCH ?) AND " if indexed else ""
+        parameters = ()
+        if indexed:
+            count = min(8, len(text) - 2)
+            positions = [index * (len(text) - 3) // max(1, count - 1) for index in range(count)]
+            trigrams = dict.fromkeys(text[position:position + 3].lower() for position in positions)
+            terms = ' AND '.join('"' + gram.replace('"', '""') + '"' for gram in trigrams)
+            parameters = (terms,)
+        return (candidate + "(e.title LIKE ? ESCAPE '\\' OR e.description LIKE ? ESCAPE '\\' OR s.title LIKE ? ESCAPE '\\')",
+                parameters + (pattern,pattern,pattern))
+
+    def search(self, query: str, limit: int = 100) -> tuple[list[Show], list[Episode]]:
+        pattern = self._search_pattern(query)
         with self.database.connect() as connection:
             show_rows = connection.execute(
                 self._show_select()
@@ -1034,19 +1109,36 @@ class LibraryRepository:
                 + " GROUP BY s.id ORDER BY s.title COLLATE NOCASE LIMIT ?",
                 (pattern, pattern, limit),
             ).fetchall()
+            predicate, parameters = self._episode_search_predicate(connection, query)
             episode_rows = connection.execute(
                 """SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM episodes e
-                   JOIN shows s ON s.id=e.show_id
-                   WHERE e.title LIKE ? ESCAPE '\\'
-                      OR e.description LIKE ? ESCAPE '\\'
-                      OR s.title LIKE ? ESCAPE '\\'
-                   ORDER BY e.published_at DESC, e.id DESC LIMIT ?""",
-                (pattern, pattern, pattern, limit),
+                   JOIN shows s ON s.id=e.show_id WHERE """ + predicate + " ORDER BY e.published_at DESC,e.id DESC LIMIT ?",
+                parameters + (limit,),
             ).fetchall()
         return (
             [self._show(row) for row in show_rows],
             [self._episode(row) for row in episode_rows],
         )
+
+    def search_episodes(self, query: str, limit: int = 500, offset: int = 0) -> list[Episode]:
+        """Page the actual matching corpus, not a newest-episodes fallback."""
+        limit, offset = max(0, int(limit)), max(0, int(offset))
+        if not limit:
+            return []
+        with self.database.connect() as connection:
+            predicate, parameters = self._episode_search_predicate(connection, query)
+            rows = connection.execute(
+                "SELECT e.*,s.title AS show_title,COALESCE(NULLIF(e.episode_artwork_path,''),s.artwork_path) AS artwork_path "
+                "FROM episodes e JOIN shows s ON s.id=e.show_id WHERE " + predicate
+                + " ORDER BY e.published_at DESC,e.id DESC LIMIT ? OFFSET ?",
+                parameters + (limit,offset)).fetchall()
+        return [self._episode(row) for row in rows]
+
+    def search_episode_count(self, query: str) -> int:
+        with self.database.connect() as connection:
+            predicate, parameters = self._episode_search_predicate(connection, query)
+            return connection.execute("SELECT COUNT(*) FROM episodes e JOIN shows s ON s.id=e.show_id WHERE "
+                                      + predicate, parameters).fetchone()[0]
 
     @staticmethod
     def _show_select() -> str:

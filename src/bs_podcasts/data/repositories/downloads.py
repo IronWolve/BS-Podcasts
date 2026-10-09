@@ -44,7 +44,8 @@ class DownloadRepository:
                    last_modified=CASE WHEN source_url=excluded.source_url THEN last_modified ELSE '' END,
                    expected_total=CASE WHEN source_url=excluded.source_url THEN expected_total ELSE 0 END,
                    source_url=excluded.source_url,
-                   state='queued', error_message='', updated_at=MAX(downloads.updated_at+0.000001, excluded.updated_at)""",
+                   state='queued', error_message='', updated_at=MAX(downloads.updated_at+0.000001, excluded.updated_at)
+                   WHERE downloads.state != 'complete'""",
                 (episode_id, source_url, str(target), str(partial), now, now),
             )
         return self.get(episode_id)
@@ -87,13 +88,13 @@ class DownloadRepository:
                 ),
             )
 
-    def complete(self, episode_id: int, path: str, size: int):
+    def complete(self, episode_id: int, path: str, size: int, *, length_verified=True):
         with self.database.connect() as connection:
             changed = connection.execute(
                 """UPDATE downloads SET state='complete', target_path=?,
-                   bytes_done=?, bytes_total=?, error_message='', updated_at=MAX(updated_at+0.000001, ?)
+                   bytes_done=?, bytes_total=?, error_message='', length_verified=?, updated_at=MAX(updated_at+0.000001, ?)
                    WHERE episode_id=?""",
-                (path, size, size, time.time(), episode_id),
+                (path, size, size, int(bool(length_verified)), time.time(), episode_id),
             ).rowcount
             if changed:
                 # No downloads row means the record was deleted mid-transfer;
@@ -101,10 +102,6 @@ class DownloadRepository:
                 connection.execute(
                     "UPDATE episodes SET downloaded_path=? WHERE id=?", (path, episode_id)
                 )
-
-    def clear_downloaded_path(self, episode_id: int):
-        with self.database.connect() as connection:
-            connection.execute("UPDATE episodes SET downloaded_path='' WHERE id=?", (episode_id,))
 
     def mark_missing(self, record: DownloadRecord, message: str) -> bool:
         """Demote only the exact completed record whose file was inspected."""
@@ -130,16 +127,24 @@ class DownloadRepository:
             connection.execute("DELETE FROM downloads WHERE episode_id=?", (episode_id,))
             connection.execute("UPDATE episodes SET downloaded_path='' WHERE id=?", (episode_id,))
 
-    def played_complete(self) -> list[int]:
-        with self.database.connect() as connection:
-            rows = connection.execute(
-                "SELECT d.episode_id FROM downloads d JOIN episodes e ON e.id=d.episode_id "
-                "WHERE d.state='complete' AND e.played=1"
-            ).fetchall()
-        return [row["episode_id"] for row in rows]
+    def played_complete(self, episode_ids=None) -> list[int]:
+        return [record.episode_id for record in self.played_complete_records(episode_ids)]
 
-    def cleanup_preview(self, episode_id: int) -> DeletionPreview | None:
-        record = self.get(episode_id)
+    def played_complete_records(self, episode_ids=None) -> list[DownloadRecord]:
+        ids = None if episode_ids is None else list(dict.fromkeys(int(value) for value in episode_ids))
+        if ids == []:
+            return []
+        result = []
+        with self.database.connect() as connection:
+            for batch in ([None] if ids is None else (ids[i:i + 500] for i in range(0, len(ids), 500))):
+                query = self._select() + " WHERE d.state='complete' AND d.length_verified=1 AND e.played=1 AND e.favorite=0"
+                if batch is not None:
+                    query += " AND d.episode_id IN (" + ",".join("?" for _ in batch) + ")"
+                result.extend(self._record(row) for row in connection.execute(query, batch or ()))
+        return result
+
+    def cleanup_preview(self, episode_id: int, *, record=None) -> DeletionPreview | None:
+        record = self.get(episode_id) if record is None else record
         if record is None:
             return None
         completed = record.state == DownloadState.COMPLETE
@@ -194,4 +199,14 @@ class DownloadRepository:
             show_title=row["show_title"],
             etag=row["etag"], last_modified=row["last_modified"], expected_total=row["expected_total"],
             created_at=row["created_at"], updated_at=row["updated_at"],
+            length_verified=bool(row["length_verified"]),
         )
+
+    def verify_length(self, record: DownloadRecord) -> bool:
+        """Promote only the exact completed file that the verifier inspected."""
+        with self.database.connect() as connection:
+            changed = connection.execute(
+                "UPDATE downloads SET length_verified=1, updated_at=MAX(updated_at+0.000001, ?) "
+                "WHERE id=? AND episode_id=? AND target_path=? AND created_at=? AND updated_at=? AND state='complete'",
+                (time.time(), record.id, record.episode_id, record.target_path, record.created_at, record.updated_at)).rowcount
+        return bool(changed)

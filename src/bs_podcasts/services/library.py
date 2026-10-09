@@ -4,11 +4,21 @@ from urllib.parse import urlparse
 from contextlib import nullcontext
 from threading import RLock
 import math
+import logging
 
 from ..data.repositories import LibraryRepository
 from ..domain import FeedData
 from ..privacy import feed_label
 from ..urlguard import ensure_web_url
+
+
+class SubscriptionImport(list):
+    """Added shows plus a truthful summary, compatible with existing callers."""
+
+    def __init__(self):
+        super().__init__()
+        self.skipped = 0
+        self.errors = []
 
 
 def _bounded_float(raw, fallback: float, low: float, high: float) -> float:
@@ -86,19 +96,20 @@ class LibraryService:
         with self._subscription_lock:
             return self._add_subscription(feed_url, title)
 
-    def _add_subscription(self, feed_url: str, title: str):
+    def _add_subscription(self, feed_url: str, title: str, known=None):
         feed_url = ensure_web_url(feed_url, 'Feed URL')
         parsed = urlparse(feed_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("Enter a complete http:// or https:// feed URL.")
-        existing = self.find_subscription(feed_url)
+        existing = self.find_subscription(feed_url) if known is None else known.get(self.normalize_feed_url(feed_url))
         if existing is not None:
             raise ValueError(f"Already subscribed as “{existing.title}”.")
         speed = _bounded_float(self.setting("playback.default_speed", "1.0"), 1.0, 0.5, 3.0)
         skip_back = _bounded_int(self.setting("playback.skip_back", "15"), 15, 5, 120)
         skip_forward = _bounded_int(self.setting("playback.skip_forward", "30"), 30, 5, 300)
         auto_continue = self.setting("playback.auto_continue", "1") == "1"
-        fallback = title.strip() or feed_label(feed_url)
+        from ..feeds.parser import _clamp_title
+        fallback = _clamp_title(title.strip() or feed_label(feed_url))
         return self.repository.add_show(
             feed_url,
             fallback,
@@ -168,20 +179,35 @@ class LibraryService:
             return self.shows(), self.episodes(limit=limit)
         return self.repository.search(query, limit)
 
+    def search_episodes(self, query: str, limit: int = 500, offset: int = 0):
+        return self.repository.search_episodes(query, limit, offset)
+
+    def search_episode_count(self, query: str) -> int:
+        return self.repository.search_episode_count(query)
+
     def import_opml(self, content: bytes):
         from ..feeds.opml import import_opml
 
-        added = []
-        seen = set()
-        for entry in import_opml(content):
-            key = self.normalize_feed_url(entry.feed_url)
-            if key in seen:
-                continue
-            seen.add(key)
-            try:
-                added.append(self.add_subscription(entry.feed_url, entry.title))
-            except ValueError:
-                continue
+        entries = import_opml(content)
+        added = SubscriptionImport()
+        with self._subscription_lock:
+            known = {}
+            for show in self.repository.list_shows():
+                for url in (show.feed_url, show.canonical_url):
+                    if url:
+                        known[self.normalize_feed_url(url)] = show
+            for entry in entries:
+                try:
+                    show = self._add_subscription(entry.feed_url, entry.title, known)
+                except ValueError:
+                    added.skipped += 1
+                    continue
+                except Exception:
+                    logging.getLogger(__name__).exception("Subscription import stopped while saving a podcast")
+                    added.errors.append("Import stopped because a podcast could not be saved; previously added podcasts were kept.")
+                    break
+                added.append(show)
+                known[self.normalize_feed_url(show.feed_url)] = show
         return added
 
     def export_opml(self) -> bytes:
@@ -224,7 +250,12 @@ class LibraryService:
                     paths = extra or None
                 else:
                     paths = [*confirmed_paths, *extra]
-            return self.repository.remove_show(show_id, delete_files, paths)
+            result = self.repository.remove_show(show_id, delete_files, paths)
+            if not delete_files and retired:
+                # Cancellation may leave app-owned partials after queue rows
+                # retire. Keep them for explicit recovery, never surprise-delete.
+                self.repository._remember_orphans(retired)
+            return result
 
     def rearm(self, show_id: int):
         self.repository.rearm_show(show_id)

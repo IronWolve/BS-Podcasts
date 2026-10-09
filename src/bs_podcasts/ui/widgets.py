@@ -1,6 +1,7 @@
 """Reusable shell components."""
 
 from bisect import bisect_right
+from collections import OrderedDict
 from dataclasses import replace
 from functools import lru_cache
 from html import escape as html_escape, unescape as html_unescape
@@ -10,6 +11,7 @@ from urllib.parse import urlsplit
 
 from PySide6.QtCore import (
     QEvent,
+    SIGNAL,
     QObject,
     QPoint,
     QPropertyAnimation,
@@ -51,7 +53,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..assets import icon_path
-from ..domain.times import media_seconds
+from ..domain.times import media_seconds, format_media_time
 from ..urlguard import is_web_url
 from . import icons
 from .models import Podcast
@@ -81,6 +83,17 @@ def plain_tooltip(text: str) -> str:
     return text
 
 
+def exec_menu(menu, position):
+    """Release one-shot menus after their modal actions have returned."""
+    try:
+        return menu.exec(position)
+    finally:
+        try:
+            menu.deleteLater()
+        except RuntimeError:
+            pass  # A callback may have destroyed the owning window.
+
+
 class PlainTextLabel(QLabel):
     """Labels never interpret feed metadata, errors or paths as markup."""
 
@@ -103,7 +116,7 @@ class _SafeFeedHtml(HTMLParser):
         "blockquote", "code", "pre", "h1", "h2", "h3", "h4", "h5", "h6", "a",
     }
     VOID = {"br"}
-    BLOCKED = {"script", "style", "iframe", "object", "embed", "svg"}
+    BLOCKED = {"script", "style", "iframe", "embed", "svg"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -116,6 +129,9 @@ class _SafeFeedHtml(HTMLParser):
         tag = tag.lower()
         if tag == "img" or tag == "embed":
             return
+        if self._block_stack and self._block_stack[-1] == "svg" and tag in {"p", "div", "ul", "ol", "h1", "h2", "h3"}:
+            self._block_stack.pop()
+            self._blocked = max(0, self._blocked - 1)
         if tag in self.BLOCKED:
             self._blocked += 1
             self._block_stack.append(tag)
@@ -142,21 +158,12 @@ class _SafeFeedHtml(HTMLParser):
         if tag == "embed":
             return
         if tag == "object":
-            while self._block_stack and self._block_stack[-1] == "embed":
-                self._block_stack.pop()
-                self._blocked = max(0, self._blocked - 1)
-            if self._block_stack and self._block_stack[-1] == "object":
-                self._block_stack.pop()
-                self._blocked = max(0, self._blocked - 1)
-            elif self._blocked:
-                self._blocked = max(0, self._blocked - 1)
-            return
+            return  # Object tags are discarded; their fallback text is readable.
         if tag in self.BLOCKED:
-            if self._block_stack and self._block_stack[-1] == tag:
-                self._block_stack.pop()
-            elif self._block_stack:
-                self._block_stack.pop()
-            self._blocked = max(0, self._blocked - 1)
+            if tag in self._block_stack:
+                index = len(self._block_stack) - 1 - self._block_stack[::-1].index(tag)
+                del self._block_stack[index:]
+                self._blocked = len(self._block_stack)
             return
         if self._blocked or tag not in self.ALLOWED or tag in self.VOID:
             return
@@ -170,7 +177,8 @@ class _SafeFeedHtml(HTMLParser):
             return
         # Never linkify inside an existing anchor — that would nest <a> tags.
         inside_anchor = bool(self._anchors) and self._anchors[-1]
-        self.parts.append(html_escape(data) if inside_anchor else linkify(data))
+        rendered = html_escape(data) if inside_anchor else linkify(data)
+        self.parts.append(rendered.replace("\n", "<br>"))
 
 
 # Bare URLs in show notes: with a scheme, as www., or as host/path (which is
@@ -193,7 +201,9 @@ def linkify(text: str) -> str:
     position = 0
     for match in _URL_PATTERN.finditer(text or ""):
         raw = match.group("url")
-        trimmed = raw.rstrip(_URL_TRAILING)
+        trimmed = raw.rstrip(_URL_TRAILING.replace(")", ""))
+        while trimmed.endswith(")") and trimmed.count(")") > trimmed.count("("):
+            trimmed = trimmed[:-1]
         if not trimmed:
             continue
         href = trimmed if trimmed.lower().startswith(("http://", "https://")) else f"https://{trimmed}"
@@ -214,19 +224,40 @@ def _link_style() -> str:
 MAX_SHOW_NOTE_CHARS = 64 * 1024
 
 
-def safe_feed_html(text: str) -> str:
+def safe_feed_html(text: str, *, source_label="publisher's website") -> str:
     # Bound both Qt layout and the cache keys themselves, with an explicit
     # notice rather than silently discarding exceptionally large show notes.
     text = text or ""
     shortened = len(text) > MAX_SHOW_NOTE_CHARS
     result = _safe_feed_html(text[:MAX_SHOW_NOTE_CHARS])
     if shortened:
-        result += "<p>Show notes shortened for display. Open the episode website for the complete text.</p>"
+        result += f"<p>Show notes shortened for display. Open the {html_escape(source_label)} for the complete text.</p>"
     return result
 
 
-@lru_cache(maxsize=256)
+_notes_cache = OrderedDict()
+_notes_cache_bytes = 0
+MAX_NOTES_CACHE_BYTES = 8 * 1024 * 1024
+
+
 def _safe_feed_html(text: str) -> str:
+    global _notes_cache_bytes
+    cached = _notes_cache.get(text)
+    if cached is not None:
+        _notes_cache.move_to_end(text)
+        return cached[0]
+    result = _render_feed_html(text)
+    cost = 256 + 4 * (len(text) + len(result))
+    if cost <= MAX_NOTES_CACHE_BYTES:
+        while _notes_cache and (_notes_cache_bytes + cost > MAX_NOTES_CACHE_BYTES or len(_notes_cache) >= 256):
+            key, (_value, retired) = _notes_cache.popitem(last=False)
+            _notes_cache_bytes -= retired
+        _notes_cache[text] = (result, cost)
+        _notes_cache_bytes += cost
+    return result
+
+
+def _render_feed_html(text: str) -> str:
     """Pure function of the text (link colours come from the document
     stylesheet), so the pane and Now Playing share one sanitised copy
     instead of re-parsing the same show notes on every click (audit F-128)."""
@@ -326,9 +357,15 @@ class Artwork(QWidget):
         self._bounds = (size, size)
         self.setFixedSize(size, size)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAccessibleName("Artwork")
 
     def set_bounds(self, smallest: int, largest: int):
         self._bounds = (smallest, largest)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus if self.receivers(SIGNAL('clicked()')) else Qt.FocusPolicy.NoFocus)
 
     def set_side(self, side: int):
         side = max(self._bounds[0], min(self._bounds[1], int(side)))
@@ -364,6 +401,13 @@ class Artwork(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
             self.clicked.emit()
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
 
 class NavigationRail(QFrame):
@@ -473,7 +517,9 @@ class NavigationRail(QFrame):
 
     def set_background_paused(self, paused: bool):
         self._background_paused = bool(paused)
-        self.background_status.setVisible(self._background_paused and not self._compact)
+        self.background_status.setText("Ⅱ" if self._compact else "Background paused")
+        self.background_status.setAccessibleName("Background paused")
+        self.background_status.setVisible(self._background_paused)
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Type.DevicePixelRatioChange and watched is getattr(self, "_dpr_window", None):
@@ -591,8 +637,10 @@ class NavigationRail(QFrame):
             return
         self._badge_counts[index] = max(0, int(count))
         badge = self._badges[index]
-        if count > 0 and not self._compact:
-            badge.setText(str(count) if count < 100 else "99+")
+        if count > 0:
+            badge.setText("•" if self._compact else str(count) if count < 100 else "99+")
+            badge.setStyleSheet(f"background: transparent; color: {COLORS['accent']}; min-width: 0; padding: 0;" if self._compact else "")
+            badge.setMaximumWidth(8 if self._compact else 16777215)
             badge.show()
         else:
             badge.hide()
@@ -607,7 +655,7 @@ class NavigationRail(QFrame):
         changed = compact != self._compact
         self._compact = compact
         self.brand_text.setVisible(not compact)
-        self.background_status.setVisible(self._background_paused and not compact)
+        self.set_background_paused(self._background_paused)
         self.toggle.set_glyph(
             "collapse-right" if compact else "collapse-left",
             "Expand navigation" if compact else "Collapse navigation",
@@ -616,10 +664,7 @@ class NavigationRail(QFrame):
             button.setText("" if compact else label)
             button.setToolTip(f"{label}  ·  Ctrl+{index + 1}")
             button.setStyleSheet(f"text-align: center; padding: {scaled_px(9)}px 0;" if compact else "")
-            if compact:
-                self._badges[index].hide()
-            else:
-                self.set_badge(index, self._badge_counts[index])
+            self.set_badge(index, self._badge_counts[index])
         self.apply_metrics()
         if user and changed:
             self.compact_toggled.emit(compact)
@@ -640,6 +685,7 @@ class SearchField(QLineEdit):
         super().__init__(parent)
         self.setObjectName("searchField")
         self.setPlaceholderText(placeholder)
+        self.setAccessibleName(placeholder)
         self.setClearButtonEnabled(True)
         self.addAction(icons.icon("search", COLORS["subtle"], 16), QLineEdit.ActionPosition.LeadingPosition)
 
@@ -858,10 +904,12 @@ class FlowLayout(QLayout):
 
     def addItem(self, item):
         self._items.append(item)
+        self.invalidate()
 
     def insertWidget(self, index, widget):
         self.addWidget(widget)
         self._items.insert(index, self._items.pop())
+        self.invalidate()
 
     def count(self):
         return len(self._items)
@@ -870,7 +918,11 @@ class FlowLayout(QLayout):
         return self._items[index] if 0 <= index < len(self._items) else None
 
     def takeAt(self, index):
-        return self._items.pop(index) if 0 <= index < len(self._items) else None
+        if not 0 <= index < len(self._items):
+            return None
+        item = self._items.pop(index)
+        self.invalidate()
+        return item
 
     def expandingDirections(self):
         return Qt.Orientation(0)
@@ -1018,13 +1070,13 @@ class StateBanner(QFrame):
         self.retry.setObjectName("quietButton")
         self.retry.setCursor(Qt.CursorShape.PointingHandCursor)
         self.retry.clicked.connect(self.retry_requested)
-        self.close = icon_button("close", "Dismiss", size=14)
-        self.close.clicked.connect(self.clear)
+        self.dismiss_button = icon_button("close", "Dismiss", size=14)
+        self.dismiss_button.clicked.connect(self.clear)
         row.addWidget(self.icon)
         row.addWidget(self.prefix)
         row.addWidget(self.label, 1)
         row.addWidget(self.retry)
-        row.addWidget(self.close)
+        row.addWidget(self.dismiss_button)
         outer.addLayout(row)
         self.progress = QProgressBar()
         self.progress.setObjectName("bannerProgress")
@@ -1047,10 +1099,12 @@ class StateBanner(QFrame):
         self.prefix.setVisible(bool(prefix))
         self.label.setText(message)
         self.retry.setVisible(retry)
-        self.close.setVisible(state not in {"loading", "empty"})
+        self.dismiss_button.setVisible(state not in {"loading", "empty"})
         self.progress.setVisible(state == "loading")
         self.setAccessibleName(f"{prefix}: {message}" if prefix else message)
         self.show()
+        if state in {"partial", "error", "offline", "suspended"} and state != previous:
+            QAccessible.updateAccessibility(QAccessibleEvent(self, QAccessible.Event.Alert))
         if state != previous:
             self.state_changed.emit(state)
 
@@ -1099,12 +1153,12 @@ class Toast(QFrame):
         self.action.setObjectName("textButton")
         self.action.setCursor(Qt.CursorShape.PointingHandCursor)
         self.action.clicked.connect(self._action)
-        self.close = icon_button("close", "Dismiss", size=14)
-        self.close.clicked.connect(self._user_close)
+        self.dismiss_button = icon_button("close", "Dismiss", size=14)
+        self.dismiss_button.clicked.connect(self._user_close)
         layout.addWidget(self.icon)
         layout.addWidget(self.text_scroll, 1)
         layout.addWidget(self.action)
-        layout.addWidget(self.close)
+        layout.addWidget(self.dismiss_button)
         self._effect = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self._effect)
         self._animation = QPropertyAnimation(self._effect, b"opacity", self)
@@ -1117,6 +1171,9 @@ class Toast(QFrame):
         self._callback = None
         self._on_close = None
         self._closing = False
+        self._sticky = False
+        self._sticky_entry = None
+        self._overflow = 0
         self._animation.finished.connect(self._animation_finished)
         self.hide()
 
@@ -1133,6 +1190,12 @@ class Toast(QFrame):
         only when the person clicks the X, never on programmatic dismissal
         — a sticky progress toast uses it as its cancel affordance."""
         showing = self.isVisible() and not self._closing
+        if showing and self._sticky and duration_ms > 0:
+            self._sticky_entry = (self.text.text(), self.property('tone') or 'loading', self.action.text(), self._callback, 0, self._on_close, self._owner)
+            self._animation.stop()
+            self._timer.stop()
+            self.hide()
+            showing = False
         if showing:
             entry = (message, tone, action, callback, duration_ms, on_close, owner)
             duplicate = self.text.text() == message or any(queued[0] == message for queued in self._queue)
@@ -1151,7 +1214,9 @@ class Toast(QFrame):
             if duplicate:
                 return
             self._queue.append(entry)
-            del self._queue[:-self.MAX_QUEUE]
+            if len(self._queue) > self.MAX_QUEUE:
+                self._queue.pop(0)
+                self._overflow += 1
             return
         glyph = {"success": "check", "error": "warning", "info": "info", "loading": "refresh"}.get(tone, "info")
         color = {"success": "success", "error": "danger", "loading": "blue"}.get(tone, "muted")
@@ -1164,9 +1229,11 @@ class Toast(QFrame):
         self.text.setText(message)
         self.action.setText(action)
         self.action.setVisible(bool(action))
+        self.action.setEnabled(True)
         self._callback = callback
         self._on_close = on_close
         self._owner = owner
+        self._sticky = duration_ms == 0
         self._closing = False
         self.adjustSize()
         self.reposition()
@@ -1177,6 +1244,8 @@ class Toast(QFrame):
         QAccessible.updateAccessibility(QAccessibleEvent(self, QAccessible.Event.Alert))
         self.raise_()
         self._animation.stop()
+        from .theme import reduced_motion
+        self._animation.setDuration(0 if reduced_motion() else 160)
         self._animation.setStartValue(0.0)
         self._animation.setEndValue(1.0)
         self._animation.start()
@@ -1188,6 +1257,9 @@ class Toast(QFrame):
     def update_message(self, message: str, owner=None):
         """Refresh a visible toast's text in place (progress ticks)."""
         if owner is not None and getattr(self, "_owner", None) != owner:
+            if self._sticky_entry is not None and self._sticky_entry[6] == owner:
+                self._sticky_entry = (message, *self._sticky_entry[1:])
+                return True
             for index, queued in enumerate(self._queue):
                 if queued[6] == owner:
                     self._queue[index] = (message, *queued[1:])
@@ -1203,6 +1275,8 @@ class Toast(QFrame):
 
     def dismiss_owner(self, owner):
         self._queue[:] = [queued for queued in self._queue if queued[6] != owner]
+        if self._sticky_entry is not None and self._sticky_entry[6] == owner:
+            self._sticky_entry = None
         if getattr(self, "_owner", None) == owner:
             self.dismiss()
 
@@ -1213,7 +1287,7 @@ class Toast(QFrame):
         anchor = getattr(parent, "toast_anchor", None)
         bottom = anchor() if callable(anchor) else parent.height() - SPACE["lg"]
         margins = self.layout().contentsMargins()
-        controls = [self.icon, self.close]
+        controls = [self.icon, self.dismiss_button]
         if not self.action.isHidden():
             controls.append(self.action)
         chrome = (margins.left() + margins.right()
@@ -1251,12 +1325,16 @@ class Toast(QFrame):
 
     def dismiss(self):
         self._on_close = None
+        self._callback = None
+        self.action.setEnabled(False)
         self._timer.stop()
         if not self.isVisible() or self._closing:
             return
         self._closing = True
         current = self._effect.opacity()
         self._animation.stop()
+        from .theme import reduced_motion
+        self._animation.setDuration(0 if reduced_motion() else 160)
         self._animation.setStartValue(current)
         self._animation.setEndValue(0.0)
         self._animation.start()
@@ -1266,11 +1344,26 @@ class Toast(QFrame):
             return
         self._closing = False
         self.hide()
+        if self._queue or self._overflow or self._sticky_entry:
+            from .theme import reduced_motion
+            QTimer.singleShot(0 if reduced_motion() else 120, self, self._show_next)
+
+    def _show_next(self):
         if self._queue:
-            QTimer.singleShot(120, self, lambda: self.show_message(*self._queue.pop(0)) if self._queue else None)
+            self.show_message(*self._queue.pop(0))
+        elif self._overflow:
+            count, self._overflow = self._overflow, 0
+            self.show_message(f"{count} additional notices were grouped while feedback was busy.")
+        elif self._sticky_entry:
+            entry, self._sticky_entry = self._sticky_entry, None
+            self.show_message(*entry)
 
     def _action(self):
+        if self._closing or not self.action.isEnabled():
+            return
         callback = self._callback
+        self._callback = None
+        self.action.setEnabled(False)
         self.dismiss()
         if callback:
             callback()
@@ -1444,7 +1537,6 @@ class HeroCard(QFrame):
         self.description = PlainTextLabel("")
         self.description.setObjectName("contextBody")
         self.description.setWordWrap(True)
-        self.description.setMaximumHeight(44)
         actions = QHBoxLayout()
         actions.setSpacing(SPACE["sm"])
         self.primary = QPushButton("Play latest")
@@ -1502,7 +1594,6 @@ class HeroCard(QFrame):
         self.layout().setSpacing(SPACE["lg"])
         self.art.set_bounds(scaled_px(96), scaled_px(160))
         self.art.set_side(scaled_px(128))
-        self.description.setMaximumHeight(scaled_px(44))
         self._apply_compact_chrome()
 
     def _apply_compact_chrome(self):
@@ -1535,7 +1626,9 @@ class HeroCard(QFrame):
         self.title.setText(title)
         self.meta.setText(meta)
         self.meta.setToolTip(meta)
-        self.description.setText(description)
+        from .models import plain_snippet
+        summary = plain_snippet(description, 241)
+        self.description.setText(summary[:240].rstrip() + "…" if len(summary) > 240 else summary)
         self.description.setToolTip(description)
         self.description.setVisible(bool(description))
         self.primary.setText("Play latest" if subscribed else "Subscribe")
@@ -1573,7 +1666,7 @@ class HeroCard(QFrame):
         return menu
 
     def _show_context_menu(self, position):
-        self._create_context_menu().exec(self.mapToGlobal(position))
+        exec_menu(self._create_context_menu(), self.mapToGlobal(position))
 
     def set_playing(self, playing_latest: bool, active: bool):
         if self._subscribe_mode:
@@ -1667,7 +1760,13 @@ class HoverBubble(QFrame):
         if screen is not None:
             area = screen.availableGeometry()
             left = max(area.left() + 4, min(left, area.right() - self.width() - 4))
-        self.move(left, global_top - self.height() - 6)
+            top = global_top - self.height() - 6
+            if top < area.top() + 4:
+                top = global_top + 6
+            top = max(area.top() + 4, min(top, area.bottom() - self.height() - 4))
+        else:
+            top = global_top - self.height() - 6
+        self.move(left, top)
         if not self.isVisible():
             self.show()
         self.raise_()
@@ -2144,11 +2243,11 @@ class ContextPanel(QFrame):
         self.health.setObjectName("meta")
         self.health.setWordWrap(True)
         self.links = QWidget()
-        links_layout = QHBoxLayout(self.links)
+        links_layout = FlowLayout(self.links, spacing=SPACE["xs"])
         links_layout.setContentsMargins(0, 0, 0, 0)
         links_layout.setSpacing(SPACE["xs"])
         links_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
-        self.links.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.links.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._directory_url = ""
         self._website_url = ""
         self.episodes_link = QPushButton("Episodes")
@@ -2164,7 +2263,6 @@ class ContextPanel(QFrame):
             button.setObjectName("textButton")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             links_layout.addWidget(button)
-        links_layout.addStretch(1)
         self.links.hide()
         selected_layout.addWidget(self.title)
         selected_layout.addWidget(self.meta)
@@ -2179,7 +2277,7 @@ class ContextPanel(QFrame):
         self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 18))
         self.primary.setCursor(Qt.CursorShape.PointingHandCursor)
         self.primary.clicked.connect(self._primary_clicked)
-        self.primary.setAccessibleName("Primary episode or podcast action")
+        self.primary.setAccessibleName("")  # Qt follows the visible action text.
         secondary_row = QHBoxLayout()
         secondary_row.setSpacing(SPACE["sm"])
         self.secondary = QPushButton("Up Next")
@@ -2193,7 +2291,7 @@ class ContextPanel(QFrame):
         self.download.setIcon(icons.icon("download", COLORS["text"], 16, disabled=COLORS["disabled"]))
         self.download.setCursor(Qt.CursorShape.PointingHandCursor)
         self.download.clicked.connect(self._download_clicked)
-        self.download.setAccessibleName("Download episode")
+        self.download.setAccessibleName("")
         # Right-click always offers the state's full menu (Retry / Clear /
         # Remove); a left click keeps doing the one obvious thing.
         self.download.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2234,6 +2332,7 @@ class ContextPanel(QFrame):
         self.body = QTextBrowser()
         self.body.setObjectName("contextBody")
         self.body.setReadOnly(True)
+        self.body.setAccessibleName("Episode or podcast details")
         self.body.setOpenExternalLinks(False)
         self.body.setOpenLinks(False)
         self.body.anchorClicked.connect(lambda url: self.open_url_requested.emit(url.toString()))
@@ -2253,6 +2352,7 @@ class ContextPanel(QFrame):
         self.transcript_search.returnPressed.connect(self._search_transcript)
         self.transcript_text = QTextEdit()
         self.transcript_text.setReadOnly(True)
+        self.transcript_text.setAccessibleName("Transcript")
         self.transcript_text.setFrameShape(QFrame.Shape.NoFrame)
         transcript_layout.addWidget(self.transcript_search)
         transcript_layout.addWidget(self.transcript_text, 1)
@@ -2268,6 +2368,8 @@ class ContextPanel(QFrame):
         self._tab_specs = (("Details", "info"), ("Chapters", "chapters"), ("Transcript", "list"), ("Bookmarks", "bookmark"))
         self._tabs_full_width = self.tabs.tabBar().sizeHint().width()
         self._tabs_iconic = False
+        self.tabs.installEventFilter(self)
+        self._tab_counts = {}
         self.tabs.currentChanged.connect(lambda _index: self._tint_tab_icons())
         selected_layout.addWidget(self.tabs, 1)
         selected_layout.addStretch(0)
@@ -2370,9 +2472,10 @@ class ContextPanel(QFrame):
             placeholder = QListWidgetItem("No chapters provided")
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.chapter_list.addItem(placeholder)
-        self.tabs.setTabToolTip(1, f"{len(chapters)} chapter{'s' if len(chapters) != 1 else ''}")
+        self._tab_counts[1] = f"{len(chapters)} chapter{'s' if len(chapters) != 1 else ''}"
+        self.tabs.setTabToolTip(1, "Chapters\n" + self._tab_counts[1])
 
-    def set_transcript(self, segments):
+    def set_transcript(self, segments, query=""):
         segments = list(segments)
         timed = bool(segments) and all(segment.start_seconds is not None for segment in segments)
         if timed:
@@ -2381,7 +2484,8 @@ class ContextPanel(QFrame):
             )
         else:
             body = "\n\n".join(segment.text or "" for segment in segments)
-        self.transcript_text.setPlainText(body or "No transcript provided")
+        empty = f"No segments match “{query}”" if query else "No transcript provided"
+        self.transcript_text.setPlainText(body or empty)
 
     def show_details_error(self, message: str):
         """A failed chapters/transcript download looked exactly like 'the
@@ -2407,7 +2511,8 @@ class ContextPanel(QFrame):
             placeholder = QListWidgetItem("No bookmarks yet")
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.bookmark_list.addItem(placeholder)
-        self.tabs.setTabToolTip(3, f"{len(bookmarks)} bookmark{'s' if len(bookmarks) != 1 else ''}")
+        self._tab_counts[3] = f"{len(bookmarks)} bookmark{'s' if len(bookmarks) != 1 else ''}"
+        self.tabs.setTabToolTip(3, "Bookmarks\n" + self._tab_counts[3])
 
     def update_podcast_artwork(self, podcast):
         current = self._current_item
@@ -2431,7 +2536,6 @@ class ContextPanel(QFrame):
         self.tabs.show()
         self.art.set_artwork(podcast.artwork_path, initials(podcast.author if podcast.is_episode else podcast.title), podcast.accent)
         self.title.setText(podcast.title)
-        self._episode_candidate = podcast.is_episode
         if podcast.is_episode:
             self.meta.setText(f"Episode of {podcast.author}" + (f"  ·  {podcast.display_meta}" if podcast.display_meta else ""))
         elif podcast.directory_result and not podcast.show_id:
@@ -2479,6 +2583,7 @@ class ContextPanel(QFrame):
         if self._feed_url and not description:
             description = "Loading feed details…"
         self._set_body(description or "No description provided by this feed.")
+        self._fit_tabs()
 
     def _set_latest_episode(self, title: str, date: str):
         """The label word-wraps, so it gets the whole title whenever it is
@@ -2538,7 +2643,8 @@ class ContextPanel(QFrame):
     def show_preview_error(self, feed_url: str, message: str):
         if feed_url != self._preview_url:
             return
-        self._set_body(f"Couldn’t load feed details: {message}\n\nYou can still subscribe; episodes are fetched after subscribing.")
+        text = f"Couldn’t load feed details: {message}\n\nYou can still subscribe; episodes are fetched after subscribing."
+        self.body.setPlainText(text)
 
     def show_episode(self, episode):
         self._set_current_item(episode)
@@ -2564,15 +2670,16 @@ class ContextPanel(QFrame):
         for index in range(1, self.tabs.count()):
             self.tabs.setTabVisible(index, True)
         self._episode_progress = episode.progress
-        self._playing_state = ("", False)
         self.primary.setText("Resume" if 0 < episode.progress < 1 else "Play")
         self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 18))
         self.primary.setEnabled(True)
         self.secondary.setEnabled(bool(self._episode_id))
         self._downloadable = is_web_url(episode.media_url) or bool(episode.downloaded_path)
         self._apply_download_button(episode.state)
+        self._fit_tabs()
 
     def _apply_download_button(self, state: str):
+        self._download_state = state
         if not getattr(self, "_downloadable", True):
             self.download.setEnabled(False)
             self.download.setText("Local audio")
@@ -2586,7 +2693,7 @@ class ContextPanel(QFrame):
         elif state == "Downloading":
             self.download.setText("Downloading…")
             self.download.setIcon(icons.icon("pause", COLORS["text"], 16, disabled=COLORS["disabled"]))
-            self.download.setToolTip("Click to pause")
+            self.download.setToolTip("Download options — pause or manage this download")
             self.download.setEnabled(True)
         else:
             self.download.setToolTip("")
@@ -2633,6 +2740,30 @@ class ContextPanel(QFrame):
         self.art.set_side(min(self.art.width() or scaled_px(240), scaled_px(240)))
         self.tabs.setMinimumHeight(scaled_px(150))
         self.queue_empty.apply_metrics()
+        self._measure_tabs()
+        self._fit_tabs()
+
+    def _measure_tabs(self):
+        if not hasattr(self, '_tab_specs'):
+            return
+        bar = self.tabs.tabBar()
+        original = [(bar.tabText(index), bar.tabIcon(index), bar.isTabVisible(index)) for index in range(bar.count())]
+        for index, (label, _glyph) in enumerate(self._tab_specs):
+            bar.setTabText(index, label)
+            bar.setTabIcon(index, QIcon())
+            bar.setTabVisible(index, True)
+        bar.ensurePolished()
+        self._tabs_full_width = bar.sizeHint().width()
+        for index, (text, icon, visible) in enumerate(original):
+            bar.setTabText(index, text)
+            bar.setTabIcon(index, icon)
+            bar.setTabVisible(index, visible)
+
+    def eventFilter(self, watched, event):
+        if watched is getattr(self, 'tabs', None) and event.type() in (QEvent.Type.FontChange, QEvent.Type.Show, QEvent.Type.Resize):
+            self._measure_tabs()
+            self._fit_tabs()
+        return super().eventFilter(watched, event)
 
     def _set_current_item(self, item):
         def item_key(value):
@@ -2663,23 +2794,24 @@ class ContextPanel(QFrame):
             self.information_requested.emit(self._current_item)
 
     def _create_information_menu(self):
+        current = self._current_item
         menu = QMenu(self)
         action = menu.addAction(
             icons.icon("info", COLORS["text"], 16),
-            "Podcast information…" if hasattr(self._current_item, "feed_url") else "Episode information…",
-            self._information_clicked,
+            "Podcast information…" if hasattr(current, "feed_url") else "Episode information…",
+            lambda: self.information_requested.emit(current) if current is not None else None,
         )
-        action.setEnabled(self._current_item is not None)
-        if self._current_item is not None and hasattr(self._current_item, "favorite") and getattr(self._current_item, "episode_id", 0):
+        action.setEnabled(current is not None)
+        if current is not None and hasattr(current, "favorite") and getattr(current, "episode_id", 0):
             menu.addAction(
-                icons.icon("favorite", COLORS["accent"] if self._current_item.favorite else COLORS["text"], 16),
-                "Remove from favorites" if self._current_item.favorite else "Add to favorites",
-                lambda: self.favorite_requested.emit(self._current_item, not self._current_item.favorite),
+                icons.icon("favorite", COLORS["accent"] if current.favorite else COLORS["text"], 16),
+                "Remove from favorites" if current.favorite else "Add to favorites",
+                lambda: self.favorite_requested.emit(current, not current.favorite),
             )
         return menu
 
     def _show_information_menu(self, position):
-        self._create_information_menu().exec(
+        exec_menu(self._create_information_menu(),
             self.selected_scroll.viewport().mapToGlobal(position)
         )
 
@@ -2693,14 +2825,14 @@ class ContextPanel(QFrame):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         # Keep the artwork proportional to the space that remains for text and tabs.
-        reserved = 520 if self.latest_card.isVisible() else 440
+        reserved = scaled_px(520 if self.latest_card.isVisible() else 440)
         self.art.set_side(min(self.width() - 2 * SPACE["lg"] - 12, self.height() - reserved))
         self._fit_tabs()
 
     def _fit_tabs(self):
         """Full labels when they fit, icon-only tabs (label in the tooltip)
         when the strip is wider than the pane. Never a truncated label."""
-        available = self.tabs.width() - 2
+        available = min(self.tabs.width(), self.selected_scroll.viewport().width() - SPACE["sm"]) - 2
         iconic = self._tabs_full_width > available > 0
         if iconic == self._tabs_iconic:
             return
@@ -2708,7 +2840,8 @@ class ContextPanel(QFrame):
         for index, (label, glyph) in enumerate(self._tab_specs):
             if iconic:
                 self.tabs.setTabText(index, "")
-                self.tabs.setTabToolTip(index, label)
+                self.tabs.setTabToolTip(index, label + ("\n" + self._tab_counts[index] if index in self._tab_counts else ""))
+                self.tabs.tabBar().setAccessibleTabName(index, label)
             else:
                 self.tabs.setTabIcon(index, QIcon())
                 self.tabs.setTabText(index, label)
@@ -2763,7 +2896,7 @@ class ContextPanel(QFrame):
     def _download_clicked(self):
         if not self._episode_id:
             return
-        if self.download.text() in {"Downloaded", "Downloading…"}:
+        if getattr(self, '_download_state', '') in {"Downloaded", "Downloading"}:
             self.download_menu_requested.emit(self._episode_id, self.download.mapToGlobal(self.download.rect().bottomLeft()))
         else:
             self.download_episode_requested.emit(self._episode_id)
@@ -2779,9 +2912,7 @@ class ContextPanel(QFrame):
 
     @staticmethod
     def _time(seconds: float) -> str:
-        total = int(media_seconds(seconds) or 0)
-        minutes, secs = divmod(total, 60)
-        return f"{minutes}:{secs:02d}"
+        return format_media_time(seconds)
 
 
 def _escape(text: str) -> str:
@@ -2926,6 +3057,7 @@ class NowPlayingView(QFrame):
         self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
         self.notes = QTextBrowser()
         self.notes.setReadOnly(True)
+        self.notes.setAccessibleName("Show notes")
         self.notes.setOpenExternalLinks(False)
         self.notes.setOpenLinks(False)
         self.notes.anchorClicked.connect(lambda url: self.open_url_requested.emit(url.toString()))
@@ -2933,19 +3065,31 @@ class NowPlayingView(QFrame):
         self.notes.setFrameShape(QFrame.Shape.NoFrame)
         self.tabs.addTab(self.notes, "Show notes")
         self.chapter_list = QListWidget()
+        self.chapter_list.setAccessibleName("Chapters")
         self.chapter_list.itemClicked.connect(self._seek_item)
         self.chapter_list.itemActivated.connect(self._seek_item)
         self.tabs.addTab(self.chapter_list, "Chapters")
         self.transcript = QTextEdit()
         self.transcript.setReadOnly(True)
+        self.transcript.setAccessibleName("Transcript")
         self.transcript.setFrameShape(QFrame.Shape.NoFrame)
         self._transcript_user_scrolled = False
         self._ignore_transcript_scroll = False
         self._transcript_timed = False
         self._segment_blocks = []
         self.transcript.verticalScrollBar().valueChanged.connect(self._transcript_scrolled)
-        self.tabs.addTab(self.transcript, "Transcript")
+        transcript_page = QWidget()
+        transcript_layout = QVBoxLayout(transcript_page)
+        transcript_layout.setContentsMargins(0, 0, 0, 0)
+        self.follow_transcript_button = QPushButton("Follow playback")
+        self.follow_transcript_button.setObjectName("textButton")
+        self.follow_transcript_button.clicked.connect(self.resume_transcript_follow)
+        transcript_layout.addWidget(self.follow_transcript_button, alignment=Qt.AlignmentFlag.AlignRight)
+        transcript_layout.addWidget(self.transcript, 1)
+        self.follow_transcript_button.hide()
+        self.tabs.addTab(transcript_page, "Transcript")
         self.bookmark_list = QListWidget()
+        self.bookmark_list.setAccessibleName("Bookmarks")
         self.bookmark_list.itemClicked.connect(self._seek_item)
         self.bookmark_list.itemActivated.connect(self._seek_item)
         self.tabs.addTab(self.bookmark_list, "Bookmarks")
@@ -3018,7 +3162,7 @@ class NowPlayingView(QFrame):
         return menu
 
     def _show_context_menu(self, position):
-        self._create_context_menu().exec(self.mapToGlobal(position))
+        exec_menu(self._create_context_menu(), self.mapToGlobal(position))
 
     def set_stats(self, rows):
         """Fill the info card under the time line: (label, value) pairs."""
@@ -3051,6 +3195,12 @@ class NowPlayingView(QFrame):
             self._transcript_timed = False
             self._transcript_user_scrolled = False
             self._current_chapter = self._current_segment = -1
+            self.title.setText("Loading episode…")
+            self.show_link.hide()
+            self.meta.setText("")
+            self.art.set_artwork("", "—", "")
+            self.notes.setPlainText("Loading show notes…")
+            self.set_stats([])
 
     def set_episode(self, snapshot, description: str, chapters, segments, bookmarks, accent: str):
         self._episode_id = snapshot.episode_id or 0
@@ -3060,8 +3210,8 @@ class NowPlayingView(QFrame):
         set_button_text_elided(self.show_link, snapshot.show_title, scaled_px(230))
         self.show_link.setVisible(bool(snapshot.show_title))
         self._fit_artwork()
-        self.notes.setHtml(safe_feed_html(description or "No show notes provided for this episode."))
-        self._chapters = list(chapters)
+        self.notes.setHtml(safe_feed_html(description or "No show notes provided for this episode.", source_label="episode website"))
+        self._chapters = sorted(chapters, key=lambda chapter: chapter.start_seconds)
         self._chapter_starts = [chapter.start_seconds for chapter in self._chapters]
         self.chapter_list.clear()
         for chapter in self._chapters:
@@ -3074,6 +3224,8 @@ class NowPlayingView(QFrame):
             self.chapter_list.addItem(placeholder)
         self.tabs.setTabText(1, f"Chapters ({len(self._chapters)})" if self._chapters else "Chapters")
         self._segments = list(segments)
+        if self._segments and all(segment.start_seconds is not None for segment in self._segments):
+            self._segments.sort(key=lambda segment: segment.start_seconds)
         self._fill_transcript(self._segments)
         self.bookmark_list.clear()
         for bookmark in bookmarks:
@@ -3100,6 +3252,7 @@ class NowPlayingView(QFrame):
         painter.fillRect(self.rect(), gradient)
 
     def set_position(self, position: float, duration: float):
+        self._last_position, self._last_duration = position, duration
         self.meta.setText(f"{PlayerBar._time(position)}  ·  {PlayerBar._time(max(0.0, duration - position))} left" if duration else "")
         chapter_index = bisect_right(self._chapter_starts, position) - 1
         if chapter_index != self._current_chapter and self._chapters:
@@ -3131,9 +3284,22 @@ class NowPlayingView(QFrame):
         if self._ignore_transcript_scroll:
             return
         self._transcript_user_scrolled = True
+        self.follow_transcript_button.setVisible(self._transcript_timed)
+
+    def resume_transcript_follow(self):
+        self._ignore_transcript_scroll = True
+        cursor = self.transcript.textCursor()
+        cursor.clearSelection()
+        self.transcript.setTextCursor(cursor)
+        self._ignore_transcript_scroll = False
+        self._transcript_user_scrolled = False
+        self.follow_transcript_button.hide()
+        self._current_segment = -1
+        self.set_position(getattr(self, '_last_position', 0), getattr(self, '_last_duration', 0))
 
     def _fill_transcript(self, segments):
         self._transcript_user_scrolled = False
+        self.follow_transcript_button.hide()
         self._ignore_transcript_scroll = True
         starts = [segment.start_seconds for segment in segments]
         self._transcript_timed = bool(segments) and all(start is not None for start in starts)
@@ -3151,7 +3317,7 @@ class NowPlayingView(QFrame):
             text = segment.text or ""
             if self._transcript_timed:
                 text = f"{PlayerBar._time(segment.start_seconds)}   {text}"
-            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\u2028", "\n").replace("\u2029", "\n")
             parts.append(text)
             block += text.count("\n") + 1
         self.transcript.setPlainText("\n".join(parts))
@@ -3170,6 +3336,7 @@ class SearchOverlay(QFrame):
     podcast_chosen = Signal(object)
     episode_chosen = Signal(object)
     directory_chosen = Signal(str)
+    show_all_requested = Signal(str)
     menu_requested = Signal(object, object)
     closed = Signal()
 
@@ -3283,6 +3450,10 @@ class SearchOverlay(QFrame):
                 item.setSizeHint(QSize(0, scaled_px(62)))
                 item.setData(Qt.ItemDataRole.UserRole, ("episode", episode))
                 self.results.addItem(item)
+            if len(episodes) > 12:
+                item = QListWidgetItem(icons.icon('search', COLORS['accent'], 16), f'Show all matching episodes for “{query}”')
+                item.setData(Qt.ItemDataRole.UserRole, ('show-all', query))
+                self.results.addItem(item)
         if query:
             self._section("DIRECTORY")
             item = QListWidgetItem(icons.icon("discover", COLORS["accent"], 16), f"Search the podcast directory for “{query}”")
@@ -3324,6 +3495,8 @@ class SearchOverlay(QFrame):
             self.podcast_chosen.emit(value)
         elif kind == "episode":
             self.episode_chosen.emit(value)
+        elif kind == 'show-all':
+            self.show_all_requested.emit(value)
         else:
             self.directory_chosen.emit(value)
 
@@ -3388,6 +3561,9 @@ class PlayerBar(QFrame):
         self._capabilities = None
         self._speed = 1.0
         self._volume = 100.0
+        self._engine_volume = 100.0
+        self._volume_target = None
+        self._volume_target_until = 0.0
         self._volume_wheel = 0
         self._skip_back = 15
         self._skip_forward = 30
@@ -3552,7 +3728,7 @@ class PlayerBar(QFrame):
         self.queue.clicked.connect(self.context_requested)
         self.volume = icon_button("volume", "Volume")
         self.volume_popover = VolumePopover(self)
-        self.volume_popover.volume_changed.connect(self.volume_requested)
+        self.volume_popover.volume_changed.connect(self._request_volume)
         self.volume.clicked.connect(self._show_volume)
         self.volume.installEventFilter(self)
         self.tray_button = icon_button("minimize-tray", "Minimize to tray — keep playing")
@@ -3936,6 +4112,11 @@ class PlayerBar(QFrame):
 
     # -- state -------------------------------------------------------------
     def set_snapshot(self, snapshot):
+        import time
+        self._engine_volume = float(snapshot.volume)
+        pending = getattr(self, '_volume_target', None)
+        if pending is not None and (abs(pending - self._engine_volume) < .5 or time.monotonic() >= self._volume_target_until):
+            self._volume_target = None
         # Position ticks arrive several times a second; re-applying icons,
         # tooltips and popover state on every tick churns the Qt thread for
         # nothing. When only position moved, update the timeline and leave.
@@ -3955,6 +4136,9 @@ class PlayerBar(QFrame):
                 self.slider.blockSignals(False)
             self.elapsed.setText(self._time(position))
             self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
+            description = f"{self._time(position)} of {self._time(self._duration)}"
+            if self.slider.accessibleDescription() != description:
+                self.slider.setAccessibleDescription(description)
             return
         self._chrome_key = chrome_key
         self._download_wait = bool(getattr(snapshot, 'download_request', 0))
@@ -3989,8 +4173,9 @@ class PlayerBar(QFrame):
         self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
         self._speed = float(snapshot.speed)
         self.speed.setText(f"{self._speed:g}×")
+        self.speed.setAccessibleName(f"Playback speed, {self._speed:g} times")
         self.speed_popover.set_current(self._speed)
-        self._volume = float(snapshot.volume)
+        self._volume = self._engine_volume if self._volume_target is None else self._volume_target
         self.volume_popover.set_volume(self._volume)
         self.volume.setIcon(icons.icon("mute" if self._volume == 0 else "volume", COLORS["text"], 20, disabled=COLORS["disabled"]))
         self.volume.setToolTip("Muted" if self._volume == 0 else f"Volume {int(self._volume)}")
@@ -4017,6 +4202,8 @@ class PlayerBar(QFrame):
         glyph = "refresh" if loading else "pause" if playing else "play"
         self.play.setIcon(icons.icon(glyph, COLORS["on_accent"], 22, disabled=COLORS["subtle"]))
         self.play.setToolTip("Opening…" if loading else ("Pause" if playing else "Play") + "  ·  Ctrl+Space")
+        self.play.setAccessibleName("Opening; pause when ready" if loading else "Pause" if playing else "Play")
+        self.slider.setAccessibleDescription(f"{self._time(position)} of {self._time(self._duration)}")
         self.set_transport_state(loading, getattr(snapshot, "buffering", None), getattr(self, "_streaming", False))
         self.set_enabled(self._has_episode and str(snapshot.state) != "shutdown")
         self.bookmark.setEnabled(self._has_episode and durable_episode)
@@ -4039,7 +4226,7 @@ class PlayerBar(QFrame):
         return menu
 
     def _show_context_menu(self, position):
-        self._create_context_menu().exec(self.mapToGlobal(position))
+        exec_menu(self._create_context_menu(), self.mapToGlobal(position))
 
     def set_queue_open(self, open_: bool):
         self.queue.setChecked(open_)
@@ -4067,9 +4254,18 @@ class PlayerBar(QFrame):
             if steps == 0:
                 return True
             self._volume_wheel -= steps * 120
-            self.volume_requested.emit(float(max(0, min(100, int(self._volume) + steps * 5))))
+            import time
+            pending = getattr(self, '_volume_target', None)
+            base = pending if pending is not None and time.monotonic() < self._volume_target_until else getattr(self, '_engine_volume', self._volume)
+            self._request_volume(float(max(0, min(100, int(base) + steps * 5))))
             return True
         return super().eventFilter(watched, event)
+
+    def _request_volume(self, value):
+        import time
+        self._volume_target = self._volume = float(value)
+        self._volume_target_until = time.monotonic() + 2
+        self.volume_requested.emit(float(value))
 
     def _capture_drag_duration(self):
         # If auto-advance swaps tracks mid-drag, the release must seek within
@@ -4101,7 +4297,4 @@ class PlayerBar(QFrame):
 
     @staticmethod
     def _time(seconds: float) -> str:
-        total = int(media_seconds(seconds) or 0)
-        hours, remainder = divmod(total, 3600)
-        minutes, secs = divmod(remainder, 60)
-        return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+        return format_media_time(seconds)

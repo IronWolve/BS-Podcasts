@@ -2,7 +2,9 @@
 import argparse
 import importlib.metadata
 from pathlib import Path
+import re
 import sys
+import tomllib
 
 
 def parse_requirement(text):
@@ -55,8 +57,22 @@ def check(lock):
         pass
     else:
         failures.append('Retired dependency mutagen is still installed; remove it from this project environment before building.')
+    entries = parse_lock(Path(lock).read_text())
+    if not entries:
+        raise RuntimeError('Dependency lock is empty; refusing an unpinned build environment.')
+    names = [re.sub(r'[-_.]+', '-', name).lower() for name, _, _ in entries]
+    if len(names) != len(set(names)):
+        raise RuntimeError('Dependency lock contains duplicate package names.')
+    metadata = Path(lock).resolve().parent.parent / 'pyproject.toml'
+    if metadata.is_file():
+        requirements = tomllib.loads(metadata.read_text())['project'].get('dependencies', [])
+        expected = {re.sub(r'[-_.]+', '-', re.split(r'[<>=!~;\[\s]', value, 1)[0]).lower()
+                    for value in requirements}
+        missing = expected - set(names)
+        if missing:
+            raise RuntimeError('Dependency lock omits application packages: ' + ', '.join(sorted(missing)))
     count=0
-    for name, version, hashes in parse_lock(Path(lock).read_text()):
+    for name, version, hashes in entries:
         count+=1
         if not hashes:
             failures.append(f'{name}: dependency lock is missing publisher hashes')

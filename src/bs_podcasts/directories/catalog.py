@@ -185,7 +185,10 @@ class PublicDirectory:
         self.charts.invalidate()
 
     def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:
-        excluded = {show.feed_url for show in shows}
+        from ..services.library import LibraryService
+        key = LibraryService.normalize_feed_url
+        shows = list(shows)
+        excluded = {key(url) for show in shows for url in (show.feed_url, getattr(show, 'canonical_url', '')) if url}
         categories = []
         for show in shows:
             for category in show.categories.split(","):
@@ -202,7 +205,7 @@ class PublicDirectory:
             return [
                 candidate
                 for candidate in self.browse("", limit + len(excluded))
-                if candidate.feed_url not in excluded
+                if key(candidate.feed_url) not in excluded
             ][:limit]
 
         merged = []
@@ -212,9 +215,10 @@ class PublicDirectory:
         )
         for category in categories[:2]:
             for candidate in self.browse(category, per_category):
-                if candidate.feed_url in seen:
+                feed_key = key(candidate.feed_url)
+                if feed_key in seen:
                     continue
-                seen.add(candidate.feed_url)
+                seen.add(feed_key)
                 merged.append(candidate)
         return merged[:limit]
 

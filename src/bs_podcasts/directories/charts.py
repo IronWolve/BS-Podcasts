@@ -1,6 +1,5 @@
 """Current public podcast-chart reader using serialized page data."""
 
-from html import unescape
 import json
 import re
 import time
@@ -83,9 +82,11 @@ class DirectoryCharts:
             )
             if not match:
                 raise DirectoryError("Directory chart data was not present.")
-            payload = json.loads(unescape(match.group(1)))
+            payload = json.loads(match.group(1))
             shelves = payload["data"][0]["data"]["shelves"]
-        except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
+            if not isinstance(shelves, list):
+                raise DirectoryError("Directory chart shelves are not a list.")
+        except (requests.RequestException, ValueError, KeyError, IndexError, TypeError, RecursionError) as exc:
             raise DirectoryError(describe_network_error(exc, "the directory")) from exc
 
         wanted = CHART_TITLES[chart_type]
@@ -93,15 +94,18 @@ class DirectoryCharts:
             (
                 value
                 for value in shelves
-                if str(value.get("title", "")).split(":", 1)[0] == wanted
+                if isinstance(value, dict) and str(value.get("title", "")).split(":", 1)[0] == wanted
             ),
             None,
         )
         if shelf is None:
-                raise DirectoryError(f"The directory did not provide {wanted}.")
+            raise DirectoryError(f"The directory did not provide {wanted}.")
+        items = shelf.get("items", [])
+        if not isinstance(items, list):
+            raise DirectoryError("Directory chart items are not a list.")
         results = [
             candidate
-            for position, item in enumerate(shelf.get("items", []), start=1)
+            for position, item in enumerate(items, start=1)
             if (candidate := self._safe_candidate(self._candidate, item, chart_type, position)) is not None
         ]
         self._store(key, results, revision)
@@ -117,7 +121,7 @@ class DirectoryCharts:
         result set."""
         try:
             return builder(item, chart_type, rank)
-        except (AttributeError, TypeError, ValueError, KeyError, IndexError):
+        except (AttributeError, TypeError, ValueError, KeyError, IndexError, OverflowError):
             return None
 
     def _full_chart(self, chart_type: str, category: str):
@@ -153,7 +157,9 @@ class DirectoryCharts:
             )
             response.raise_for_status()
             data = response.json()["results"][media_type][0]["data"]
-        except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
+            if not isinstance(data, list):
+                raise DirectoryError("Directory chart entries are not a list.")
+        except (requests.RequestException, ValueError, KeyError, IndexError, TypeError, RecursionError) as exc:
             self._developer_token = ""
             raise DirectoryError(describe_network_error(exc, "the directory")) from exc
         return [
@@ -260,8 +266,8 @@ class DirectoryCharts:
         genre = next((value for value in genres if value in CATEGORY_IDS), genres[0] if genres else "")
         try:
             rank = int(item.get("ordinal") or position)
-        except (TypeError, ValueError):
-            rank = 0
+        except (TypeError, ValueError, OverflowError):
+            rank = position
         return DirectoryCandidate(
             title=str(item.get("title") or "Untitled").strip(),
             author=author,

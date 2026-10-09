@@ -1,12 +1,13 @@
 """Bounded, atomic artwork cache."""
 
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Lock
 from collections import OrderedDict
 import os
 import json
 import time
+import stat
 
 from ..net import SessionSlot
 from ..data.files import atomic_write, open_private
@@ -44,10 +45,10 @@ def _looks_textual(head: bytes) -> bool:
     """
     sniff = head.lstrip()[:512]
     lowered = sniff.lower()
-    if b"<svg" in lowered:  # SVG is markup and a legitimate image
-        return False
     if lowered.startswith((b"<!doctype html", b"<html", b"<head", b"<body")):
         return True
+    if lowered.startswith((b"<svg", b"<?xml")):  # SVG may have an XML prolog
+        return False
     return sniff[:1] in (b"{", b"[")
 
 
@@ -62,6 +63,7 @@ class ArtworkCache:
         self.directory = Path(directory)
         self.session = session
         self._url_locks: dict[str, Lock] = {}
+        self._active_files = set()
         self._locks_guard = Lock()
         self._validated = OrderedDict()
         self._retry_after = OrderedDict()
@@ -72,9 +74,9 @@ class ArtworkCache:
     @staticmethod
     def signature(path):
         try:
-            if path.is_symlink() or not path.is_file():
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
                 return None
-            info = path.stat()
             return info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
         except OSError:
             return None
@@ -112,12 +114,6 @@ class ArtworkCache:
                 self._validated.popitem(last=False)
         return valid
 
-    def cached_path(self, url):
-        target = self.path_for(url)
-        if url and self.valid_file(target) and self._touch(target):
-            return target
-        return None
-
     def _touch(self, path):
         with self._locks_guard:
             if self.signature(Path(path)) is None:
@@ -129,13 +125,27 @@ class ArtworkCache:
             return True
 
     def files(self):
-        if not self.directory.is_dir():
+        try:
+            return [path for path in self.directory.iterdir() if self._owned_name(path.name)]
+        except OSError:
             return []
-        return [path for path in self.directory.iterdir() if path.is_file() and path.suffix == ".img"]
+
+    @staticmethod
+    def _owned_name(name: str) -> bool:
+        stem, separator, suffix = name.rpartition('.')
+        return bool(separator and suffix == 'img' and len(stem) == 64 and
+                    all(char in '0123456789abcdef' for char in stem))
+
+    @classmethod
+    def _keep_names(cls, keep) -> set[str]:
+        # Cache filenames are URL digests. Stored absolute artwork references
+        # from another OS/location still refer to the same owned filename.
+        names = {PurePosixPath(str(path).replace('\\', '/')).name for path in keep}
+        return {name for name in names if cls._owned_name(name)}
 
     def usage(self) -> tuple[int, int]:
-        files = self.files()
-        return len(files), sum(path.stat().st_size for path in files)
+        stamps = [stamp for path in self.files() if (stamp := self.signature(path)) is not None]
+        return len(stamps), sum(stamp[1] for stamp in stamps)
 
     def candidates(self, keep: set[str]) -> list[tuple[Path, int]]:
         """What a full prune would delete right now, as (path, bytes), without deleting.
@@ -144,14 +154,15 @@ class ArtworkCache:
         minutes and files just used are never candidates, so a confirmation
         that quotes this list matches what the clear then removes."""
         threshold = time.time() - 15 * 60
+        keep_names = self._keep_names(keep)
         recent_after = time.monotonic() - 15 * 60
         found = []
         for path in self.files():
             stamp = self.signature(path)
-            if stamp is None or str(path) in keep or stamp[2] / 1e9 >= threshold:
+            if stamp is None or path.name in keep_names or stamp[2] / 1e9 >= threshold:
                 continue
             with self._locks_guard:
-                if self._recent.get(str(path), 0) > recent_after:
+                if path.name in self._active_files or self._recent.get(str(path), 0) > recent_after:
                     continue
             found.append((path, stamp[1]))
         return found
@@ -167,6 +178,7 @@ class ArtworkCache:
         # fetch dedup remembered the URL as done. Fresh files are never
         # candidates; the next pass collects them if they stay unreferenced.
         with self._prune_lock:
+            keep_names = self._keep_names(keep)
             threshold = time.time() - 15 * 60
             entries = [(path, stamp) for path in self.files() if (stamp := self.signature(path)) is not None]
             total = sum(stamp[1] for _path, stamp in entries)
@@ -174,11 +186,12 @@ class ArtworkCache:
             for path, stamp in sorted(entries, key=lambda item:item[1][2]):
                 if max_bytes is not None and total <= max_bytes:
                     break
-                if str(path) in keep or stamp[2] / 1e9 >= threshold:
+                if path.name in keep_names or stamp[2] / 1e9 >= threshold:
                     continue
                 try:
                     with self._locks_guard:
-                        if (self._recent.get(str(path), 0) > time.monotonic() - 15 * 60
+                        if (path.name in self._active_files
+                                or self._recent.get(str(path), 0) > time.monotonic() - 15 * 60
                                 or self.signature(path) != stamp):
                             continue
                         path.unlink()
@@ -250,6 +263,7 @@ class ArtworkCache:
             entry = self._url_locks.get(url)
             if entry is None:
                 entry = self._url_locks[url] = [Lock(), 0]
+                self._active_files.add(self.path_for(url).name)
             entry[1] += 1
             return entry[0]
 
@@ -343,7 +357,7 @@ class ArtworkCache:
             with self._locks_guard:
                 retry = self._retry_after.get(url, 0)
             if not force and retry > time.monotonic():
-                if self.valid_file(target):
+                if self.valid_file(target) and self._touch(target):
                     return target
                 raise ArtworkError('Artwork is temporarily unavailable; retry shortly.')
             try:
@@ -358,7 +372,7 @@ class ArtworkCache:
                         self._retry_after.move_to_end(url)
                         while len(self._retry_after) > 1024:
                             self._retry_after.popitem(last=False)
-                if not force and self.valid_file(target):
+                if not force and self.valid_file(target) and self._touch(target):
                     return target
                 raise
             with self._locks_guard:
@@ -379,6 +393,7 @@ class ArtworkCache:
                 entry[1] -= 1
                 if entry[1] <= 0:
                     del self._url_locks[url]
+                    self._active_files.discard(self.path_for(url).name)
 
     def _fetch_locked(self, url: str, target: Path) -> Path:
         import requests

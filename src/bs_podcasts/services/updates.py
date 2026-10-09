@@ -5,7 +5,7 @@ import re
 
 from ..config import RELEASES_API_URL
 from ..net import make_session
-from ..urlguard import ensure_web_url
+from ..urlguard import UnsafeUrl, ensure_web_url
 
 
 @dataclass(frozen=True)
@@ -49,11 +49,16 @@ def check_for_update(installed: str, session=None) -> UpdateResult:
             client.close()
     if not isinstance(payload, dict):
         raise RuntimeError("The release service returned an invalid response.")
-    available = str(payload.get("tag_name") or payload.get("name") or "").lstrip("v")
+    available = str(payload.get("tag_name") or payload.get("name") or "").strip()
+    if available[:1] in {"v", "V"}:
+        available = available[1:]
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", available):
         raise RuntimeError("The latest release has no valid version number.")
     notes = str(payload.get("body") or "").strip()
     url = str(payload.get("html_url") or "")
     if url:
-        url = ensure_web_url(url, "Release page")
+        try:
+            url = ensure_web_url(url, "Release page")
+        except UnsafeUrl:
+            url = ""
     return UpdateResult(installed, available, _version_key(available) > _version_key(installed), notes, url)

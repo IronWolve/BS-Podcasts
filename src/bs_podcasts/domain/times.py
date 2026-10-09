@@ -17,3 +17,11 @@ def media_interval(start, end):
     if start is not None and end is not None and end < start:
         end = None
     return start, end
+
+
+def format_media_time(value) -> str:
+    """Elapsed media time, floor to seconds; retain hours for long episodes."""
+    total = int(media_seconds(value) or 0)
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"

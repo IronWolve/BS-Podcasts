@@ -5,11 +5,11 @@ import json
 import math
 from pathlib import Path
 import time
-from urllib.parse import urlsplit
 
 from ..config import cache_dir
 from ..data.files import atomic_write
 from ..domain import DirectoryCandidate
+from ..urlguard import is_web_url
 
 
 MAX_CACHE_AGE = 30 * 24 * 60 * 60
@@ -100,13 +100,7 @@ class PersistentDirectoryCache:
             if not isinstance(value, str) or len(value) > maximum:
                 return None
             values[name] = value
-        try:
-            parsed = urlsplit(values["feed_url"])
-            valid = parsed.scheme.lower() in {"http", "https"} and bool(parsed.hostname)
-            parsed.port  # Invalid ports make this record unusable too.
-        except ValueError:
-            return None
-        if not valid:
+        if not is_web_url(values["feed_url"]):
             return None
         try:
             rank = int(record.get("rank", 0))
@@ -123,10 +117,13 @@ class PersistentDirectoryCache:
         try:
             limit = min(MAX_CANDIDATES, max(0, int(limit)))
             previous = previous if previous is not None else self.load(operation, value)
+            results = list(results[:MAX_CANDIDATES])
             if previous and previous['candidates'] and previous['limit'] > limit:
-                # A small first page is not a replacement for the saved full
-                # view; keep it until the larger refresh succeeds.
-                return False
+                # Persist the newest first page immediately while retaining
+                # the old deeper-page fallback until it is refreshed too.
+                fresh_urls = {getattr(item[0] if isinstance(item, tuple) else item, 'feed_url', '') for item in results}
+                results.extend(item for item in previous['candidates'] if item[0].feed_url not in fresh_urls)
+                limit = max(limit, previous['limit'])
             for item in results[:MAX_CANDIDATES]:
                 candidate = item[0] if isinstance(item, tuple) else item
                 if not isinstance(candidate, DirectoryCandidate):

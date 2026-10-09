@@ -1,6 +1,7 @@
 """Small dependency and migration self-check; no test discovery."""
 
 import argparse
+import codecs
 import importlib.util
 import json
 from pathlib import Path
@@ -21,6 +22,7 @@ _DEPENDENCY_CHECKS = (
     'urllib3 patched',
     'native library loaded',
     'bundled branding/fonts',
+    'bundled shell/tray icons',
     'native core initialized',
     'patched bundled FFmpeg',
     'native library inside deployment',
@@ -36,7 +38,8 @@ def _exception_text(exc):
 def _note_dependency_failure(checks, errors, exc):
     """Keep a check that already recorded false; otherwise record the generic flag."""
     detail = _exception_text(exc)
-    specific = [name for name in _DEPENDENCY_CHECKS if checks.get(name) is False]
+    specific = [name for name in checks if checks[name] is False and name not in errors
+                and (name in _DEPENDENCY_CHECKS or name.startswith('feed encoding '))]
     if specific:
         errors[specific[-1]] = detail
         return
@@ -97,6 +100,50 @@ def _painter(plain):
     return lambda code, text: f'\033[{code}m{text}\033[0m' if colour else text
 
 
+def _storage_checks(root, checks, errors):
+    database = None
+    try:
+        database = Database(root / 'library.db')
+        with database.connect() as connection:
+            versions = [row['version'] for row in connection.execute(
+                'SELECT version FROM schema_migrations ORDER BY version').fetchall()]
+        checks['library database opens'] = True
+        shipped = len(list((Path(__file__).parent / 'data/migrations').glob('[0-9]*.sql')))
+        checks['migrations applied'] = bool(versions) and versions == list(range(1, len(versions) + 1)) and len(versions) == shipped
+        previous_cache = os.environ.get('BS_PODCASTS_CACHE_DIR')
+        try:
+            import wave
+            from .data.repositories import LibraryRepository
+            from .feeds.local import LocalAudioImporter
+            os.environ['BS_PODCASTS_CACHE_DIR'] = str(root / 'cache')
+            audio = root / 'silent metadata check.wav'
+            with wave.open(str(audio), 'wb') as stream:
+                stream.setparams((1, 2, 8000, 0, 'NONE', 'not compressed'))
+                stream.writeframes(bytes(16000))
+            repository = LibraryRepository(database)
+            show = LocalAudioImporter(repository).import_file(audio)
+            episode = repository.list_episodes(show.id)[0]
+            checks['isolated local audio metadata'] = show.source == 'local' and episode.duration_seconds == 1
+        except Exception as exc:
+            checks['isolated local audio metadata'] = False
+            errors['isolated local audio metadata'] = _exception_text(exc)
+        finally:
+            if previous_cache is None:
+                os.environ.pop('BS_PODCASTS_CACHE_DIR', None)
+            else:
+                os.environ['BS_PODCASTS_CACHE_DIR'] = previous_cache
+    except Exception as exc:
+        checks['library database opens'] = False
+        errors['library database opens'] = _exception_text(exc)
+    finally:
+        if database is not None:
+            try:
+                database.close()
+            except Exception as exc:
+                checks['library database closes'] = False
+                errors['library database closes'] = _exception_text(exc)
+
+
 def main() -> int:
     started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -110,6 +157,14 @@ def main() -> int:
     checks = {"Python >=3.14.7": sys.version_info[:3] >= (3,14,7)}
     checks['retired metadata dependency absent'] = importlib.util.find_spec('mutagen') is None
     errors = {}
+    for encoding in ('gb2312', 'gbk', 'big5', 'shift_jis', 'euc_jp', 'euc_kr'):
+        name = 'feed encoding ' + encoding
+        try:
+            codecs.lookup(encoding)
+            checks[name] = True
+        except (LookupError, ImportError, OSError) as exc:
+            checks[name] = False
+            errors[name] = _exception_text(exc)
     try:
         import PySide6
         import requests
@@ -144,46 +199,12 @@ def main() -> int:
             checks['native library inside bundle'] = Path(mpv.backend._name).resolve().is_relative_to(bundle)
     except Exception as exc:
         _note_dependency_failure(checks, errors, exc)
-    with TemporaryDirectory(prefix="selfcheck-", dir=workspace_tmp) as temporary:
-        root = Path(temporary)
-        database = Database(root / "library.db")
-        with database.connect() as connection:
-            versions = [
-                row["version"]
-                for row in connection.execute(
-                    "SELECT version FROM schema_migrations ORDER BY version"
-                ).fetchall()
-            ]
-        # Gapless from 1 and matching what ships, never a pinned count: the
-        # hardcoded "1-11" broke the moment migration 012 landed, failing
-        # every healthy install — the same bug class the audit smoke had.
-        shipped = len(list((Path(__file__).parent / "data" / "migrations").glob("[0-9]*.sql")))
-        checks["migrations applied"] = bool(versions) and versions == list(
-            range(1, len(versions) + 1)
-        ) and len(versions) == shipped
-        previous_cache = os.environ.get('BS_PODCASTS_CACHE_DIR')
-        try:
-            import wave
-            from .data.repositories import LibraryRepository
-            from .feeds.local import LocalAudioImporter
-            os.environ['BS_PODCASTS_CACHE_DIR'] = str(root/'cache')
-            audio = root/'silent metadata check.wav'
-            with wave.open(str(audio), 'wb') as stream:
-                stream.setparams((1, 2, 8000, 0, 'NONE', 'not compressed'))
-                stream.writeframes(bytes(16000))
-            repository = LibraryRepository(database)
-            show = LocalAudioImporter(repository).import_file(audio)
-            episode = repository.list_episodes(show.id)[0]
-            checks['isolated local audio metadata'] = show.source == 'local' and episode.duration_seconds == 1
-        except Exception as exc:
-            checks['isolated local audio metadata'] = False
-            errors['isolated local audio metadata'] = _exception_text(exc)
-        finally:
-            if previous_cache is None:
-                os.environ.pop('BS_PODCASTS_CACHE_DIR', None)
-            else:
-                os.environ['BS_PODCASTS_CACHE_DIR'] = previous_cache
-            database.close()
+    try:
+        with TemporaryDirectory(prefix="selfcheck-", dir=workspace_tmp) as temporary:
+            _storage_checks(Path(temporary), checks, errors)
+    except Exception as exc:
+        checks['isolated storage checks'] = False
+        errors['isolated storage checks'] = _exception_text(exc)
 
     from . import __version__
     package_version = _distribution_version()

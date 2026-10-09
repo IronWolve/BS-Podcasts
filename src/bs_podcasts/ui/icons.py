@@ -9,6 +9,7 @@ the handful of glyphs Qt style sheets must reference by URL.
 from hashlib import sha1
 from pathlib import Path
 import re
+import stat
 import tempfile
 
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF, Qt
@@ -202,7 +203,16 @@ def icon_file(name: str, color: str, size: int) -> str:
     # never reach them.
     digest = sha1(GLYPHS.get(name, "").encode("utf-8")).hexdigest()[:8]
     target = _cache_dir() / f"{name}-{safe_color}-{size}-{digest}.png"
-    if target not in _verified_files:
+    if target.is_symlink():
+        _verified_files.pop(target, None)
+        return ""  # A planted glyph path must never become a stylesheet URL.
+    try:
+        info = target.stat()
+        signature = (info.st_ino, info.st_size, info.st_mtime_ns) if stat.S_ISREG(info.st_mode) else None
+    except OSError:
+        signature = None
+    if signature is None or _verified_files.get(target) != signature:
+        _verified_files.pop(target, None)
         valid = False
         try:
             if not target.is_symlink() and 0 < target.stat().st_size <= 128 * 1024:
@@ -219,13 +229,20 @@ def icon_file(name: str, color: str, size: int) -> str:
             buffer.close()
             if valid:
                 try:
+                    # Cache deletion is safe while running; recreate the
+                    # directory when regenerating a stylesheet glyph.
+                    target.parent.mkdir(parents=True, exist_ok=True)
                     atomic_write(target, bytes(data))
                 except OSError:
                     valid = False
         if valid:
-            _verified_files[target] = True
-            _bound(_verified_files)
-    return target.as_posix()
+            try:
+                info = target.stat()
+                _verified_files[target] = (info.st_ino, info.st_size, info.st_mtime_ns)
+                _bound(_verified_files)
+            except OSError:
+                _verified_files.pop(target, None)
+    return target.as_posix() if target in _verified_files else ""
 
 
 def resolve_stylesheet(qss: str) -> str:

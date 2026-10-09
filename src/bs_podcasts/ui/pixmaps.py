@@ -15,7 +15,7 @@ from PySide6.QtCore import QObject, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPainterPath, QPixmap
 
 from . import icons
-from .theme import COLORS, app_font
+from .theme import COLORS, ARTWORK_LIGHT_INK, ARTWORK_DARK_INK, app_font
 from ..data.files import atomic_write
 from ..artwork import previews
 from ..artwork.cache import ARTWORK_FORMATS, MAX_ARTWORK_PIXELS, MAX_ARTWORK_SIDE
@@ -220,7 +220,7 @@ def _load_disk() -> None:
                 continue
             color = record.get("color")
             mtime = record.get("mtime")
-            if not isinstance(color, str) or not isinstance(mtime, (int, float)):
+            if not isinstance(color, str) or not isinstance(mtime, (int, float)) or not color:
                 continue
             _dominant[path] = color
             _dominant_mtime[path] = float(mtime)
@@ -282,13 +282,13 @@ def _artwork_reader(path: str) -> QImageReader:
     return reader
 
 
-def _sample(path: str) -> str:
+def _sample(path: str) -> str | None:
     """Decode a thumbnail, not the full file."""
     reader = _artwork_reader(path)
     reader.setScaledSize(QSize(_SAMPLE_SIZE, _SAMPLE_SIZE))
     image = reader.read()
     if image.isNull():
-        return ""
+        return None
     total = [0, 0, 0]
     count = 0
     for y in range(image.height()):
@@ -331,6 +331,8 @@ def dominant_color(path: str, fallback: str = "", compute: bool = True) -> str:
         return cached or fallback
     signature = previews.signature(path)
     result = _sample(path)
+    if result is None:
+        return cached or fallback  # A temporary read failure must remain retryable.
     if signature is None or previews.signature(path) != signature:
         return result or fallback
     try:
@@ -406,6 +408,15 @@ def prune_accents():
 def initials(text: str) -> str:
     words = [word for word in text.replace("The ", "").split() if word]
     return "".join(word[0] for word in words[:2]).upper() or "—"
+
+
+def initials_ink(background: str) -> str:
+    color = QColor(background)
+    def linear(value):
+        return value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
+    luminance = (.2126 * linear(color.redF()) + .7152 * linear(color.greenF())
+                 + .0722 * linear(color.blueF()))
+    return ARTWORK_DARK_INK if luminance >= .179 else ARTWORK_LIGHT_INK
 
 
 def _target_reader(path: str, width: int, height: int) -> QImageReader:
@@ -786,7 +797,7 @@ def cover(
         painter.drawPixmap(0, 0, scaled, offset_x, offset_y, physical_w, physical_h)
     elif fallback_text and fallback_text != "—":
         painter.fillRect(QRect(0, 0, physical_w, physical_h), QColor(fallback_color or COLORS["surface_soft"]))
-        painter.setPen(QColor("#0B0F18" if fallback_color else COLORS["muted"]))
+        painter.setPen(QColor(initials_ink(fallback_color) if fallback_color else COLORS["muted"]))
         font = app_font(max(11, int(min(physical_w, physical_h) * 0.32)), QFont.Weight.Bold)
         painter.setFont(font)
         painter.drawText(QRect(0, 0, physical_w, physical_h), Qt.AlignmentFlag.AlignCenter, fallback_text)

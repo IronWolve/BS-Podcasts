@@ -185,3 +185,4 @@ class DownloadRecord:
     expected_total: int = 0
     created_at: float = 0.0
     updated_at: float = 0.0
+    length_verified: bool = False
