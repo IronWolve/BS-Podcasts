@@ -441,7 +441,7 @@ def stylesheet() -> str:
     }}
     QLabel#brandIcon {{ background: transparent; }}
     QLabel#brandName {{ font-size: {TYPE['h2']}px; font-weight: 700; color: {c['text_strong']}; }}
-    QLabel#brandSub, QLabel#muted, QLabel#meta {{ color: {c['muted']}; font-size: {small}px; }}
+    QLabel#muted, QLabel#meta {{ color: {c['muted']}; font-size: {small}px; }}
     QLabel#eyebrow {{
         color: {c['subtle']}; font-size: {micro}px; font-weight: 600;
         letter-spacing: 0.08em;

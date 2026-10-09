@@ -3119,7 +3119,7 @@ class MainWindow(QMainWindow):
         self._new_episode_total = new_total
         show_count = len(stored_shows)
         with self._page_guard(self.home_page, "Home") as home_counts:
-            self.home_page.set_counts(new_total, len(queued), active_downloads)
+            self.home_page.set_counts(new_total, len(queued), active_downloads, podcast_count=show_count)
             self.home_page.set_empty_context(bool(stored_shows))
         if home_sections['ok'] and home_counts['ok']:
             self._finish_page_load(self.home_page)
@@ -3127,10 +3127,6 @@ class MainWindow(QMainWindow):
             self.navigation.set_badge(PAGE_EPISODES, new_total)
             self.navigation.set_badge(PAGE_QUEUE, len(queued))
             self.navigation.set_badge(PAGE_DOWNLOADS, active_downloads)
-            self.navigation.set_summary(
-                f"{show_count} podcast{'s' if show_count != 1 else ''}" + (f"  ·  {new_total} new" if new_total else "")
-                if show_count else "Library"
-            )
         with self._page_guard(self.podcast_page, "your podcasts"):
             self.podcast_page.header.set_subtitle(
                 f"{show_count} podcast{'s' if show_count != 1 else ''}  ·  {episode_total} episode{'s' if episode_total != 1 else ''}" if show_count else ""
@@ -7217,6 +7213,7 @@ class MainWindow(QMainWindow):
             stored, shows = payload
             self._stored_shows = stored
             self._stored_shows_ready = True
+            self.home_page.summary_buttons[0].set_podcast_count(len(stored))
             self.podcast_page.set_items(shows, preserve_scroll=True)
             if self._last_library_data is not None:
                 self._last_library_data.update(stored_shows=stored, shows=shows)

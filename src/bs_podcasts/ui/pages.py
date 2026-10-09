@@ -1536,6 +1536,8 @@ class SummaryCard(QPushButton):
         self.icon.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
         layout.addWidget(self.icon)
         self._label_text = label
+        self._count = 0
+        self._podcast_count = None
         self.apply_metrics()
 
     def apply_metrics(self):
@@ -1546,13 +1548,28 @@ class SummaryCard(QPushButton):
         self.icon.setPixmap(icons.pixmap(self._glyph, COLORS["subtle"], scaled_px(22), self.devicePixelRatioF()))
 
     def set_count(self, count: int):
+        self._count = count
         empty = count <= 0
-        self.number.setText("—" if empty else str(count))
+        self.number.setText("—" if empty else f"{count:,}")
         self.number.setStyleSheet(f"color: {COLORS['subtle']};" if empty else "")
-        self.setAccessibleName(f"{count} {self._label_text}")
+        self._update_label()
+
+    def set_podcast_count(self, count: int):
+        self._podcast_count = max(0, int(count))
+        self._update_label()
+
+    def _update_label(self):
+        label = self._label_text
+        accessible = f"{self._count} {label}"
+        if self._podcast_count is not None:
+            podcasts = f"{self._podcast_count:,} podcast{'s' if self._podcast_count != 1 else ''}"
+            label += f" · {podcasts}"
+            accessible += f", {podcasts}"
+        self.label.setText(label)
+        self.setAccessibleName(accessible)
 
     def text(self):  # compatibility with tooling that reads "count\nlabel"
-        return f"{self.number.text()}\n{self._label_text}"
+        return f"{self.number.text()}\n{self.label.text()}"
 
 
 class HomePage(BasePage, _ListPageMixin):
@@ -1591,6 +1608,7 @@ class HomePage(BasePage, _ListPageMixin):
             card.clicked.connect(signal.emit)
             self.summary_buttons.append(card)
             stats.addWidget(card)
+        self.summary_buttons[0].set_podcast_count(0)
         self.root.addLayout(stats)
 
         # One scrolling list: in-progress episodes lead, new episodes follow.
@@ -1701,7 +1719,9 @@ class HomePage(BasePage, _ListPageMixin):
         self.view.doItemsLayout()
         self.view.viewport().update()
 
-    def set_counts(self, new_count: int, queue_count: int, download_count: int):
+    def set_counts(self, new_count: int, queue_count: int, download_count: int, *, podcast_count=None):
+        if podcast_count is not None:
+            self.summary_buttons[0].set_podcast_count(podcast_count)
         for button, count in zip(self.summary_buttons, (new_count, queue_count, download_count)):
             button.set_count(count)
 

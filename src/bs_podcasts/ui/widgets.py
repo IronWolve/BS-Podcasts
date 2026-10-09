@@ -477,10 +477,7 @@ class NavigationRail(QFrame):
         self.brand_name.setCursor(Qt.CursorShape.PointingHandCursor)
         self.brand_name.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.brand_name.installEventFilter(self)
-        self.summary = PlainTextLabel("Library")
-        self.summary.setObjectName("brandSub")
         brand_col.addWidget(self.brand_name)
-        brand_col.addWidget(self.summary)
         brand.addWidget(self.mark)
         brand.addWidget(self.brand_text, 1)
         layout.addLayout(brand)
@@ -666,9 +663,6 @@ class NavigationRail(QFrame):
         button = self._buttons[index][0]
         label = self._buttons[index][2]
         button.setAccessibleName(f"{label}, {count} new" if count else label)
-
-    def set_summary(self, text: str):
-        self.summary.setText(text)
 
     def set_compact(self, compact: bool, user: bool = False):
         changed = compact != self._compact
