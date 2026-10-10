@@ -45,6 +45,7 @@ class Show:
     retention_keep: int | None = None
     retention_days: int | None = None
     categories: str = ""
+    last_refresh_error: str = ""
 
 
 @dataclass(frozen=True)

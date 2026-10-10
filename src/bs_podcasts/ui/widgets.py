@@ -1056,9 +1056,9 @@ class StateBanner(QFrame):
         "loading": ("Loading", "refresh", "blue"),
         "loaded": ("Done", "check", "success"),
         "partial": ("Needs attention", "warning", "warning"),
-        "error": ("Couldn’t complete that", "warning", "danger"),
+        "error": ("Error", "warning", "danger"),
         "offline": ("Offline", "offline", "subtle"),
-        "suspended": ("Refresh suspended", "warning", "warning"),
+        "suspended": ("Error updating podcast", "warning", "warning"),
         "empty": ("", "info", "muted"),
     }
 

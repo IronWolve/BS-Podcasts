@@ -7,6 +7,7 @@ import threading
 import time
 
 from ...domain import Episode, FeedData, Health, Show
+from ...privacy import redact
 from ..database import Database
 from ..files import (
     FILE_IRREGULAR,
@@ -20,6 +21,7 @@ from ..files import (
 _log = logging.getLogger("bs_podcasts")
 
 MAX_REFRESH_FAILURES = 3
+MAX_REFRESH_ERROR_BYTES = 2048
 
 
 def _confirmed_path_list(confirmed_paths) -> list[str]:
@@ -642,7 +644,7 @@ class LibraryRepository:
     ):
         with self.database.connect() as connection:
             connection.execute(
-                """UPDATE shows SET health=?, fail_count=0, suspended=0,
+                """UPDATE shows SET health=?, fail_count=0, suspended=0, last_refresh_error='',
                    etag=COALESCE(NULLIF(?, ''), etag),
                    last_modified=COALESCE(NULLIF(?, ''), last_modified),
                    canonical_url=COALESCE(NULLIF(?, ''), canonical_url),
@@ -657,12 +659,29 @@ class LibraryRepository:
                 ),
             )
 
-    def record_refresh_failure(self, show_id: int) -> Health:
+    @staticmethod
+    def _refresh_error_text(message) -> str:
+        # Bound publisher/native text before regex work and durable storage.
+        text = redact(str(message or "")[:4096]).strip()
+        return text.encode("utf-8", "replace")[:MAX_REFRESH_ERROR_BYTES].decode("utf-8", "ignore")
+
+    def record_refresh_error(self, show_id: int, message: str) -> bool:
+        """Remember a transient error without consuming the failure budget."""
+        text = self._refresh_error_text(message)
+        if not text:
+            return False
+        with self.database.connect() as connection:
+            changed = connection.execute("UPDATE shows SET last_refresh_error=? WHERE id=?", (text,show_id)).rowcount
+        return bool(changed)
+
+    def record_refresh_failure(self, show_id: int, message: str = "") -> Health:
+        text = self._refresh_error_text(message)
         with self.database.connect() as connection:
             row = connection.execute(
                 "UPDATE shows SET fail_count=fail_count+1, health='error' "
+                ",last_refresh_error=CASE WHEN ?!='' THEN ? ELSE last_refresh_error END "
                 "WHERE id=? RETURNING fail_count",
-                (show_id,),
+                (text,text,show_id),
             ).fetchone()
             if row is None:
                 return Health.UNKNOWN
@@ -1212,6 +1231,7 @@ class LibraryRepository:
             retention_keep=row["retention_keep"],
             retention_days=row["retention_days"],
             categories=row["categories"],
+            last_refresh_error=row["last_refresh_error"],
         )
 
     @staticmethod

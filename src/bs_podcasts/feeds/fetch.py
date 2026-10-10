@@ -2,8 +2,9 @@
 
 from dataclasses import dataclass, replace
 from html.parser import HTMLParser
+from http import HTTPStatus
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from ..net import USER_AGENT, SessionSlot, describe_network_error
 from ..urlguard import ensure_fetchable, UnresolvedHost, UnsafeUrl
@@ -27,6 +28,46 @@ class FeedWrongAnswerError(FeedFetchError):
     a web page where the feed should be. A captive portal or an intercepting
     network does exactly this, so does a feed that moved away. Refresh counts
     it toward suspension only for a show that has never refreshed."""
+
+
+def _http_feed_error(response) -> FeedFetchError:
+    """Keep the HTTP cause and a small plain-text publisher explanation."""
+    from ..privacy import redact
+    status = response.status_code
+    host = urlsplit(response.url).hostname or "the podcast server"
+    try:
+        phrase = HTTPStatus(status).phrase
+    except ValueError:
+        phrase = "Unknown status"
+    code = f"HTTP {status}: {phrase}"
+    if status == 404:
+        message = f"The podcast feed could not be found on {host} ({code})."
+    elif status == 410:
+        message = f"The podcast feed is no longer available on {host} ({code})."
+    elif status in {401, 403}:
+        message = f"The podcast server {host} refused access to its episode list ({code})."
+    elif status == 429:
+        message = f"The podcast server {host} received too many requests. Try again later ({code})."
+    elif status >= 500:
+        message = f"The podcast server {host} is having a problem ({code}). Try again later."
+    else:
+        message = f"The podcast server {host} returned an error ({code})."
+    if response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() == "text/plain":
+        try:
+            body = bytearray()
+            for chunk in response.iter_content(1024):
+                body.extend(chunk[:1024 - len(body)])
+                if len(body) >= 1024:
+                    break
+            text = _markup_text(bytes(body), getattr(response, "encoding", None))
+            text = " ".join("".join(c for c in text if c.isprintable() or c.isspace()).split())
+            if text and not text.startswith("<"):
+                message += f" Server says: {redact(text)[:400]}"
+        except Exception:
+            # A failed error-body read must not hide the known HTTP status.
+            pass
+    kind = FeedNetworkError if status == 429 or status >= 500 else FeedFetchError
+    return kind(message)
 
 
 def _fetch_error(exc) -> FeedFetchError:
@@ -321,6 +362,8 @@ class FeedFetcher:
                     not_modified=True,
                     canonical_url=_permanent_canonical(response),
                 )
+            if response.status_code >= 400:
+                raise _http_feed_error(response)
             response.raise_for_status()
             body = bytearray()
             for chunk in response.iter_content(64 * 1024):

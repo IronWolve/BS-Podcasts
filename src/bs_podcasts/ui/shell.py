@@ -4919,10 +4919,8 @@ class MainWindow(QMainWindow):
             self._mark_with_undo([], played, show_id=show_id)
 
     def _rearm_podcast(self, show_id: int):
-        def apply(_result):
-            self._request_reload()
-            self._submit_refresh(show_id)
-        self._run_command(lambda: self.library.rearm(show_id), apply)
+        if not self._submit_refresh(show_id):
+            self._notify('This podcast is already refreshing.', 'info')
 
     # ----------------------------------------------------------------- playback
     def _play_episode(self, episode_id: int, force_stream: bool = False):
@@ -6410,10 +6408,7 @@ class MainWindow(QMainWindow):
         if not show_id or self.library is None:
             self.podcast_page.banner.clear()
             return
-        if self.podcast_page.banner.state == "suspended":
-            self.podcast_page.banner.show_state("loading", "Resuming and refreshing this podcast…")
-            self._rearm_podcast(show_id)
-        elif self._submit_refresh(show_id):
+        if self._submit_refresh(show_id):
             self.podcast_page.banner.show_state("loading", "Refreshing this podcast…")
         else:
             self._podcast_banner_show_id = show_id
@@ -6451,7 +6446,11 @@ class MainWindow(QMainWindow):
         if not batch:
             self._manual_refresh_in_flight.add(show_id)
         generation = self._refresh_generation
-        future = self.refresh_jobs.submit(self.refresh.refresh, show_id)
+        explicit = not batch or show_id in self._refresh_requested_shows
+        # Legacy injected fixtures may expose only refresh(); production retry
+        # owns the rearm+fetch transition under the service's per-show lock.
+        operation = (getattr(self.refresh, 'retry', None) if explicit else None) or self.refresh.refresh
+        future = self.refresh_jobs.submit(operation, show_id)
         self._pending_jobs.add(future)
 
         def finished(completed):
@@ -7102,6 +7101,8 @@ class MainWindow(QMainWindow):
                 self._update_new_badge()
                 return
             self._refresh_in_flight.discard(identifier)
+            if requested and getattr(result.value, 'skipped_suspended', False):
+                self._later(0, lambda show_id=identifier: self._submit_refresh(show_id))
         else:
             self._manual_refresh_in_flight.discard(identifier)
             if content_changed:

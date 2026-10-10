@@ -7,6 +7,7 @@ import threading
 from ..artwork import ArtworkCache, ArtworkError
 from ..data.repositories import LibraryRepository
 from ..domain import Health
+from ..privacy import redact
 from .fetch import FeedFetchError, FeedFetcher, FeedNetworkError, FeedWrongAnswerError
 from .parser import FeedParseError, parse_feed
 
@@ -24,6 +25,7 @@ class RefreshReport:
     # and for a show that refreshed before, a failed secure connection or a
     # web page in place of the feed (sign-in page, intercepting network).
     network_error: bool = False
+    skipped_suspended: bool = False
 
 
 class RefreshService:
@@ -53,7 +55,37 @@ class RefreshService:
 
     def refresh(self, show_id: int) -> RefreshReport:
         with self._lock_for(show_id):
-            return self._refresh_locked(show_id)
+            try:
+                return self._refresh_locked(show_id)
+            except Exception as exc:
+                logging.getLogger(__name__).exception('Unexpected refresh failure for podcast %s', show_id)
+                return self._failure_report(show_id, str(exc), counted=True)
+
+    def retry(self, show_id: int) -> RefreshReport:
+        """Explicit user retry resumes this show under the same refresh lock."""
+        with self._lock_for(show_id):
+            try:
+                show = self.repository.get_show(show_id)
+                if show is not None and show.suspended:
+                    self.repository.rearm_show(show_id)
+                return self._refresh_locked(show_id)
+            except Exception as exc:
+                logging.getLogger(__name__).exception('Manual refresh retry failed for podcast %s', show_id)
+                return self._failure_report(show_id, str(exc), counted=True)
+
+    def _failure_report(self, show_id, message, *, counted=False, network=False, health=Health.ERROR):
+        message = redact(str(message)[:8192])[:2048] or 'The podcast could not be updated; retry for current details.'
+        logging.getLogger(__name__).warning('Podcast %s refresh failed: %s', show_id, message)
+        try:
+            if counted:
+                health = self.repository.record_refresh_failure(show_id, message)
+            else:
+                self.repository.record_refresh_error(show_id, message)
+                self.repository.set_health(show_id, health)
+        except Exception:
+            logging.getLogger(__name__).exception('Could not save refresh failure for podcast %s', show_id)
+            health = Health.ERROR
+        return RefreshReport(show_id, health, message=message, network_error=network)
 
     def _refresh_artwork(self, show_id, url, previous_path):
         if self.artwork is None or not url:
@@ -71,7 +103,8 @@ class RefreshService:
             if path != previous_path:
                 self.repository.set_artwork_path(show_id, path, expected_url=url)
             return path if path != previous_path or stamp(path) != before else ''
-        except ArtworkError:
+        except ArtworkError as exc:
+            logging.getLogger(__name__).warning('Artwork refresh failed for podcast %s: %s', show_id, redact(exc))
             return ''
         except Exception:
             logging.getLogger(__name__).exception("Artwork refresh failed for podcast %s", show_id)
@@ -80,6 +113,7 @@ class RefreshService:
     def _refresh_locked(self, show_id: int) -> RefreshReport:
         show = self.repository.get_show(show_id)
         if show is None:
+            logging.getLogger(__name__).warning('Refresh requested for missing podcast %s', show_id)
             return RefreshReport(show_id, Health.ERROR, message="Podcast was not found.")
         if show.source == "local":
             from pathlib import Path
@@ -95,9 +129,15 @@ class RefreshService:
             except (ValueError, OSError) as exc:
                 health, message = Health.PARTIAL, str(exc)
             self.repository.record_refresh_success(show_id, health)
+            if message:
+                return self._failure_report(show_id, message, health=health)
             return RefreshReport(show_id, health, message=message)
         if show.suspended:
-            return RefreshReport(show_id, Health.SUSPENDED, message="Podcast refresh is suspended.")
+            previous = redact(getattr(show, 'last_refresh_error', '') or '')
+            reason = previous or 'The previous failure reason was not saved by the earlier version.'
+            return RefreshReport(show_id, Health.SUSPENDED,
+                message=f'{reason} Automatic refresh is paused for this podcast. Choose Retry to fetch current details.',
+                skipped_suspended=True)
 
         self.repository.set_health(show_id, Health.LOADING)
         try:
@@ -145,28 +185,20 @@ class RefreshService:
         except FeedNetworkError as exc:
             # Says nothing about the feed: show the error, but leave the
             # failure count alone so an outage never suspends the show.
-            self.repository.set_health(show_id, Health.ERROR)
-            return RefreshReport(show_id, Health.ERROR, message=str(exc), network_error=True)
+            return self._failure_report(show_id, str(exc), network=True)
         except FeedWrongAnswerError as exc:
             if show.last_refresh and show.episode_count:
                 # A podcast that worked is far more likely behind a sign-in
                 # page or an intercepting network than gone. Report it, leave
                 # the count alone. A feed that really became a parked page is
                 # reported every refresh but no longer suspended.
-                self.repository.set_health(show_id, Health.ERROR)
-                message = f"{exc} Not counted against this podcast, which refreshed before; check the network connection."
-                return RefreshReport(show_id, Health.ERROR, message=message, network_error=True)
-            health = self.repository.record_refresh_failure(show_id)
-            return RefreshReport(show_id, health, message=str(exc))
+                return self._failure_report(show_id, str(exc), network=True)
+            return self._failure_report(show_id, str(exc), counted=True)
         except (FeedFetchError, FeedParseError) as exc:
-            health = self.repository.record_refresh_failure(show_id)
-            return RefreshReport(show_id, health, message=str(exc))
+            return self._failure_report(show_id, str(exc), counted=True)
         except Exception as exc:
             # Any other failure (a busy database, an unexpected parser edge)
             # must still clear the LOADING health it set above, or the show
             # spins forever — across restarts — with no failure bookkeeping.
-            try:
-                health = self.repository.record_refresh_failure(show_id)
-            except Exception:
-                health = Health.ERROR
-            return RefreshReport(show_id, health, message=str(exc))
+            logging.getLogger(__name__).exception('Unexpected feed update failure for podcast %s', show_id)
+            return self._failure_report(show_id, str(exc), counted=True)
