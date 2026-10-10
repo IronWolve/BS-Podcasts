@@ -2054,41 +2054,6 @@ class SpeedPopover(Popover):
         self.hide()
 
 
-class VolumePopover(Popover):
-    volume_changed = Signal(float)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["md"], SPACE["sm"])
-        layout.setSpacing(SPACE["sm"])
-        self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setObjectName("volumeSlider")
-        self.slider.setRange(0, 100)
-        self.slider.setFixedWidth(scaled_px(140))
-        self.slider.setAccessibleName("Volume")
-        self.slider.valueChanged.connect(lambda value: self.volume_changed.emit(float(value)))
-        self.value = PlainTextLabel("100")
-        self.value.setObjectName("meta")
-        self.value.setFixedWidth(scaled_px(28))
-        self.value.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.slider.valueChanged.connect(lambda value: self.value.setText(str(value)))
-        layout.addWidget(self.slider)
-        layout.addWidget(self.value)
-
-    def apply_metrics(self):
-        self.layout().setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["md"], SPACE["sm"])
-        self.layout().setSpacing(SPACE["sm"])
-        self.slider.setFixedWidth(scaled_px(140))
-        self.value.setFixedWidth(scaled_px(28))
-
-    def set_volume(self, volume: float):
-        self.slider.blockSignals(True)
-        self.slider.setValue(int(round(volume)))
-        self.value.setText(str(int(round(volume))))
-        self.slider.blockSignals(False)
-
-
 class SleepPopover(Popover):
     sleep_selected = Signal(int)
 
@@ -3585,6 +3550,8 @@ class PlayerBar(QFrame):
         self._volume_target = None
         self._volume_target_until = 0.0
         self._volume_wheel = 0
+        self._last_audible_volume = 100.0
+        self._rendered_volume = None
         self._skip_back = 15
         self._skip_forward = 30
         self._has_episode = False
@@ -3746,25 +3713,50 @@ class PlayerBar(QFrame):
         self.sleep.clicked.connect(lambda: (self.sleep.setChecked(self._sleep_active), self.sleep_popover.show_above(self.sleep)))
         self.queue = icon_button("panel", "Show Up Next", checkable=True)
         self.queue.clicked.connect(self.context_requested)
-        self.volume = icon_button("volume", "Volume")
-        self.volume_popover = VolumePopover(self)
-        self.volume_popover.volume_changed.connect(self._request_volume)
-        self.volume.clicked.connect(self._show_volume)
+        self.volume = icon_button("volume", "Mute", checkable=True)
+        self.volume.clicked.connect(self._toggle_mute)
         self.volume.installEventFilter(self)
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setObjectName("volumeSlider")
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(100)
+        self.volume_slider.setSingleStep(1)
+        self.volume_slider.setPageStep(10)
+        self.volume_slider.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.volume_slider.setAccessibleName("Volume")
+        self.volume_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.volume_slider.valueChanged.connect(self._request_volume)
+        self.volume_slider.sliderReleased.connect(lambda: self._request_volume(self.volume_slider.value()))
+        self.volume_slider.installEventFilter(self)
+        self.volume_value = PlainTextLabel("100%")
+        self.volume_value.setObjectName("meta")
+        self.volume_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.tray_button = icon_button("minimize-tray", "Minimize to tray — keep playing")
         self.tray_button.setAccessibleName("Minimize to tray")
         self.tray_button.clicked.connect(self.minimize_to_tray_requested)
         self.set_tray_available(False)
         tools.addStretch(1)
-        for widget in (self.speed, self.bookmark, self.ab, self.trim, self.sleep, self.queue, self.volume):
+        for widget in (self.speed, self.bookmark, self.ab, self.trim, self.sleep, self.queue):
             tools.addWidget(widget)
         tools.addSpacing(SPACE["sm"])
         self._tray_gap = tools.itemAt(tools.count() - 1).spacerItem()
         tools.addWidget(self.tray_button)
         tools.setContentsMargins(0, 0, 0, 0)
         tools_wrap = QWidget()
-        tools_wrap.setLayout(tools)
+        tools_column = QVBoxLayout(tools_wrap)
+        tools_column.setContentsMargins(0, 0, 0, 0)
+        tools_column.setSpacing(SPACE["xs"])
+        tools_column.addLayout(tools)
+        volume_row = QHBoxLayout()
+        volume_row.setContentsMargins(0, 0, 0, 0)
+        volume_row.setSpacing(SPACE["sm"])
+        volume_row.addWidget(self.volume)
+        volume_row.addWidget(self.volume_slider, 1)
+        volume_row.addWidget(self.volume_value)
+        tools_column.addLayout(volume_row)
         self.tools_wrap = tools_wrap
+        self._volume_metrics()
+        self._sync_volume_controls()
         layout.addWidget(tools_wrap)
         self._balance_zones()
         self.set_enabled(False)
@@ -3843,7 +3835,9 @@ class PlayerBar(QFrame):
         # squeezes the controls row and the fixed-size play circle spills
         # over the seek bar below it.
         needed = margins.top() + margins.bottom() + controls + spacing + timeline + scaled_px(4)
-        return max(scaled_px(80 if self._compact else 88), needed)
+        tools_needed = (self.tools_wrap.minimumSizeHint().height() + margins.top() + margins.bottom()
+                        if hasattr(self, 'tools_wrap') else 0)
+        return max(scaled_px(80 if self._compact else 88), needed, tools_needed)
 
     def _balance_zones(self):
         """Give the two side zones an identical width so the transport is
@@ -3989,7 +3983,8 @@ class PlayerBar(QFrame):
             button.setIconSize(QSize(skip, skip))
         self._tray_gap.changeSize(SPACE["sm"], 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
         self.tools_wrap.layout().invalidate()
-        self.volume_popover.apply_metrics()
+        self._volume_metrics()
+        self.setFixedHeight(self._required_height())
 
     def set_capabilities(self, capabilities):
         self._capabilities = capabilities
@@ -4073,6 +4068,7 @@ class PlayerBar(QFrame):
         self.slider.setEnabled(can_seek)
         self.speed.setEnabled(enabled and (caps is None or caps.speed))
         self.volume.setEnabled(True if not enabled else (caps is None or caps.volume))
+        self.volume_slider.setEnabled(self.volume.isEnabled())
         self.bookmark.setEnabled(enabled)
         self.sleep.setEnabled(enabled)
         self.next.setEnabled(enabled)
@@ -4135,8 +4131,11 @@ class PlayerBar(QFrame):
         import time
         self._engine_volume = float(snapshot.volume)
         pending = getattr(self, '_volume_target', None)
-        if pending is not None and (abs(pending - self._engine_volume) < .5 or time.monotonic() >= self._volume_target_until):
+        if pending is not None and (abs(pending - self._engine_volume) < .5 or
+                (not self.volume_slider.isSliderDown() and time.monotonic() >= self._volume_target_until)):
             self._volume_target = None
+        self._volume = self._engine_volume if self._volume_target is None else self._volume_target
+        self._sync_volume_controls()
         # Position ticks arrive several times a second; re-applying icons,
         # tooltips and popover state on every tick churns the Qt thread for
         # nothing. When only position moved, update the timeline and leave.
@@ -4195,10 +4194,6 @@ class PlayerBar(QFrame):
         self.speed.setText(f"{self._speed:g}×")
         self.speed.setAccessibleName(f"Playback speed, {self._speed:g} times")
         self.speed_popover.set_current(self._speed)
-        self._volume = self._engine_volume if self._volume_target is None else self._volume_target
-        self.volume_popover.set_volume(self._volume)
-        self.volume.setIcon(icons.icon("mute" if self._volume == 0 else "volume", COLORS["text"], 20, disabled=COLORS["disabled"]))
-        self.volume.setToolTip("Muted" if self._volume == 0 else f"Volume {int(self._volume)}")
         self._ab_active = snapshot.ab_start is not None
         self._trim_active = snapshot.trim_level != "off"
         self._sleep_active = snapshot.sleep_deadline is not None or getattr(snapshot, "sleep_at_end", False)
@@ -4263,7 +4258,8 @@ class PlayerBar(QFrame):
                 self.podcast_requested.emit()
                 return True
             return super().eventFilter(watched, event)
-        if watched is getattr(self, "volume", None) and event.type() == QEvent.Type.Wheel and self.volume.isEnabled():
+        if (watched in (getattr(self, "volume", None), getattr(self, "volume_slider", None))
+                and event.type() == QEvent.Type.Wheel and self.volume.isEnabled()):
             delta = event.angleDelta().y()
             if delta == 0:
                 delta = event.pixelDelta().y()
@@ -4283,9 +4279,40 @@ class PlayerBar(QFrame):
 
     def _request_volume(self, value):
         import time
-        self._volume_target = self._volume = float(value)
+        self._volume_target = self._volume = float(max(0, min(100, value)))
         self._volume_target_until = time.monotonic() + 2
-        self.volume_requested.emit(float(value))
+        self._sync_volume_controls()
+        self.volume_requested.emit(self._volume)
+
+    def _volume_metrics(self):
+        self.volume_slider.setMinimumWidth(scaled_px(32))
+        self.volume_slider.setFixedHeight(max(scaled_px(22), self.volume_value.fontMetrics().height()))
+        self.volume_value.setFixedWidth(self.volume_value.fontMetrics().horizontalAdvance('100%') + scaled_px(4))
+        self.tools_wrap.layout().setSpacing(SPACE['xs'])
+        self.tools_wrap.layout().itemAt(1).layout().setSpacing(SPACE['sm'])
+
+    def _sync_volume_controls(self):
+        value = self.volume_slider.value() if self.volume_slider.isSliderDown() else int(round(self._volume))
+        value = max(0, min(100, value))
+        if self._rendered_volume == value:
+            return
+        self._rendered_volume = value
+        if value:
+            self._last_audible_volume = float(value)
+        if not self.volume_slider.isSliderDown():
+            blocked = self.volume_slider.blockSignals(True)
+            self.volume_slider.setValue(value)
+            self.volume_slider.blockSignals(blocked)
+        self.volume_value.setText(f'{value}%')
+        self.volume_slider.setToolTip(f'Volume {value}%')
+        self.volume.setChecked(value == 0)
+        action = 'Unmute' if value == 0 else 'Mute'
+        self.volume.setIcon(icons.icon('mute' if value == 0 else 'volume', COLORS['text'], 20, disabled=COLORS['disabled']))
+        self.volume.setToolTip(f'{action} · Volume {value}%')
+        self.volume.setAccessibleName(action)
+
+    def _toggle_mute(self):
+        self._request_volume(0.0 if self._volume > 0 else self._last_audible_volume)
 
     def _capture_drag_duration(self):
         # If auto-advance swaps tracks mid-drag, the release must seek within
@@ -4310,10 +4337,6 @@ class PlayerBar(QFrame):
     def _show_speed(self):
         self.speed_popover.set_current(self._speed)
         self.speed_popover.show_above(self.speed)
-
-    def _show_volume(self):
-        self.volume_popover.set_volume(self._volume)
-        self.volume_popover.show_above(self.volume)
 
     @staticmethod
     def _time(seconds: float) -> str:

@@ -8326,7 +8326,7 @@ class MainWindow(QMainWindow):
         if not self._tray_is_available():
             self._notify("No system tray is available. Use the normal minimize button instead.", "info")
             return
-        for popover in (self.player.speed_popover, self.player.sleep_popover, self.player.volume_popover):
+        for popover in (self.player.speed_popover, self.player.sleep_popover):
             popover.hide()
         self.hide()
         if not self._close_to_tray_notice_shown:
