@@ -650,7 +650,10 @@ class LibraryRepository:
                         failed_files.append(path)
                 except OSError as exc:
                     failed_files.append(path)
-                    _log.warning("Could not remove %s while unsubscribing: %s", path, exc)
+                    # The file name and the reason only: the error text and the
+                    # path both carry the whole local folder.
+                    _log.warning("Could not remove %s while unsubscribing: %s",
+                                 Path(path).name, exc.strerror or type(exc).__name__)
                 else:
                     removed_files.append(path)
         retention_key = f"retention.confirmed.{show_id}"
