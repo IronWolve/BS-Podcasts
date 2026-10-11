@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 
 from ..config import APP_NAME, RELEASES_URL, RELEASES_API_URL, app_version
 from ..logging_setup import log_path
-from ..domain import DownloadState, FeedData, Health
+from ..domain import DownloadState, FeedData, FeedEpisodeData, Health
 from ..directories.persistent import PersistentDirectoryCache
 from ..downloads import DownloadError, AutomaticCleanupSkipped
 from ..jobs import JobResult, JobRunner, JobStatus
@@ -111,6 +111,10 @@ _MONTH_ABBREVIATIONS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", 
 
 class PeekFeed(FeedData):
     """A FeedData holding only the newest item, from FeedFetcher.peek_latest."""
+
+
+def _newest_item_feed(title, published_at):
+    return PeekFeed(title="", episodes=(FeedEpisodeData("peek", title, published_at=published_at),))
 
 
 # The window filters every event the application delivers (tooltip hints are
@@ -314,6 +318,7 @@ class MainWindow(QMainWindow):
         self._discover_newest_total = 0
         self._discover_newest_done = 0
         self._discover_newest_summary = ""
+        self._newest_dates = OrderedDict()
         self._discover_scan_toast = False
         self._discover_scan_cancelled = False
         # Completed directory results by (operation, value): switching
@@ -6189,6 +6194,9 @@ class MainWindow(QMainWindow):
         self._start_directory_request("topic", (category, topic))
 
     DISCOVER_CACHE_SECONDS = 900
+    # How long a feed's newest date, read by the Newest sort, answers a rescan.
+    NEWEST_DATE_SECONDS = 3600
+    NEWEST_DATE_ENTRIES = 2000
 
     def _start_directory_request(self, operation: str, value, force: bool = False):
         key = (operation, repr(value))
@@ -6229,6 +6237,7 @@ class MainWindow(QMainWindow):
         self._discover_retry_request = None
         if force:
             self._discover_cache.pop(key, None)
+            self._newest_dates.clear()
             # The UI cache is only the outer layer: browse results never
             # expired and charts held a 900 s TTL underneath, so an explicit
             # Refresh re-fetched the same stale list from the directory
@@ -7210,6 +7219,12 @@ class MainWindow(QMainWindow):
         if result.status == JobStatus.OK:
             self._preview_retries.pop(identifier, None)
             peek = isinstance(result.value, PeekFeed)
+            if kind == "preview-scan" and peek and result.value.episodes:
+                newest = result.value.episodes[0]
+                self._newest_dates[identifier] = (time.time(), newest.title, newest.published_at)
+                self._newest_dates.move_to_end(identifier)
+                while len(self._newest_dates) > self.NEWEST_DATE_ENTRIES:
+                    self._newest_dates.popitem(last=False)
             if newest_scan:
                 card = next((item for item in self.discover_page._all_items if item.feed_url == identifier), None)
                 if card is not None:
@@ -8039,13 +8054,17 @@ class MainWindow(QMainWindow):
         if cached is not None:
             self._emit_completed(("preview-scan", identity, JobResult(JobStatus.OK, value=cached)))
             return
+        known = self._newest_dates.get(feed_url)
+        if known is not None and time.time() - known[0] < self.NEWEST_DATE_SECONDS:
+            # Read a short while ago: the same answer, with no request.
+            self._emit_completed(("preview-scan", identity, JobResult(JobStatus.OK, value=_newest_item_feed(*known[1:]))))
+            return
         if self.jobs is None or self.refresh is None or feed_url in self._preview_pending:
             self._discover_newest_active.discard(feed_url)
             return
         fetcher = self.refresh.fetcher
 
         def work():
-            from ..domain import FeedEpisodeData
             from ..feeds.fetch import FeedFetchError
             from ..netlimits import Deadline, NetworkDeadline, request_scope
 
@@ -8065,8 +8084,7 @@ class MainWindow(QMainWindow):
                         "The newest-date peek for %s failed; reading the whole feed", feed_label(feed_url), exc_info=True)
                 deadline.remaining()
                 if peek is not None:
-                    title, published_at = peek
-                    return PeekFeed(title="", episodes=(FeedEpisodeData("peek", title, published_at=published_at),))
+                    return _newest_item_feed(*peek)
                 return _fetch_feed_preview(fetcher, feed_url, deadline.remaining)
 
         future = self.network_jobs.submit(work)
