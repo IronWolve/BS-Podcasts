@@ -774,11 +774,11 @@ class MainWindow(QMainWindow):
         self.settings_page.load_theme(self.library.setting("ui.theme", "system"))
         self.podcast_page.set_sort(self.library.setting("ui.podcast_sort", "name"))
         self.settings_page.load_density(self.library.setting("ui.density", "comfortable"))
-        set_item_tooltips(self.library.setting("ui.item_tooltips", "0") == "1")
-        self.settings_page.load_hover_previews(self.library.setting("ui.item_tooltips", "0") == "1")
+        item_tooltips = self.library.setting("ui.item_tooltips", "0") == "1"
+        set_item_tooltips(item_tooltips)
+        self.settings_page.load_hover_previews(item_tooltips)
         self.settings_page.load_text_size(self.library.setting("ui.text_size", "comfortable"))
         self.settings_page.load_font(self.library.setting("ui.font", "Inter"))
-        self._apply_density(self.library.setting("ui.density", "comfortable") == "compact")
         try:
             episode_lines = int(self.library.setting("ui.episode_lines", "2"))
         except ValueError:
