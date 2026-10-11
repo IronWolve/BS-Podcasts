@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 from ..config import APP_NAME, RELEASES_URL, RELEASES_API_URL, app_version
 from ..logging_setup import log_path
 from ..domain import DownloadState, FeedData, FeedEpisodeData, Health
+from ..domain.times import format_media_time
 from ..directories.base import CandidateList
 from ..directories.persistent import PersistentDirectoryCache
 from ..downloads import DownloadError, AutomaticCleanupSkipped
@@ -4254,7 +4255,7 @@ class MainWindow(QMainWindow):
             menu.addAction(icons.icon("download", COLORS["text"], 16), label, lambda: self._download_many(targets))
         if page is self.bookmark_page and not many:
             menu.addSeparator()
-            menu.addAction(icons.icon("play", COLORS["text"], 16), f"Play from {self.player._time(episode.bookmark_position)}", lambda: self._play_bookmark(episode))
+            menu.addAction(icons.icon("play", COLORS["text"], 16), f"Play from {format_media_time(episode.bookmark_position)}", lambda: self._play_bookmark(episode))
             menu.addAction("Rename bookmark…", lambda: self._rename_bookmark(episode))
             delete_bookmark = menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete bookmark", lambda: self._delete_bookmarks([episode]))
             delete_bookmark.setShortcut(QKeySequence(Qt.Key.Key_Delete))
@@ -4919,7 +4920,7 @@ class MainWindow(QMainWindow):
         item = UiEpisode(title=bookmark.title, show=bookmark.show_title, published="", duration="", progress=0.0, state="Bookmark", accent="",
                          episode_id=episode_id, bookmark_id=bookmark.id, bookmark_position=bookmark.position_seconds, detail=bookmark.episode_title)
         menu = QMenu(self)
-        menu.addAction(icons.icon("play", COLORS["text"], 16), f"Play from {self.player._time(seconds)}", lambda: self._play_bookmark(item))
+        menu.addAction(icons.icon("play", COLORS["text"], 16), f"Play from {format_media_time(seconds)}", lambda: self._play_bookmark(item))
         menu.addAction("Rename bookmark…", lambda: self._rename_bookmark(item))
         menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete bookmark", lambda: self._delete_bookmarks([item]))
         exec_menu(menu, global_position)
@@ -4927,7 +4928,7 @@ class MainWindow(QMainWindow):
     def _rename_bookmark(self, item):
         if self.listening is None or not item.bookmark_id:
             return
-        dialog = TextInputDialog("Rename bookmark", f"At {self.player._time(item.bookmark_position)} in {item.detail or item.show}.", item.title, "Rename", self)
+        dialog = TextInputDialog("Rename bookmark", f"At {format_media_time(item.bookmark_position)} in {item.detail or item.show}.", item.title, "Rename", self)
         if self._exec_dialog(dialog) == QDialog.DialogCode.Accepted and dialog.value:
             value = dialog.value
             def apply(_result):
@@ -5265,7 +5266,7 @@ class MainWindow(QMainWindow):
         if snapshot.episode_id is None:
             return
         listening = self.listening
-        title = f"Bookmark at {self.player._time(snapshot.position)}"
+        title = f"Bookmark at {format_media_time(snapshot.position)}"
         def apply(_result):
             self._reload_bookmarks()
             self._reload_pane_bookmarks(snapshot.episode_id)
@@ -5864,7 +5865,7 @@ class MainWindow(QMainWindow):
             rate = sample[2] if sample else None
             if rate:
                 remaining = max(0, record.bytes_total - record.bytes_done) / rate
-                detail += f"  ·  {self._format_bytes(int(rate))}/s  ·  {PlayerBar._time(remaining)} left"
+                detail += f"  ·  {self._format_bytes(int(rate))}/s  ·  {format_media_time(remaining)} left"
         elif state == "Downloaded" and record.bytes_total:
             detail = f"{self._format_bytes(record.bytes_total)} on disk"
         elif record.error_message:
@@ -6000,7 +6001,7 @@ class MainWindow(QMainWindow):
                 replace_item(
                     item,
                     title=bookmark.title or item.title,
-                    published=f"At {PlayerBar._time(bookmark.position_seconds)}",
+                    published=f"At {format_media_time(bookmark.position_seconds)}",
                     progress=(bookmark.position_seconds / episode.duration_seconds) if episode.duration_seconds else 0.0,
                     state="Bookmark",
                     detail=item.title,
