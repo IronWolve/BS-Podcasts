@@ -170,6 +170,26 @@ def _fetch_feed_preview(fetcher, feed_url, checkpoint=lambda: None):
     return prepare_preview(parse_feed(response.content, base_url=response.final_url))
 
 
+def _track_job(window, future, kind, identifier, classify=None, drop_cancelled=False):
+    """Hand a background future's outcome to `window` as one completion tagged
+    `kind`: the future is forgotten, an exception becomes an error result
+    (`classify` may map it to another result), and the completion is emitted.
+    `drop_cancelled` emits nothing for a cancelled future."""
+    window._pending_jobs.add(future)
+
+    def finished(completed):
+        window._pending_jobs.discard(completed)
+        if drop_cancelled and completed.cancelled():
+            return
+        try:
+            result = completed.result()
+        except Exception as exc:
+            result = classify(exc) if classify is not None else JobResult(JobStatus.ERROR, message=str(exc))
+        window._emit_completed((kind, identifier, result))
+
+    future.add_done_callback(finished)
+
+
 class _JobBridge(QObject):
     completed = Signal(object)
     playback_event = Signal(object)
@@ -1388,17 +1408,7 @@ class MainWindow(QMainWindow):
             return
         database = self.library.repository.database
         future = self.jobs.submit(lambda: _integrity_report(database))
-        self._pending_jobs.add(future)
-
-        def finished(completed):
-            self._pending_jobs.discard(completed)
-            try:
-                result = completed.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._emit_completed(("integrity", None, result))
-
-        future.add_done_callback(finished)
+        _track_job(self, future, "integrity", None)
 
     def _arm_refresh_timer(self):
         minutes = self._refresh_interval() if self.library else 0
@@ -2583,17 +2593,7 @@ class MainWindow(QMainWindow):
             return sample_accents(paths)
 
         future = self.jobs.submit(work)
-        self._pending_jobs.add(future)
-
-        def finished(completed):
-            self._pending_jobs.discard(completed)
-            try:
-                result = completed.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._emit_completed(("accents", None, result))
-
-        future.add_done_callback(finished)
+        _track_job(self, future, "accents", None)
 
     def _invalidate_library_caches(self):
         """The converted-row cache and the retint payload are two views of
@@ -2874,17 +2874,7 @@ class MainWindow(QMainWindow):
             return
         if token is not None:
             self._read_active[key] = (token, future)
-        self._pending_jobs.add(future)
-
-        def finished(completed):
-            self._pending_jobs.discard(completed)
-            try:
-                result = completed.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._emit_completed(("read", (key, token, apply, owner), result))
-
-        future.add_done_callback(finished)
+        _track_job(self, future, "read", (key, token, apply, owner))
 
     def _delete_downloads_async(self, previews, template: str, *, retention_show=None, retention_keep=(), automatic=False, played_only=False):
         """Unlink confirmed download targets on a worker.
@@ -2954,17 +2944,7 @@ class MainWindow(QMainWindow):
             future = executor.submit(work, keep=keep, bulk=True) if bulk else executor.submit(work, keep=keep)
         else:
             future = executor.submit(work)
-        self._pending_jobs.add(future)
-
-        def finished(completed):
-            self._pending_jobs.discard(completed)
-            try:
-                result = completed.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._emit_completed((kind, identifier, result))
-
-        future.add_done_callback(finished)
+        _track_job(self, future, kind, identifier)
 
     def _run_command(self, work, apply=None, *, keep=True, bulk=False):
         if self._closed:
@@ -3105,17 +3085,7 @@ class MainWindow(QMainWindow):
         self._reload_in_flight = True
         self._reload_again = False
         future = self.jobs.submit(self._read_library)
-        self._pending_jobs.add(future)
-
-        def finished(completed):
-            self._pending_jobs.discard(completed)
-            try:
-                result = completed.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._emit_completed(("library", None, result))
-
-        future.add_done_callback(finished)
+        _track_job(self, future, "library", None)
 
     @contextmanager
     def _page_guard(self, page, what: str):
@@ -4442,17 +4412,7 @@ class MainWindow(QMainWindow):
         self._details_fetched.add(identity)
         listening, fetcher = self.listening, self.refresh.fetcher
         future = self.network_jobs.submit(lambda: listening.ensure_details(episode, fetcher.session))
-        self._pending_jobs.add(future)
-
-        def finished(completed):
-            self._pending_jobs.discard(completed)
-            try:
-                result = completed.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._emit_completed(("details", identity, result))
-
-        future.add_done_callback(finished)
+        _track_job(self, future, "details", identity)
 
     def _retry_artwork(self, item):
         cache = getattr(self.refresh, "artwork", None)
@@ -4593,15 +4553,7 @@ class MainWindow(QMainWindow):
             self._episode_artwork_active[key] = cancel
             self._artwork_fetched.add(episode.id)
             future = self.artwork_jobs.submit(self._fetch_episode_artwork, episode, cancel)
-            self._pending_jobs.add(future)
-            def finished(completed, identity=key):
-                self._pending_jobs.discard(completed)
-                try:
-                    result = completed.result()
-                except Exception as exc:
-                    result = JobResult(JobStatus.ERROR, message=str(exc))
-                self._emit_completed(('artwork', identity, result))
-            future.add_done_callback(finished)
+            _track_job(self, future, 'artwork', identity)
 
     def _fetch_episode_artwork(self, episode, cancel):
         from ..netlimits import request_scope
@@ -5580,17 +5532,7 @@ class MainWindow(QMainWindow):
         runner = (self.play_download_jobs or self.download_jobs) if priority else self.download_jobs
         future = runner.submit(self.downloads.download, episode_id, ticket)
         self._download_state_changed(episode_id)
-        self._pending_jobs.add(future)
-
-        def finished(completed):
-            self._pending_jobs.discard(completed)
-            try:
-                result = completed.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._emit_completed(("download", (episode_id, ticket), result))
-
-        future.add_done_callback(finished)
+        _track_job(self, future, "download", (episode_id, ticket))
         if not quiet:
             self._notify("Download started", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
 
@@ -6439,24 +6381,14 @@ class MainWindow(QMainWindow):
                 return candidates
         future = self.network_jobs.submit(work)
         self._directory_future = future
-        self._pending_jobs.add(future)
+        def offline_aware(exc):
+            import requests
 
-        def finished(completed):
-            self._pending_jobs.discard(completed)
-            try:
-                result = completed.result()
-            except Exception as exc:
-                import requests
+            offline = isinstance(exc, requests.exceptions.ConnectionError)
+            return JobResult(JobStatus.ERROR, message=str(exc), value="offline" if offline else None)
 
-                offline = isinstance(exc, requests.exceptions.ConnectionError)
-                result = JobResult(
-                    JobStatus.ERROR,
-                    message=str(exc),
-                    value="offline" if offline else None,
-                )
-            self._emit_completed(("directory", (generation, request, True), result))
-
-        future.add_done_callback(finished)
+        # The directory path alone tells an outage from other failures.
+        _track_job(self, future, "directory", (generation, request, True), classify=offline_aware)
 
     def _directory_request(self, operation: str, value, limit: int):
         sample_accents(())  # Load persisted tint metadata on this worker, not in paint/apply.
@@ -6515,15 +6447,7 @@ class MainWindow(QMainWindow):
                     accent = dominant_color(path, compute=True)
                     return path, accent, changed, artwork_accent_token(path)
             future = self.artwork_jobs.submit(work)
-            self._pending_jobs.add(future)
-            def finished(completed, identity=identity):
-                self._pending_jobs.discard(completed)
-                try:
-                    result = completed.result()
-                except Exception as exc:
-                    result = JobResult(JobStatus.ERROR, message=str(exc))
-                self._emit_completed(('directory-artwork', identity, result))
-            future.add_done_callback(finished)
+            _track_job(self, future, 'directory-artwork', identity)
 
     def _on_directory_artwork(self, kind, identity, result):
         if kind != "artwork-retry":
@@ -6673,17 +6597,7 @@ class MainWindow(QMainWindow):
         # owns the rearm+fetch transition under the service's per-show lock.
         operation = (getattr(self.refresh, 'retry', None) if explicit else None) or self.refresh.refresh
         future = self.refresh_jobs.submit(operation, show_id)
-        self._pending_jobs.add(future)
-
-        def finished(completed):
-            self._pending_jobs.discard(completed)
-            try:
-                result = completed.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._emit_completed(("refresh", (show_id, batch, generation), result))
-
-        future.add_done_callback(finished)
+        _track_job(self, future, "refresh", (show_id, batch, generation))
         return True
 
     def _reload_refreshed_show(self, show_id: int, *, reveal_latest=False):
@@ -8106,17 +8020,7 @@ class MainWindow(QMainWindow):
 
         future = self.network_jobs.submit(work)
         self._discover_newest_futures[feed_url] = future
-        self._pending_jobs.add(future)
-
-        def finished(completed):
-            self._pending_jobs.discard(completed)
-            try:
-                result = completed.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._emit_completed(("preview-scan", identity, result))
-
-        future.add_done_callback(finished)
+        _track_job(self, future, "preview-scan", identity)
 
     def _finish_discover_newest_scan(self):
         """Merge and sort all scanned dates with one model update."""
@@ -8299,19 +8203,9 @@ class MainWindow(QMainWindow):
 
         future = self.network_jobs.submit(work)
         self._preview_futures[feed_url] = future
-        self._pending_jobs.add(future)
-
-        def finished(completed):
-            self._pending_jobs.discard(completed)
-            if completed.cancelled():
-                return  # dropped while waiting; its owner already cleared the pending mark
-            try:
-                result = completed.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            self._emit_completed(("preview", feed_url, result))
-
-        future.add_done_callback(finished)
+        # A request dropped while it waited reports nothing: its owner has
+        # already cleared the pending mark.
+        _track_job(self, future, "preview", feed_url, drop_cancelled=True)
 
     def _apply_preview(self, feed_url: str, feed, update_grid: bool = True):
         # Merge before re-selecting the card; cached preview callbacks then become
