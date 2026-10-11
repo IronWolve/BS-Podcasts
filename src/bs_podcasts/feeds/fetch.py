@@ -318,6 +318,43 @@ class FeedFetcher:
                 _url, (_when, dropped) = self._recent.popitem(last=False)
                 total -= len(dropped.content)
 
+    def _open_body(self, url, headers, timeout, want_body, probe=None):
+        """The guarded streamed GET and bounded body read that peek_latest and _fetch share.
+
+        A 4xx or 5xx answer raises the mapped feed error before any of its body
+        is read. For any other answer, `want_body(status)` says whether the body
+        is read; when it says no, the body is None. `probe(body)` runs after
+        each chunk and may return a value that ends the read early; that value
+        comes back as the third item and the body is None. The caller closes the
+        returned response. A transport failure, while connecting or reading, is
+        raised as the mapped feed error, and the response is closed first.
+        """
+        import requests
+
+        response = None
+        try:
+            try:
+                response = self.session.get(url, headers=headers, timeout=timeout, allow_redirects=True, stream=True)
+                if response.status_code >= 400:
+                    raise _http_feed_error(response)
+                if not want_body(response.status_code):
+                    return response, None, None
+                body = bytearray()
+                for chunk in response.iter_content(64 * 1024):
+                    body.extend(chunk)
+                    if len(body) > MAX_RESPONSE_BYTES:
+                        raise FeedFetchError("Feed response exceeds the size limit.")
+                    early = probe(body) if probe is not None else None
+                    if early is not None:
+                        return response, None, early
+                return response, bytes(body), None
+            except requests.RequestException as exc:
+                raise _fetch_error(exc) from exc
+        except BaseException:
+            if response is not None:
+                response.close()
+            raise
+
     def peek_latest(self, url: str) -> tuple[str, str] | None:
         """(title, published_at) of the newest dated item, in one request.
 
@@ -342,41 +379,34 @@ class FeedFetcher:
             url = ensure_fetchable(url, "Feed URL")
         except UnsafeUrl as exc:
             raise _url_error(exc) from exc
-        import requests
-
         headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.2"}
-        try:
-            response = self.session.get(url, headers=headers, timeout=(8, 15), allow_redirects=True, stream=True)
-        except requests.RequestException as exc:
-            raise _fetch_error(exc) from exc
         from .parser import newest_item, FeedParseError
-        try:
-            if response.status_code >= 400:
-                raise _http_feed_error(response)
-            if response.status_code != 200:
+        probed = False
+
+        def probe(body):
+            # Once the first PEEK_HEAD_BYTES are in, the head may already settle the answer.
+            nonlocal probed
+            if probed or len(body) < PEEK_HEAD_BYTES:
                 return None
-            body = bytearray()
-            probed = False
-            for chunk in response.iter_content(64 * 1024):
-                body.extend(chunk)
-                if len(body) > MAX_RESPONSE_BYTES:
-                    raise FeedFetchError("Feed response exceeds the size limit.")
-                if not probed and len(body) >= PEEK_HEAD_BYTES:
-                    probed = True
-                    head = newest_item(bytes(body), partial=True)
-                    if head is not None:
-                        return head
-        except requests.RequestException as exc:
-            raise _fetch_error(exc) from exc
+            probed = True
+            return newest_item(bytes(body), partial=True)
+
+        response = None
+        try:
+            response, content, head = self._open_body(url, headers, (8, 15), lambda status: status == 200, probe)
+            if head is not None:
+                return head
+            if content is None:
+                return None
         finally:
-            response.close()
-        content = bytes(body)
+            if response is not None:
+                response.close()
         try:
             latest = newest_item(content)
         except FeedParseError:
             # The same bytes fail again, unless this is a page that the full
             # fetch can follow to the feed it advertises.
-            lead = _body_lead(body, getattr(response, "encoding", None))
+            lead = _body_lead(content, getattr(response, "encoding", None))
             return NOTHING_DATED if _looks_like_feed(lead) else None
         headers = getattr(response, "headers", None) or {}
         self._keep_recent(url, FeedResponse(
@@ -401,8 +431,6 @@ class FeedFetcher:
             url = ensure_fetchable(url, "Feed URL")
         except UnsafeUrl as exc:
             raise _url_error(exc) from exc
-        import requests
-
         headers = {
             "User-Agent": USER_AGENT,
             "Accept": (
@@ -419,13 +447,7 @@ class FeedFetcher:
             headers["If-Modified-Since"] = last_modified.replace("\r", "").replace("\n", "").strip()
         response = None
         try:
-            response = self.session.get(
-                url,
-                headers=headers,
-                timeout=(8, 20),
-                allow_redirects=True,
-                stream=True,
-            )
+            response, body, _ = self._open_body(url, headers, (8, 20), lambda status: status != 304)
             if response.status_code == 304:
                 if conditional and validator_url and not _answered_by(response, validator_url):
                     # Another resource answered for the feed's validators;
@@ -442,14 +464,6 @@ class FeedFetcher:
                     not_modified=True,
                     canonical_url=_permanent_canonical(response),
                 )
-            if response.status_code >= 400:
-                raise _http_feed_error(response)
-            response.raise_for_status()
-            body = bytearray()
-            for chunk in response.iter_content(64 * 1024):
-                body.extend(chunk)
-                if len(body) > MAX_RESPONSE_BYTES:
-                    raise FeedFetchError("Feed response exceeds the size limit.")
             content_type = response.headers.get("Content-Type", "").lower()
             discovered = ""
             # Many hosts serve RSS with a text/html Content-Type; a body that
@@ -461,7 +475,7 @@ class FeedFetcher:
             ):
                 parser = _FeedLinkParser()
                 try:
-                    parser.feed(_markup_text(bytes(body), getattr(response, "encoding", None)))
+                    parser.feed(_markup_text(body, getattr(response, "encoding", None)))
                 except _FeedLinkFound:
                     pass
                 if not parser.href:
@@ -472,7 +486,7 @@ class FeedFetcher:
                     # A bracketed host that is not an IPv6 literal, for example.
                     raise FeedWrongAnswerError("HTML page advertises a podcast feed link that is not a valid URL.") from exc
             result = FeedResponse(
-                content=bytes(body),
+                content=body,
                 final_url=response.url,
                 etag=response.headers.get("ETag", ""),
                 last_modified=response.headers.get("Last-Modified", ""),
@@ -485,10 +499,6 @@ class FeedFetcher:
                 feed = self._fetch(discovered, etag, last_modified, allow_discovery=False, validator_url=validator_url)
                 return replace(feed, canonical_url=feed.canonical_url or discovered)
             return result
-        except FeedFetchError:
-            raise
-        except requests.RequestException as exc:
-            raise _fetch_error(exc) from exc
         finally:
             if response is not None:
                 response.close()
