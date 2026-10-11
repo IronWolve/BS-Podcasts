@@ -7,7 +7,7 @@ import time
 import unicodedata
 
 from PySide6.QtCore import QEasingCurve, QEvent, QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint, QPropertyAnimation, QTimer, Signal, Qt
-from PySide6.QtGui import QContextMenuEvent, QCursor, QKeySequence, QShortcut
+from PySide6.QtGui import QAccessible, QAccessibleEvent, QContextMenuEvent, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSlider,
@@ -2529,6 +2529,7 @@ class SettingsPage(BasePage):
             editor.blockSignals(False)
         self.shortcut_error.setText(message)
         self.shortcut_error.show()
+        QAccessible.updateAccessibility(QAccessibleEvent(self.shortcut_error, QAccessible.Event.Alert))
 
     def set_storage_info(self, data_root, library_path, download_path, downloads, artwork_path, artwork, temp_path, log_path="", backups=""):
         self.log_path.setText(log_path or "—")
