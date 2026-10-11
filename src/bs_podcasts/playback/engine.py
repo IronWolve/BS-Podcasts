@@ -7,6 +7,8 @@ import uuid
 from threading import Lock, RLock
 from typing import Any, Callable
 
+from ..privacy import redact
+
 
 mpv = None
 
@@ -202,6 +204,15 @@ class MpvEngine:
 
     def load(self, source: str, start_position: float = 0.0, autoplay: bool = True):
         self._guard()
+        from ..urlguard import UnsafeUrl, ensure_media_source, is_web_url
+        if not is_web_url(source):
+            # The service decides which local files and shares may play; the
+            # native loader must still never see a concat, edl or other
+            # scheme, so only web URLs, local paths and file URLs pass.
+            try:
+                ensure_media_source(source, "Playback source", allow_file_url=True, allow_unc=True)
+            except UnsafeUrl as exc:
+                raise PlaybackUnavailable(redact(exc)) from exc
         with self._state_lock:
             self._activated = True
             self._resolving = False
@@ -221,7 +232,6 @@ class MpvEngine:
             # Playlist replacement returns before native loading/events finish.
             # Bind this load to its unique entry before releasing the callback
             # lock. Start paused until the matching FILE_LOADED applies intent.
-            from ..urlguard import is_web_url
             native_source = source
             if is_web_url(source):
                 native_source = 'bshttp://' + uuid.uuid4().hex
