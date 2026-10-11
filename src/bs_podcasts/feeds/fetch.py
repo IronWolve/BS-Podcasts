@@ -468,7 +468,11 @@ class FeedFetcher:
                     pass
                 if not parser.href:
                     raise FeedWrongAnswerError("HTML page does not advertise a podcast feed.")
-                discovered = urljoin(urljoin(response.url, parser.base), parser.href)
+                try:
+                    discovered = urljoin(urljoin(response.url, parser.base), parser.href)
+                except ValueError as exc:
+                    # A bracketed host that is not an IPv6 literal, for example.
+                    raise FeedWrongAnswerError("HTML page advertises a podcast feed link that is not a valid URL.") from exc
             result = FeedResponse(
                 content=bytes(body),
                 final_url=response.url,
