@@ -1501,6 +1501,22 @@ class MainWindow(QMainWindow):
         self._run_task("remove-preview", work)
 
     @staticmethod
+    def _remove_podcasts(library, show_ids, paths):
+        """Remove podcasts one at a time. One that cannot go (its downloads
+        are still stopping, a file or database error) stays in the library and
+        the rest are still removed. Returns the number removed and one reason
+        per podcast that was kept."""
+        removed, failed = 0, []
+        for show_id in show_ids:
+            try:
+                if library.remove_subscription(show_id, True, list(paths.get(show_id, ()))):
+                    removed += 1
+            except Exception as exc:
+                logging.getLogger("bs_podcasts").warning("Could not remove podcast %s", show_id, exc_info=True)
+                failed.append(str(exc) or type(exc).__name__)
+        return removed, failed
+
+    @staticmethod
     def _is_unreachable(show) -> bool:
         """What "Remove unreachable" offers and, at removal time, re-checks:
         suspended podcasts and feeds that failed. A podcast whose only
@@ -1536,11 +1552,8 @@ class MainWindow(QMainWindow):
             targets = [show_id for show_id, show in current.items() if show is not None and self._is_unreachable(show)]
             if playback is not None and playback.snapshot.show_id in set(targets):
                 playback.stop()
-            removed = sum(
-                1 for show_id in targets
-                if library.remove_subscription(show_id, True, list(paths.get(show_id, ())))
-            )
-            return removed, sum(1 for show in current.values() if show is not None) - len(targets)
+            removed, failed = self._remove_podcasts(library, targets, paths)
+            return removed, sum(1 for show in current.values() if show is not None) - len(targets), failed
 
         self._run_task("remove-shows", work, pool=self.commands, keep=True)
 
@@ -1597,12 +1610,11 @@ class MainWindow(QMainWindow):
         self.podcast_page.banner.show_state("loading", f"Removing {len(show_ids)} podcasts…")
 
         def work():
-            removed = sum(
-                1 for show_id in show_ids
-                if library.remove_subscription(show_id, True, list(confirmed_paths.get(show_id, ())))
-            )
-            # Podcasts added while the dialog was open were not listed in it.
-            return removed, len(library.shows())
+            removed, failed = self._remove_podcasts(library, show_ids, confirmed_paths)
+            # Podcasts added while the dialog was open were not listed in it;
+            # one that could not be removed is counted as failed, not as kept.
+            listed = set(show_ids)
+            return removed, sum(1 for show in library.shows() if show.id not in listed), failed
 
         def stopped_work():
             if playback is not None:
@@ -6740,22 +6752,26 @@ class MainWindow(QMainWindow):
             self._notify(result.message or "Removal failed", "error")
             self._request_reload()
             return
-        removed, kept = result.value
+        removed, kept, failed = result.value
         plural = lambda count: "" if count == 1 else "s"
+        # Podcasts that could not be removed are still in the library; the
+        # earlier ones in the batch are gone, so say both.
+        left = f" · {len(failed)} could not be removed and {'was' if len(failed) == 1 else 'were'} kept; try again shortly" if failed else ""
+        tone = "success" if not failed else "info" if removed else "error"
         if kind == "reset-library":
             self._refresh_storage_settings()
             self._request_reload()
             message = f"Library reset — removed {removed} podcast{plural(removed)}"
             if kept:
                 message += f" · kept {kept} added during the reset"
-            self._notify(message, "success")
+            self._notify(message + left, tone)
         else:
             self.podcast_page.chips.select("All")
             self._request_reload(lambda: self.podcast_page._apply_filters())
             message = f"Removed {removed} unreachable podcast{plural(removed)}"
             if kept:
                 message += f" · kept {kept} that recovered"
-            self._notify(message, "success")
+            self._notify(message + left, tone)
         return
     def _on_database_health(self, kind, identifier, result):
         if result.status == JobStatus.OK and result.value == "ok":
