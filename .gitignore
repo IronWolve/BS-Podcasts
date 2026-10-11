@@ -144,6 +144,7 @@
 !/src/bs_podcasts/data/migrations/028_show_move_counts.sql
 !/src/bs_podcasts/data/migrations/029_listening_attempts.sql
 !/src/bs_podcasts/data/migrations/030_drop_redundant_show_index.sql
+!/src/bs_podcasts/data/migrations/031_listening_source_triggers.sql
 !/src/bs_podcasts/data/repositories/__init__.py
 !/src/bs_podcasts/data/repositories/downloads.py
 !/src/bs_podcasts/data/repositories/library.py
