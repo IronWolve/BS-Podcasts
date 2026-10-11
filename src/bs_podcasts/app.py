@@ -11,8 +11,9 @@ import json
 import hashlib
 from pathlib import Path
 import re
+import stat
 
-from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QObject, QSettings, QTimer, Qt
+from PySide6.QtCore import QCoreApplication, QDir, QEvent, QEventLoop, QObject, QSettings, QTimer, Qt
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 import getpass
 from PySide6.QtGui import QIcon, QImageReader
@@ -298,6 +299,47 @@ def _instance_name() -> str:
     return f"{APP_ID}-{user}-{_profile_key()[:12]}"
 
 
+def _own_folder(path, forbidden, follow=False):
+    """True for a folder owned by this account with none of the `forbidden` mode bits set."""
+    info = os.stat(path) if follow else os.lstat(path)
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & forbidden
+
+
+def _instance_endpoint():
+    """The plain name, or a path in a private folder when the temporary folder is shared.
+
+    In a folder other accounts can write to, one of them could create the
+    predictable name first and be sent the file paths of a second launch.
+    None: no safe place; the library lease still protects the library."""
+    name = _instance_name()
+    if not hasattr(os, 'geteuid'):
+        return name  # a Windows pipe name is not a path
+    try:
+        base = QDir.tempPath()
+        if _own_folder(base, 0o002, follow=True):
+            return name
+        folder = os.path.join(base, f"{APP_ID}-{os.geteuid()}")
+        try:
+            os.mkdir(folder, 0o700)
+        except FileExistsError:
+            pass
+        if _own_folder(folder, 0o077):
+            return os.path.join(folder, name)
+    except OSError:
+        pass
+    return None
+
+
+def _endpoint_is_foreign(name):
+    """True when the entry behind `name` is owned by another account."""
+    if not hasattr(os, 'geteuid'):
+        return False
+    try:
+        return os.lstat(name if os.path.isabs(name) else os.path.join(QDir.tempPath(), name)).st_uid != os.geteuid()
+    except OSError:
+        return False  # nothing there: the connect below reports 'missing'
+
+
 _FILE_SUFFIXES = frozenset({'.opml', '.xml', '.mp3', '.m4a', '.ogg', '.opus', '.wav', '.flac', '.aac', '.m4b'})
 _IPC_LIMIT = 8192
 _PROCESS_SERIAL = re.compile(r'-psn_\d+_\d+')
@@ -380,6 +422,8 @@ def _read_file_request(raw):
 
 def _probe_instance_status(name: str, timeout_ms: int = 300, files=()) -> str:
     """Transport observation only; an answer never substitutes for a lease."""
+    if name is None or _endpoint_is_foreign(name):
+        return 'silent'  # nothing is sent to, or believed from, another account's listener
     probe = QLocalSocket()
     probe.connectToServer(name)
     if not probe.waitForConnected(timeout_ms):
@@ -549,9 +593,12 @@ def _claim_single_instance(app):
     An answering/silent endpoint may belong to a different profile or local
     process. Preserve it; the lease still protects this library even if IPC is
     unavailable. Only a non-connecting stale socket may be retired."""
-    name = _instance_name()
+    name = _instance_endpoint()
     server = QLocalServer(app)
     server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+    if name is None:
+        logging.getLogger('bs_podcasts').warning('No private place for the instance endpoint; the library lease remains active and startup continues.')
+        return server
     # Do NOT clear the socket path before trying to bind it. Removing it up
     # front meant a second launch could unlink the path a live first instance
     # had just bound — after which both listen() calls succeeded, neither took
@@ -728,7 +775,7 @@ def main() -> int:
         return 1
     app._incoming_file_args = incoming
     root = application_data_dir()
-    name = _instance_name()
+    name = _instance_endpoint()
     # Probing a predictable pipe name is not proof that the library is owned.
     # Acquire the lease first; only actual contention can justify yielding.
     from .data.lease import LibraryLease, LibraryInUseError
