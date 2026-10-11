@@ -9,7 +9,7 @@ import re
 import threading
 
 from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, QUrl, Qt, Signal, qVersion
-from PySide6.QtGui import QAccessible, QAccessibleEvent, QColor, QDesktopServices, QPixmap, QKeySequence, QTextDocument, QTextOption
+from PySide6.QtGui import QAccessible, QAccessibleEvent, QColor, QDesktopServices, QPainter, QPen, QPixmap, QKeySequence, QTextDocument, QTextOption
 
 from ..urlguard import is_web_url
 from ..domain.times import format_media_time
@@ -54,15 +54,27 @@ def open_web_url(url):
 
 
 class PlainTextLabel(_PlainTextLabel):
+    def _tab_stop(self):
+        return self.focusPolicy() == Qt.FocusPolicy.StrongFocus
+
     def _copy_selection(self):
-        QApplication.clipboard().setText(self.selectedText().replace("\u200b", ""))
+        # With nothing selected, a value that is a Tab stop copies as a whole.
+        QApplication.clipboard().setText((self.selectedText() or self.text()).replace("\u200b", ""))
 
     def keyPressEvent(self, event):
-        if event.matches(QKeySequence.StandardKey.Copy) and self.hasSelectedText():
+        if event.matches(QKeySequence.StandardKey.Copy) and (self.hasSelectedText() or self._tab_stop()):
             self._copy_selection()
             event.accept()
         else:
             super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._tab_stop() and self.hasFocus():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(QColor(COLORS["accent"]), 2))
+            painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 4, 4)
 
     def contextMenuEvent(self, event):
         if self.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse:
@@ -108,13 +120,20 @@ def _wrap_long_value(value: str) -> str:
     )
 
 
+def _selectable_value(label):
+    """Selectable by mouse and reachable with Tab. Qt gives a text-selectable
+    label click focus only, so the keyboard could never copy its value."""
+    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+    label.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+
 def _add_value_row(form, label_text: str, value: str, value_labels: list):
     """A selectable wrapped value beside its muted label; the value is also appended to `value_labels`."""
     field = PlainTextLabel(_wrap_long_value(value))
     field.setTextFormat(Qt.TextFormat.PlainText)
     field.setWordWrap(True)
     field.setToolTip(value)
-    field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    _selectable_value(field)
     label = PlainTextLabel(label_text)
     label.setObjectName("muted")
     label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -1218,7 +1237,7 @@ class StartupErrorDialog(StyledDialog):
         body = PlainTextLabel(message)
         body.setObjectName("contextBody")
         body.setWordWrap(True)
-        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        _selectable_value(body)
         self.card_layout.addWidget(body)
         self.repaired = False
         self.repair_result = None  # what the repair callback returned
@@ -1351,7 +1370,7 @@ class AboutDialog(StyledDialog):
             key.setFixedWidth(scaled_px(120))
             val = PlainTextLabel(value)
             val.setWordWrap(True)
-            val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            _selectable_value(val)
             row.addWidget(key, 0, Qt.AlignmentFlag.AlignTop)
             row.addWidget(val, 1)
             rows.addLayout(row)
