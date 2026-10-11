@@ -70,13 +70,18 @@ def normalize_html_entities(content: bytes) -> bytes:
     the text for every opener (quadratic, with the interpreter lock held).
     """
     from html.entities import html5
-    tokens = re.compile(br"<!\[CDATA\[(?:.*?\]\]>|.*)|<!--(?:.*?-->|.*)|<\?(?:.*?\?>|.*)|&([A-Za-z][A-Za-z0-9]+);", re.S)
+    # Only a name that XML lacks can change the text. The XML-known names
+    # (&amp; &lt; &gt; &quot; &apos;) are not matched, and a body with no other
+    # reference is returned as it came: a substitution copies the whole body
+    # even when every match is a no-op, and the XML declaration is one.
+    entity = br"&(?!(?:amp|lt|gt|quot|apos);)([A-Za-z][A-Za-z0-9]+);"
+    if re.search(entity, content) is None:
+        return content
+    tokens = re.compile(br"<!\[CDATA\[(?:.*?\]\]>|.*)|<!--(?:.*?-->|.*)|<\?(?:.*?\?>|.*)|" + entity, re.S)
     def replace(match):
         name = match[1]
         if name is None:
             return match[0]
-        if name in (b"amp", b"lt", b"gt", b"quot", b"apos"):
-            return match[0]  # XML already knows these; avoid needless expansion.
         value = html5.get(name.decode("ascii") + ";")
         if value is None:
             return match[0]
