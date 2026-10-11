@@ -266,7 +266,7 @@ def podcast_information_rows(podcast, feed=None) -> list[tuple[str, str]]:
         latest_date = getattr(podcast, "latest_episode_date", "")
         if latest_date:
             rows.append(("Latest date", latest_date))
-    source = getattr(podcast, "source", "")
+    source = value("source")
     if source:
         rows.append(("Source type", source.upper()))
     for label, field in (
