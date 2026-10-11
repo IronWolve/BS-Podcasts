@@ -1405,9 +1405,15 @@ class EpisodeListPage(BasePage, _ListPageMixin):
                             selected_keys=selected, anchor=anchor)
 
     def update_items(self, updates):
-        """Apply download deltas without resetting selection or untouched rows."""
-        self._all_items = [updates.get(item.episode_id, item) for item in self._all_items]
-        if self._filter in {"All", "New", "Favorites", "Unplayed", "Played"}:
+        """Apply download deltas without resetting selection or untouched rows.
+        The list is filtered, sorted and replaced again only when an update
+        moves a row into or out of the selected chip."""
+        before = self._all_items
+        self._all_items = [updates.get(item.episode_id, item) for item in before]
+        test = self._chip_test()
+        if test is None or not any(
+                item.episode_id in updates and bool(test(item)) != bool(test(updates[item.episode_id]))
+                for item in before):
             self.model.update_items(updates)
         else:
             self._apply_filters(restore_key=self._current_key(), preserve_scroll=True,
@@ -1475,6 +1481,27 @@ class EpisodeListPage(BasePage, _ListPageMixin):
     def _connect_filter_box(self):
         _debounce_filter_box(self)
 
+    def _chip_test(self):
+        """The test one row must pass for the selected chip; None passes every row."""
+        chip = self._filter
+        if chip == "New":
+            return lambda item: item.is_new
+        if chip == "Favorites":
+            return lambda item: item.favorite
+        if chip == "Unplayed":
+            return lambda item: not item.played
+        if chip == "Played":
+            # Flags, not the badge string: a downloaded row's badge says
+            # "Downloaded" but it can still be played / in progress.
+            return lambda item: item.played
+        if chip == "In progress":
+            return lambda item: not item.played and (item.position_seconds > 0 or 0 < item.progress < 1)
+        if chip == "Downloaded":
+            return lambda item: item.downloaded_path
+        if chip != "All":
+            return lambda item: item.state.lower() == chip.lower()
+        return None
+
     def _apply_filters(self, *_args, restore_key=None, preserve_scroll=False, selected_keys=None, anchor=None):
         anchor = anchor or (self._scroll_anchor() if preserve_scroll else None)
         selected = list(selected_keys or ())
@@ -1485,22 +1512,9 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         query = self.header.search.text().strip().lower()
         if query and query != self._catalog_query:
             items = [item for item in items if query in item.title.lower() or query in item.show.lower()]
-        if self._filter == "New":
-            items = [item for item in items if item.is_new]
-        elif self._filter == "Favorites":
-            items = [item for item in items if item.favorite]
-        elif self._filter == "Unplayed":
-            items = [item for item in items if not item.played]
-        elif self._filter == "Played":
-            # Flags, not the badge string: a downloaded row's badge says
-            # "Downloaded" but it can still be played / in progress.
-            items = [item for item in items if item.played]
-        elif self._filter == "In progress":
-            items = [item for item in items if not item.played and (item.position_seconds > 0 or 0 < item.progress < 1)]
-        elif self._filter == "Downloaded":
-            items = [item for item in items if item.downloaded_path]
-        elif self._filter != "All":
-            items = [item for item in items if item.state.lower() == self._filter.lower()]
+        test = self._chip_test()
+        if test is not None:
+            items = [item for item in items if test(item)]
         if self.sort_button is not None:
             items.sort(key=lambda item: (item.published_at, item.episode_id), reverse=True)
             if self._sort == "oldest":
