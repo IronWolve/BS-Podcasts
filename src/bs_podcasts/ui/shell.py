@@ -5438,9 +5438,16 @@ class MainWindow(QMainWindow):
                 self._play_after_download_request = request
                 self._play_after_download_intent = self.playback.intent_revision
                 if self.downloads is not None and self.jobs is not None:
-                    self._download_episode(episode_id, quiet=True, priority=True)
-                    self._notify("Downloading before playing…", "loading", "Stream instead",
-                                 lambda: self._play_episode(episode_id, force_stream=True))
+                    ticket = self._download_episode(episode_id, quiet=True, priority=True)
+                    if ticket is None and not self.downloads.is_active(episode_id):
+                        # Refused (the episode is being removed) and no running
+                        # transfer will answer this wait: end it now.
+                        self._play_after_download = 0
+                        self._playback_command('download_failed', episode_id, request,
+                                               'This episode cannot be downloaded right now. Try again, or stream it.')
+                    else:
+                        self._notify("Downloading before playing…", "loading", "Stream instead",
+                                     lambda: self._play_episode(episode_id, force_stream=True))
                 else:
                     self._playback_command('download_failed', episode_id, request, 'Downloads are unavailable; no stream was opened.')
         if state_changed:
@@ -5661,13 +5668,14 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- downloads
     def _download_episode(self, episode_id: int, quiet: bool = False, priority: bool = False):
+        """Queue a download; returns its ticket, or None when none was created."""
         if self.downloads is None or self.jobs is None or not episode_id:
-            return
+            return None
         # `priority` is a play intent: it takes over a ticket still waiting
         # in line (the old job then returns without transferring).
         ticket = self.downloads.queue(episode_id, priority=True) if priority else self.downloads.queue(episode_id)
         if ticket is None:
-            return
+            return None
         self._download_tickets[episode_id] = ticket
         runner = (self.play_download_jobs or self.download_jobs) if priority else self.download_jobs
         future = runner.submit(self.downloads.download, episode_id, ticket)
@@ -5675,6 +5683,7 @@ class MainWindow(QMainWindow):
         _track_job(self, future, "download", (episode_id, ticket))
         if not quiet:
             self._notify("Download started", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
+        return ticket
 
     def _pause_download(self, episode_id: int):
         if self._play_after_download == episode_id:
