@@ -11,7 +11,7 @@ from ..net import SessionSlot, describe_network_error
 from ..domain import DirectoryCandidate
 from ..urlguard import is_web_url
 from .base import DirectoryError, failure_text
-from .catalog import CATEGORY_IDS
+from .catalog import CACHE_SECONDS, CATEGORY_IDS, MAX_ROWS, REQUEST_TIMEOUT
 
 
 CHART_TITLES = {
@@ -29,7 +29,7 @@ class DirectoryCharts:
 
     session = SessionSlot()
 
-    def __init__(self, session=None, cache_seconds: int = 900):
+    def __init__(self, session=None, cache_seconds: int = CACHE_SECONDS):
         self.session = session
         self.cache_seconds = cache_seconds
         self._cache = {}
@@ -80,7 +80,7 @@ class DirectoryCharts:
             response = self.session.get(
                 self.endpoint,
                 params=params,
-                timeout=(8, 20),
+                timeout=REQUEST_TIMEOUT,
             )
             response.raise_for_status()
             match = re.search(
@@ -150,7 +150,7 @@ class DirectoryCharts:
             "chart": chart,
             "genre": CATEGORY_IDS.get(category, 26),
             "l": "en-US",
-            "limit": 200,  # the API's ceiling; 250 returns HTTP 400
+            "limit": MAX_ROWS,  # the API's ceiling; 250 returns HTTP 400
             "types": media_type,
             "extend[podcasts]": "editorialArtwork,feedUrl",
             "include[podcast-episodes]": "podcast",
@@ -164,7 +164,7 @@ class DirectoryCharts:
                     "Authorization": f"Bearer {token}",
                     "Origin": "https://podcasts.apple.com",
                 },
-                timeout=(8, 20),
+                timeout=REQUEST_TIMEOUT,
             )
             response.raise_for_status()
             data = response.json()["results"][media_type][0]["data"]
@@ -191,7 +191,7 @@ class DirectoryCharts:
         if self._developer_token:
             return self._developer_token
         try:
-            response = self.session.get(self.endpoint, timeout=(8, 20))
+            response = self.session.get(self.endpoint, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             script = re.search(
                 r'<script[^>]+src="([^"]*index[^"]+\.js)', response.text
@@ -212,7 +212,7 @@ class DirectoryCharts:
                 raise DirectoryError("Directory script was not served over https.")
             if parts.netloc != "podcasts.apple.com":
                 raise DirectoryError(f"Directory script came from an unexpected host: {parts.hostname}")
-            bundle = self.session.get(script_url, timeout=(8, 20))
+            bundle = self.session.get(script_url, timeout=REQUEST_TIMEOUT)
             bundle.raise_for_status()
             # Every hop of a redirect chain must be the same host, not only
             # the address that was asked for.

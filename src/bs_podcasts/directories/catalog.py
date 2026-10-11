@@ -3,6 +3,7 @@
 import logging
 import queue
 import threading
+import time
 
 from ..net import SessionSlot, describe_network_error
 from threading import Lock
@@ -16,6 +17,12 @@ from .base import CandidateList, DirectoryError, failure_text, is_unreachable
 # Expansion-term requests in flight at once; the shared header gate admits 12
 # background requests in all, so a browse leaves room for feeds and artwork.
 TERM_WORKERS = 3
+# Seconds a directory request may take to connect, then to answer.
+REQUEST_TIMEOUT = (8, 20)
+# Seconds a browse or chart answer is reused before the directory is asked again.
+CACHE_SECONDS = 900
+# The most rows one directory request asks for; the search and chart APIs accept 200.
+MAX_ROWS = 200
 
 
 CATEGORY_IDS = {
@@ -109,19 +116,18 @@ class PublicDirectory:
                 "term": query,
                 "media": "podcast",
                 "entity": "podcast",
-                "limit": min(200, limit),
+                "limit": min(MAX_ROWS, limit),
             }
         )
 
     def browse(self, category: str = "", limit: int = 30) -> list[DirectoryCandidate]:
         check = Deadline(600)
-        import time
         fast = limit <= 50
         cache_key = (category or "__all__", fast)
         with self._cache_guard:
             revision = self._cache_revision
             cached = self._browse_cache.get(cache_key)
-        if cached is not None and time.monotonic() - cached[0] < 900:
+        if cached is not None and time.monotonic() - cached[0] < CACHE_SECONDS:
             return cached[1][:limit]
         terms = CATEGORY_EXPANSION_TERMS.get(
             category,
@@ -134,7 +140,7 @@ class PublicDirectory:
                 "term": term,
                 "media": "podcast",
                 "entity": "podcast",
-                "limit": 50 if fast else 200,
+                "limit": 50 if fast else MAX_ROWS,
             }
             if genre_id:
                 params["genreId"] = genre_id
@@ -247,7 +253,7 @@ class PublicDirectory:
             "term": topic,
             "media": "podcast",
             "entity": "podcast",
-            "limit": min(200, limit),
+            "limit": min(MAX_ROWS, limit),
         }
         genre_id = CATEGORY_IDS.get(category)
         if genre_id:
@@ -316,7 +322,7 @@ class PublicDirectory:
         import requests
 
         try:
-            response = self.session.get(self.endpoint, params=params, timeout=(8, 20))
+            response = self.session.get(self.endpoint, params=params, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
         except requests.RequestException as exc:
             raise DirectoryError(
