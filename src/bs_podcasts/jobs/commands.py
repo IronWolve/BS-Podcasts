@@ -1,13 +1,19 @@
 """FIFO user commands with load supersession and a drainable finalizer."""
 from concurrent.futures import Future
-from threading import RLock
+from functools import wraps
+from threading import Event, RLock
 import logging
+import time
 from .runner import JobRunner, JobResult, JobStatus
 
 
 class CommandQueue:
     def __init__(self):
         self.runner = JobRunner(1)
+        # Long file and maintenance jobs run on their own worker so that a
+        # transport command never waits behind them (see `submit`).
+        self.bulk_runner = JobRunner(1)
+        self._tail = None
         self._lock = RLock()
         self._revision = 0
         self._pending = {}
@@ -27,18 +33,42 @@ class CommandQueue:
         with self._lock:
             return any(not future.done() for future in self._pending)
 
-    def submit(self, work, keep=False):
-        with self._lock:
-            # Ordinary commands are FIFO boundaries for replaceable settings.
-            self._latest.clear()
-            return self._submit_locked(work, keep)
+    def submit(self, work, keep=False, bulk=False):
+        """Queue `work` behind earlier commands on the single command worker.
 
-    def _submit_locked(self, work, keep):
+        With `bulk=True` the work runs on the separate bulk worker instead:
+        it still starts only after every ordinary command queued before it
+        has finished, but ordinary commands queued after it do not wait for
+        it. Bulk jobs are FIFO among themselves, and are drained, cancelled
+        and joined together with the ordinary ones.
+        """
+        with self._lock:
+            if not bulk:
+                # Ordinary commands are FIFO boundaries for replaceable settings.
+                self._latest.clear()
+            return self._submit_locked(work, keep, bulk)
+
+    def _submit_locked(self, work, keep, bulk=False):
         if self.closing:
             result = Future()
             result.set_result(JobResult(JobStatus.ERROR, message='Application is closing.'))
             return result
-        future = self.runner.submit(work)
+        if bulk:
+            earlier = Event()
+            if self._tail is None:
+                earlier.set()
+            else:
+                self._tail.add_done_callback(lambda _done: earlier.set())
+
+            @wraps(work)
+            def after_earlier():
+                earlier.wait()
+                return work()
+
+            future = self.bulk_runner.submit(after_earlier)
+        else:
+            future = self.runner.submit(work)
+            self._tail = future
         self._pending[future] = keep
         future.add_done_callback(self._finished)
         return future
@@ -97,6 +127,7 @@ class CommandQueue:
                 future = self.runner.submit(finalizer)
                 future.add_done_callback(self._finalized)
             self.runner.shutdown(wait=False, cancel_futures=False)
+            self.bulk_runner.shutdown(wait=False, cancel_futures=False)
 
     @staticmethod
     def _finalized(future):
@@ -105,4 +136,6 @@ class CommandQueue:
             logging.getLogger('bs_podcasts').error('Playback shutdown failed: %s', result.message)
 
     def join(self, grace_seconds=3):
-        return self.runner.join(grace_seconds, cancel_futures=False)
+        deadline = time.monotonic() + grace_seconds
+        busy = self.runner.join(grace_seconds, cancel_futures=False)
+        return busy + self.bulk_runner.join(max(0.0, deadline - time.monotonic()), cancel_futures=False)
