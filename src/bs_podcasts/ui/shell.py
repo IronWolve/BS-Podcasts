@@ -5175,6 +5175,11 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         menu = QMenu(self)
+        # The mouse menu's Play next, and the keyboard counterpart of dragging.
+        menu.addAction("Play next", lambda: self._queue_to_front(item.episode_id))
+        menu.addAction("Move up", lambda: self.context.move_queue_row(-1)).setEnabled(index.row() > 0)
+        menu.addAction("Move down", lambda: self.context.move_queue_row(1)).setEnabled(index.row() < index.model().rowCount() - 1)
+        menu.addSeparator()
         menu.addAction("Go to podcast", lambda: self._open_show_id(item.show_id))
         menu.addAction("Remove from Up Next", lambda: self._remove_from_queue(item.episode_id))
         menu.addAction("Clear queue…", self._clear_queue)
