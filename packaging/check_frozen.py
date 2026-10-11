@@ -53,8 +53,10 @@ def denied_constant(constant, views):
 def check(root, private_root):
     root=root.resolve()
     payload = root / ('Contents/Resources' if root.suffix == '.app' else '_internal')
-    if not (payload / 'THIRD-PARTY-NOTICES.txt').is_file() or not (payload / 'licenses').is_dir():
-        raise ValueError('Bundled notices or their supporting text folder are missing.')
+    # The bundled Inter fonts ship under the OFL, which requires its licence text with each copy.
+    if (not (payload / 'THIRD-PARTY-NOTICES.txt').is_file() or not (payload / 'licenses').is_dir()
+            or not (payload / 'bs_podcasts/assets/fonts/OFL.txt').is_file()):
+        raise ValueError('Bundled notices, their licence text folder or the font licence (OFL.txt) are missing.')
     if not private_root:
         raise ValueError('The frozen privacy check needs the project root and its private deny file.')
     tokens=[str(private_root),str(private_root/'repo')]
