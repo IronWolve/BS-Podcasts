@@ -43,8 +43,29 @@ if [[ -z "${BS_NATIVE_RESUME:-}" ]]; then
     printf '%s\n' "$BS_INPUTS_SHA" > "$BS_NATIVE_ROOT/inputs.sha256"
     printf '%s\n' "$BS_BUILD_SHA" > "$BS_NATIVE_ROOT/build-identity.sha256"
 fi
+# The fetched directory for a pinned name, read from native-sources.json, so no
+# version is written into this recipe and a pin change cannot leave a stale path.
+pinned_dir() {
+    "$BS_PYTHON" -B -c '
+import json, sys
+for entry in json.load(open(sys.argv[1])):
+    if entry["name"] == sys.argv[2]:
+        print(entry["name"] + "-" + entry["version"])
+        break
+else:
+    sys.exit("not pinned: " + sys.argv[2])
+' "$BS_PROJECT/repo/packaging/native-sources.json" "$1"
+}
+for name in freetype fribidi harfbuzz libass ffmpeg libplacebo mpv; do
+    fetched="$(pinned_dir "$name")"
+    [[ -d "$BS_SRC/$fetched" ]] || { printf 'Fetched source is missing: %s\n' "$fetched" >&2; exit 1; }
+done
+BS_FFMPEG_DIR="$(pinned_dir ffmpeg)"
+BS_MPV_DIR="$(pinned_dir mpv)"
 build_static() {
-    local source="$1"; shift
+    local name="$1"; shift
+    local source
+    source="$(pinned_dir "$name")"
     local reconfigure=()
     [[ -f "$BS_NATIVE_ROOT/build-$source/meson-private/coredata.dat" ]] && reconfigure=(--reconfigure)
     meson setup "${reconfigure[@]}" "$BS_NATIVE_ROOT/build-$source" "$BS_SRC/$source" --prefix "$BS_PREFIX" --libdir lib \
@@ -52,13 +73,13 @@ build_static() {
     ninja -C "$BS_NATIVE_ROOT/build-$source" -j "$BS_JOBS" install >> "$BS_NATIVE_ROOT/build.log" 2>&1
     printf 'Built %s\n' "$source"
 }
-build_static freetype-2.14.3 -Dharfbuzz=disabled -Dbrotli=disabled -Dpng=disabled -Dbzip2=disabled -Dzlib=internal -Dtests=disabled
-build_static fribidi-1.0.17 -Ddocs=false -Dtests=false
-build_static harfbuzz-14.5.0 -Dfreetype=enabled -Dglib=disabled -Dgobject=disabled -Dcairo=disabled -Dicu=disabled -Dtests=disabled -Ddocs=disabled
-build_static libass-0.17.5 -Dtest=disabled -Dfontconfig=disabled -Drequire-system-font-provider=false
+build_static freetype -Dharfbuzz=disabled -Dbrotli=disabled -Dpng=disabled -Dbzip2=disabled -Dzlib=internal -Dtests=disabled
+build_static fribidi -Ddocs=false -Dtests=false
+build_static harfbuzz -Dfreetype=enabled -Dglib=disabled -Dgobject=disabled -Dcairo=disabled -Dicu=disabled -Dtests=disabled -Ddocs=disabled
+build_static libass -Dtest=disabled -Dfontconfig=disabled -Drequire-system-font-provider=false
 if [[ ! -f "$BS_PREFIX/.done-ffmpeg" ]]; then
 (
-    cd "$BS_SRC/ffmpeg-9.0.2"
+    cd "$BS_SRC/$BS_FFMPEG_DIR"
     ./configure --prefix="$BS_PREFIX" --cpu=generic --enable-pic --disable-shared --enable-static \
         --disable-autodetect --enable-zlib --disable-programs --disable-doc --disable-debug \
         --disable-encoders --disable-muxers --disable-outdevs --disable-indevs \
@@ -69,12 +90,30 @@ if [[ ! -f "$BS_PREFIX/.done-ffmpeg" ]]; then
 ) >> "$BS_NATIVE_ROOT/build.log" 2>&1
 touch "$BS_PREFIX/.done-ffmpeg"
 fi
-printf 'Built FFmpeg 9.0.2\n'
-build_static libplacebo-7.360.1 -Dvulkan=disabled -Dopengl=disabled -Dd3d11=disabled -Ddemos=false \
+printf 'Built FFmpeg %s\n' "$BS_FFMPEG_DIR"
+# The same licence and configure checks the Windows recipe makes: the player is
+# built only from an FFmpeg configured as LGPL, with autodetection off.
+BS_FFMPEG_LOG="$BS_SRC/$BS_FFMPEG_DIR/ffbuild/config.log"
+BS_LICENSE="$(grep -E "^license=" "$BS_FFMPEG_LOG" | head -n 1 || true)"
+BS_CONFIGURE="$(head -n 1 "$BS_FFMPEG_LOG")"
+if [[ "$BS_LICENSE" != "license='LGPL version 2.1 or later'" ]]; then
+    printf 'FFmpeg config.log does not record the expected LGPL configuration.\n' >&2
+    exit 1
+fi
+case "$BS_CONFIGURE" in
+    *--enable-gpl*|*--enable-nonfree*)
+        printf 'FFmpeg configure enables a non-LGPL license option.\n' >&2
+        exit 1 ;;
+    *--disable-autodetect*) ;;
+    *)
+        printf 'FFmpeg config.log does not record --disable-autodetect.\n' >&2
+        exit 1 ;;
+esac
+build_static libplacebo -Dvulkan=disabled -Dopengl=disabled -Dd3d11=disabled -Ddemos=false \
     -Dtests=false -Dshaderc=disabled -Dglslang=disabled -Dlcms=disabled
 BS_RECONFIGURE=()
 [[ -f "$BS_NATIVE_ROOT/build-mpv/meson-private/coredata.dat" ]] && BS_RECONFIGURE=(--reconfigure)
-meson setup "${BS_RECONFIGURE[@]}" "$BS_NATIVE_ROOT/build-mpv" "$BS_SRC/mpv-0.41.0" --prefix "$BS_PREFIX" --libdir lib \
+meson setup "${BS_RECONFIGURE[@]}" "$BS_NATIVE_ROOT/build-mpv" "$BS_SRC/$BS_MPV_DIR" --prefix "$BS_PREFIX" --libdir lib \
     --buildtype release --prefer-static --default-library shared --wrap-mode=nodownload --auto-features=disabled \
     --sysconfdir=/bs-native/etc --datadir=/bs-native/share \
     -Dgpl=false -Dlibmpv=true -Dcplayer=false -Dtests=false -Dgl=disabled -Dalsa=enabled -Dpulse=enabled \
@@ -87,6 +126,15 @@ strip --strip-unneeded "$BS_NATIVE_ROOT/out/libmpv.so.2"
 "$BS_PYTHON" -B -c 'import ctypes,sys; ctypes.CDLL(sys.argv[1])' "$BS_NATIVE_ROOT/out/libmpv.so.2"
 if readelf -d "$BS_NATIVE_ROOT/out/libmpv.so.2" | grep -Eq 'NEEDED.*lib(avcodec|avformat|avutil|avfilter|swscale|swresample)'; then
     printf 'The native player unexpectedly depends on system FFmpeg.\n' >&2
+    exit 1
+fi
+# Allow list: the glibc baseline, libstdc++, and the ALSA and PulseAudio clients
+# this build enables. Any other linked library would be a dependency the deploy
+# does not ship, so it fails the build here rather than at run time.
+BS_ALLOWED_LIBS='^(libc\.so\.6|libm\.so\.6|libdl\.so\.2|libpthread\.so\.0|libgcc_s\.so\.1|libstdc\+\+\.so\.6|libasound\.so\.2|libpulse\.so\.0)$'
+BS_UNEXPECTED_LIBS="$(readelf -d "$BS_NATIVE_ROOT/out/libmpv.so.2" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | grep -Ev "$BS_ALLOWED_LIBS" || true)"
+if [[ -n "$BS_UNEXPECTED_LIBS" ]]; then
+    printf 'The native player links a library outside the allow list: %s\n' "$BS_UNEXPECTED_LIBS" >&2
     exit 1
 fi
 [[ "$BS_RECIPE_SHA" == "$(sha256sum "$BS_PROJECT/repo/packaging/build-libmpv-linux.sh" | cut -d ' ' -f 1)" && "$BS_HELPER_SHA" == "$(sha256sum "$BS_PROJECT/repo/packaging/native_sources.py" | cut -d ' ' -f 1)" && "$BS_INPUTS_SHA" == "$(sha256sum "$BS_PROJECT/repo/packaging/native-sources.json" | cut -d ' ' -f 1)" ]] || { printf 'Native build inputs changed during compilation; refusing provenance.\n' >&2; exit 1; }
