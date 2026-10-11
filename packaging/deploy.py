@@ -4,7 +4,7 @@ import ast
 from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import tempfile
@@ -34,6 +34,15 @@ def prune_previous_deployments(root, keep=3, retain=None):
         shutil.rmtree(stale)
         removed.append(stale.name)
     return removed
+
+
+# Built by this deploy beside the manifest's runtime destinations: the native library folder and the record.
+BUILT_ENTRIES = ('native', 'deployment.json')
+
+
+def publish_names(runtime):
+    """The names published into the runtime folder: the manifest's top-level runtime destinations and the built entries."""
+    return sorted({PurePosixPath(relative).parts[0] for relative in runtime.values()} | set(BUILT_ENTRIES))
 
 
 def receipt_source(snapshot):
@@ -118,6 +127,13 @@ def _deploy_staged(workspace, destination, temporary, prune, report):
               'files':{relative:file_digest(temporary/relative) for relative in deployed},
               'native':receipt}
     (temporary/'deployment.json').write_text(json.dumps(record,indent=2)+'\n')
+    # The publish list comes from the manifest's top-level runtime destinations plus the two built entries.
+    # Refuse before anything is swapped if the built tree holds a different set.
+    publish = publish_names(runtime)
+    built_names = sorted(path.name for path in temporary.iterdir() if path.name != 'source')
+    if built_names != publish:
+        raise RuntimeError('Built runtime entries differ from the manifest destinations; nothing was published: '
+                           f'built {built_names}, expected {publish}.')
     # Preserve the prior runtime; never replace personal settings, data or venv.
     previous = workspace/'.cache/previous-deployments'/temporary.name
     previous.mkdir(parents=True)
@@ -125,7 +141,7 @@ def _deploy_staged(workspace, destination, temporary, prune, report):
         retire_stale(workspace)
         retired, published, launchers = [], [], []
         try:
-            for name in ('app','native','licenses','THIRD-PARTY-NOTICES.txt','runner.py','runtime_state.py','runtime_linux.py','start.sh','stop.sh','requirements-linux.lock','deployment.json'):
+            for name in publish:
                 current = destination/name
                 built = temporary/name
                 if current.exists():
