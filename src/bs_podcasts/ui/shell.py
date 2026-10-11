@@ -1976,7 +1976,9 @@ class MainWindow(QMainWindow):
             reclaimed = sum(size for path, size in preview["files"] if path in removed)
             return preview['show'].title, reclaimed, len(result.get("failed_files", ()))
         try:
-            self._run_task('unsubscribe', work, show_id, pool=self.jobs, keep=True)
+            # Retained and bulk, like the other removals: Quit waits for it
+            # whatever the read workers are doing; Play and Pause do not.
+            self._run_task('unsubscribe', work, show_id, pool=self.commands, keep=True, bulk=True)
         except Exception as exc:
             self._unsubscribe_start_failed(show_id, str(exc))
 
