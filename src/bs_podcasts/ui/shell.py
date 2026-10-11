@@ -2142,9 +2142,11 @@ class MainWindow(QMainWindow):
         )
         library = self.library
         def work():
-            library.repository.update_show_playback(show.id, **values)
+            # Reset the confirmation first: if a later write fails, the old
+            # limits are asked about again rather than new ones applied unasked.
             if retention_changed:
                 library.set_setting(f"retention.confirmed.{show.id}", "0")
+            library.repository.update_show_playback(show.id, **values)
             return True
         def apply(_result):
             if self.playback is not None and self.playback.snapshot.show_id == show.id:
