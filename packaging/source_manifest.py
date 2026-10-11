@@ -320,7 +320,11 @@ def reject_commit_trailers(root=ROOT):
 
 _SECRETS = re.compile(r'(?:sk-[A-Za-z0-9]{24,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}'
                       r'|(?:AKIA|ASIA)[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}'
-                      r'|-----BEGIN [A-Z ]*PRIVATE KEY-----)')
+                      r'|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+                      r'|(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{24,}|(?<![A-Za-z0-9])hf_[A-Za-z0-9]{30,}'
+                      r'|(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}|(?<![A-Za-z0-9])[sr]k_live_[A-Za-z0-9]{16,}'
+                      r'''|(?i:(?:api[_-]?key|secret|token|passw(?:or)?d)["']?\s*[:=]\s*'''
+                      r'''(?:["'][^\s"']{12,}["']|(?=[A-Za-z0-9/+_=-]*\d)(?=[A-Za-z0-9/+_=-]*[A-Za-z])[A-Za-z0-9/+_=-]{12,})))''')
 
 
 def check(root=ROOT, require_deny=True, ran=None):
