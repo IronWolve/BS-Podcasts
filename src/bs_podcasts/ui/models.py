@@ -269,18 +269,6 @@ class EpisodeModel(QAbstractListModel):
         self._items = items
         self.endResetModel()
 
-    def update_artwork(self, episode_id, artwork_url, path, own_path, accent):
-        from dataclasses import replace
-        rows = []
-        for row, item in enumerate(self._items):
-            if item.episode_id == episode_id and item.artwork_url == artwork_url:
-                updated = replace(item, artwork_path=path, episode_artwork_path=own_path, accent=accent)
-                if updated != item:
-                    self._items[row] = updated
-                    rows.append(row)
-        for row in rows:
-            self.dataChanged.emit(self.index(row, 0), self.index(row, 0))
-
     def update_items(self, updates):
         for row, item in enumerate(self._items):
             updated = updates.get(item.episode_id)
