@@ -110,7 +110,7 @@ def source_digest(root=ROOT):
 @lru_cache(maxsize=4)
 def _public_url_patterns(root):
     from urllib.parse import urlsplit
-    urls = json.loads((Path(root) / 'source-manifest.json').read_text()).get('public_urls', [])
+    urls = json.loads((Path(root) / 'source-manifest.json').read_text(encoding='utf-8')).get('public_urls', [])
     if not isinstance(urls, list) or any(not isinstance(url, str) for url in urls):
         raise ValueError('Public URL approvals must be an explicit list.')
     patterns = []
@@ -296,17 +296,19 @@ def git_tracked(root):
     env = {**os.environ, 'LC_ALL': 'C'}  # stable wording for the "not a repository" test below
     try:
         top = subprocess.run(['git', '-C', str(root), 'rev-parse', '--show-toplevel'],
-                             capture_output=True, text=True, timeout=5, env=env)
+                             capture_output=True, encoding='utf-8', errors='surrogateescape', timeout=5, env=env)
         if top.returncode != 0 and 'not a git repository' not in top.stderr:
             raise ValueError('Git could not read the checkout: ' + top.stderr.strip())
         if top.returncode != 0 or Path(top.stdout.strip()).resolve() != Path(root).resolve():
             return None
         tracked = subprocess.run(['git', '-C', str(root), 'ls-files', '-z'],
-                                 capture_output=True, text=True, timeout=30, check=True, env=env)
+                                 capture_output=True, encoding='utf-8', errors='surrogateescape', timeout=30, check=True, env=env)
     except FileNotFoundError:
         return None
     except subprocess.CalledProcessError as exc:
         raise ValueError('Git could not list the tracked files: ' + (exc.stderr or '').strip()) from exc
+    except UnicodeError as exc:
+        raise ValueError(f'Git output could not be read: {exc}') from exc
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError(f'Git failed or timed out: {exc}') from exc
     return set(tracked.stdout.split('\0')) - {''}
@@ -320,7 +322,7 @@ def tracking_difference(root, files):
     ignored = subprocess.run(
         ['git', '-C', str(root), 'ls-files', '--others', '--ignored',
          '--exclude-standard', '-z'],
-        capture_output=True, text=True, timeout=30, check=True)
+        capture_output=True, encoding='utf-8', errors='surrogateescape', timeout=30, check=True)
     hidden = sorted(name for name in ignored.stdout.split('\0') if name)
     if hidden:
         shown = ', '.join(hidden[:20]) + (f' and {len(hidden) - 20} more' if len(hidden) > 20 else '')
@@ -344,8 +346,8 @@ def reject_commit_trailers(root=ROOT):
     try:
         log = subprocess.run(
             ['git', '-C', str(root), 'log', '--all', '--format=%H%x1e%B%x1f'],
-            capture_output=True, text=True, timeout=30, check=True)
-    except (OSError, subprocess.SubprocessError) as exc:
+            capture_output=True, encoding='utf-8', errors='surrogateescape', timeout=30, check=True)
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
         raise ValueError('Commit-message check requires Git history.') from exc
     bad = []
     for record in log.stdout.split('\x1f'):
@@ -444,28 +446,28 @@ def stage(destination, root=ROOT, ran=None):
     origin={'commit':None,'dirty':True,'sha256':expected}
     inherited = root/'.build-origin.json'
     if inherited.is_file():
-        previous=json.loads(inherited.read_text())
+        previous=json.loads(inherited.read_text(encoding='utf-8'))
         if previous.get('sha256') != expected:
             raise ValueError('Imported source origin does not match its exact files.')
         origin.update(commit=previous.get('commit'), dirty=previous.get('dirty',True))
     try:
-        top = subprocess.run(['git','-C',str(root),'rev-parse','--show-toplevel'],capture_output=True,text=True,timeout=5)
+        top = subprocess.run(['git','-C',str(root),'rev-parse','--show-toplevel'],capture_output=True,encoding='utf-8', errors='surrogateescape',timeout=5)
         checkout = top.returncode==0 and Path(top.stdout.strip()).resolve()==root
-    except (OSError,subprocess.TimeoutExpired):
+    except (OSError,subprocess.TimeoutExpired,UnicodeError):
         checkout = False  # Build hosts without Git still get content-addressed development artifacts.
     if checkout:
         # Separate calls: a slow status keeps the commit already read and leaves the record dirty.
         try:
-            commit = subprocess.run(['git','-C',str(root),'rev-parse','HEAD'],capture_output=True,text=True,timeout=5)
+            commit = subprocess.run(['git','-C',str(root),'rev-parse','HEAD'],capture_output=True,encoding='utf-8', errors='surrogateescape',timeout=5)
             origin['commit'] = commit.stdout.strip() if commit.returncode==0 else None
-        except (OSError,subprocess.TimeoutExpired):
+        except (OSError,subprocess.TimeoutExpired,UnicodeError):
             pass
         try:
-            status = subprocess.run(['git','-C',str(root),'--no-optional-locks','status','--porcelain'],capture_output=True,text=True,timeout=5)
+            status = subprocess.run(['git','-C',str(root),'--no-optional-locks','status','--porcelain'],capture_output=True,encoding='utf-8', errors='surrogateescape',timeout=5)
             origin['dirty'] = status.returncode!=0 or bool(status.stdout.strip())
-        except (OSError,subprocess.TimeoutExpired):
+        except (OSError,subprocess.TimeoutExpired,UnicodeError):
             pass
-    (destination/'.build-origin.json').write_text(json.dumps(origin,indent=2)+'\n')
+    (destination/'.build-origin.json').write_text(json.dumps(origin,indent=2)+'\n', encoding='utf-8')
     return destination
 
 
