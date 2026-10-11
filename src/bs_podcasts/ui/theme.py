@@ -4,6 +4,7 @@ Tokens are the single source of truth for colour, spacing, radius and type.
 Delegates read the same dictionaries so painted lists match styled widgets.
 """
 
+import logging
 import os
 import threading
 
@@ -168,7 +169,12 @@ def system_theme() -> str | None:
         hints = QGuiApplication.styleHints()
         scheme = hints.colorScheme() if hints is not None else None
         return {Qt.ColorScheme.Light: "light", Qt.ColorScheme.Dark: "dark"}.get(scheme)
+    except (AttributeError, RuntimeError):
+        return None  # No usable style hints: the platform does not say.
     except Exception:
+        # Anything else is a changed interface, not a platform that is silent;
+        # say so rather than quietly turning every "system" user dark.
+        logging.getLogger("bs_podcasts").warning("Could not read the system colour scheme", exc_info=True)
         return None
 
 
