@@ -3437,6 +3437,12 @@ class MainWindow(QMainWindow):
     def _export_opml(self):
         if self.library is None:
             return
+        notice = ConfirmDialog(
+            "Export OPML",
+            "The file lists every subscribed feed URL, and some feed URLs contain access tokens. "
+            "Keep the exported file private.", "Choose file…", parent=self)
+        if self._exec_dialog(notice) != QDialog.DialogCode.Accepted:
+            return
         path, _filter = QFileDialog.getSaveFileName(self, "Export OPML", str(Path.home() / "bs-podcasts.opml"), "OPML files (*.opml)")
         if not path:
             return
