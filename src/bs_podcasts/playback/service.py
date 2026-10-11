@@ -1114,10 +1114,15 @@ class PlaybackService:
                     self._flush_listening()
                 if state != self.snapshot.state:
                     self._reset_metrics(self.snapshot.position)
+                was_playing = self.snapshot.state == PlaybackState.PLAYING
                 self.snapshot = replace(self.snapshot, state=state)
                 if self.snapshot.episode_id is not None:
                     episode_id = self.snapshot.episode_id
                     self._set_current_playback(episode_id, state.value)
+                    if event.value and was_playing:
+                        # Saves otherwise wait for a five-second change; a
+                        # pause is where the resume point has to be exact.
+                        self._persist_position(force=True)
             elif event.kind == "file_loaded":
                 logger.info("Playback source loaded: generation=%s source=%s autoplay=%s seconds=%.3f",
                             self._engine_generation, source_kind, self._load_autoplay,
