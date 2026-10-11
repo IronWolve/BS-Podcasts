@@ -107,6 +107,36 @@ ACCENTS = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
 # window by one page; design.md forbids silently substituting a cap for "all".
 EPISODES_PAGE_SIZE = 5000
 HISTORY_PAGE_SIZE = 200
+# How the command queue treats each playback action, as (supersedes, keeps,
+# cancellable, logs). A superseding action retires the commands queued before
+# it; a kept one retains its position change through Quit; a cancellable one
+# stops itself once a later command supersedes it. An action missing here is
+# refused by the dispatcher, so a misspelt name fails at the call site.
+_PLAYBACK_ACTIONS = {
+    "play": (True, False, False, True),
+    "pause": (True, False, False, True),
+    "play_pause": (True, False, False, True),
+    "stop": (True, False, False, True),
+    "next": (True, False, False, True),
+    "previous": (True, True, False, True),
+    "seek": (True, True, False, False),
+    "seek_current": (False, True, False, False),
+    "seek_episode": (True, True, True, False),
+    "skip": (True, True, False, False),
+    "skip_back": (True, True, False, False),
+    "skip_forward": (True, True, False, False),
+    "load_stream": (True, False, True, False),
+    "set_speed": (False, False, False, False),
+    "set_volume": (False, False, False, False),
+    "set_trim_level": (False, False, False, False),
+    "set_sleep_timer": (False, False, False, False),
+    "set_sleep_at_end": (False, False, False, False),
+    "cancel_sleep_timer": (False, False, False, False),
+    "update_artwork": (False, False, False, False),
+    "update_preview_artwork": (False, False, False, False),
+    "complete_download": (False, False, False, False),
+    "download_failed": (False, False, False, False),
+}
 # Written out rather than strftime("%b"): month names follow the system
 # locale and mixed into English text ("Okt 03" beside "Today").
 _MONTH_ABBREVIATIONS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -3032,22 +3062,24 @@ class MainWindow(QMainWindow):
         self._run_task("command", work, apply, pool=self.commands, keep=keep, bulk=bulk)
 
     def _playback_command(self, name, *args, **kwargs):
+        if name not in _PLAYBACK_ACTIONS:
+            raise ValueError(f"Unknown playback command: {name!r}")
+        supersedes, keep, cancellable, logs = _PLAYBACK_ACTIONS[name]
         playback, commands = self.playback, self.commands
         if playback is None:
             return
-        if name in {"play", "pause", "play_pause", "stop", "next", "previous", "seek", "seek_episode", "skip", "skip_back", "skip_forward", "load_stream"}:
+        if supersedes:
             self._play_after_download = 0
             token = commands.supersede() if commands is not None else None
-            if name in {"load_stream", "seek_episode"} and commands is not None:
+            if cancellable and commands is not None:
                 kwargs["cancelled"] = lambda: not commands.current(token)
         # Every position change is retained: Quit drains retained commands
         # before the shutdown finalizer saves the position, so a pending seek
         # still lands. A superseded seek_episode still cancels itself, because
         # the drain runs before finish() retires the current token.
-        keep = name in {"seek", "seek_current", "seek_episode", "previous", "skip", "skip_back", "skip_forward"}
         queued_at = time.monotonic()
         def work():
-            if name in {"play", "pause", "play_pause", "stop", "next", "previous"}:
+            if logs:
                 logging.getLogger("bs_podcasts").info(
                     "Playback command started: action=%s queued=%.3fs", name, time.monotonic() - queued_at)
             return getattr(playback, name)(*args, **kwargs)
