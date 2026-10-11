@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 import platform
 from pathlib import Path
 import re
@@ -31,7 +32,8 @@ def prepare(source, cache, only=None, macos=False):
         archive=cache/entry['archive']
         if archive.is_symlink():
             raise ValueError('Native archive cache must not contain links.')
-        if not archive.exists():
+        # A cached archive that fails its checksum is only replaced by a download that passes it.
+        if not archive.exists() or digest(archive)!=entry['sha256']:
             with tempfile.NamedTemporaryFile(dir=cache,delete=False) as temporary:
                 pending=Path(temporary.name)
                 try:
@@ -45,6 +47,7 @@ def prepare(source, cache, only=None, macos=False):
                                 raise ValueError('Native archive exceeds the size limit.')
                             temporary.write(chunk)
                     temporary.flush()
+                    os.fsync(temporary.fileno())
                     if digest(pending)!=entry['sha256']:
                         raise ValueError('Native archive checksum mismatch: '+entry['name'])
                 except BaseException:
