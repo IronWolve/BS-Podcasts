@@ -5,9 +5,9 @@ from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from ..assets import shell_icon_path
+from ..config import APP_NAME
 
 
-APP_TITLE = "BS Podcasts"
 _TOOLTIP_LIMIT = 127
 
 
@@ -43,11 +43,11 @@ class TrayController:
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         tray = QSystemTrayIcon(_tray_icon(), window)
-        tray.setToolTip(APP_TITLE)
+        tray.setToolTip(APP_NAME)
         menu = QMenu()
         self.now_playing = QAction("Nothing playing", menu)
         self.now_playing.setEnabled(False)
-        show = QAction(f"Show {APP_TITLE}", menu)
+        show = QAction(f"Show {APP_NAME}", menu)
         show.triggered.connect(self._show_window)
         self.toggle = QAction("Play / Pause", menu)
         self.toggle.triggered.connect(self._toggle_playback)
@@ -97,19 +97,19 @@ class TrayController:
             return
         self._revision = revision
         if not snapshot.source:
-            texts = ("Nothing playing", APP_TITLE, "Play / Pause")
+            texts = ("Nothing playing", APP_NAME, "Play / Pause")
         else:
             title = snapshot.title if len(snapshot.title) <= 60 else snapshot.title[:57] + "…"
             state = str(snapshot.state)
             # The Windows shell keeps only the first 127 characters of a
             # tooltip: put the app name first and cut the detail, not the name.
             detail = f"{snapshot.title} — {snapshot.show_title}"
-            room = _TOOLTIP_LIMIT - len(APP_TITLE) - 1
+            room = _TOOLTIP_LIMIT - len(APP_NAME) - 1
             if len(detail) > room:
                 detail = detail[:room - 1] + "…"
             texts = (
                 f"{'▶' if state == 'playing' else '⏸'}  {title}",
-                f"{APP_TITLE}\n{detail}",
+                f"{APP_NAME}\n{detail}",
                 "Pause" if state == "playing" else "Play",
             )
         # Ten position ticks a second reached here; a tray tooltip update is
