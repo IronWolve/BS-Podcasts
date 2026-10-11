@@ -238,12 +238,14 @@ class DirectoryCharts:
             feed_url = str(podcast_attributes.get("feedUrl") or "").strip()
             author = str(podcast_attributes.get("name") or "").strip()
             artwork = attributes.get("artwork") or podcast_attributes.get("artwork") or {}
-            genres = podcast_attributes.get("genreNames") or attributes.get("genreNames") or []
+            genres = self._genre_list(podcast_attributes.get("genreNames")) or self._genre_list(
+                attributes.get("genreNames")
+            )
         else:
             feed_url = str(attributes.get("feedUrl") or "").strip()
             author = str(attributes.get("artistName") or "").strip()
             artwork = attributes.get("artwork") or {}
-            genres = attributes.get("genreNames") or []
+            genres = self._genre_list(attributes.get("genreNames"))
         if not feed_url:
             return None
         genre = next(
@@ -276,7 +278,7 @@ class DirectoryCharts:
             artwork = item.get("icon") or {}
         if not feed_url:
             return None
-        genres = [str(value) for value in item.get("genreNames", [])]
+        genres = [str(value) for value in self._genre_list(item.get("genreNames"))]
         genre = next((value for value in genres if value in CATEGORY_IDS), genres[0] if genres else "")
         try:
             rank = int(item.get("ordinal") or position)
@@ -292,6 +294,11 @@ class DirectoryCharts:
             chart_type=chart_type,
             directory_url=str(item.get("clickAction", {}).get("pageUrl") or ""),
         )
+
+    @staticmethod
+    def _genre_list(value):
+        """The payload's genre names when they are a list, else none."""
+        return value if isinstance(value, list) else []
 
     @staticmethod
     def _artwork_url(template: str):
