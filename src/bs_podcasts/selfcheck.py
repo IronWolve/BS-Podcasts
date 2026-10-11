@@ -157,14 +157,16 @@ def main() -> int:
         import requests
         import urllib3
         import mpv
-        from .assets import icon_path, shell_icon_path, font_paths
+        from .assets import BRANDING_DIR, font_paths
+        # Exact files: icon_path() and shell_icon_path() fall back to the 512 px
+        # icon, so a missing 256 or 64 px file would otherwise still pass here.
         checks.update({
             'PySide6 available': bool(PySide6.__version__),
             'requests available': bool(requests.__version__),
             'urllib3 patched': tuple(int(x) for x in urllib3.__version__.split('.')[:3]) >= (2,8,0),
             'native library loaded': bool(mpv.backend),
-            'bundled branding/fonts': icon_path().is_file() and len(font_paths()) >= 2,
-            'bundled shell/tray icons': all(shell_icon_path(size).is_file() for size in (64, 256)),
+            'bundled branding/fonts': (BRANDING_DIR / 'bs-podcasts-icon-256.png').is_file() and len(font_paths()) >= 2,
+            'bundled shell/tray icons': all((BRANDING_DIR / f'bs-podcasts-shell-icon-{size}.png').is_file() for size in (64, 256)),
         })
         from .playback.engine import MpvEngine
         engine = MpvEngine(ao='null', vo='null')
