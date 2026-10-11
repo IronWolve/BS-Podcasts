@@ -3557,7 +3557,7 @@ class MainWindow(QMainWindow):
         if self.library is None or self._closed:
             return
         library = self.library
-        navigation = self._read_tokens.get('show-open', 0)
+        show_open_token = self._read_tokens.get('show-open', 0)
         def work():
             try:
                 return library.import_local_audio(path), ''
@@ -3574,7 +3574,7 @@ class MainWindow(QMainWindow):
             # A later import that works retires an earlier failure's banner.
             if banner.state == 'error' and banner.label.text() == self._local_import_error:
                 banner.clear()
-            if self._read_tokens.get('show-open', 0) == navigation:
+            if self._read_tokens.get('show-open', 0) == show_open_token:
                 self.navigation.select(PAGE_PODCASTS)
                 token = self._read_tokens.get('show-open', 0)
                 context = self._context_revision
