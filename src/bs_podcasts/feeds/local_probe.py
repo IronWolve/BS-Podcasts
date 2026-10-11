@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import traceback
 from threading import Event, Timer
 
 if __package__ in {None, ''}:
@@ -68,8 +69,11 @@ def main():
     try:
         try:
             payload = probe(args.probe_local_audio)
-        except Exception:
-            payload = {'ok': False}
+        except Exception as exc:
+            # The reason and the traceback go to the parent through the result
+            # file and stderr; the user sees one generic sentence either way.
+            payload = {'ok': False, 'reason': f'{type(exc).__name__}: {exc}'[:400]}
+            traceback.print_exc()
         atomic_write(args.probe_output, json.dumps(payload, ensure_ascii=False).encode('utf-8'))
         return 0 if payload['ok'] else 1
     finally:

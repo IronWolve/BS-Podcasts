@@ -4,6 +4,7 @@ from hashlib import sha256
 from pathlib import Path
 import ctypes.util
 import json
+import logging
 import mimetypes
 import os
 import subprocess
@@ -39,7 +40,7 @@ def read_metadata(source: Path) -> dict:
         command += ['--probe-local-audio', str(source), '--probe-output', str(output), '--native-library', native]
         try:
             result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, cwd=directory, timeout=PROBE_TIMEOUT,
+                stderr=subprocess.PIPE, cwd=directory, timeout=PROBE_TIMEOUT,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0)
         except subprocess.TimeoutExpired as exc:
             raise LocalAudioError('Audio metadata reading timed out; the file was not imported.') from exc
@@ -52,6 +53,12 @@ def read_metadata(source: Path) -> dict:
         except (ValueError, OSError) as exc:
             raise LocalAudioError('The audio metadata reader returned an invalid result.') from exc
         if not isinstance(payload, dict) or result.returncode != 0 or not payload.get('ok'):
+            # The app log keeps why it failed, bounded; the user keeps the generic sentence.
+            reason = payload.get('reason') if isinstance(payload, dict) else None
+            detail = (result.stderr or b'')[-2000:].decode('utf-8', 'replace').strip()
+            logging.getLogger('bs_podcasts').warning(
+                'Audio metadata reader refused %s (exit %s): %s', source.name, result.returncode,
+                reason or detail or 'no reason reported')
             raise LocalAudioError('Unsupported, damaged or unreadable audio file.')
         if any(not isinstance(payload.get(key), str) or len(payload[key]) > 4096 for key in ('title','album','artist')):
             raise LocalAudioError('Audio metadata exceeds the supported limits.')
