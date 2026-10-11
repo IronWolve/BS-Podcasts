@@ -28,9 +28,11 @@ class LibraryLease:
         except OSError as exc:
             self._handle.close()
             self._handle = None
-            busy = (getattr(exc, "winerror", None) in {32, 33}
-                    or exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK} if os.name == "nt"
-                    else exc.errno in {errno.EAGAIN, errno.EWOULDBLOCK})
+            if os.name == "nt":
+                busy = (getattr(exc, "winerror", None) in {32, 33}
+                        or exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK})
+            else:
+                busy = exc.errno in {errno.EAGAIN, errno.EWOULDBLOCK}
             if busy:
                 raise LibraryInUseError("The library is in use. Close BS Podcasts before migrating it.") from exc
             raise OSError(f"Could not acquire the library lock: {exc}") from exc
