@@ -122,9 +122,13 @@ function Publish-Application {
                 throw "Close this copy of BS Podcasts before replacing it. The verified new build is retained at $incoming."
             }
         }
+        # A setup program from an earlier build would sit beside this application and a
+        # manifest that does not list it, so it is retired with the rest.
+        $stale = @(Get-ChildItem -LiteralPath $Target -File -Force -Filter "BS-Podcasts-*-Setup.exe" |
+            Where-Object { $names -notcontains $_.Name } | ForEach-Object { $_.Name })
         New-Item -ItemType Directory -Path $previous | Out-Null
         try {
-            foreach ($name in $names) {
+            foreach ($name in ($names + $stale)) {
                 $current = Join-Path $Target $name
                 if (Test-Path -LiteralPath $current) {
                     if ((Get-Item -LiteralPath $current).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
