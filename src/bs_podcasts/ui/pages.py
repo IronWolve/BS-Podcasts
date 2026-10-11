@@ -719,6 +719,26 @@ class _ListPageMixin:
             self.view.setCurrentIndex(index)
         self.menu_requested.emit(index.data(ItemRoles.ITEM), self.view.viewport().mapToGlobal(position))
 
+    def _update_hover_cursor(self, view, delegate, event):
+        """Pointing hand over a row's play, queue and show controls; the
+        size-all cursor over the reorder grip on pages that reorder."""
+        position = event.position().toPoint()
+        index = view.indexAt(position)
+        visual = view.visualRect(index) if index.isValid() else None
+        item = index.data(ItemRoles.ITEM) if index.isValid() else None
+        visible = delegate.controls_visible(view, index, item)
+        over_play = visible and delegate.play_rect(visual).contains(position)
+        over_queue = visible and delegate.can_queue(item) and delegate.queue_rect(visual).contains(position)
+        over_show = delegate.can_open_show(item) and delegate.show_rect(visual, item).contains(position)
+        over_grip = index.isValid() and getattr(self, "reorder", False) and delegate.grip_rect(visual).contains(position)
+        if over_play or over_queue or over_show:
+            cursor = Qt.CursorShape.PointingHandCursor
+        elif over_grip:
+            cursor = Qt.CursorShape.SizeAllCursor
+        else:
+            cursor = Qt.CursorShape.ArrowCursor
+        view.viewport().setCursor(cursor)
+
 
 class PodcastGridPage(BasePage, _ListPageMixin):
     open_requested = Signal(object)
@@ -1522,26 +1542,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             self._menu(event.pos())
             return True
         if watched is self.view.viewport() and event.type() == QEvent.Type.MouseMove:
-            index = self.view.indexAt(event.position().toPoint())
-            position = event.position().toPoint()
-            visual = self.view.visualRect(index) if index.isValid() else None
-            item = index.data(ItemRoles.ITEM) if index.isValid() else None
-            visible = self.delegate.controls_visible(self.view, index, item)
-            over_play = visible and self.delegate.play_rect(visual).contains(position)
-            over_queue = visible and self.delegate.can_queue(item) and self.delegate.queue_rect(visual).contains(position)
-            over_show = self.delegate.can_open_show(item) and self.delegate.show_rect(visual, item).contains(position)
-            over_grip = (
-                index.isValid()
-                and self.reorder
-                and self.delegate.grip_rect(visual).contains(position)
-            )
-            if over_play or over_queue or over_show:
-                cursor = Qt.CursorShape.PointingHandCursor
-            elif over_grip:
-                cursor = Qt.CursorShape.SizeAllCursor
-            else:
-                cursor = Qt.CursorShape.ArrowCursor
-            self.view.viewport().setCursor(cursor)
+            self._update_hover_cursor(self.view, self.delegate, event)
         return super().eventFilter(watched, event)
 
 
@@ -1786,21 +1787,9 @@ class HomePage(BasePage, _ListPageMixin):
             return True
         self._track_item_tooltip(view, event)
         if event.type() == QEvent.Type.MouseMove:
-            index = view.indexAt(event.position().toPoint())
-            position = event.position().toPoint()
-            visual = view.visualRect(index) if index.isValid() else None
-            item = index.data(ItemRoles.ITEM) if index.isValid() else None
-            visible = delegate.controls_visible(view, index, item)
-            over_play = visible and delegate.play_rect(visual).contains(position)
-            over_queue = visible and delegate.can_queue(item) and delegate.queue_rect(visual).contains(position)
-            over_show = delegate.can_open_show(item) and delegate.show_rect(visual, item).contains(position)
-            view.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over_play or over_queue or over_show else Qt.CursorShape.ArrowCursor)
+            self._update_hover_cursor(view, delegate, event)
         if event.type() == QEvent.Type.ContextMenu:
-            index = view.indexAt(event.pos())
-            if index.isValid():
-                if not view.selectionModel().isSelected(index):
-                    view.setCurrentIndex(index)
-                self.menu_requested.emit(index.data(ItemRoles.ITEM), view.viewport().mapToGlobal(event.pos()))
+            self._menu(event.pos())
             return True
         return super().eventFilter(watched, event)
 
