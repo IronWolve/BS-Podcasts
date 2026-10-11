@@ -20,6 +20,7 @@ from PySide6.QtCore import QByteArray, QEvent, QObject, QTimer, QUrl, Signal, Qt
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QAbstractItemView,
     QAbstractSpinBox,
     QApplication,
     QComboBox,
@@ -117,6 +118,7 @@ class PeekFeed(FeedData):
 _FILTERED_EVENTS = frozenset({
     QEvent.Type.ToolTip, QEvent.Type.Enter, QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.Resize,
     QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove, QEvent.Type.ContextMenu,
+    QEvent.Type.ShortcutOverride,
 })
 _HINT_EVENTS = frozenset({QEvent.Type.ToolTip, QEvent.Type.Enter})
 # Set by a real Quit and by nothing else. A window rebuild (theme change) closes
@@ -7583,6 +7585,22 @@ class MainWindow(QMainWindow):
             # The centre area resizes without a window resize when the rail
             # compacts or the splitter is dragged; the handles must follow.
             self._place_edge_handles()
+        if (
+            event.type() == QEvent.Type.ShortcutOverride
+            and event.key() == Qt.Key.Key_Space
+            and event.modifiers() == Qt.KeyboardModifier.ControlModifier
+            and isinstance(watched, QAbstractItemView)
+            and self.isAncestorOf(watched)
+            and watched.currentIndex().isValid()
+            and watched.selectionMode() in {QAbstractItemView.SelectionMode.ExtendedSelection,
+                                            QAbstractItemView.SelectionMode.MultiSelection}
+        ):
+            # Ctrl+Space plays or pauses everywhere else. In a list that takes
+            # several rows it belongs to the list: Ctrl+Arrow moves the current
+            # row without selecting it and Ctrl+Space adds or drops that row,
+            # the only keyboard way to a non-contiguous selection.
+            event.accept()
+            return True
         if (
             event.type() == QEvent.Type.KeyPress
             and event.key() == Qt.Key.Key_Space
