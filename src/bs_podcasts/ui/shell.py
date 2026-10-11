@@ -5017,15 +5017,19 @@ class MainWindow(QMainWindow):
             return
         dialog = ConfirmDialog("Clear Up Next?", f"Removes {len(queued)} episode{'s' if len(queued) != 1 else ''} from the queue. Nothing is deleted.", "Clear Up Next", destructive=True, parent=self)
         if self._exec_dialog(dialog) == QDialog.DialogCode.Accepted:
+            confirmed = {episode.id for episode in queued}
             def work():
-                ids = [episode.id for episode in self.library.queue()]
-                self.library.clear_queue()
-                return ids
-            def apply(ids):
+                # Only what the dialog showed: an episode queued since stays.
+                queue = [episode.id for episode in self.library.queue()]
+                ids = [episode_id for episode_id in queue if episode_id in confirmed]
+                self.library.dequeue_many(ids)
+                return ids, len(queue) - len(ids)
+            def apply(result):
+                ids, kept = result
                 self._reload_queue()
                 def undo():
                     self._run_command(lambda: self.library.enqueue_many(ids), lambda _: self._reload_queue())
-                self._notify("Up Next cleared", "success", "Undo", undo)
+                self._notify("Up Next cleared" + (f" · {kept} added since kept" if kept else ""), "success", "Undo", undo)
             self._run_command(work, apply)
 
     def _queue_to_front(self, episode_id: int):
