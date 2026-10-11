@@ -3828,9 +3828,6 @@ class MainWindow(QMainWindow):
         self._episode_navigation_prepared = True
         self.navigation.select(PAGE_EPISODES)
 
-    def _show_episodes_nav_menu(self, global_position):
-        exec_menu(self._create_episodes_nav_menu(), global_position)
-
     def _show_navigation_menu(self, index: int, global_position):
         exec_menu(self._create_navigation_menu(index), global_position)
 
