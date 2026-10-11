@@ -46,11 +46,45 @@ def _write_crash_file(text: str):
     write_crash_file(f"BS Podcasts {app_version()}\n{redact(text)}\n")
 
 
+def _repeat_guard(window: float = 60.0, keep: int = 32):
+    """Report each distinct exception text at once, then at most once per
+    window with the number of repeats held back. A handler that raises on every
+    event must not open, rotate and write the crash log on every event."""
+    lock = threading.Lock()
+    seen = {}  # digest -> [time of the last report, repeats held back since]
+
+    def admit(text: str) -> int:
+        """-1 to hold this occurrence back, else the repeats held back since the last report."""
+        digest = hashlib.sha256(text.encode("utf-8", "replace")).digest()
+        now = time.monotonic()
+        with lock:
+            entry = seen.get(digest)
+            if entry is not None and now - entry[0] < window:
+                entry[1] += 1
+                return -1
+            held = entry[1] if entry is not None else 0
+            seen.pop(digest, None)
+            seen[digest] = [now, 0]
+            if len(seen) > keep:
+                seen.pop(next(iter(seen)))
+            return held
+
+    return admit
+
+
 def _install_excepthook():
     logger = logging.getLogger("bs_podcasts")
+    admit = _repeat_guard()
+
+    def repeats(held: int) -> str:
+        return f"[raised {held} more time(s) since the last report]\n" if held else ""
 
     def hook(exc_type, exc_value, exc_traceback):
         text = redact("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
+        held = admit(text)
+        if held < 0:
+            return
+        text = repeats(held) + text
         logger.error("Unhandled exception:\n%s", text)
         _write_crash_file(text)
         if sys.__stderr__ is not None:
@@ -64,6 +98,10 @@ def _install_excepthook():
         if args.exc_type is SystemExit:
             return
         text = redact("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+        held = admit(text)
+        if held < 0:
+            return
+        text = repeats(held) + text
         logger.error("Unhandled exception in thread %s:\n%s", getattr(args.thread, "name", "?"), text)
         _write_crash_file(f"[thread {getattr(args.thread, 'name', '?')}]\n{text}")
 
@@ -74,7 +112,10 @@ def _install_excepthook():
         try:
             text = redact("".join(traceback.format_exception(
                 unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback)))
-            logger.error("Unraisable exception (%s):\n%s", unraisable.err_msg or "ignored", text)
+            held = admit(text)
+            if held < 0:
+                return
+            logger.error("Unraisable exception (%s):\n%s%s", unraisable.err_msg or "ignored", repeats(held), text)
         except Exception:
             pass
 
