@@ -263,9 +263,11 @@ class FeedFetcher:
         """(title, published_at) of the newest dated item, in one request.
 
         NOTHING_DATED, with an empty date, when the feed was read but holds no
-        dated item or is XML that does not parse; None when nothing was read
-        (a non-200 answer) or the body is a page the full fetch may still
-        follow to a feed.
+        dated item or is XML that does not parse; None when the body is a page
+        the full fetch may still follow to a feed, or the answer was a
+        non-error status other than 200. An HTTP error status, an oversized
+        body and a network failure raise the same error the full fetch would,
+        so a caller must not repeat the request to learn what failed.
 
         Discover's 'Newest episode' sort needs one date per result (audit
         F-089). A ranged 64 KB peek could not parse any larger feed, since a
@@ -286,6 +288,8 @@ class FeedFetcher:
         except requests.RequestException as exc:
             raise _fetch_error(exc) from exc
         try:
+            if response.status_code >= 400:
+                raise _http_feed_error(response)
             if response.status_code != 200:
                 return None
             body = bytearray()
