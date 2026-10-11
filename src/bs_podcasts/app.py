@@ -293,7 +293,9 @@ def _instance_name() -> str:
         # and service accounts): the numeric id names the endpoint just as
         # stably, and startup goes on.
         user = str(os.getuid()) if hasattr(os, 'getuid') else 'user'
-    return f"{APP_ID}-{user}"
+    # The library part (hex only, so still a plain socket or pipe name) keeps
+    # two library profiles of one account from sharing an endpoint.
+    return f"{APP_ID}-{user}-{_profile_key()[:12]}"
 
 
 _FILE_SUFFIXES = frozenset({'.opml', '.xml', '.mp3', '.m4a', '.ogg', '.opus', '.wav', '.flac', '.aac', '.m4b'})
