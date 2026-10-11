@@ -598,6 +598,17 @@ class _NewestItem:
         return self.seen >= NEWEST_FIRST_RUN and not self.unordered
 
 
+def _detach(parent, current, index: int):
+    """Drop `current` from `parent`. Every older sibling that was dropped is
+    gone, so `current` sits at `index`, the count of older siblings still
+    attached; `remove` would search the kept fields from the start each time.
+    The tree is built ahead of the events, so the position is checked."""
+    if index < len(parent) and parent[index] is current:
+        del parent[index]
+    else:
+        parent.remove(current)
+
+
 def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=None, newest=None):
     """Parse without keeping every element. Items are dropped once read.
 
@@ -607,10 +618,11 @@ def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=N
     With a `_NewestItem` as `newest`, no episode is built or kept: each item is
     handed to it and reading stops as soon as it is settled.
 
-    A frame is [element, base, under, unread, size]. `unread` marks an
-    element dropped unread when it closes: a non-field child of
+    A frame is [element, base, under, unread, size, attached]. `unread` marks
+    an element dropped unread when it closes: a non-field child of
     rss/channel/feed and everything inside one, except an item or entry.
-    `size` counts the frame's still-attached subtree for MAX_KEPT_ELEMENTS.
+    `size` counts the frame's still-attached subtree for MAX_KEPT_ELEMENTS;
+    `attached` counts its children that stayed attached.
     """
     bounded = _url_budget()
     head = []
@@ -657,9 +669,9 @@ def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=N
                     unread = True
                 else:
                     unread = stack[-1][3]
-                stack.append([element, base, under, unread, 1])
+                stack.append([element, base, under, unread, 1, 0])
                 continue
-            current, base, under, unread, size = stack.pop()
+            current, base, under, unread, size, _attached = stack.pop()
             _rewrite_text(current, base, under, bounded)
             local = _local(current.tag)
             parent = stack[-1][0] if stack else None
@@ -680,17 +692,18 @@ def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=N
                 _remember_episode(head, tail, seen, episode)
                 item_position += 1
                 if parent is not None:
-                    parent.remove(current)
+                    _detach(parent, current, stack[-1][5])
                 current.clear()
                 kept -= size
                 if settled:
                     break
             elif unread:
-                parent.remove(current)
+                _detach(parent, current, stack[-1][5])
                 current.clear()
                 kept -= size
             elif parent is not None:
                 stack[-1][4] += size
+                stack[-1][5] += 1
     finally:
         source.close()
     if root is None:
