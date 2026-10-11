@@ -175,6 +175,9 @@ class PlaybackService:
     LOAD_TIMEOUT = 25.0
     RESOLVE_TIMEOUT = 55.0  # HTTP resolver has its own 45-second total budget
     WEB_LOAD_TIMEOUT = 55.0  # the stream's own open (connect, headers, first bytes) can take about 50 s
+    # Download-first wait: no download result may ever arrive (it was paused,
+    # or absorbed into another transfer), so the wait reports itself.
+    DOWNLOAD_WAIT_TIMEOUT = 600.0
     STREAM_RECOVERY_LIMIT = 3
     STREAM_RECOVERY_WINDOW = 600.0
     START_TOLERANCE = 10.0
@@ -195,17 +198,18 @@ class PlaybackService:
         except Exception as exc:
             logger.warning("Playback %s failed: %s", what, redact(exc))
 
-    def _arm_load_watchdog(self, episode_id: int | None, source: str):
+    def _arm_load_watchdog(self, episode_id: int | None, source: str, timeout: float | None = None):
         self._cancel_load_watchdog()
         # The token — not episode/source equality — identifies the load:
         # Timer.cancel() is a no-op once the callback has started, and a
         # retried load of the SAME episode+source would otherwise be killed
         # instantly by the previous attempt's already-running watchdog.
         self._load_token += 1
-        if self._resolving:
-            timeout = self.RESOLVE_TIMEOUT
-        else:
-            timeout = self.WEB_LOAD_TIMEOUT if is_web_url(source) else self.LOAD_TIMEOUT
+        if timeout is None:
+            if self._resolving:
+                timeout = self.RESOLVE_TIMEOUT
+            else:
+                timeout = self.WEB_LOAD_TIMEOUT if is_web_url(source) else self.LOAD_TIMEOUT
         timer = Timer(timeout, self._load_timed_out, args=(self._load_token,))
         timer.daemon = True
         timer.start()
@@ -227,10 +231,14 @@ class PlaybackService:
                 return
             self._load_generation += 1
             self._load_autoplay = False
+            # A download wait keeps its ticket: the download still runs, and a
+            # completion that arrives later makes the episode ready, paused.
+            message = (f"Still downloading after {int(self.DOWNLOAD_WAIT_TIMEOUT // 60)} minutes. "
+                       "The download keeps running; choose Retry to keep waiting for it."
+                       if self.snapshot.download_request else
+                       "Couldn’t open the stream (timed out). Check the connection or download the episode.")
             self.snapshot = replace(
-                self.snapshot, state=PlaybackState.ERROR,
-                message="Couldn’t open the stream (timed out). Check the connection or download the episode.",
-                buffering=None,
+                self.snapshot, state=PlaybackState.ERROR, message=message, buffering=None,
             )
             logger.warning("Playback load timed out: generation=%s source=%s position=%.1fs",
                            self._engine_generation,
@@ -356,6 +364,7 @@ class PlaybackService:
                 self.snapshot = replace(self.snapshot, download_request=self._load_generation,
                                         message="Downloading before playing…",
                                         state=PlaybackState.LOADING if autoplay else PlaybackState.PAUSED)
+                self._arm_load_watchdog(episode.id, source, self.DOWNLOAD_WAIT_TIMEOUT)
                 self._emit()
                 return
             try:
