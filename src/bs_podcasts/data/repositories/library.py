@@ -882,6 +882,13 @@ class LibraryRepository:
         return removed
 
     def reorder_queue(self, episode_ids: list[int]):
+        """Arrange the named queued episodes in the given order, in place.
+
+        The Up Next page passes the whole queue. A shorter list is not a
+        move: the named rows swap among the positions they already hold and
+        every other row keeps its position. Ids that are not queued are
+        ignored, so a list that went stale while a row was added or removed
+        still applies cleanly."""
         with self.database.connect() as connection:
             # The order is read inside the write, so a removal or an add that
             # commits meanwhile cannot leave a duplicate or a gap.
