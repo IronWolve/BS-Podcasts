@@ -1401,7 +1401,7 @@ class PlaybackService:
         self._arm_load_watchdog(self.snapshot.episode_id, source)
         thread = threading.Thread(
             target=self._rescue_redirects,
-            args=(source, self.snapshot.position, self._load_autoplay, self._load_generation, self._resolve_cancel),
+            args=(source, self._load_generation, self._resolve_cancel),
             daemon=True,
             name="playback-redirect-rescue",
         )
@@ -1467,8 +1467,10 @@ class PlaybackService:
         self._dispatch(recover)
         return True
 
-    def _rescue_redirects(self, source: str, position: float, autoplay: bool, generation=None, cancel=None):
+    def _rescue_redirects(self, source: str, generation=None, cancel=None):
         final = self._resolve_final(source, cancel)
+        # The load below reads the latest intent on purpose: a seek or a
+        # pause while the URL resolved has already updated it.
         with self._lock:
             if self._dead or self.snapshot.source != source or generation != self._load_generation:
                 return
