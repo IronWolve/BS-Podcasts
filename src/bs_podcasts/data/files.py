@@ -44,7 +44,9 @@ def open_private(path: Path, mode='wb'):
         raise
 
 
-def atomic_write(path: Path, content: bytes) -> Path:
+def atomic_write(path: Path, content: bytes, durable: bool = True) -> Path:
+    """Replace `path` whole. `durable=False` skips the disk flushes, for
+    files that are rebuilt when missing; the rename stays atomic."""
     path = Path(path)
     descriptor, name = tempfile.mkstemp(prefix=".bs-write-", suffix=".tmp", dir=path.parent)
     temporary = Path(name)
@@ -52,9 +54,11 @@ def atomic_write(path: Path, content: bytes) -> Path:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(content)
             handle.flush()
-            os.fsync(handle.fileno())
+            if durable:
+                os.fsync(handle.fileno())
         os.replace(temporary, path)
-        sync_directory(path.parent)
+        if durable:
+            sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
     return path

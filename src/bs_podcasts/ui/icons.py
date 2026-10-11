@@ -249,7 +249,7 @@ def icon_file(name: str, color: str, size: int) -> str:
                     # Cache deletion is safe while running; recreate the
                     # directory when regenerating a stylesheet glyph.
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    atomic_write(target, bytes(data))
+                    atomic_write(target, bytes(data), durable=False)  # rebuilt when missing
                 except OSError:
                     valid = False
         if valid:
