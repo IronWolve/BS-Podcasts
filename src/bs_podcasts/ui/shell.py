@@ -311,6 +311,8 @@ class MainWindow(QMainWindow):
         # compact state: closing it means no path (mode change, selection,
         # playback follow) may auto-reopen it until the user opens it again.
         self._context_user_closed = False
+        # The control last used in each F6 area, by area; a new window starts empty.
+        self._region_focus = weakref.WeakKeyDictionary()
         self._pane_user_width = 0
         self._rail_user_compact = None
         self._last_mode = None
@@ -2063,19 +2065,30 @@ class MainWindow(QMainWindow):
                 widget = widget.parentWidget()
             if current >= 0:
                 break
+        if current >= 0 and focused is not None:
+            self._region_focus[regions[current][0]] = weakref.ref(focused)
         for step in range(1, len(regions) + 1):
             base = current if current >= 0 else (len(regions) if direction < 0 else -1)
             owner, target = regions[(base + direction * step) % len(regions)]
-            widget = self._first_focusable(owner, target)
+            widget = self._first_focusable(owner, target, self._remembered_focus(owner))
             if widget is None:
                 continue
             widget.setFocus(Qt.FocusReason.TabFocusReason)
             if QApplication.focusWidget() is widget:
                 return
 
+    def _remembered_focus(self, owner):
+        """The control last focused in an F6 area, or None if it is gone."""
+        ref = self._region_focus.get(owner)
+        widget = ref() if ref is not None else None
+        try:
+            return widget if widget is not None and owner.isAncestorOf(widget) else None
+        except RuntimeError:  # the control was deleted
+            return None
+
     @staticmethod
-    def _first_focusable(owner, preferred):
-        candidates = [preferred] + [w for w in owner.findChildren(QWidget) if w is not preferred]
+    def _first_focusable(owner, preferred, remembered=None):
+        candidates = [remembered, preferred] + [w for w in owner.findChildren(QWidget) if w is not preferred and w is not remembered]
         for widget in candidates:
             if widget is None or not widget.isVisible() or not widget.isEnabled():
                 continue
