@@ -460,8 +460,12 @@ def _read_image(path: str, width: int, height: int) -> QImage:
     return image.scaled(width, height, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
 
-def prepare_previews(paths, limit=480):
-    """Worker-only startup seed, bounded below the independent RAM budget."""
+def prepare_previews(paths, limit=1):
+    """Worker-only previews for artwork a producer just replaced.
+
+    Stops after `limit` paths; its one caller passes a single path. The
+    library's startup seed is `prepare_saved_previews`.
+    """
     result = {}
     for index, path in enumerate(dict.fromkeys(path for path in paths if path)):
         if index >= limit:
