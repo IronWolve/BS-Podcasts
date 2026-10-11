@@ -13,6 +13,8 @@ _TRANSCODE_XML = {'gb2312', 'gbk', 'big5', 'shift_jis', 'euc_jp', 'euc_kr'}
 def normalize_xml(content: bytes, maximum=20 * 1024 * 1024) -> bytes:
     """Normalize UTF-8 aliases and known multibyte publisher encodings safely."""
     content = strip_leading_space(content)
+    if content.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return _transcode_utf16(content, maximum)
     declaration = _DECLARATION.match(content)
     if declaration is None:
         return content
@@ -31,6 +33,26 @@ def normalize_xml(content: bytes, maximum=20 * 1024 * 1024) -> bytes:
         if len(content) > maximum:
             raise UnsupportedEncoding('Normalized XML exceeds the size limit.')
     elif codec.name != "utf-8":
+        return content
+    begin, end = encoding.span(3)
+    return content[:begin] + b"utf-8" + content[end:]
+
+
+def _transcode_utf16(content: bytes, maximum: int) -> bytes:
+    """A UTF-16 body marked by its byte order mark, as UTF-8 with a matching declaration.
+
+    The byte-level passes that follow read ASCII only, so they see the text
+    just as UTF-8 readers do: entity names resolve and items are counted."""
+    try:
+        text = content.decode("utf-16")
+    except UnicodeError as exc:
+        raise UnsupportedEncoding('The XML body does not match its declared character encoding.') from exc
+    content = strip_leading_space(text.encode("utf-8"))
+    if len(content) > maximum:
+        raise UnsupportedEncoding('Normalized XML exceeds the size limit.')
+    declaration = _DECLARATION.match(content)
+    encoding = _ENCODING.search(declaration.group()) if declaration else None
+    if encoding is None:
         return content
     begin, end = encoding.span(3)
     return content[:begin] + b"utf-8" + content[end:]
