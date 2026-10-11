@@ -615,7 +615,11 @@ def stylesheet() -> str:
     QPushButton#iconButton:hover {{ background: {c['surface_raised']}; }}
     QPushButton#iconButton:pressed {{ background: {c['surface_soft']}; }}
     QPushButton#iconButton:focus {{ border: {focus_ring}; }}
-    QPushButton#iconButton:checked {{ background: {c['accent_soft']}; }}
+    /* A tint alone measures 1.05-1.5:1 against the bar, so a checked toggle also
+       gets a 2px accent outline; focus on it uses the strong ink so the two
+       stay distinguishable. */
+    QPushButton#iconButton:checked {{ background: {c['accent_soft']}; border: 2px solid {c['accent']}; }}
+    QPushButton#iconButton:checked:focus {{ border: 2px solid {c['text_strong']}; }}
     QPushButton#playButton {{
         background: {c['accent']}; border: 2px solid {c['accent']}; border-radius: {play_btn // 2}px;
         min-width: {play_btn}px; max-width: {play_btn}px; min-height: {play_btn}px; max-height: {play_btn}px; padding: 0;
