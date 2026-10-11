@@ -4424,7 +4424,7 @@ class PlayerBar(QFrame):
         self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
         self._speed = float(snapshot.speed)
         self.speed.setText(f"{self._speed:g}×")
-        self.speed.setAccessibleName(f"Playback speed, {self._speed:g} times")
+        self.speed.setAccessibleName(f"Playback speed, {self._speed:g}×")
         self.speed_popover.set_current(self._speed)
         self._ab_active = snapshot.ab_start is not None
         self._trim_active = snapshot.trim_level != "off"
