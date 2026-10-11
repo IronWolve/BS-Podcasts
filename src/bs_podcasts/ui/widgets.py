@@ -2448,6 +2448,8 @@ class ContextPanel(QFrame):
         queue_layout.addWidget(self.queue_summary)
         self.queue_view = QListView()
         self.queue_view.setAccessibleName("Up Next queue")
+        self.queue_view.setAccessibleDescription("Alt+Up and Alt+Down move the selected episode up or down")
+        self.queue_view.installEventFilter(self)
         self.queue_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.queue_view.setDragDropMode(QListView.DragDropMode.InternalMove)
         self.queue_view.setDefaultDropAction(Qt.DropAction.MoveAction)
@@ -2815,7 +2817,25 @@ class ContextPanel(QFrame):
         if watched is getattr(self, 'tabs', None) and event.type() in (QEvent.Type.FontChange, QEvent.Type.Show, QEvent.Type.Resize):
             self._measure_tabs()
             self._fit_tabs()
+        elif (watched is getattr(self, 'queue_view', None) and event.type() == QEvent.Type.KeyPress
+              and event.modifiers() == Qt.KeyboardModifier.AltModifier
+              and event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down)):
+            self.move_queue_row(-1 if event.key() == Qt.Key.Key_Up else 1)
+            return True
         return super().eventFilter(watched, event)
+
+    def move_queue_row(self, step: int):
+        """Keyboard counterpart of dragging a row: move the current Up Next
+        episode one place up (-1) or down (+1). The model reports the new
+        order exactly as it does for a drop."""
+        model = self.queue_view.model()
+        index = self.queue_view.currentIndex()
+        if model is None or not index.isValid():
+            return
+        target = index.row() + step
+        if 0 <= target < model.rowCount():
+            model.moveRows(index.parent(), index.row(), 1, index.parent(), target if step < 0 else target + 1)
+            self.queue_view.scrollTo(self.queue_view.currentIndex())
 
     def _set_current_item(self, item):
         def item_key(value):
