@@ -2,6 +2,7 @@
 
 from hashlib import sha256
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -28,6 +29,15 @@ _TEXT_LIMITS = {
     "chart_type": 64,
     "directory_url": 8192,
 }
+_UNLOADED = object()  # save() was not told what load() found
+_failures_logged = set()
+
+
+def _log_failure(reason):
+    """Warn once per kind of failed save; a reason never holds a query or URL."""
+    if reason not in _failures_logged:
+        _failures_logged.add(reason)
+        logging.getLogger(__name__).warning("Could not save a Discover snapshot: %s", reason)
 
 
 class PersistentDirectoryCache:
@@ -117,14 +127,15 @@ class PersistentDirectoryCache:
         values["rank"] = max(0, min(1_000_000, rank))
         return DirectoryCandidate(**values)
 
-    def save(self, operation, value, results, limit, *, previous=None):
+    def save(self, operation, value, results, limit, *, previous=_UNLOADED):
         key = self._key(operation, value)
         if key is None or not results:
             return False
         records = []
         try:
             limit = min(MAX_CANDIDATES, max(0, int(limit)))
-            previous = previous if previous is not None else self.load(operation, value)
+            if previous is _UNLOADED:
+                previous = self.load(operation, value)
             results = list(results[:MAX_CANDIDATES])
             if previous and previous['candidates'] and previous['limit'] > limit:
                 # Persist the newest first page immediately while retaining
@@ -144,6 +155,7 @@ class PersistentDirectoryCache:
                 record['rank'] = validated.rank
                 records.append(record)
             if not records:
+                _log_failure("no row could be stored")
                 return False
             raw = json.dumps({
                 "version": 1,
@@ -153,12 +165,17 @@ class PersistentDirectoryCache:
                 "candidates": records,
             }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             if len(raw) > MAX_ENTRY_BYTES:
+                _log_failure("the snapshot is over the size limit")
                 return False
             self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             atomic_write(self._path(key), raw)
             self._prune()
             return True
-        except (OSError, TypeError, ValueError, OverflowError):
+        except (OSError, TypeError, ValueError, OverflowError) as exc:
+            reason = type(exc).__name__
+            if isinstance(exc, OSError) and exc.strerror:
+                reason = f"{reason}: {exc.strerror}"
+            _log_failure(reason)
             return False
 
     def _prune(self):
