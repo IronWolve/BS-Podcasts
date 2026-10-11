@@ -1359,4 +1359,4 @@ class DownloadService:
                 name = getattr(listener, "__qualname__", type(listener).__name__)
                 if (name, type(exc)) not in self._listener_failures:
                     self._listener_failures.add((name, type(exc)))
-                    _log.warning("Download listener %s failed: %s [%s]", name, exc, type(exc).__name__)
+                    _log.warning("Download listener %s failed: %s [%s]", name, exc, type(exc).__name__, exc_info=True)
