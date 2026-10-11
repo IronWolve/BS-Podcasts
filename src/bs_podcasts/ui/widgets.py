@@ -73,7 +73,7 @@ from ..urlguard import is_web_url
 from . import icons
 from .models import Podcast
 from .pixmaps import cover, initials
-from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, play_button_size, scaled_px, theme_name
+from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, play_button_size, reduced_motion, scaled_px, theme_name
 
 
 NAV_ITEMS = (
@@ -1213,8 +1213,7 @@ class Toast(QFrame):
         self._effect = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self._effect)
         self._animation = QPropertyAnimation(self._effect, b"opacity", self)
-        from .theme import reduced_motion
-        self._animation.setDuration(0 if reduced_motion() else 160)
+        self._animation.setDuration(self._motion_ms(160))
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.dismiss)
@@ -1247,6 +1246,11 @@ class Toast(QFrame):
     MAX_QUEUE = 3
     NOTICE_MS = 3200
     ACTION_MS = 8000
+
+    @staticmethod
+    def _motion_ms(normal: int) -> int:
+        """Fade and settle times in one place: zero under reduced motion."""
+        return 0 if reduced_motion() else normal
 
     def show_message(self, message: str, tone: str = "info", action: str = "", callback=None, duration_ms: int | None = None, on_close=None, owner=None):
         """duration_ms=0 keeps the toast up until dismissed; on_close runs
@@ -1312,8 +1316,7 @@ class Toast(QFrame):
         QAccessible.updateAccessibility(QAccessibleEvent(self, QAccessible.Event.Alert))
         self.raise_()
         self._animation.stop()
-        from .theme import reduced_motion
-        self._animation.setDuration(0 if reduced_motion() else 160)
+        self._animation.setDuration(self._motion_ms(160))
         self._animation.setStartValue(0.0)
         self._animation.setEndValue(1.0)
         self._animation.start()
@@ -1440,8 +1443,7 @@ class Toast(QFrame):
         self._closing = True
         current = self._effect.opacity()
         self._animation.stop()
-        from .theme import reduced_motion
-        self._animation.setDuration(0 if reduced_motion() else 160)
+        self._animation.setDuration(self._motion_ms(160))
         self._animation.setStartValue(current)
         self._animation.setEndValue(0.0)
         self._animation.start()
@@ -1452,8 +1454,7 @@ class Toast(QFrame):
         self._closing = False
         self.hide()
         if self._queue or self._overflow or self._sticky_entries:
-            from .theme import reduced_motion
-            QTimer.singleShot(0 if reduced_motion() else 120, self, self._show_next)
+            QTimer.singleShot(self._motion_ms(120), self, self._show_next)
 
     def _show_next(self):
         if self._queue:
