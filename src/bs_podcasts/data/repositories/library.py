@@ -1123,19 +1123,23 @@ class LibraryRepository:
         return restored
 
     def enqueue_many(self, episode_ids) -> int:
-        """Append many episodes to the queue in one transaction, in order."""
+        """Append many episodes to the queue in one transaction, in order.
+
+        Returns how many rows were added; an episode already queued, or named
+        twice, counts once."""
         ids = [int(i) for i in episode_ids]
         if not ids:
             return 0
         now = time.time()
+        added = 0
         with self.database.connect() as connection:
             for episode_id in ids:
-                connection.execute(
+                added += connection.execute(
                     "INSERT OR IGNORE INTO queue(episode_id, position, added_at) "
                     "SELECT ?, COALESCE(MAX(position), 0) + 1, ? FROM queue",
                     (episode_id, now),
-                )
-        return len(ids)
+                ).rowcount
+        return added
 
     def mark_played(self, episode_id: int, played: bool = True):
         with self.database.connect() as connection:
