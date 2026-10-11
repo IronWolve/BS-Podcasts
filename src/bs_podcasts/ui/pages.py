@@ -1998,6 +1998,13 @@ class SettingsPage(BasePage):
         hints = QApplication.styleHints()
         if hints is not None:
             hints.colorSchemeChanged.connect(self._system_scheme_changed)
+        for field, name in (
+            (self.speed, "Playback speed"), (self.skip_back, "Skip back"), (self.skip_forward, "Skip forward"),
+            (self.refresh_interval, "Refresh interval"), (self.search_depth, "Search result depth"),
+            (self.auto_download_limit, "Auto-download limit"), (self.theme, "Theme"), (self.density, "Density"),
+            (self.text_size, "Text size"), (self.ui_font, "Font"), (self.episode_lines, "Episode description lines"),
+        ):
+            field.setAccessibleName(name)
         self.density.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.density", self.density.itemData(index)))
         self.text_size.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.text_size", self.text_size.itemData(index)))
         self.ui_font.currentIndexChanged.connect(lambda index: self.setting_changed.emit("ui.font", self.ui_font.itemData(index)))
@@ -2156,6 +2163,7 @@ class SettingsPage(BasePage):
         self.change_folder_button.setIcon(icons.icon("folder", COLORS["muted"], 14))
         self.change_folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.change_folder_button.setToolTip("Existing downloads stay where they are; new ones use the new folder")
+        self.change_folder_button.setAccessibleName("Change download folder")
         self.change_folder_button.clicked.connect(self.change_download_folder_requested)
         download_row_layout.addWidget(self.change_folder_button, 0, Qt.AlignmentFlag.AlignTop)
         storage_layout.addRow("Downloads folder", download_row)
