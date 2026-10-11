@@ -2137,8 +2137,8 @@ class MainWindow(QMainWindow):
         )
         if again is not None:
             # Downloads that finished while the dialog was open, checked once
-            # the delete above has run (the command queue keeps the order).
-            self._run_command(lambda: None, lambda _none: self._apply_retention(show_id, keep=tuple(again), background=True))
+            # the delete above has run (bulk jobs keep their order).
+            self._run_command(lambda: None, lambda _none: self._apply_retention(show_id, keep=tuple(again), background=True), bulk=True)
 
     def _download_many(self, items):
         # is_active() is the live truth; filtering on the row's state string
@@ -2855,7 +2855,9 @@ class MainWindow(QMainWindow):
                     failed += 1
             return deleted, freed, failed, protected
 
-        self._run_task("delete-downloads", work, (len(episode_ids), template), pool=self.commands, keep=True)
+        # Bulk: a Play or Pause pressed during a long cleanup must not wait
+        # for the last file. Quit still waits for the job (it is kept).
+        self._run_task("delete-downloads", work, (len(episode_ids), template), pool=self.commands, keep=True, bulk=True)
 
     def _later(self, milliseconds: int, callback):
         """A one-shot timer that does nothing once the window is closing.
@@ -2869,11 +2871,17 @@ class MainWindow(QMainWindow):
         # instead of living until its last pending timer fires.
         QTimer.singleShot(milliseconds, self, lambda: None if self._closed else callback())
 
-    def _run_task(self, kind: str, work, identifier=None, pool=None, keep=False):
+    def _run_task(self, kind: str, work, identifier=None, pool=None, keep=False, bulk=False):
         if self.jobs is None or self._closed:
             return
         executor = pool or self.jobs
-        future = executor.submit(work, keep=keep) if executor is self.commands else executor.submit(work)
+        if executor is self.commands:
+            # A bulk job runs on the queue's second worker: it still starts
+            # after every earlier command, but later playback commands do not
+            # wait for it.
+            future = executor.submit(work, keep=keep, bulk=True) if bulk else executor.submit(work, keep=keep)
+        else:
+            future = executor.submit(work)
         self._pending_jobs.add(future)
 
         def finished(completed):
@@ -2886,7 +2894,7 @@ class MainWindow(QMainWindow):
 
         future.add_done_callback(finished)
 
-    def _run_command(self, work, apply=None, *, keep=True):
+    def _run_command(self, work, apply=None, *, keep=True, bulk=False):
         if self._closed:
             return
         if self.commands is None:
@@ -2897,7 +2905,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 self._notify(str(exc), "error")
             return
-        self._run_task("command", work, apply, pool=self.commands, keep=keep)
+        self._run_task("command", work, apply, pool=self.commands, keep=keep, bulk=bulk)
 
     def _playback_command(self, name, *args, **kwargs):
         playback, commands = self.playback, self.commands
