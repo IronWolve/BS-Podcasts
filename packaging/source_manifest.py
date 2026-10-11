@@ -22,7 +22,7 @@ def private_path(name, tokens=()):
     """Generic private-path rules, plus any private deny token in the path (case-insensitive)."""
     parts = PurePosixPath(name).parts
     folded = name.casefold()
-    return (parts[0].lower() in PRIVATE_ROOTS
+    return (not parts or parts[0].lower() in PRIVATE_ROOTS
             or any(part.lower() in PRIVATE_NAMES for part in parts)
             or any(part.startswith('.') for part in parts if part not in {'.gitignore', '.gitattributes'})
             or PurePosixPath(name).suffix.lower() in {'.db', '.sqlite', '.sqlite3', '.log', '.pcap', '.key', '.pem'}
@@ -32,9 +32,14 @@ def private_path(name, tokens=()):
 def inventory(root=ROOT):
     root = Path(root).resolve()
     payload = json.loads((root / 'source-manifest.json').read_text(encoding='utf-8'))
-    files = payload['files']
+    files = payload.get('files') if isinstance(payload, dict) else None
     tokens = denied_tokens(root)
-    if not isinstance(files, list) or len(files) != len(set(files)):
+    if not isinstance(files, list):
+        raise ValueError('Source manifest must contain unique exact file paths.')
+    malformed = [name for name in files if not isinstance(name, str) or not PurePosixPath(name).parts]
+    if malformed:
+        raise ValueError('Invalid manifest path: ' + ', '.join(map(repr, malformed)))
+    if len(files) != len(set(files)):
         raise ValueError('Source manifest must contain unique exact file paths.')
     if 'source-manifest.json' not in files:
         raise ValueError('The source manifest must include itself in its inventory.')
@@ -47,9 +52,12 @@ def inventory(root=ROOT):
         source = root / name
         if not source.is_file() or source.is_symlink() or not source.resolve().is_relative_to(root):
             raise ValueError(f'Missing or unsafe source file: {name}')
-    runtime = payload['runtime']
+    runtime = payload.get('runtime')
     if not isinstance(runtime, dict) or not set(runtime).issubset(files):
         raise ValueError('Runtime inputs must be approved source files.')
+    for name in runtime.values():
+        if not isinstance(name, str) or not PurePosixPath(name).parts:
+            raise ValueError(f'Invalid runtime path: {name!r}')
     if len(set(runtime.values())) != len(runtime):
         raise ValueError('Duplicate deployment targets.')
     for name in runtime.values():
