@@ -1436,6 +1436,10 @@ class PlaybackService:
                         return ""
         except Exception as exc:
             logger.info("Playback redirect resolution failed: %s: %s", type(exc).__name__, redact(exc))
+            # A host that asked for a pause refused the resolution; the user should
+            # see that reason rather than a generic failure.
+            if getattr(exc, "retry_after", None) is not None:
+                raise PlaybackUnavailable(str(exc)) from exc
             return ""
 
     def _start_redirect_rescue(self) -> bool:
@@ -1532,7 +1536,11 @@ class PlaybackService:
         return True
 
     def _rescue_redirects(self, source: str, generation=None, cancel=None):
-        final = self._resolve_final(source, cancel)
+        refusal = ""
+        try:
+            final = self._resolve_final(source, cancel)
+        except PlaybackUnavailable as exc:
+            final, refusal = "", str(exc)
         # The load below reads the latest intent on purpose: a seek or a
         # pause while the URL resolved has already updated it.
         with self._lock:
@@ -1542,7 +1550,7 @@ class PlaybackService:
             if not final or final == source:
                 self._cancel_load_watchdog()
                 self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR,
-                                        message="Could not open the episode stream.", buffering=None)
+                                        message=refusal or "Could not open the episode stream.", buffering=None)
             else:
                 try:
                     self.engine.load(final, self._desired_position, self._load_autoplay)
