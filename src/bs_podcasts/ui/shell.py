@@ -6373,7 +6373,7 @@ class MainWindow(QMainWindow):
         self._pump_directory_request()
 
     def _pump_directory_request(self):
-        if self._closed or self._directory_future is not None or self._directory_waiting is None:
+        if self._closed or self.network_jobs is None or self._directory_future is not None or self._directory_waiting is None:
             return
         generation, request, cancel = self._directory_waiting
         self._directory_waiting = None
