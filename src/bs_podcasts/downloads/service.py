@@ -1224,7 +1224,13 @@ class DownloadService:
             time.sleep(0.1)
 
     def _target(self, episode_id: int, url: str) -> Path:
-        suffix = Path(urlparse(url).path).suffix.lower()
+        try:
+            suffix = Path(urlparse(url).path).suffix.lower()
+        except ValueError:
+            # A feed can hand over an address the parser rejects. Naming the
+            # file must not fail: the queue listing calls this for every
+            # waiting episode, and the fetch refuses the address itself.
+            suffix = ".media"
         if suffix not in SAFE_MEDIA_SUFFIXES:
             suffix = ".media"
         # Episode IDs are never reused within one library (migration 017's
