@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import threading
 
-from PySide6.QtCore import QPoint, QSize, QTimer, QUrl, Qt, Signal, qVersion
+from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, QUrl, Qt, Signal, qVersion
 from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QKeySequence, QTextDocument, QTextOption
 
 from ..urlguard import is_web_url
@@ -1314,12 +1314,12 @@ class AboutDialog(StyledDialog):
         super().__init__(parent)
         self.setWindowTitle(f"About {APP_NAME}")
         self.set_card_width(560)
-        logo = PlainTextLabel()
-        pixmap = QPixmap(str(logo_path()))
-        if not pixmap.isNull():
-            logo.setPixmap(pixmap.scaledToWidth(360, Qt.TransformationMode.SmoothTransformation))
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.card_layout.addWidget(logo)
+        self.logo = PlainTextLabel()
+        self._logo_source = QPixmap(str(logo_path()))
+        self._logo_ratio = 0.0
+        self._paint_logo()
+        self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.card_layout.addWidget(self.logo)
         name = QLabel(f"{escape(APP_NAME)}  <span style='color:{COLORS['muted']}; font-weight:400'>v{escape(app_version())}</span>")
         name.setObjectName("cardTitle")
         name.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1376,3 +1376,22 @@ class AboutDialog(StyledDialog):
         links.addWidget(close)
         self.card_layout.addLayout(links)
         self.set_default_button(close)
+
+    def _paint_logo(self):
+        """The logo over 360 logical pixels, with one device pixel per image pixel."""
+        ratio = self.devicePixelRatioF() or 1.0
+        if self._logo_source.isNull() or ratio == self._logo_ratio:
+            return
+        self._logo_ratio = ratio
+        pixmap = self._logo_source.scaledToWidth(round(360 * ratio), Qt.TransformationMode.SmoothTransformation)
+        pixmap.setDevicePixelRatio(ratio)
+        self.logo.setPixmap(pixmap)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._paint_logo()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.DevicePixelRatioChange:
+            self._paint_logo()
