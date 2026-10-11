@@ -987,7 +987,17 @@ class PodcastInfoDialog(StyledDialog):
         categories = getattr(feed, "categories", ()) or getattr(podcast, "categories", "")
         if isinstance(categories, (tuple, list)):
             categories = ", ".join(str(value) for value in categories if value)
+        scroll, content_layout = self._build_scroll()
+        self._build_hero(content_layout, podcast, title, author, categories, artwork_path)
+        self._build_links(content_layout, website_url, feed_url)
+        self._build_about(content_layout, description)
+        self._build_facts(content_layout, rows)
+        technical_toggle = self._build_technical(content_layout, rows, scroll)
+        content_layout.addStretch(1)
+        self.card_layout.addWidget(scroll, 1)
+        self._build_buttons(technical_toggle)
 
+    def _build_scroll(self):
         scroll = QScrollArea()
         scroll.setObjectName("dialogScroll")
         scroll.setWidgetResizable(True)
@@ -998,7 +1008,9 @@ class PodcastInfoDialog(StyledDialog):
         content_layout.setContentsMargins(0, 0, SPACE["sm"], 0)
         content_layout.setSpacing(SPACE["md"])
         scroll.setWidget(content)
+        return scroll, content_layout
 
+    def _build_hero(self, content_layout, podcast, title, author, categories, artwork_path):
         hero = QHBoxLayout()
         hero.setSpacing(SPACE["lg"])
         art_side = scaled_px(148)
@@ -1038,6 +1050,7 @@ class PodcastInfoDialog(StyledDialog):
         hero.addLayout(summary, 1)
         content_layout.addLayout(hero)
 
+    def _build_links(self, content_layout, website_url, feed_url):
         actions = QHBoxLayout()
         actions.setSpacing(SPACE["sm"])
         open_website = QPushButton("Open website")
@@ -1063,6 +1076,7 @@ class PodcastInfoDialog(StyledDialog):
         link_help.setWordWrap(True)
         content_layout.addWidget(link_help)
 
+    def _build_about(self, content_layout, description):
         about_heading = PlainTextLabel("ABOUT")
         about_heading.setObjectName("eyebrow")
         content_layout.addWidget(about_heading)
@@ -1078,6 +1092,7 @@ class PodcastInfoDialog(StyledDialog):
         about.setMaximumHeight(220)
         content_layout.addWidget(about)
 
+    def _build_facts(self, content_layout, rows):
         facts = QFormLayout()
         facts.setHorizontalSpacing(SPACE["xl"])
         facts.setVerticalSpacing(SPACE["xs"])
@@ -1090,6 +1105,7 @@ class PodcastInfoDialog(StyledDialog):
             _add_value_row(facts, name, value, self.value_labels)
         content_layout.addLayout(facts)
 
+    def _build_technical(self, content_layout, rows, scroll):
         technical_toggle = QPushButton("Show technical details")
         technical_toggle.setObjectName("textButton")
         technical_toggle.setCheckable(True)
@@ -1117,9 +1133,9 @@ class PodcastInfoDialog(StyledDialog):
                 QTimer.singleShot(0, lambda: scroll.ensureWidgetVisible(technical))
 
         technical_toggle.toggled.connect(toggle_technical)
-        content_layout.addStretch(1)
-        self.card_layout.addWidget(scroll, 1)
+        return technical_toggle
 
+    def _build_buttons(self, technical_toggle):
         buttons = QHBoxLayout()
         buttons.addWidget(technical_toggle)
         copy = QPushButton("Copy information")
@@ -1133,6 +1149,7 @@ class PodcastInfoDialog(StyledDialog):
         buttons.addWidget(close)
         self.card_layout.addLayout(buttons)
         self.set_default_button(close)
+
 
 
 class ShortcutsDialog(StyledDialog):
