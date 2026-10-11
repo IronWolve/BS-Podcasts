@@ -46,6 +46,12 @@ def is_corruption_error(error) -> bool:
     return isinstance(code, int) and (code & 0xff) in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}
 
 
+def is_lock_error(error) -> bool:
+    """A busy or locked file says nothing about the data inside it."""
+    code = getattr(error, "sqlite_errorcode", None)
+    return isinstance(code, int) and (code & 0xff) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+
+
 class _SharedExclusiveLock:
     """Many concurrent shared holders, or one exclusive holder.
 
@@ -626,7 +632,9 @@ class Database:
             destination.execute("SAVEPOINT salvage")
             try:
                 cls._copy_rows(source, destination, f"SELECT * FROM {table}", (), insert)
-            except sqlite3.DatabaseError:
+            except sqlite3.DatabaseError as exc:
+                if is_lock_error(exc):
+                    raise  # a lock is not damage: never rebuild the library without these rows
                 destination.execute("ROLLBACK TO salvage")
                 lost[name] = cls._copy_readable_ranges(source, destination, table, insert)
                 if name == "schema_migrations" and lost[name] != 0:
@@ -737,7 +745,9 @@ class Database:
         # remain; each of those is counted as a row that could not be read.
         try:
             low, high = source.execute(f"SELECT min(rowid), max(rowid) FROM {table}").fetchone()
-        except sqlite3.DatabaseError:
+        except sqlite3.DatabaseError as exc:
+            if is_lock_error(exc):
+                raise
             return None
         if low is None:
             return 0
@@ -748,7 +758,9 @@ class Database:
             try:
                 cls._copy_rows(source, destination, f"SELECT * FROM {table} WHERE rowid BETWEEN ? AND ?",
                                (start, end), insert)
-            except sqlite3.DatabaseError:
+            except sqlite3.DatabaseError as exc:
+                if is_lock_error(exc):
+                    raise
                 destination.execute("ROLLBACK TO salvage_range")
                 if start == end:
                     lost += 1
