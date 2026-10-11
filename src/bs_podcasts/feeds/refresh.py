@@ -115,6 +115,12 @@ class RefreshService:
         except Exception:
             logging.getLogger(__name__).exception('Could not save refresh failure for podcast %s', show_id)
             health = Health.ERROR
+            try:
+                # The refresh stored LOADING before it fetched; a failed
+                # failure write must not leave the podcast showing Refreshing.
+                self.repository.set_health(show_id, health)
+            except Exception:
+                logging.getLogger(__name__).exception('Could not clear the Refreshing state of podcast %s', show_id)
         return RefreshReport(show_id, health, message=message, network_error=network, local_error=local)
 
     def _refresh_artwork(self, show_id, url, previous_path):
