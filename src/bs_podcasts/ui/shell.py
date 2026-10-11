@@ -5766,7 +5766,7 @@ class MainWindow(QMainWindow):
         value = re.sub(r"\s+", " ", value).strip(" .")
         value = value[:120].rstrip(" .") or fallback
         value = value.encode('utf-8')[:200].decode('utf-8', 'ignore').rstrip(' .') or fallback
-        if re.fullmatch(r"(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])", value.split(".")[0]):
+        if re.fullmatch(r"(?i)(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]|CONIN\$|CONOUT\$)", value.split(".")[0]):
             value = "_" + value
         return value
 
