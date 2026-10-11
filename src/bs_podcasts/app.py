@@ -944,15 +944,20 @@ def main() -> int:
         quit_on_close = app.quitOnLastWindowClosed()
         if old is not None:
             old._keep_services = True  # the services outlive this window
-            if getattr(old, "tray", None) is not None:
-                old.tray.shutdown()
             # Both may still be None: they are now built after first paint,
             # so a rebuild triggered immediately can arrive before they exist.
+            # A failure in either must not stop the rebuild half way, with
+            # the services marked as kept and the old window left in place.
+            if getattr(old, "tray", None) is not None:
+                try:
+                    old.tray.shutdown()
+                except Exception:
+                    logger.warning("Tray shutdown failed during the window rebuild", exc_info=True)
             if getattr(old, "mpris", None) is not None:
                 try:
                     old.mpris.shutdown()
                 except Exception:
-                    pass
+                    logger.warning("Media controls shutdown failed during the window rebuild", exc_info=True)
             # No window exists until replace_window runs; closing the last
             # one must not quit the application in between.
             app.setQuitOnLastWindowClosed(False)
