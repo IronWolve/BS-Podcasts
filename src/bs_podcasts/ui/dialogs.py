@@ -108,6 +108,20 @@ def _wrap_long_value(value: str) -> str:
     )
 
 
+def _add_value_row(form, label_text: str, value: str, value_labels: list):
+    """A selectable wrapped value beside its muted label; the value is also appended to `value_labels`."""
+    field = PlainTextLabel(_wrap_long_value(value))
+    field.setTextFormat(Qt.TextFormat.PlainText)
+    field.setWordWrap(True)
+    field.setToolTip(value)
+    field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    label = PlainTextLabel(label_text)
+    label.setObjectName("muted")
+    label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    form.addRow(label, field)
+    value_labels.append(field)
+
+
 _MONTHS = (
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
@@ -284,9 +298,21 @@ def podcast_information_rows(podcast, feed=None) -> list[tuple[str, str]]:
     return rows
 
 
-def podcast_information_text(podcast, feed=None) -> str:
+# The rows the dialog shows under "technical details", with the label shown for
+# each. Every other row is a fact, except the description, which the About
+# text holds. A row added to podcast_information_rows therefore shows up in
+# the facts instead of being dropped.
+_PODCAST_TECHNICAL_LABELS = {
+    "Podcast website": "Website", "Feed URL": "RSS feed", "Artwork URL": "Artwork URL",
+    "Artwork file": "Artwork file", "Source type": "Source type",
+}
+
+
+def podcast_information_text(podcast, feed=None, rows=None) -> str:
+    if rows is None:
+        rows = podcast_information_rows(podcast, feed)
     text = [getattr(feed, "title", "") or getattr(podcast, "title", "Podcast"), ""]
-    text.extend(f"{label}: {value}" for label, value in podcast_information_rows(podcast, feed))
+    text.extend(f"{label}: {value}" for label, value in rows)
     return "\n".join(text).strip()
 
 
@@ -865,16 +891,7 @@ class EpisodeInfoDialog(StyledDialog):
             self._measure_download(downloaded_path)
 
     def _add_information_row(self, form, name: str, value: str):
-        field = PlainTextLabel(_wrap_long_value(value))
-        field.setTextFormat(Qt.TextFormat.PlainText)
-        field.setWordWrap(True)
-        field.setToolTip(value)
-        field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        label = PlainTextLabel(name)
-        label.setObjectName("muted")
-        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        form.addRow(label, field)
-        self.value_labels.append(field)
+        _add_value_row(form, name, value, self.value_labels)
 
     def _measure_download(self, path: str):
         """Stat the file on a daemon thread (never blocking the window or
@@ -935,7 +952,8 @@ class PodcastInfoDialog(StyledDialog):
         target_height = min(760, max(600, int(available.height() * 0.82)))
         self.setFixedSize(min(target_width, available.width()), min(target_height, available.height()))
         title = getattr(feed, "title", "") or getattr(podcast, "title", "Podcast information")
-        self.information_text = podcast_information_text(podcast, feed)
+        rows = podcast_information_rows(podcast, feed)
+        self.information_text = podcast_information_text(podcast, feed, rows)
         website_url = getattr(feed, "website_url", "") or getattr(podcast, "website_url", "")
         feed_url = getattr(feed, "feed_url", "") or getattr(podcast, "feed_url", "")
         artwork_url = getattr(feed, "artwork_url", "") or getattr(podcast, "artwork_url", "")
@@ -1042,20 +1060,10 @@ class PodcastInfoDialog(StyledDialog):
         facts.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         facts.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.value_labels = []
-        friendly_names = {"Author", "Categories", "Episodes", "New episodes", "Feed status", "Last refreshed", "Latest episode", "Latest date"}
-        for name, value in podcast_information_rows(podcast, feed):
-            if name not in friendly_names:
+        for name, value in rows:
+            if name in _PODCAST_TECHNICAL_LABELS or name == "Description":
                 continue
-            field = PlainTextLabel(_wrap_long_value(value))
-            field.setTextFormat(Qt.TextFormat.PlainText)
-            field.setWordWrap(True)
-            field.setToolTip(value)
-            field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            label = PlainTextLabel(name)
-            label.setObjectName("muted")
-            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-            facts.addRow(label, field)
-            self.value_labels.append(field)
+            _add_value_row(facts, name, value, self.value_labels)
         content_layout.addLayout(facts)
 
         technical_toggle = QPushButton("Show technical details")
@@ -1069,20 +1077,9 @@ class PodcastInfoDialog(StyledDialog):
         technical_form.setHorizontalSpacing(SPACE["lg"])
         technical_form.setVerticalSpacing(SPACE["xs"])
         technical_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        technical_names = {"Podcast website", "Feed URL", "Artwork URL", "Artwork file", "Source type"}
-        for name, value in podcast_information_rows(podcast, feed):
-            if name not in technical_names:
-                continue
-            field = PlainTextLabel(_wrap_long_value(value))
-            field.setTextFormat(Qt.TextFormat.PlainText)
-            field.setWordWrap(True)
-            field.setToolTip(value)
-            field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            label = PlainTextLabel("RSS feed" if name == "Feed URL" else "Website" if name == "Podcast website" else name)
-            label.setObjectName("muted")
-            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-            technical_form.addRow(label, field)
-            self.value_labels.append(field)
+        for name, value in rows:
+            if name in _PODCAST_TECHNICAL_LABELS:
+                _add_value_row(technical_form, _PODCAST_TECHNICAL_LABELS[name], value, self.value_labels)
         technical.hide()
         content_layout.addWidget(technical)
 
