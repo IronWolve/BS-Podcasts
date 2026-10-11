@@ -369,8 +369,16 @@ class LibraryRepository:
             ).fetchall()
         return {row[0] for row in rows}
 
-    def removal_preview(self, show_id: int) -> dict:
-        """Exact targets that removing a show would delete; nothing is touched."""
+    def removal_preview(self, show_id: int, *, inspect_files: bool = True) -> dict:
+        """Exact targets that removing a show would delete; nothing is touched.
+
+        A download that cannot be checked (its folder is offline or gone, or
+        no longer carries the root marker, or its path is not a regular file)
+        never blocks the preview. It is listed under ``unchecked`` with its
+        folders, kept out of ``files`` so it is never offered for deletion, and
+        left where it is. ``inspect_files=False`` skips the file pass for a
+        removal that keeps every file.
+        """
         show = self.get_show(show_id)
         if show is None:
             return {}
@@ -380,7 +388,7 @@ class LibraryRepository:
                 "SELECT d.target_path, d.partial_path, d.state FROM downloads d "
                 "JOIN episodes e ON e.id=d.episode_id WHERE e.show_id=?",
                 (show_id,),
-            ).fetchall()
+            ).fetchall() if inspect_files else ()
             queued = connection.execute(
                 "SELECT COUNT(*) FROM queue q JOIN episodes e ON e.id=q.episode_id WHERE e.show_id=?", (show_id,)
             ).fetchone()[0]
@@ -407,6 +415,7 @@ class LibraryRepository:
             kind, size = inspect_download_file(candidate, roots, completed=completed)
             checked.append((candidate, completed, kind, size))
         files = []
+        unchecked = []
         for candidate, completed, kind, size in checked:
             if kind == FILE_UNCONFIRMED:
                 kind, size = inspect_download_file(candidate, roots, completed=False)
@@ -414,12 +423,10 @@ class LibraryRepository:
                 files.append((candidate, size))
             elif kind == FILE_MISSING:
                 continue
-            elif kind == FILE_IRREGULAR:
-                raise OSError("A download path is not a regular file.")
             elif kind == FILE_UNCONFIRMED and not completed:
                 continue
             else:
-                raise OSError("A download folder is unavailable.")
+                unchecked.append(candidate)
         # Artwork is shared cache data, not owned by this subscription. Leave
         # it to cache maintenance; a refresh may be about to attach a reference.
         return {
@@ -429,6 +436,8 @@ class LibraryRepository:
             "bookmarks": bookmarks,
             "files": files,
             "bytes": sum(size for _path, size in files),
+            "unchecked": unchecked,
+            "unchecked_folders": list(dict.fromkeys(str(Path(path).parent) for path in unchecked)),
         }
 
     ORPHAN_SETTING = "storage.orphans"
@@ -581,9 +590,12 @@ class LibraryRepository:
         removed only when the download root is confirmed. Survivors are
         recorded as orphans. Orphan retry is not part of this call.
         """
-        preview = self.removal_preview(show_id)
+        preview = self.removal_preview(show_id, inspect_files=delete_files)
         if not preview:
             return {}
+        if preview["unchecked"]:
+            _log.warning("%d download path(s) could not be checked while unsubscribing and were left in place: %s",
+                         len(preview["unchecked"]), ", ".join(preview["unchecked_folders"][:3]))
         removed_files = []
         failed_files = []
         if delete_files and confirmed_paths is not None:
