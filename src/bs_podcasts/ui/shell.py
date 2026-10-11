@@ -4774,20 +4774,25 @@ class MainWindow(QMainWindow):
         if isinstance(current, UiEpisode) and (current.episode_id, current.artwork_url) in changes:
             self._refresh_context_item(current, update(current))
 
-    def _delete_played_quietly(self, episode_ids=None, confirm=False):
+    def _delete_played_quietly(self, episode_ids=None, confirm=False, if_enabled=False):
         """Auto-delete downloads for episodes that JUST became played.
 
         The setting reads per-episode; deleting every historical played
         download without confirmation violated the destructive-storage rule.
         Bulk cleanup stays behind the confirming dialog, and `confirm` puts
-        a bulk mark's files behind it too."""
+        a bulk mark's files behind it too. `if_enabled` has the worker read
+        the delete-played setting, so a finished episode never makes the
+        window thread wait on the database."""
         if self.downloads is None or (episode_ids is None and not confirm):
             # No ids means every played download: only the dialog may ask.
             return
         downloads = self.downloads
+        library = self.library if if_enabled else None
         wanted = None if episode_ids is None else set(episode_ids)
 
         def work():
+            if library is not None and library.setting("downloads.delete_played", "0") != "1":
+                return (), False
             previews = downloads.played_previews(episode_ids=wanted)
             return previews, confirm and bool(previews)
 
@@ -5543,8 +5548,8 @@ class MainWindow(QMainWindow):
             marker = (revision, int(completed))
             if marker != self._handled_completion:
                 self._handled_completion = marker
-                if self.library is not None and self.library.setting("downloads.delete_played", "0") == "1":
-                    self._delete_played_quietly([int(completed)])
+                if self.library is not None:
+                    self._delete_played_quietly([int(completed)], if_enabled=True)
         chapter = ""
         for entry in self._chapters_cache.get(episode_id, ()):
             if entry.start_seconds <= float(snapshot.position):
@@ -5571,14 +5576,15 @@ class MainWindow(QMainWindow):
             queued = library.queue() if library is not None else ()
             item = self._ui_episode_live(episode) if episode is not None else None
             accent = dominant_color(snapshot.artwork_path, "") if source else ""
-            return episode, show, chapters, queued, item, accent
+            skips = self._default_skips() if show is None else None
+            return episode, show, chapters, queued, item, accent, skips
         def apply(data):
             if (self._playing_episode_id, self._playing_source) != (episode_id, source):
                 return
-            episode, show, chapters, queued, item, accent = data
+            episode, show, chapters, queued, item, accent, skips = data
             # A Discover preview has no podcast settings: it uses the global
             # times, not those of the podcast played before it.
-            self.player.set_skip_values(*((show.skip_back, show.skip_forward) if show is not None else self._default_skips()))
+            self.player.set_skip_values(*((show.skip_back, show.skip_forward) if show is not None else skips))
             self.player._streaming = bool(source) and not bool(episode and episode.downloaded_path)
             if episode is not None:
                 if episode.artwork_path != snapshot.artwork_path:
