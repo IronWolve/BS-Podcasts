@@ -13,6 +13,7 @@ import fcntl
 from source_manifest import ROOT, check, checked_version, inventory, package_version, source_digest, file_digest, stage  # noqa: F401
 from runtime_state import runtime_lock, retire_stale
 from report import Reporter, size_text
+from build_manifest import require_keys
 
 
 # Linux rollbacks are named by mkdtemp with this prefix. The shared folder also
@@ -112,7 +113,11 @@ def _deploy_staged(workspace, destination, temporary, prune, report):
         target.parent.mkdir(parents=True,exist_ok=True)
         shutil.copy2(snapshot/name,target)
     native = workspace/'.cache/linux-build/libmpv-lgpl'
-    receipt = json.loads((native/'native-build.json').read_text())
+    try:
+        receipt = json.loads((native/'native-build.json').read_text())
+    except OSError as exc:
+        raise ValueError(f'Linux native receipt cannot be read ({exc.strerror or exc}); rebuild the native library.') from None
+    require_keys(receipt, ('sha256', 'inputs_sha256', 'recipe_sha256'), 'Linux native receipt')
     if (receipt['sha256'] != file_digest(native/'libmpv.so.2')
             or receipt['inputs_sha256'] != file_digest(snapshot/'packaging/native-sources.json')
             or receipt['recipe_sha256'] != file_digest(snapshot/'packaging/build-libmpv-linux.sh')):
@@ -208,4 +213,8 @@ if __name__ == '__main__':
                 fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise SystemExit('Linux build is busy (.cache/linux-build.lock); retry after it finishes.') from None
-            deploy(prune=args.prune_old_deployments, report=report)
+            try:
+                deploy(prune=args.prune_old_deployments, report=report)
+            except ValueError as exc:
+                report.fail(str(exc))
+                raise SystemExit(1) from None

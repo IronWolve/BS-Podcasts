@@ -15,6 +15,7 @@ import tomllib
 from source_manifest import ROOT, stage, source_digest, file_digest, check as check_source
 from check_dependencies import check
 from report import Reporter, size_text, tree_size
+from build_manifest import require_keys
 
 
 # Mac rollbacks are named by mkdtemp with this prefix. The shared folder also
@@ -79,7 +80,12 @@ def _finish_macos(workspace, work, prune, report):
     snapshot=stage(work/'source')
     version=tomllib.loads((snapshot/'pyproject.toml').read_text())['project']['version']
     native=workspace/'.cache/macos-build/libmpv-lgpl/libmpv.2.dylib'
-    receipt=json.loads(native.with_name('native-build.json').read_text())
+    try:
+        receipt=json.loads(native.with_name('native-build.json').read_text())
+    except OSError as exc:
+        raise ValueError(f'macOS native receipt cannot be read ({exc.strerror or exc}); rebuild the pinned LGPL player.') from None
+    require_keys(receipt, ('sha256', 'inputs_sha256', 'extra_inputs_sha256', 'patch_sha256', 'recipe_sha256',
+                           'minimum_macos'), 'macOS native receipt')
     if (receipt['sha256']!=file_digest(native)
             or receipt['inputs_sha256']!=file_digest(snapshot/'packaging/native-sources.json')
             or receipt.get('extra_inputs_sha256')!=file_digest(snapshot/'packaging/native-sources-macos.json')
@@ -185,4 +191,8 @@ if __name__=='__main__':
             fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:
             raise SystemExit('macOS build is busy (.cache/macos-build.lock); retry after it finishes.') from None
-        build(workspace, prune=args.prune_old_deployments, report=report)
+        try:
+            build(workspace, prune=args.prune_old_deployments, report=report)
+        except ValueError as exc:
+            report.fail(str(exc))
+            raise SystemExit(1) from None

@@ -31,6 +31,16 @@ def digest(path):
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
+def require_keys(receipt, keys, name):
+    """Return the receipt, or raise ValueError naming the first key it must carry and does not."""
+    if not isinstance(receipt, dict):
+        raise ValueError(f"{name} is not a JSON object; rebuild the native library.")
+    for key in keys:
+        if key not in receipt:
+            raise ValueError(f"{name} has no {key!r} entry; rebuild the native library.")
+    return receipt
+
+
 def source_inventory(root=ROOT):
     return source_digest(root)
 
@@ -93,7 +103,8 @@ def create_manifest(artifact, archive=None, require_clean=False):
     if archive is not None:
         result["archive"] = {"name": archive.name, "bytes": archive.stat().st_size, "sha256": digest(archive)}
     if sys.platform == 'win32' and os.environ.get('BS_PODCASTS_NATIVE_RECEIPT'):
-        receipt=json.loads(Path(os.environ['BS_PODCASTS_NATIVE_RECEIPT']).read_text())
+        receipt=require_keys(json.loads(Path(os.environ['BS_PODCASTS_NATIVE_RECEIPT']).read_text()),
+                             ('sha256', 'inputs_sha256', 'recipe_sha256'), 'Windows native receipt')
         native=artifact/'_internal/libmpv-2.dll'
         lock=ROOT/'packaging/native-sources.json'
         recipe = ROOT/'packaging/build-libmpv-lgpl.sh'
@@ -104,7 +115,9 @@ def create_manifest(artifact, archive=None, require_clean=False):
                                     'inputs':json.loads(lock.read_text()), 'recipe_sha256':receipt['recipe_sha256']}
     if sys.platform == 'darwin' and os.environ.get('BS_PODCASTS_NATIVE_RECEIPT'):
         receipt_path=Path(os.environ['BS_PODCASTS_NATIVE_RECEIPT'])
-        receipt=json.loads(receipt_path.read_text())
+        receipt=require_keys(json.loads(receipt_path.read_text()),
+                             ('sha256', 'inputs_sha256', 'extra_inputs_sha256', 'patch_sha256', 'recipe_sha256',
+                              'minimum_macos'), 'macOS native receipt')
         native=artifact/'Contents/Frameworks/libmpv.2.dylib'
         lock=ROOT/'packaging/native-sources.json'
         if (receipt['sha256']!=digest(receipt_path.with_name('libmpv.2.dylib'))
