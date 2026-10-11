@@ -8,6 +8,7 @@ from html import escape as html_escape, unescape as html_unescape
 from html.parser import HTMLParser
 import re
 from typing import NamedTuple
+import weakref
 
 from PySide6.QtCore import (
     QEvent,
@@ -3116,7 +3117,30 @@ class ElidedValueLabel(PlainTextLabel):
         self.setToolTip(self._full if shown != self._full else "")
 
 
-class NowPlayingView(QFrame):
+class _ReturnsFocus:
+    """Mixin for an overlay on the page area: closing it gives keyboard focus
+    back to the control that held it on opening. Otherwise Qt passes focus to
+    whatever follows the overlay in the tab order and the person loses their
+    place."""
+
+    _opener = None
+
+    def setVisible(self, visible):
+        focus = QApplication.focusWidget()
+        if visible and self.isHidden():
+            self._opener = weakref.ref(focus) if focus is not None and not self.isAncestorOf(focus) else None
+        holds = not visible and not self.isHidden() and focus is not None and self.isAncestorOf(focus)
+        super().setVisible(visible)
+        if holds and self._opener is not None:
+            widget, self._opener = self._opener(), None
+            try:
+                if widget is not None and widget.isVisible() and widget.isEnabled():
+                    widget.setFocus(Qt.FocusReason.OtherFocusReason)
+            except RuntimeError:
+                pass  # the control was deleted while the overlay was open
+
+
+class NowPlayingView(_ReturnsFocus, QFrame):
     """Full-size now-playing surface overlaid on the page area."""
 
     seek_requested = Signal(float)
@@ -3485,7 +3509,7 @@ class NowPlayingView(QFrame):
             self.seek_requested.emit(float(position))
 
 
-class SearchOverlay(QFrame):
+class SearchOverlay(_ReturnsFocus, QFrame):
     """Global search: podcasts, episodes and the directory, in one box (Ctrl+K)."""
 
     query_changed = Signal(str)
@@ -3592,6 +3616,19 @@ class SearchOverlay(QFrame):
     def hideEvent(self, event):
         self._timer.stop()
         super().hideEvent(event)
+
+    def focusNextPrevChild(self, forward):
+        """Tab cycles between the field and the results; it does not walk on
+        into the page the overlay covers."""
+        stops = [self.field] + ([self.results] if self.results.count() else [])
+        focus = QApplication.focusWidget()
+        index = next((i for i, stop in enumerate(stops) if focus is not None and (stop is focus or stop.isAncestorOf(focus))), None)
+        if index is None:
+            index = -1 if forward else 0
+        stops[(index + (1 if forward else -1)) % len(stops)].setFocus(
+            Qt.FocusReason.TabFocusReason if forward else Qt.FocusReason.BacktabFocusReason
+        )
+        return True
 
     def _emit_query(self):
         if not self.isVisible():
