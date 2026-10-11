@@ -169,7 +169,10 @@ def _guarded_chunks(response, stall: "_StallWatch"):
     import requests
 
     try:
-        yield from response.iter_content(4 * 1024)
+        # 16 KiB is the most the shared session reads at once; smaller reads
+        # only multiply the per-chunk hand-offs between its reader thread and
+        # this one.
+        yield from response.iter_content(16 * 1024)
     except requests.RequestException:
         if stall.message:
             raise (_TransferStalled if stall.stalled else DownloadError)(stall.message)
@@ -554,7 +557,9 @@ class DownloadService:
 
     MISSING_FILE_MESSAGE = "Downloaded file is missing — retry to download it again."
     STALL_WINDOW_SECONDS = 30.0
-    STALL_MIN_BYTES = 8 * 1024  # under ~270 B/s for 30 s counts as stalled
+    # Bytes count when a whole 16 KiB read completes, so in practice one read
+    # per window (about 550 B/s) is the floor.
+    STALL_MIN_BYTES = 8 * 1024
     MAX_TRANSFER_SECONDS = 4 * 3600
 
     def reconcile_missing(self, limit: int | None = None) -> int:
