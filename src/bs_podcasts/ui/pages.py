@@ -57,14 +57,20 @@ def _number_key(digits: str) -> tuple:
     return (len(digits), digits)
 
 
+def fold_text(text: str) -> str:
+    """Text with accents and case removed, for ordering and for searching, so
+    "cafe" finds "Café" and "Émission" sorts under E."""
+    return "".join(
+        character for character in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(character)
+    ).casefold()
+
+
 def title_sort_key(title: str) -> tuple:
     """A–Z the way people read it: accents and case ignored, and numbers by
     value. Lower-cased code points put "Émission" after "Zebra" and
     "10 Things" before "2 Dope Queens"."""
-    folded = "".join(
-        character for character in unicodedata.normalize("NFKD", title)
-        if not unicodedata.combining(character)
-    ).casefold()
+    folded = fold_text(title)
     # Split parts alternate text, number, text…, so equal positions compare
     # like with like.
     return tuple(_number_key(part) if index % 2 else part for index, part in enumerate(_DIGIT_RUNS.split(folded)))
@@ -1009,7 +1015,8 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         items = list(self._all_items)
         query = self.header.search.text().strip().lower()
         if query and not self.discover:
-            items = [item for item in items if query in item.title.lower() or query in item.author.lower()]
+            folded = fold_text(query)
+            items = [item for item in items if folded in fold_text(item.title) or folded in fold_text(item.author)]
         chip = self.chips.current()
         if chip == "New":
             items = [item for item in items if item.new_count > 0]
