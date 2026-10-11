@@ -145,7 +145,10 @@ class LibraryService:
     def episodes(self, show_id: int | None = None, limit: int | None = 500, offset: int = 0):
         # limit=None loads the complete catalogue (used when opening one
         # podcast off-thread); the old always-500 default silently hid large
-        # back catalogues. offset pages the capped global view.
+        # back catalogues. offset pages the capped global view and needs a
+        # limit: the repository would ignore it and return the first rows.
+        if limit is None and offset:
+            raise ValueError("An offset needs a limit; limit=None already returns every episode.")
         return self.repository.list_episodes(show_id, limit, offset)
 
     def history(self, limit: int = 200, offset: int = 0):
