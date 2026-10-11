@@ -349,7 +349,6 @@ class StyledDialog(QDialog):
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.setObjectName("styledDialogHost")
         self._drag_origin: QPoint | None = None
         self._scrim: QWidget | None = None
         self._target_size: QSize | None = None
@@ -948,7 +947,6 @@ class PodcastInfoDialog(StyledDialog):
             categories = ", ".join(str(value) for value in categories if value)
 
         scroll = QScrollArea()
-        self.scroll = scroll
         scroll.setObjectName("dialogScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -1104,11 +1102,9 @@ class PodcastInfoDialog(StyledDialog):
         buttons = QHBoxLayout()
         buttons.addWidget(technical_toggle)
         copy = QPushButton("Copy information")
-        self.copy_button = copy
         copy.setObjectName("quietButton")
         copy.clicked.connect(lambda: _copy_with_feedback(copy, self.information_text))
         close = QPushButton("Close")
-        self.close_button = close
         close.setObjectName("primaryButton")
         close.clicked.connect(self.accept)
         buttons.addWidget(copy)
