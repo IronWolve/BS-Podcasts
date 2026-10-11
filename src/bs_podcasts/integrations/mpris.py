@@ -8,6 +8,8 @@ from pathlib import Path
 import stat
 import time
 
+from ..config import APP_ID
+
 
 def _local_artwork_path(value):
     """Worker-only local regular-file validation; never follow remote URLs."""
@@ -52,7 +54,7 @@ class _RootAdaptor(QDBusAbstractAdaptor):
 
     @Property(str, constant=True)
     def DesktopEntry(self):
-        return "bs-podcasts"
+        return APP_ID
 
     @Slot()
     def Raise(self):
