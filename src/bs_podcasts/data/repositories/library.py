@@ -8,6 +8,7 @@ import threading
 import time
 
 from ...domain import Episode, FeedData, Health, Show
+from ...domain.times import media_seconds
 from ...privacy import redact
 from ..database import Database
 from ..files import (
@@ -937,14 +938,19 @@ class LibraryRepository:
 
         True: written. False: maintenance holds the database, so the playback
         writer keeps the save and retries. None: nothing was written because
-        the episode is gone or a newer write already stands. A finished
+        the episode is gone, a newer write already stands, or the position is
+        not a finite, bounded time (the saved position is kept). A finished
         episode lands its end position even past a newer stamp, so
         mark_played does not run ahead of that write.
         """
         if self.database.maintenance_active:
             return False
         stamp = time.time() if stamp is None else stamp
-        seconds = max(0.0, float(seconds))
+        seconds = float(seconds)
+        # A negative position still clamps to the start; max() would also turn NaN into 0.
+        seconds = media_seconds(0.0 if seconds < 0 else seconds)
+        if seconds is None:
+            return None
         with self.database.connect() as connection:
             if self._write_position(connection, episode_id, seconds, stamp):
                 return True
