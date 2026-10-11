@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 import weakref
@@ -420,7 +421,7 @@ def prune_accents():
 
 
 def initials(text: str) -> str:
-    words = [word for word in text.replace("The ", "").split() if word]
+    words = [word for word in re.sub(r"^\s*The\s+", "", text).split() if word]
     return "".join(word[0] for word in words[:2]).upper() or "—"
 
 
