@@ -3,6 +3,7 @@
 # Every run builds from scratch in its own work folder: nothing is resumed, so there
 # are no completion markers.
 set -euo pipefail
+unset PYTHONPATH
 BS_BUILD_WORKSPACE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 ROOT="$(mktemp -d "$BS_BUILD_WORKSPACE/tmp/lgpl-mpv.XXXXXX")"
 BS_PYTHON="$BS_BUILD_WORKSPACE/dists/linux/.venv/bin/python"
@@ -40,13 +41,13 @@ endian = 'little'
 CROSS
 
 echo "=== fetch sources"
-"$BS_PYTHON" -B "$BS_BUILD_WORKSPACE/repo/packaging/native_sources.py" \
+"$BS_PYTHON" -B -I "$BS_BUILD_WORKSPACE/repo/packaging/native_sources.py" \
   --source "$SRC" --cache "$BS_BUILD_WORKSPACE/.cache/native-sources"
 
 # The fetched directory for a pinned name, read from native-sources.json, so no
 # version is written into this recipe and a pin change cannot leave a stale path.
 pinned_dir() {
-  "$BS_PYTHON" -B -c '
+  "$BS_PYTHON" -B -I -c '
 import json, sys
 for entry in json.load(open(sys.argv[1])):
     if entry["name"] == sys.argv[2]:
@@ -102,7 +103,7 @@ echo "=== ffmpeg (LGPL)"
    --disable-encoders --disable-muxers --disable-outdevs --disable-indevs \
    --enable-schannel \
    --extra-cflags="-ffile-prefix-map=$ROOT=/bs-native -fdebug-prefix-map=$ROOT=/bs-native" \
- && "$BS_PYTHON" -B "$BS_BUILD_WORKSPACE/repo/packaging/native_sources.py" --sanitize config.h --root "$ROOT" \
+ && "$BS_PYTHON" -B -I "$BS_BUILD_WORKSPACE/repo/packaging/native_sources.py" --sanitize config.h --root "$ROOT" \
  && make -j $JOBS && make install) >> "$ROOT/build.log" 2>&1
 echo "=== built ffmpeg"
 BS_FFMPEG_LOG="$SRC/$FFMPEG_DIR/ffbuild/config.log"
@@ -140,7 +141,7 @@ echo "=== mpv (LGPL, libmpv only)"
       -Dlua=disabled -Djavascript=disabled -Dlibarchive=disabled -Dlibbluray=disabled \
       -Duchardet=disabled -Dzimg=disabled -Djpeg=disabled -Dvapoursynth=disabled \
       -Drubberband=disabled -Dlcms2=disabled \
- && "$BS_PYTHON" -B "$BS_BUILD_WORKSPACE/repo/packaging/native_sources.py" --sanitize build-mingw/config.h --root "$ROOT" \
+ && "$BS_PYTHON" -B -I "$BS_BUILD_WORKSPACE/repo/packaging/native_sources.py" --sanitize build-mingw/config.h --root "$ROOT" \
  && ninja -C build-mingw -j $JOBS) >> "$ROOT/build.log" 2>&1
 echo "=== built mpv"
 
@@ -149,7 +150,7 @@ DLL=$(find "$SRC/$MPV_DIR/build-mingw" -name "libmpv-2.dll" | head -1)
 mkdir -p "$ROOT/out"
 cp "$DLL" "$ROOT/out/libmpv-2.dll"
 ${TRIPLE}-strip "$ROOT/out/libmpv-2.dll"
-"$BS_PYTHON" -B "$BS_BUILD_WORKSPACE/repo/packaging/native_sources.py" --record "$ROOT/out/libmpv-2.dll"
+"$BS_PYTHON" -B -I "$BS_BUILD_WORKSPACE/repo/packaging/native_sources.py" --record "$ROOT/out/libmpv-2.dll"
 BS_CACHE="$BS_BUILD_WORKSPACE/.cache/windows-build/libmpv-lgpl"
 mkdir -p "$BS_BUILD_WORKSPACE/.cache/windows-build"
 if [[ -e "$BS_CACHE" ]]; then

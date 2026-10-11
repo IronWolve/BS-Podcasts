@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pinned LGPL-only arm64 player; no Homebrew libraries or global installs.
 set -euo pipefail
+unset PYTHONPATH
 BS_PROJECT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 BS_VENV="${BS_PODCASTS_MAC_VENV:-$BS_PROJECT/.cache/macos-build/.venv}"
 BS_PYTHON="$BS_VENV/bin/python"
@@ -19,11 +20,11 @@ export CFLAGS="-O2 -fPIC -mmacosx-version-min=14.0 -ffile-prefix-map=$BS_WORK=/b
 export CXXFLAGS="$CFLAGS"
 command -v meson ninja pkg-config >/dev/null
 printf 'Native work/log directory: %s\n' "$BS_WORK"
-"$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --source "$BS_SRC" --cache "$BS_PROJECT/.cache/native-sources" --macos
+"$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --source "$BS_SRC" --cache "$BS_PROJECT/.cache/native-sources" --macos
 # The fetched directory for a pinned name, read from native-sources.json, so no
 # version is written into this recipe and a pin change cannot leave a stale path.
 pinned_dir() {
-    "$BS_PYTHON" -B -c '
+    "$BS_PYTHON" -B -I -c '
 import json, sys
 for entry in json.load(open(sys.argv[1])):
     if entry["name"] == sys.argv[2]:
@@ -59,7 +60,7 @@ build_static libass -Dtest=disabled -Dfontconfig=disabled
         --disable-autodetect --enable-zlib --disable-programs --disable-doc --disable-debug \
         --disable-encoders --disable-muxers --disable-outdevs --disable-indevs \
         --extra-cflags="$CFLAGS" --extra-ldflags=-mmacosx-version-min=14.0
-    "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --sanitize config.h --root "$BS_WORK"
+    "$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --sanitize config.h --root "$BS_WORK"
     make -j "$BS_JOBS"
     make install
 ) >> "$BS_WORK/build.log" 2>&1
@@ -89,21 +90,21 @@ meson setup "$BS_WORK/build-mpv" "$BS_SRC/$BS_MPV_DIR" --prefix "$BS_PREFIX" --l
     --sysconfdir=/bs-native/etc --datadir=/bs-native/share \
     -Dgpl=false -Dlibmpv=true -Dcplayer=false -Dtests=false -Dgl=disabled -Dcoreaudio=enabled \
     "-Dc_link_args=['-lc++','-mmacosx-version-min=14.0']" >> "$BS_WORK/build.log" 2>&1
-"$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --sanitize "$BS_WORK/build-mpv/config.h" --root "$BS_WORK"
+"$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --sanitize "$BS_WORK/build-mpv/config.h" --root "$BS_WORK"
 ninja -C "$BS_WORK/build-mpv" -j "$BS_JOBS" >> "$BS_WORK/build.log" 2>&1
 mkdir "$BS_WORK/out"
 cp -L "$BS_WORK/build-mpv/libmpv.2.dylib" "$BS_WORK/out/libmpv.2.dylib"
 install_name_tool -id @rpath/libmpv.2.dylib "$BS_WORK/out/libmpv.2.dylib"
 strip -x "$BS_WORK/out/libmpv.2.dylib"
 codesign --force --sign - "$BS_WORK/out/libmpv.2.dylib"
-"$BS_PYTHON" -B -c 'import ctypes,sys; ctypes.CDLL(sys.argv[1])' "$BS_WORK/out/libmpv.2.dylib"
+"$BS_PYTHON" -B -I -c 'import ctypes,sys; ctypes.CDLL(sys.argv[1])' "$BS_WORK/out/libmpv.2.dylib"
 # Allow list: system libraries and frameworks, plus the library's own install
 # name. Any other path (Homebrew, a user folder, a local prefix) fails the build.
 if otool -L "$BS_WORK/out/libmpv.2.dylib" | tail -n +2 \
     | grep -Ev '^[[:space:]]+(/usr/lib/|/System/Library/|@rpath/libmpv[.]2[.]dylib )' | grep -q .; then
     printf 'Unexpected non-system linkage in native player.\n' >&2; exit 1
 fi
-"$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --record "$BS_WORK/out/libmpv.2.dylib"
+"$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --record "$BS_WORK/out/libmpv.2.dylib"
 BS_CACHE="$BS_PROJECT/.cache/macos-build/libmpv-lgpl"
 if [[ -e "$BS_CACHE" ]]; then
     mv -- "$BS_CACHE" "$BS_WORK/previous-native"

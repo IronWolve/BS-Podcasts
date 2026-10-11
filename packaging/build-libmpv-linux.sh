@@ -4,12 +4,13 @@
 # an option that changes nothing, makes the receipt stale and the Linux deploy
 # refuses it: rebuild the player after editing. Never edit the receipt to match.
 set -euo pipefail
+unset PYTHONPATH
 BS_PROJECT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 BS_PYTHON="$BS_PROJECT/dists/linux/.venv/bin/python"
 BS_INPUTS_SHA="$(sha256sum "$BS_PROJECT/repo/packaging/native-sources.json" | cut -d ' ' -f 1)"
 BS_RECIPE_SHA="$(sha256sum "$BS_PROJECT/repo/packaging/build-libmpv-linux.sh" | cut -d ' ' -f 1)"
 BS_HELPER_SHA="$(sha256sum "$BS_PROJECT/repo/packaging/native_sources.py" | cut -d ' ' -f 1)"
-BS_BUILD_SHA="$("$BS_PYTHON" -B -c '
+BS_BUILD_SHA="$("$BS_PYTHON" -B -I -c '
 import hashlib, json, os, pathlib, shlex, subprocess, sys
 root = pathlib.Path(sys.argv[1])
 files = ["build-libmpv-linux.sh", "native_sources.py", "native-sources.json"]
@@ -39,14 +40,14 @@ export CFLAGS="-O2 -fPIC -ffile-prefix-map=$BS_NATIVE_ROOT=/bs-native -fdebug-pr
 export CXXFLAGS="$CFLAGS"
 printf 'Native work/log directory: %s\n' "$BS_NATIVE_ROOT"
 if [[ -z "${BS_NATIVE_RESUME:-}" ]]; then
-    "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --source "$BS_SRC" --cache "$BS_PROJECT/.cache/native-sources"
+    "$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --source "$BS_SRC" --cache "$BS_PROJECT/.cache/native-sources"
     printf '%s\n' "$BS_INPUTS_SHA" > "$BS_NATIVE_ROOT/inputs.sha256"
     printf '%s\n' "$BS_BUILD_SHA" > "$BS_NATIVE_ROOT/build-identity.sha256"
 fi
 # The fetched directory for a pinned name, read from native-sources.json, so no
 # version is written into this recipe and a pin change cannot leave a stale path.
 pinned_dir() {
-    "$BS_PYTHON" -B -c '
+    "$BS_PYTHON" -B -I -c '
 import json, sys
 for entry in json.load(open(sys.argv[1])):
     if entry["name"] == sys.argv[2]:
@@ -84,7 +85,7 @@ if [[ ! -f "$BS_PREFIX/.done-ffmpeg" ]]; then
         --disable-autodetect --enable-zlib --disable-programs --disable-doc --disable-debug \
         --disable-encoders --disable-muxers --disable-outdevs --disable-indevs \
         --extra-cflags="$CFLAGS"
-    "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --sanitize config.h --root "$BS_NATIVE_ROOT"
+    "$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --sanitize config.h --root "$BS_NATIVE_ROOT"
     make -j "$BS_JOBS"
     make install
 ) >> "$BS_NATIVE_ROOT/build.log" 2>&1
@@ -118,12 +119,12 @@ meson setup "${BS_RECONFIGURE[@]}" "$BS_NATIVE_ROOT/build-mpv" "$BS_SRC/$BS_MPV_
     --sysconfdir=/bs-native/etc --datadir=/bs-native/share \
     -Dgpl=false -Dlibmpv=true -Dcplayer=false -Dtests=false -Dgl=disabled -Dalsa=enabled -Dpulse=enabled \
     "-Dc_link_args=['-Wl,--no-undefined','-Wl,--no-as-needed','-lstdc++','-Wl,--as-needed']" >> "$BS_NATIVE_ROOT/build.log" 2>&1
-"$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --sanitize "$BS_NATIVE_ROOT/build-mpv/config.h" --root "$BS_NATIVE_ROOT"
+"$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --sanitize "$BS_NATIVE_ROOT/build-mpv/config.h" --root "$BS_NATIVE_ROOT"
 ninja -C "$BS_NATIVE_ROOT/build-mpv" -j "$BS_JOBS" >> "$BS_NATIVE_ROOT/build.log" 2>&1
 mkdir -p "$BS_NATIVE_ROOT/out"
 cp -L "$BS_NATIVE_ROOT/build-mpv/libmpv.so.2" "$BS_NATIVE_ROOT/out/libmpv.so.2"
 strip --strip-unneeded "$BS_NATIVE_ROOT/out/libmpv.so.2"
-"$BS_PYTHON" -B -c 'import ctypes,sys; ctypes.CDLL(sys.argv[1])' "$BS_NATIVE_ROOT/out/libmpv.so.2"
+"$BS_PYTHON" -B -I -c 'import ctypes,sys; ctypes.CDLL(sys.argv[1])' "$BS_NATIVE_ROOT/out/libmpv.so.2"
 if readelf -d "$BS_NATIVE_ROOT/out/libmpv.so.2" | grep -Eq 'NEEDED.*lib(avcodec|avformat|avutil|avfilter|swscale|swresample)'; then
     printf 'The native player unexpectedly depends on system FFmpeg.\n' >&2
     exit 1
@@ -138,7 +139,7 @@ if [[ -n "$BS_UNEXPECTED_LIBS" ]]; then
     exit 1
 fi
 [[ "$BS_RECIPE_SHA" == "$(sha256sum "$BS_PROJECT/repo/packaging/build-libmpv-linux.sh" | cut -d ' ' -f 1)" && "$BS_HELPER_SHA" == "$(sha256sum "$BS_PROJECT/repo/packaging/native_sources.py" | cut -d ' ' -f 1)" && "$BS_INPUTS_SHA" == "$(sha256sum "$BS_PROJECT/repo/packaging/native-sources.json" | cut -d ' ' -f 1)" ]] || { printf 'Native build inputs changed during compilation; refusing provenance.\n' >&2; exit 1; }
-"$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --record "$BS_NATIVE_ROOT/out/libmpv.so.2"
+"$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --record "$BS_NATIVE_ROOT/out/libmpv.so.2"
 BS_CACHE="$BS_PROJECT/.cache/linux-build/libmpv-lgpl"
 mkdir -p "$BS_PROJECT/.cache/linux-build"
 if [[ -e "$BS_CACHE" ]]; then
