@@ -623,6 +623,8 @@ class Database:
         applied = [row[0] for row in destination.execute("SELECT version FROM schema_migrations")]
         if not applied or any(not isinstance(value, int) or value < 1 for value in applied):
             raise DatabaseIntegrityError("The library's format record could not be recovered; a backup is needed.")
+        for table, count in cls._drop_orphans(destination).items():
+            lost[table] = (lost.get(table) or 0) + count
         if search_schema:
             destination.execute(search_schema)
             destination.execute("INSERT INTO episode_search(rowid,title,description,show_title) "
@@ -663,6 +665,36 @@ class Database:
                 "UNION ALL SELECT '', '', '' LIMIT 1)"
             )
         return lost
+
+    @staticmethod
+    def _drop_orphans(destination) -> dict:
+        """Remove copied rows whose parent row was not copied.
+
+        Tables are copied one at a time with foreign keys off, so a child can
+        outlive an unreadable parent. Left in place it is skipped by every
+        query that joins the parent, still counts in the library totals, and
+        would attach to an unrelated row if the lost parent's id were issued
+        again. A reference declared ON DELETE SET NULL is cleared instead.
+        Returns the rows removed per table.
+        """
+        removed, actions = {}, {}
+        while violations := destination.execute("PRAGMA foreign_key_check").fetchall():
+            changed = 0
+            for table, rowid, _parent, key in violations:
+                quoted = '"' + table.replace('"', '""') + '"'
+                if table not in actions:
+                    actions[table] = {row[0]: ('"' + row[3].replace('"', '""') + '"', row[6])
+                                      for row in destination.execute(f"PRAGMA foreign_key_list({quoted})")}
+                column, on_delete = actions[table][key]
+                if on_delete == "SET NULL":
+                    changed += destination.execute(f"UPDATE {quoted} SET {column}=NULL WHERE rowid=?", (rowid,)).rowcount
+                else:
+                    deleted = destination.execute(f"DELETE FROM {quoted} WHERE rowid=?", (rowid,)).rowcount
+                    changed += deleted
+                    removed[table] = removed.get(table, 0) + deleted
+            if not changed:
+                break  # a row that cannot be addressed by rowid would repeat forever
+        return removed
 
     def _backup_sequence_floors(self) -> dict:
         """Recover retired-ID high-water marks from a few recent safe snapshots."""
