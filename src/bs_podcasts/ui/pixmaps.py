@@ -4,6 +4,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
+import logging
 import math
 import os
 import threading
@@ -179,6 +180,7 @@ _disk_loaded = False
 _disk_load_lock = threading.Lock()
 _disk_lock = threading.Lock()
 _disk_write_lock = threading.Lock()
+_save_error_logged = False
 _SAMPLE_SIZE = 24
 MAX_METADATA = 4096
 MAX_ACCENT_FILE = 2 * 1024 * 1024
@@ -240,6 +242,7 @@ def _read_disk() -> None:
 
 
 def _save_disk() -> None:
+    global _save_error_logged
     target = _cache_file()
     with _disk_write_lock:
         # Serialize writers, but never hold the GUI lookup lock during I/O.
@@ -258,7 +261,9 @@ def _save_disk() -> None:
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             atomic_write(target, payload)
         except OSError:
-            pass
+            if not _save_error_logged:
+                _save_error_logged = True
+                logging.getLogger("bs_podcasts").debug("Could not save the artwork tint table", exc_info=True)
 
 
 def _fresh(path: str) -> bool:
@@ -530,6 +535,7 @@ _waiting = weakref.WeakSet()
 _revisions = OrderedDict()
 _revision_ids = count(1)
 _decode_stopped = False
+_decode_errors_logged: set[str] = set()
 MAX_PENDING_DECODES = 64
 _bridge = None
 
@@ -611,7 +617,15 @@ def _decode_job(key: str, path: str, width: int, height: int, bridge: _DecodeBri
             image = previews.load(path, _read_image, persist=False)
         else:
             image = _read_image(path, width, height)
+    except (OSError, ValueError):
+        image = QImage()  # The file could not be read or decoded.
     except Exception:
+        # A programming error: still show initials, but leave one trace per path.
+        if path not in _decode_errors_logged:
+            if len(_decode_errors_logged) >= 256:
+                _decode_errors_logged.clear()
+            _decode_errors_logged.add(path)
+            logging.getLogger("bs_podcasts").warning("Could not decode artwork %s", Path(path).name, exc_info=True)
         image = QImage()
     try:
         bridge.decoded.emit(key, path, image)
