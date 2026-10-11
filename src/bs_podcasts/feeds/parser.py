@@ -124,26 +124,6 @@ def _description(text: str) -> str:
     return text[:MAX_DESCRIPTION_CHARS - len(marker)].rstrip() + marker
 
 
-# Non-audio enclosures seen while parsing the current feed (per thread).
-import threading as _threading
-
-_skipped_local = _threading.local()
-
-
-class _SkippedList:
-    def append(self, mime):
-        getattr(_skipped_local, "items", None) is None and setattr(_skipped_local, "items", [])
-        _skipped_local.items.append(mime)
-
-    def take(self) -> int:
-        items = getattr(_skipped_local, "items", None) or []
-        _skipped_local.items = []
-        return len(items)
-
-
-_SKIPPED = _SkippedList()
-
-
 def _date(value: str) -> str:
     value = value.strip()
     if not value:
@@ -292,8 +272,6 @@ def _rss_enclosure(item) -> tuple[str, str, int]:
         length = attributes.get("length", "").strip()
         mime = attributes.get("type", "").split(";", 1)[0].strip().lower()
         if mime and not mime.startswith("audio/") and mime not in BINARY_AUDIO_TYPES:
-            if mime.startswith("video/"):
-                _SKIPPED.append(mime)
             continue
         candidate = (url, mime or "audio/*", _integer(length) or 0)
         if local == "enclosure":
@@ -333,8 +311,6 @@ def _atom_link(element, relation: str) -> tuple[str, str, int]:
             continue
         mime = link.attrib.get("type", "").split(";", 1)[0].strip().lower()
         if relation == "enclosure" and mime and not mime.startswith("audio/") and mime not in BINARY_AUDIO_TYPES:
-            if mime.startswith("video/"):
-                _SKIPPED.append(mime)
             continue
         return (
             href,
@@ -342,6 +318,27 @@ def _atom_link(element, relation: str) -> tuple[str, str, int]:
             _integer(link.attrib.get("length", "")) or 0,
         )
     return "", "", 0
+
+
+def _offers_video(element, local: str) -> bool:
+    """True when an item or entry lists a video enclosure. Asked only of one
+    that has no playable enclosure, so it counts as one video-only episode
+    however many video files it lists."""
+    for child in element:
+        if local == "item":
+            if _local(child.tag) not in {"enclosure", "content"}:
+                continue
+            attributes = {_local(key): value for key, value in child.attrib.items()}
+            url = (attributes.get("url") or attributes.get("resource") or "").strip()
+            mime = attributes.get("type", "")
+        else:
+            if _local(child.tag) != "link" or child.attrib.get("rel", "alternate") != "enclosure":
+                continue
+            url = child.attrib.get("href", "").strip()
+            mime = child.attrib.get("type", "")
+        if url and mime.split(";", 1)[0].strip().lower().startswith("video/"):
+            return True
+    return False
 
 
 def _external_id(title: str, published: str, media_url: str, explicit: str) -> str:
@@ -386,7 +383,7 @@ def _rss_episode(item) -> FeedEpisodeData | None:
     )
 
 
-def _parse_rss(root, episodes) -> FeedData:
+def _parse_rss(root, episodes, skipped_video) -> FeedData:
     channel = root if _local(root.tag) == "channel" else _first(root, "channel")
     if channel is None:
         raise FeedParseError("RSS feed has no channel.")
@@ -400,7 +397,7 @@ def _parse_rss(root, episodes) -> FeedData:
         categories=_categories(channel),
         episodes=tuple(_cap_newest(episodes)),
         truncated=len(episodes) > MAX_EPISODES,
-        skipped_video=_SKIPPED.take(),
+        skipped_video=skipped_video,
     )
 
 
@@ -453,7 +450,7 @@ def _atom_episode(entry) -> FeedEpisodeData | None:
     )
 
 
-def _parse_atom(root, episodes) -> FeedData:
+def _parse_atom(root, episodes, skipped_video) -> FeedData:
     website_url, _mime, _size = _atom_link(root, "alternate")
     author = _first(root, "author")
     return FeedData(
@@ -465,7 +462,7 @@ def _parse_atom(root, episodes) -> FeedData:
         categories=_categories(root),
         episodes=tuple(_cap_newest(episodes)),
         truncated=len(episodes) > MAX_EPISODES,
-        skipped_video=_SKIPPED.take(),
+        skipped_video=skipped_video,
     )
 
 
@@ -631,6 +628,10 @@ def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=N
     With a `_NewestItem` as `newest`, no episode is built or kept: each item is
     handed to it and reading stops as soon as it is settled.
 
+    Returns the root, the kept episodes and the number of items dropped for
+    offering video only. The count is taken in a pass that reads every item
+    for its enclosure, so the second pass (`positions`) and `newest` give 0.
+
     A frame is [element, base, under, unread, size, attached]. `unread` marks
     an element dropped unread when it closes: a non-field child of
     rss/channel/feed and everything inside one, except an item or entry.
@@ -646,6 +647,7 @@ def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=N
     root_kind = ""
     count = 0
     kept = 0
+    skipped_video = 0
     item_position = 0
     source = BytesIO(content)
 
@@ -702,6 +704,8 @@ def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=N
                         episode = replace(episode, external_id=positions[item_position])
                 else:
                     episode = None
+                if episode is None and newest is None and positions is None and _offers_video(current, local):
+                    skipped_video += 1
                 _remember_episode(head, tail, seen, episode)
                 item_position += 1
                 if parent is not None:
@@ -721,7 +725,7 @@ def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=N
         source.close()
     if root is None:
         raise FeedParseError("Feed response was empty.")
-    return root, head + list(tail)
+    return root, head + list(tail), skipped_video
 
 
 def resolve_feed_urls(feed: FeedData, base_url: str) -> FeedData:
@@ -803,9 +807,7 @@ def newest_item(content: bytes, partial: bool = False) -> tuple[str, str] | None
     newest = _NewestItem()
     try:
         content = _checked_content(content)
-        _SKIPPED.take()
-        root, _episodes = _stream_feed(content, "", newest=newest)
-        _SKIPPED.take()
+        root, _episodes, _skipped = _stream_feed(content, "", newest=newest)
     except (FeedParseError, ET.ParseError) as exc:
         if partial:
             return None
@@ -822,25 +824,22 @@ def newest_item(content: bytes, partial: bool = False) -> tuple[str, str] | None
 
 def parse_feed(content: bytes, base_url: str = "") -> FeedData:
     content = _checked_content(content)
-    _SKIPPED.take()
     try:
         # Normal feeds keep their single pass. Only a document larger than
         # the retained window needs a cheap identity pass and a second pass
         # that fully materializes selected distinct head/tail records.
         count = sum(1 for _ in re.finditer(br"<(?:[\w.-]+:)?(?:item|entry)(?=[\s/>])", content, re.I))
         if count > MAX_SCANNED_EPISODES:
-            _root, slots = _stream_feed(content, base_url, slots_only=True)
-            skipped_video = _SKIPPED.take()
+            _root, slots, skipped_video = _stream_feed(content, base_url, slots_only=True)
             del _root
-            root, episodes = _stream_feed(content, base_url, positions={slot.position: slot.external_id for slot in slots})
-            _skipped_local.items = [None] * skipped_video
+            root, episodes, _skipped = _stream_feed(content, base_url, positions={slot.position: slot.external_id for slot in slots})
         else:
-            root, episodes = _stream_feed(content, base_url)
+            root, episodes, skipped_video = _stream_feed(content, base_url)
     except ET.ParseError as exc:
         raise FeedParseError(f"Invalid XML: {exc}") from exc
     kind = _local(root.tag)
     if kind in {"rss", "rdf", "channel"}:
-        return resolve_feed_urls(_parse_rss(root, episodes), base_url)
+        return resolve_feed_urls(_parse_rss(root, episodes, skipped_video), base_url)
     if kind == "feed":
-        return resolve_feed_urls(_parse_atom(root, episodes), base_url)
+        return resolve_feed_urls(_parse_atom(root, episodes, skipped_video), base_url)
     raise FeedParseError(f"Unsupported feed root: {kind or 'unknown'}.")
