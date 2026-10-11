@@ -70,6 +70,14 @@ def title_sort_key(title: str) -> tuple:
     return tuple(_number_key(part) if index % 2 else part for index, part in enumerate(_DIGIT_RUNS.split(folded)))
 
 
+def _is_removal_target(item) -> bool:
+    """Whether "Remove unreachable" offers this show. The library marks the row
+    from the stored show; a row without that mark falls back to its health."""
+    if item.unreachable is not None:
+        return item.unreachable
+    return item.health in {"error", "suspended"}
+
+
 def _debounce_filter_box(page):
     """Rebuild the list 200 ms after the last keystroke, not on every one:
     a 5,000-row page re-filtered and re-modelled per character (audit F-032).
@@ -988,9 +996,10 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         elif chip == "Problems":
             items = [item for item in items if item.health in {"error", "suspended", "partial"}]
         if not self.discover and hasattr(self, "remove_problems"):
-            unreachable = sum(1 for item in items if item.health in {"error", "suspended"})
             # The chip also lists "partial" feeds (refreshed, nothing playable);
-            # the button removes only unreachable ones, so say how many.
+            # the button removes only unreachable ones, whatever the search box
+            # or chip show, so count exactly those across the whole library.
+            unreachable = sum(1 for item in self._all_items if _is_removal_target(item))
             self.remove_problems.setText(f"Remove unreachable ({unreachable})…" if unreachable else "Remove unreachable…")
             self.remove_problems.setVisible(chip == "Problems" and unreachable > 0)
             self._empty_text = (

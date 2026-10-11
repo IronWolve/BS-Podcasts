@@ -47,6 +47,9 @@ class Podcast:
     website_url: str = ""
     last_refresh_text: str = ""
     is_episode: bool = False
+    # Whether "Remove unreachable" offers this stored show. None means the row
+    # was not marked by the library; pages then fall back to its health.
+    unreachable: bool | None = None
 
 
 @dataclass(frozen=True)
