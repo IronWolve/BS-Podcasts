@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install the launcher entry and icons for the current user (no root needed).
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WORKSPACE="$(cd "$HERE/../.." && pwd -P)"
 BRANDING="$WORKSPACE/dists/linux/app/bs_podcasts/assets/branding"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
