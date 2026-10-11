@@ -189,6 +189,9 @@ def _run_gui(extra, requested):
                 for window in qt.topLevelWidgets():
                     quit_window=getattr(window,'_request_quit',None)
                     if quit_window is not None:
+                        # Ask once per stop request; the window retries its own close
+                        # while saves finish, and asking again would stack those retries.
+                        requested[0]=False
                         quit_window()
                         return
                 # No main window yet: a startup error dialog runs its own loop.
