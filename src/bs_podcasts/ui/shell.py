@@ -911,8 +911,14 @@ class MainWindow(QMainWindow):
         # and refreshes this page; avoid rebuilding it synchronously here.
 
     def _wire_listening(self):
+        # The first bookmark read starts shortly after the window is built. A
+        # timer the window holds is counted by reads_pending() until it fires.
+        self._bookmark_timer = QTimer(self)
+        self._bookmark_timer.setSingleShot(True)
+        self._bookmark_timer.setInterval(100)
+        self._bookmark_timer.timeout.connect(self._reload_bookmarks)
         if self.listening is not None:
-            self._later(100, self._reload_bookmarks)
+            self._bookmark_timer.start()
 
     # ------------------------------------------------------------- persistence
     def _restore_layout(self):
@@ -2853,6 +2859,7 @@ class MainWindow(QMainWindow):
             or self._download_reload_timer.isActive()
             or self.search_overlay._timer.isActive()
             or self._catalog_timer.isActive()
+            or self._bookmark_timer.isActive()
         )
 
     # Reads that keep a page's data current report a failure on that page;
@@ -8733,6 +8740,7 @@ class MainWindow(QMainWindow):
         self._refresh_timer.stop()
         self._cache_timer.stop()
         self._download_reload_timer.stop()
+        self._bookmark_timer.stop()
         self._layout_save_timer.stop()
         if not self._keep_services:
             self._refresh_waiting.clear()
