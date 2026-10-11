@@ -44,6 +44,7 @@ from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 
 
 FILTER_DEBOUNCE_MS = 200
+LIBRARY_EMPTY_TEXT = ("Your library is empty", "Add a podcast by feed URL, import an OPML file, or browse Discover.", "Add podcast")
 _DIGIT_RUNS = re.compile(r"(\d+)")
 
 
@@ -772,7 +773,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         self._empty_text = (
             ("Find a podcast", "Search or pick a category. For You fills in from your library.", "")
             if discover
-            else ("Your library is empty", "Add a podcast by feed URL, import an OPML file, or browse Discover.", "Add podcast")
+            else LIBRARY_EMPTY_TEXT
         )
         chips = () if discover else ("All", "New", "Problems")
         self.chips = ChipRow(chips)
@@ -780,10 +781,8 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             banner_policy = self.banner.sizePolicy()
             banner_policy.setRetainSizeWhenHidden(True)
             self.banner.setSizePolicy(banner_policy)
-            self.banner.setFixedHeight(scaled_px(42))
             filters = QWidget()
             filters.setObjectName("discoverToolbar")
-            filters.setFixedHeight(scaled_px(88))
             self.discover_toolbar = filters
             filter_layout = QVBoxLayout(filters)
             filter_layout.setContentsMargins(0, 0, 0, 0)
@@ -796,7 +795,6 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.chart.setExpanding(True)
             self.chart.setUsesScrollButtons(True)
             self.chart.setElideMode(Qt.TextElideMode.ElideRight)
-            self.chart.setFixedHeight(scaled_px(40))
             self.chart.setCursor(Qt.CursorShape.PointingHandCursor)
             for label, value in (
                 ("For You", "explore"),
@@ -820,7 +818,6 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             primary_filters.addWidget(self.chart, 1)
             filter_layout.addLayout(primary_filters)
             self.secondary_filters_widget = QWidget()
-            self.secondary_filters_widget.setFixedHeight(scaled_px(40))
             # Filters must never raise the page's minimum width; the splitter would
             # otherwise re-balance whenever a combo is shown or hidden.
             self.secondary_filters_widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -846,13 +843,9 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.category.setAccessibleName("Podcast category")
             self.category.addItem("All Categories")
             self.category.addItems(CATEGORY_IDS.keys())
-            self.category.setMinimumWidth(scaled_px(140))
-            self.category.setMaximumWidth(scaled_px(220))
             secondary_filters.addWidget(self.category)
             self.topic = QComboBox()
             self.topic.setAccessibleName("Podcast subcategory or topic")
-            self.topic.setMinimumWidth(scaled_px(140))
-            self.topic.setMaximumWidth(scaled_px(220))
             self.topic.setEnabled(False)
             self.topic.addItem("Choose a category first")
             secondary_filters.addWidget(self.topic)
@@ -861,7 +854,6 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.root.addWidget(filters)
             self.result_summary = PlainTextLabel("Choose For You, search, or select a category.")
             self.result_summary.setObjectName("meta")
-            self.result_summary.setFixedHeight(scaled_px(22))
             self.root.addWidget(self.result_summary)
             self.header.search.setPlaceholderText("Search")
             self.header.search.setAccessibleName("Search the podcast directory")
@@ -871,7 +863,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
                 self.header.action.setIcon(icons.icon("refresh", COLORS["text"], 20))
                 self.header.action.setToolTip("Refresh current Discover view")
                 self.header.action.setAccessibleName("Refresh Discover")
-                self.header.action.setFixedSize(scaled_px(38), scaled_px(38))
+            self._size_discover_controls()
         else:
             self.chart = None
             self.discover_toolbar = None
@@ -1041,7 +1033,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.remove_problems.setVisible(chip == "Problems" and unreachable > 0)
             self._empty_text = (
                 ("No problems", "Every subscribed feed refreshed successfully.", "") if chip == "Problems"
-                else ("Your library is empty", "Add a podcast by feed URL, import an OPML file, or browse Discover.", "Add podcast")
+                else LIBRARY_EMPTY_TEXT
             )
         if not self.discover and getattr(self, "_sort", "name") == "date":
             items.sort(key=lambda item: item.latest_sort_key or "", reverse=True)
@@ -1225,27 +1217,25 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.topic.setEnabled(False)
         self.topic.blockSignals(False)
 
+    def _size_discover_controls(self):
+        """The Discover toolbar's fixed sizes, set at construction and again
+        whenever the scale changes."""
+        self.banner.setFixedHeight(scaled_px(42))
+        self.discover_toolbar.setFixedHeight(scaled_px(88))
+        self.chart.setFixedHeight(scaled_px(40))
+        self.secondary_filters_widget.setFixedHeight(scaled_px(40))
+        for combo in (self.category, self.topic):
+            combo.setMinimumWidth(scaled_px(140))
+            combo.setMaximumWidth(scaled_px(220))
+        self.result_summary.setFixedHeight(scaled_px(22))
+        if self.header.action is not None:
+            self.header.action.setFixedSize(scaled_px(38), scaled_px(38))
+
     def apply_metrics(self):
         super().apply_metrics()
         if self.discover:
-            self.banner.setFixedHeight(scaled_px(42))
-            if self.discover_toolbar is not None:
-                self.discover_toolbar.setFixedHeight(scaled_px(88))
-            if self.chart is not None:
-                self.chart.setFixedHeight(scaled_px(40))
-            if self.secondary_filters_widget is not None:
-                self.secondary_filters_widget.setFixedHeight(scaled_px(40))
-            if self.category is not None:
-                self.category.setMinimumWidth(scaled_px(140))
-                self.category.setMaximumWidth(scaled_px(220))
-            if self.topic is not None:
-                self.topic.setMinimumWidth(scaled_px(140))
-                self.topic.setMaximumWidth(scaled_px(220))
-            if self.result_summary is not None:
-                self.result_summary.setFixedHeight(scaled_px(22))
+            self._size_discover_controls()
             if self.header.action is not None:
-                side = scaled_px(38)
-                self.header.action.setFixedSize(side, side)
                 self.header.action.setIcon(icons.icon("refresh", COLORS["text"], scaled_px(20)))
         self.load_more.setFixedHeight(scaled_px(38))
         self._layout_cards()
