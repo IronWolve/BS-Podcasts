@@ -75,8 +75,18 @@ def prepare(source, cache, only=None, macos=False):
 def sanitize(header, root):
     # Configuration describes compiler inputs but must not publish the builder's
     # home directory. This changes descriptive/generated path strings only.
+    if root is None or not root.is_absolute() or len(root.parts)<2:
+        raise ValueError('Provide an absolute native build root with --root.')
     text=header.read_text()
-    header.write_text(text.replace(str(root),'/bs-native'))
+    with tempfile.NamedTemporaryFile(dir=header.parent,delete=False) as stream:
+        temporary=Path(stream.name)
+    try:
+        temporary.write_text(text.replace(str(root),'/bs-native'))
+        temporary.chmod(header.stat().st_mode&0o7777)
+        temporary.replace(header)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def record(artifact):
