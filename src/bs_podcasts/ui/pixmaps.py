@@ -819,7 +819,13 @@ def cover(
         if source is None and physical_w == physical_h:
             source = _preview_cache.find(path)
         interim = source is not None
-    if path and source is None:
+    if interim:
+        # Kept apart from the exact cover, which replaces it once decoded.
+        key = f"coverinterim:{key}"
+        cached = _artwork_cache.find(key)
+        if cached is not None and not cached.isNull():
+            return present(cached)
+    elif path and source is None:
         # Still decoding: draw the placeholder under its own key so the real
         # cover is built (and cached under `key`) on the repaint that follows.
         key = f"coverpending:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}"
@@ -856,6 +862,7 @@ def cover(
         icons.paint(painter, "podcasts", COLORS["muted"], QRect((physical_w - glyph) // 2, (physical_h - glyph) // 2, glyph, glyph))
     painter.end()
     result.setDevicePixelRatio(scale)
-    if not interim:
-        _artwork_cache.insert(key, result)
+    _artwork_cache.insert(key, result)
+    if source is not None and not interim:
+        _artwork_cache.drop(f"coverinterim:{key}")
     return present(result)
