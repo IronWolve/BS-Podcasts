@@ -46,6 +46,7 @@ from ..logging_setup import log_path
 from ..domain import DownloadState, FeedData, FeedEpisodeData, Health
 from ..domain.times import format_hours_minutes, format_media_time
 from ..directories.base import CandidateList
+from ..directories.catalog import CACHE_SECONDS as DIRECTORY_CACHE_SECONDS
 from ..directories.persistent import PersistentDirectoryCache
 from ..downloads import AutomaticCleanupSkipped
 from ..jobs import JobResult, JobRunner, JobStatus
@@ -6349,7 +6350,7 @@ class MainWindow(QMainWindow):
         self.discover_page.set_discover_summary(f"Loading {category} › {topic}…")
         self._start_directory_request("topic", (category, topic))
 
-    DISCOVER_CACHE_SECONDS = 900
+    DISCOVER_CACHE_SECONDS = DIRECTORY_CACHE_SECONDS
     # How long a feed's newest date, read by the Newest sort, answers a rescan.
     NEWEST_DATE_SECONDS = 3600
     NEWEST_DATE_ENTRIES = 2000
