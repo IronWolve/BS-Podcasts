@@ -1404,7 +1404,13 @@ class PlaybackService:
             return False
         self._rescued_source = source
         # A reopen that failed keeps its unconfirmed resume target (None on a first open).
-        self._begin_load(self.snapshot.position, self._load_autoplay, keep_target=True)
+        try:
+            self._begin_load(self.snapshot.position, self._load_autoplay, keep_target=True)
+        except Exception as exc:
+            # The engine cannot prepare a second load; the caller reports the
+            # open failure that led here, not a storage problem.
+            logger.warning("Playback redirect rescue could not start: %s", redact(exc))
+            return False
         self._arm_load_watchdog(self.snapshot.episode_id, source)
         thread = threading.Thread(
             target=self._rescue_redirects,
