@@ -2960,6 +2960,14 @@ class ContextPanel(QFrame):
                 0, self, lambda: self.selected_scroll.verticalScrollBar().setValue(0)
             )
 
+    def current_item(self):
+        """The podcast or episode the pane shows, or None."""
+        return self._current_item
+
+    def shown_episode_id(self) -> int:
+        """The id of the episode the pane shows, or 0."""
+        return self._episode_id
+
     def _information_clicked(self):
         if self._current_item is not None:
             self.information_requested.emit(self._current_item)
@@ -4337,6 +4345,10 @@ class PlayerBar(QFrame):
         self._buffering = buffering
         self._streaming = streaming
         self._refresh_status()
+
+    def track_key(self):
+        """Identity of the track the bar shows, or None before one is loaded."""
+        return getattr(self, "_track_key", None)
 
     def set_streaming(self, streaming: bool):
         """Whether the loaded track is streamed. Callers use this, not the attribute."""

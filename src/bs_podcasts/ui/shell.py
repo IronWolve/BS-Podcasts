@@ -4577,7 +4577,7 @@ class MainWindow(QMainWindow):
             self._on_directory_artwork("artwork-retry", (generation, url),
                 JobResult(JobStatus.OK, value=(path, accent, True, token)))
             self._request_reload()
-            current = self.context._current_item
+            current = self.context.current_item()
             if isinstance(item, UiEpisode):
                 same = isinstance(current, UiEpisode) and (
                     (episode_id and current.episode_id == episode_id) or
@@ -4612,7 +4612,7 @@ class MainWindow(QMainWindow):
             items = []
         self._episode_artwork_page = page
         self._read_tokens['visible-artwork'] = self._read_tokens.get('visible-artwork', 0) + 1
-        important = {self._playing_episode_id, self.context._episode_id}
+        important = {self._playing_episode_id, self.context.shown_episode_id()}
         wanted = {(item.episode_id, item.artwork_url) for item in items if item.episode_id and item.artwork_url}
         for key in list(self._episode_artwork_waiting):
             if key not in wanted and key[0] not in important:
@@ -4758,7 +4758,7 @@ class MainWindow(QMainWindow):
             for episode_id, _url in changes:
                 self._ui_episode_cache.pop(episode_id, None)
             self._convert_revision += 1
-        current = self.context._current_item
+        current = self.context.current_item()
         if isinstance(current, UiEpisode) and (current.episode_id, current.artwork_url) in changes:
             self._refresh_context_item(current, update(current))
 
@@ -5003,13 +5003,13 @@ class MainWindow(QMainWindow):
         shows `episode_id` (default: whatever it shows). Re-running the whole
         chapters/transcript read could supersede the pane's own load of
         another episode, and reset an active transcript search."""
-        shown = self.context._episode_id
+        shown = self.context.shown_episode_id()
         if self.listening is None or not shown or (episode_id is not None and episode_id != shown):
             return
         listening = self.listening
 
         def apply(bookmarks):
-            if self.context._episode_id == shown:
+            if self.context.shown_episode_id() == shown:
                 self.context.set_bookmarks(bookmarks)
 
         self._run_read(lambda: listening.bookmarks(shown), apply, "context-bookmarks")
@@ -5018,13 +5018,13 @@ class MainWindow(QMainWindow):
         entry = self.context.bookmark_list.itemAt(position)
         if entry is None or not entry.data(Qt.ItemDataRole.UserRole + 1) or self.listening is None:
             return
-        episode_id = self.context._episode_id
+        episode_id = self.context.shown_episode_id()
         bookmark_id = entry.data(Qt.ItemDataRole.UserRole + 1)
         global_position = self.context.bookmark_list.viewport().mapToGlobal(position)
         self.context.bookmark_list.setCurrentItem(entry)
         def apply(bookmarks):
             current = self.context.bookmark_list.currentItem()
-            if (self.context._episode_id == episode_id and current is not None
+            if (self.context.shown_episode_id() == episode_id and current is not None
                     and current.data(Qt.ItemDataRole.UserRole + 1) == bookmark_id):
                 self._show_pane_bookmark_menu(bookmarks, bookmark_id, episode_id, global_position)
         self._run_read(lambda: self.listening.bookmarks(episode_id), apply, 'bookmark-menu')
@@ -5373,7 +5373,7 @@ class MainWindow(QMainWindow):
         if self.playback is not None:
             playback = self.playback
             identity = getattr(self, '_playback_identity', None)
-            if identity is not None and identity[:2] == getattr(self.player, "_track_key", None):
+            if identity is not None and identity[:2] == self.player.track_key():
                 self._run_command(lambda: playback.seek_current(identity, seconds), keep=True)
 
     def _seek_episode(self, episode_id: int, seconds: float):
@@ -6086,7 +6086,7 @@ class MainWindow(QMainWindow):
         # The context panel snapshots download state when it opens; keep its
         # button live so it never sticks at "Downloading…" (UI-P2-1). A
         # vanished record means the download was removed: back to "Download".
-        context_id = self.context._episode_id
+        context_id = self.context.shown_episode_id()
         if context_id:
             record = next((r for r in records if r.episode_id == context_id), None)
             self.context.update_download_state(
@@ -7306,7 +7306,7 @@ class MainWindow(QMainWindow):
             # the whole session: let the next selection retry.
             self._details_fetched.discard(identity)
         if outcome and (outcome.get("chapters") or outcome.get("transcript")):
-            if self.context._episode_id == identifier:
+            if self.context.shown_episode_id() == identifier:
                 self._load_listening_details(identifier)
             if self._playing_episode_id == identifier and self.playback is not None:
                 self._read_playback_metadata(self.playback.snapshot, follow=False)
@@ -7315,7 +7315,7 @@ class MainWindow(QMainWindow):
         message = (outcome or {}).get('error') or (result.message if result.status != JobStatus.OK else '')
         if message:
             logging.getLogger("bs_podcasts").info("Listening details unavailable for episode %s: %s", identifier, message)
-            if self.context._episode_id == identifier:
+            if self.context.shown_episode_id() == identifier:
                 self.context.show_details_error(message)
                 if outcome and (outcome.get('chapters') or outcome.get('transcript')):
                     self._notify(message, 'error')  # Partial successes must not hide the failed part.
@@ -8082,7 +8082,7 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def _refresh_context_item(self, previous, item):
-        current = self.context._current_item
+        current = self.context.current_item()
         if current is None or previous is None or self.discover_page._key(current) != self.discover_page._key(previous):
             return
         if item is None:
@@ -8121,7 +8121,7 @@ class MainWindow(QMainWindow):
                 library = self.library
                 def apply(data):
                     stored = data[0]
-                    if stored is not None and self.context._episode_id == item.episode_id:
+                    if stored is not None and self.context.shown_episode_id() == item.episode_id:
                         self._ensure_listening_details(stored)
                         self._ensure_episode_artwork(stored)
                 self._run_read(lambda: (library.episode(item.episode_id),), apply, "selected-metadata")
@@ -8428,7 +8428,7 @@ class MainWindow(QMainWindow):
     def _preview_still_wanted(self, feed_url: str) -> bool:
         return bool(feed_url) and not self._closed and (
             feed_url == self._pending_episodes_url
-            or getattr(self.context._current_item, "feed_url", "") == feed_url)
+            or getattr(self.context.current_item(), "feed_url", "") == feed_url)
 
     def _preview_selected(self):
         feed_url, self._preview_wanted = self._preview_wanted, ""
@@ -8488,7 +8488,7 @@ class MainWindow(QMainWindow):
         episodes = sorted(feed.episodes, key=lambda episode: episode.published_at or "", reverse=True)
         latest = episodes[0] if episodes else None
         recent = [(episode.title, self._display_full_date(episode.published_at)) for episode in episodes[:5]]
-        current = self.context._current_item
+        current = self.context.current_item()
         card = current if getattr(current, "feed_url", "") == feed_url else next(
             (item for item in self.discover_page._all_items if item.feed_url == feed_url), None)
         matched = None
@@ -8600,7 +8600,7 @@ class MainWindow(QMainWindow):
         def work():
             return listening.chapters(episode_id), listening.transcript(episode_id, query), listening.bookmarks(episode_id)
         def apply(data):
-            if self.context._episode_id != episode_id:
+            if self.context.shown_episode_id() != episode_id:
                 return
             self.context.set_chapters(data[0])
             self.context.set_transcript(data[1], query=query)
