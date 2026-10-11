@@ -10,6 +10,7 @@ from ..data.files import (
     FILE_UNAVAILABLE,
     FILE_UNCONFIRMED,
     _root_key,
+    flush_to_drive,
     inspect_download_file,
     note_completed_download,
     open_private,
@@ -906,7 +907,7 @@ class DownloadService:
                 # this a power loss could keep both while the data blocks
                 # never reached the disk, a "downloaded" short file.
                 handle.flush()
-                os.fsync(handle.fileno())
+                flush_to_drive(handle.fileno())
             stall.stop()
             if stall.message:
                 raise (_TransferStalled if stall.stalled else DownloadError)(stall.message)
