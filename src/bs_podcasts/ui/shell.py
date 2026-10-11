@@ -5020,11 +5020,18 @@ class MainWindow(QMainWindow):
 
         def work():
             stamps = {}
-            for episode_id in ids:
-                episode = repository.get_episode(episode_id)
-                if episode is not None and episode.last_played is not None:
-                    stamps[episode_id] = episode.last_played
-                    repository.clear_history(episode_id)
+            failure = None
+            try:
+                for episode_id in ids:
+                    episode = repository.get_episode(episode_id)
+                    if episode is not None and episode.last_played is not None:
+                        stamps[episode_id] = episode.last_played
+                        repository.clear_history(episode_id)
+            except Exception as exc:
+                # Each clear commits on its own: keep the rows already
+                # cleared, so they are reloaded and can be undone.
+                logging.getLogger("bs_podcasts").exception("Removing episodes from History stopped early")
+                failure = exc
             changes = []
             for episode_id, last_played in stamps.items():
                 episode = repository.get_episode(episode_id)
@@ -5032,17 +5039,24 @@ class MainWindow(QMainWindow):
                     continue
                 state = (episode.played, episode.is_new, episode.position_seconds)
                 changes.append(((episode.id, episode.show_id, episode.external_id, *state, last_played), (*state, None)))
-            return changes
+            return changes, failure
 
-        def apply(changes):
+        def apply(result):
+            changes, failure = result
             self._request_reload()
-            if not changes:
-                return
             removed = len(changes)
 
             def undo():
                 self._run_command(lambda: repository.undo_played(changes), lambda _count: self._request_reload())
 
+            if failure is not None:
+                reason = str(failure) or type(failure).__name__
+                message = (f"Removed {removed} episode{'s' if removed != 1 else ''} from History, then an error stopped the rest: {reason}"
+                           if removed else f"Could not remove from History: {reason}")
+                self._notify(message, "error", "Undo" if changes else "", undo if changes else None)
+                return
+            if not changes:
+                return
             self._notify(f"Removed {removed} episode{'s' if removed != 1 else ''} from History", "success", "Undo", undo)
 
         self._run_command(work, apply)
