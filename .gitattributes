@@ -5,3 +5,6 @@ packaging/licenses/Qt-6.11.2-third-party.txt -whitespace
 src/bs_podcasts/assets/fonts/OFL.txt -whitespace
 # Shell launchers and recipes are read by bash on Linux and macOS: always LF.
 *.sh text eol=lf
+# Python and PowerShell sources are stored with LF in every checkout, as the shell scripts are.
+*.py text eol=lf
+*.ps1 text eol=lf
