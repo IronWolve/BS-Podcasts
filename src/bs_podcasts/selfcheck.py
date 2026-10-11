@@ -5,6 +5,7 @@ import codecs
 import importlib.util
 import json
 import re
+import struct
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import os
@@ -94,6 +95,19 @@ def _pyproject_version_in_bundle():
     return None
 
 
+def _png_matches(path, size=None):
+    """True for a PNG whose IHDR size is `size`, or any non-empty size when None. Reads the header only, no Qt."""
+    try:
+        with Path(path).open('rb') as handle:
+            head = handle.read(24)
+    except OSError:
+        return False
+    if len(head) < 24 or head[:8] != b'\x89PNG\r\n\x1a\n' or head[12:16] != b'IHDR':
+        return False
+    width, height = struct.unpack('>II', head[16:24])
+    return (width, height) == size if size is not None else width > 0 and height > 0
+
+
 def _painter(plain):
     """Colour only on a terminal; --plain, NO_COLOR or TERM=dumb turn it off.
     Windowed builds have no stdout at all, and print() then does nothing."""
@@ -173,9 +187,10 @@ def main() -> int:
         import requests
         import urllib3
         import mpv
-        from .assets import BRANDING_DIR, font_paths
+        from .assets import BRANDING_DIR, font_paths, logo_path
         # Exact files: icon_path() and shell_icon_path() fall back to the 512 px
         # icon, so a missing 256 or 64 px file would otherwise still pass here.
+        # The About logo and the 512 px icon (rail mark) are read as PNG headers.
         checks.update({
             'PySide6 available': bool(PySide6.__version__),
             'requests available': bool(requests.__version__),
@@ -183,6 +198,8 @@ def main() -> int:
             'native library loaded': bool(mpv.backend),
             'bundled branding/fonts': (BRANDING_DIR / 'bs-podcasts-icon-256.png').is_file() and len(font_paths()) >= 2,
             'bundled shell/tray icons': all((BRANDING_DIR / f'bs-podcasts-shell-icon-{size}.png').is_file() for size in (64, 256)),
+            'bundled logo and 512 px icon': (_png_matches(logo_path())
+                                             and _png_matches(BRANDING_DIR / 'bs-podcasts-icon-512.png', (512, 512))),
         })
         from .playback.engine import MpvEngine
         engine = MpvEngine(ao='null', vo='null')

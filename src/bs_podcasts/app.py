@@ -20,7 +20,7 @@ from PySide6.QtGui import QIcon, QImageReader
 from PySide6.QtWidgets import QApplication, QWidget
 
 from .artwork import ArtworkCache
-from .assets import shell_icon_path
+from .assets import icon_path, logo_path, shell_icon_path
 from .config import APP_ID, APP_NAME, app_version, system_reduced_motion
 from .config import cache_dir, data_dir as application_data_dir, default_downloads_dir
 from .data import Database
@@ -759,6 +759,11 @@ def _watch_accessibility_contrast(app, current_window, current_theme):
     return changed
 
 
+def _missing_branding_files():
+    """Names of bundled brand files the window draws. A missing one leaves a blank area with no error shown."""
+    return [path.name for path in (logo_path(), icon_path(512)) if not path.is_file()]
+
+
 def _close_busy_database(database, grace_seconds=0.1):
     """Bound the whole cleanup attempt, including implicit SQLite close I/O.
     Surviving work may reopen handles; its library lease stays until process death."""
@@ -994,6 +999,8 @@ def main() -> int:
     )
     directory = DirectoryService([PublicDirectory()])
     logger = logging.getLogger("bs_podcasts")
+    for missing in _missing_branding_files():
+        logger.warning("Bundled branding file %s is missing; part of the window will be blank.", missing)
     engine = LazyMpvEngine()
     listening_repository = ListeningRepository(database)
     listening = ListeningService(listening_repository)
