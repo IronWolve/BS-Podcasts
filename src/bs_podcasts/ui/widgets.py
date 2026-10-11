@@ -3682,7 +3682,14 @@ class PlayerBar(QFrame):
         self.slider.setValue(0)
         self.slider.sliderPressed.connect(self._capture_drag_duration)
         self.slider.sliderReleased.connect(self._seek_from_slider)
-        self.slider.user_step.connect(self._seek_from_slider)
+        self._step_timer = QTimer(self)
+        self._step_timer.setSingleShot(True)
+        self._step_timer.setInterval(200)
+        self._step_timer.timeout.connect(self._flush_step_seek)
+        self._step_pending = False
+        self._step_duration = 0.0
+        self._step_track = None
+        self.slider.user_step.connect(self._seek_from_step)
         self.remaining = PlainTextLabel("−0:00")
         self.remaining.setObjectName("timeLabel")
         timeline.addWidget(self.elapsed)
@@ -4155,7 +4162,7 @@ class PlayerBar(QFrame):
         )
         if chrome_key == getattr(self, "_chrome_key", None):
             position = media_seconds(snapshot.position) or 0.0
-            if not self.slider.isSliderDown():
+            if not self._slider_busy():
                 self.slider.blockSignals(True)
                 self.slider.setValue(min(self.slider.maximum(), int(self.slider.maximum() * position / self._duration)) if self._duration else 0)
                 self.slider.blockSignals(False)
@@ -4190,7 +4197,7 @@ class PlayerBar(QFrame):
             self.slider.setRange(0, span)
         position = media_seconds(snapshot.position) or 0.0
         self.slider.set_duration(self._duration, self._time)
-        if not self.slider.isSliderDown():
+        if not self._slider_busy():
             self.slider.blockSignals(True)
             self.slider.setValue(min(self.slider.maximum(), int(self.slider.maximum() * position / self._duration)) if self._duration else 0)
             self.slider.blockSignals(False)
@@ -4320,7 +4327,15 @@ class PlayerBar(QFrame):
     def _toggle_mute(self):
         self._request_volume(0.0 if self._volume > 0 else self._last_audible_volume)
 
+    def _slider_busy(self) -> bool:
+        """A drag or a burst of wheel/key steps owns the handle; playback
+        ticks must not pull it back to the engine position meanwhile."""
+        return self.slider.isSliderDown() or self._step_timer.isActive()
+
     def _capture_drag_duration(self):
+        # A drag supersedes steps still waiting for their trailing seek.
+        self._step_timer.stop()
+        self._step_pending = False
         # If auto-advance swaps tracks mid-drag, the release must seek within
         # the track the user was dragging, not near the end of the new one.
         self._drag_duration = self._duration
@@ -4339,6 +4354,26 @@ class PlayerBar(QFrame):
             return
         if duration:
             self.seek_requested.emit(duration * self.slider.value() / max(1, self.slider.maximum()))
+
+    def _seek_from_step(self):
+        """Wheel notches and key repeats arrive faster than the engine can
+        seek, and each seek is absolute, so only the last one matters. The
+        first step of a burst seeks at once; the rest fold into one trailing
+        seek on the final handle value."""
+        if self._step_timer.isActive():
+            self._step_pending = True
+        else:
+            self._step_duration = self._duration
+            self._step_track = getattr(self, "_track_key", None)
+            self._seek_from_slider()
+        self._step_timer.start()
+
+    def _flush_step_seek(self):
+        if self._step_pending:
+            self._step_pending = False
+            self._drag_duration = self._step_duration
+            self._drag_track = self._step_track
+            self._seek_from_slider()
 
     def _show_speed(self):
         self.speed_popover.set_current(self._speed)
