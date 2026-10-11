@@ -6193,6 +6193,7 @@ class MainWindow(QMainWindow):
     def _clear_discover_search_history(self):
         self._discover_search_history = []
         self._save_discover_search_history()
+        self._discover_snapshot_cache.clear()
 
     def _show_discover_search_history(self):
         menu = self._create_discover_search_history_menu()
