@@ -7215,6 +7215,16 @@ class MainWindow(QMainWindow):
             if result.status not in {JobStatus.OK, JobStatus.EMPTY}:
                 self._play_after_download = 0
                 self._playback_command('download_failed', identifier, request, result.message or 'Download failed')
+            elif self._play_after_download == identifier and str(self.playback.snapshot.state) == 'loading':
+                # The job ended without a finished file and nothing else will
+                # answer this wait. Say so and leave Play to try again. A wait
+                # the user paused already has its notice and is not asked again.
+                self._play_after_download = 0
+                paused = getattr(record, 'state', None) == DownloadState.PAUSED
+                self._playback_command(
+                    'download_failed', identifier, request,
+                    'The download was paused before it finished. Press Play to resume it.' if paused else
+                    'The download ended before the episode was ready. Press Play to try again.')
         if complete and self._play_after_download == identifier:
             self._play_after_download = 0
             if self._play_after_download_intent == getattr(self.playback, 'intent_revision', 0):
