@@ -3145,7 +3145,6 @@ class NowPlayingView(QFrame):
         left.addStretch(1)
         self.left_wrap = QWidget()
         self.left_wrap.setLayout(left)
-        left.setContentsMargins(0, 0, 0, 0)
         self.left_wrap.setMaximumWidth(scaled_px(460))
         layout.addWidget(self.left_wrap, 0)
 
@@ -4052,11 +4051,11 @@ class PlayerBar(QFrame):
         titles have real room without ever displacing the controls."""
         layout = self.layout()
         if layout is None or not hasattr(self, "tools_wrap"):
-            return
+            return False
         margins = layout.contentsMargins()
         available = self.width() - margins.left() - margins.right() - 2 * layout.spacing()
         if available <= 0:
-            return
+            return False
         floor = max(self.tools_wrap.sizeHint().width(), self.art.width() + self.now_wrap.minimumWidth())
         side = max(floor, int(available * self.SIDE_SHARE))
         # Clamp against the transport's PREFERRED width, not its minimum. Using
@@ -4092,8 +4091,12 @@ class PlayerBar(QFrame):
             self._centre_play()
         # The column width may have changed without a bar resize (compact
         # flip, first show): re-elide against it now, not on the next resize.
+        # Returns whether the labels were elided, so callers elide only when
+        # the balance did not.
         if hasattr(self, "_now_title"):
             self._elide_now_labels()
+            return True
+        return False
 
     def _centre_play(self):
         """Balance the transport row around the play button: the controls are
@@ -4158,8 +4161,8 @@ class PlayerBar(QFrame):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._balance_zones()
-        self._elide_now_labels()
+        if not self._balance_zones():
+            self._elide_now_labels()
         self._refresh_status()
 
     def apply_metrics(self):
@@ -4170,8 +4173,8 @@ class PlayerBar(QFrame):
         # row is exactly how the circle ended up drawn over the seek bar.
         circle = play_button_size()
         self.play.setFixedSize(circle, circle)
-        self._balance_zones()
-        self._elide_now_labels()
+        if not self._balance_zones():
+            self._elide_now_labels()
         self.setFixedHeight(self._required_height())
         self.layout().setContentsMargins(SPACE["lg"], SPACE["sm"], SPACE["lg"], SPACE["sm"])
         self.layout().setSpacing(SPACE["md"])
