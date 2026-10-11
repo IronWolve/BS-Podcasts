@@ -1734,7 +1734,7 @@ class HomePage(BasePage, _ListPageMixin):
             self.latest_title.set_count(len(latest) if has_new else len(shown), show_link=has_new)
         self._restore_selection(key, True, selected, anchor)
 
-    def set_items(self, items, heading: str | None = None):  # compatibility
+    def set_items(self, items):  # compatibility: no heading is shown
         self.set_sections([], items)
 
     def set_playing(self, episode_id: int, active: bool, source: str = ""):
