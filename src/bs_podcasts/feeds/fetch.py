@@ -11,6 +11,9 @@ from ..urlguard import ensure_fetchable, UnresolvedHost, UnsafeUrl
 
 
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024
+# How much of a feed the newest-date peek reads before it asks whether the
+# start already settles the answer. A longer feed that does is not read on.
+PEEK_HEAD_BYTES = 256 * 1024
 
 
 class FeedFetchError(RuntimeError):
@@ -274,7 +277,9 @@ class FeedFetcher:
         partial document cannot prove which item is newest, so nearly every
         card cost the peek plus a second, full request. The body is read
         once, up to the feed size cap; a caller falls back to the full fetch
-        only when nothing was read.
+        only when nothing was read. Only the newest date is read from it (see
+        parser.newest_item), and once the first PEEK_HEAD_BYTES of a longer
+        feed list its episodes newest first the rest is not downloaded.
         """
         try:
             url = ensure_fetchable(url, "Feed URL")
@@ -287,33 +292,35 @@ class FeedFetcher:
             response = self.session.get(url, headers=headers, timeout=(8, 15), allow_redirects=True, stream=True)
         except requests.RequestException as exc:
             raise _fetch_error(exc) from exc
+        from .parser import newest_item, FeedParseError
         try:
             if response.status_code >= 400:
                 raise _http_feed_error(response)
             if response.status_code != 200:
                 return None
             body = bytearray()
+            probed = False
             for chunk in response.iter_content(64 * 1024):
                 body.extend(chunk)
                 if len(body) > MAX_RESPONSE_BYTES:
                     raise FeedFetchError("Feed response exceeds the size limit.")
+                if not probed and len(body) >= PEEK_HEAD_BYTES:
+                    probed = True
+                    head = newest_item(bytes(body), partial=True)
+                    if head is not None:
+                        return head
         except requests.RequestException as exc:
             raise _fetch_error(exc) from exc
         finally:
             response.close()
-        from .parser import parse_feed, FeedParseError
         try:
-            feed = parse_feed(bytes(body), base_url=response.url)
+            latest = newest_item(bytes(body))
         except FeedParseError:
             # The same bytes fail again, unless this is a page that the full
             # fetch can follow to the feed it advertises.
             lead = _body_lead(body, getattr(response, "encoding", None))
             return NOTHING_DATED if _looks_like_feed(lead) else None
-        dated = [episode for episode in feed.episodes if episode.published_at]
-        if not dated:
-            return NOTHING_DATED
-        latest = max(dated, key=lambda episode: episode.published_at)
-        return latest.title, latest.published_at
+        return latest or NOTHING_DATED
 
     def _fetch(
         self,

@@ -33,6 +33,10 @@ MIN_ENCLOSURE_BYTES = 16 * 1024
 # layout pass. Episode identity is taken from the full title before this cap.
 MAX_TITLE_CHARS = 500
 MAX_DESCRIPTION_CHARS = 128 * 1024
+# Dated episodes at the start of a feed, none newer than the one before, that
+# show it to be listed newest first. The newest-date scan stops there (see
+# newest_item).
+NEWEST_FIRST_RUN = 5
 
 
 class FeedParseError(ValueError):
@@ -556,11 +560,47 @@ def _remember_episode(head, tail, seen, episode):
         tail.append(episode)
 
 
-def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=None):
+class _NewestItem:
+    """The newest dated episode among the items that stream past.
+
+    Reads the same fields as a full parse (an episode needs an enclosure, a
+    date comes from the same elements) and keeps only the best title and date.
+    `add` answers True once the first NEWEST_FIRST_RUN dated episodes come
+    newest first: the feed is then taken to be listed that way and no later
+    item is newer. Any other order is never settled and reads to the end.
+    """
+
+    def __init__(self):
+        self.best = None
+        self.last = ""
+        self.seen = 0
+        self.unordered = False
+
+    def add(self, element, local: str) -> bool:
+        if local == "item":
+            media_url = _rss_enclosure(element)[0]
+            published = _date(_text(element, "pubdate", "published", "date"))
+        else:
+            media_url = _atom_link(element, "enclosure")[0]
+            published = _date(_text(element, "published", "updated"))
+        if not media_url or not published:
+            return False
+        if self.best is None or published > self.best[1]:
+            self.best = (_clamp_title(_text(element, "title") or "Untitled episode"), published)
+        self.unordered = self.unordered or (self.seen > 0 and published > self.last)
+        self.last = published
+        self.seen += 1
+        return self.seen >= NEWEST_FIRST_RUN and not self.unordered
+
+
+def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=None, newest=None):
     """Parse without keeping every element. Items are dropped once read.
 
     The kept episodes are the head and the tail of the document, so an
     oldest-first feed still has its newest items when the scan cap is hit.
+
+    With a `_NewestItem` as `newest`, no episode is built or kept: each item is
+    handed to it and reading stops as soon as it is settled.
 
     A frame is [element, base, under, unread, size]. `unread` marks an
     element dropped unread when it closes: a non-field child of
@@ -619,7 +659,10 @@ def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=N
             local = _local(current.tag)
             parent = stack[-1][0] if stack else None
             if episode_tag(local):
-                if slots_only:
+                settled = False
+                if newest is not None:
+                    episode, settled = None, newest.add(current, local)
+                elif slots_only:
                     episode = _episode_slot(current, local, item_position)
                 elif positions is None or item_position in positions:
                     read = _rss_episode if local == "item" else _atom_episode
@@ -635,6 +678,8 @@ def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=N
                     parent.remove(current)
                 current.clear()
                 kept -= size
+                if settled:
+                    break
             elif unread:
                 parent.remove(current)
                 current.clear()
@@ -685,7 +730,9 @@ def resolve_feed_urls(feed: FeedData, base_url: str) -> FeedData:
     )
 
 
-def parse_feed(content: bytes, base_url: str = "") -> FeedData:
+def _checked_content(content: bytes) -> bytes:
+    """`content` as the XML parser should read it, or FeedParseError. Shared by
+    the full parse and the newest-date scan so both apply the same guards."""
     if not content:
         raise FeedParseError("Feed response was empty.")
     if len(content) > MAX_FEED_BYTES:
@@ -704,6 +751,46 @@ def parse_feed(content: bytes, base_url: str = "") -> FeedData:
     content = normalize_html_entities(content)
     if len(content) > MAX_FEED_BYTES:
         raise FeedParseError("Normalized feed exceeds the size limit.")
+    return content
+
+
+def newest_item(content: bytes, partial: bool = False) -> tuple[str, str] | None:
+    """(title, published_at) of the newest dated episode, or None if none is dated.
+
+    The answer parse_feed would give for the newest episode, without building
+    the feed: items are read one at a time and dropped, and reading stops once
+    the first NEWEST_FIRST_RUN dated episodes are listed newest first, since
+    the rest of such a feed is older. A feed in any other order is read to the
+    end. For the Discover newest-date scan only; every other reader needs the
+    whole feed and uses parse_feed.
+
+    Raises FeedParseError for a document parse_feed would refuse before the
+    answer was settled. With `partial`, `content` may be only the start of a
+    longer document: an answer comes back when the start settles it or proves
+    to be the whole document, otherwise None, and nothing is raised.
+    """
+    newest = _NewestItem()
+    try:
+        content = _checked_content(content)
+        _SKIPPED.take()
+        root, _episodes = _stream_feed(content, "", newest=newest)
+        _SKIPPED.take()
+    except (FeedParseError, ET.ParseError) as exc:
+        if partial:
+            return None
+        if isinstance(exc, ET.ParseError):
+            raise FeedParseError(f"Invalid XML: {exc}") from exc
+        raise
+    kind = _local(root.tag)
+    if kind not in {"rss", "rdf", "channel", "feed"}:
+        if partial:
+            return None
+        raise FeedParseError(f"Unsupported feed root: {kind or 'unknown'}.")
+    return newest.best
+
+
+def parse_feed(content: bytes, base_url: str = "") -> FeedData:
+    content = _checked_content(content)
     _SKIPPED.take()
     try:
         # Normal feeds keep their single pass. Only a document larger than
