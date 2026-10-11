@@ -3835,13 +3835,9 @@ class MainWindow(QMainWindow):
         if index == PAGE_EPISODES:
             return self._create_episodes_nav_menu()
         menu = QMenu(self)
-        labels = (
-            "Home", "Podcasts", "Episodes", "Up Next", "Downloads",
-            "Discover", "Bookmarks", "History", "Settings",
-        )
         menu.addAction(
             icons.icon(NAV_ITEMS[index][0], COLORS["text"], 16),
-            f"Open {labels[index]}",
+            f"Open {NAV_ITEMS[index][1]}",
             lambda: self.navigation.select(index),
         )
         if index == PAGE_HOME:
