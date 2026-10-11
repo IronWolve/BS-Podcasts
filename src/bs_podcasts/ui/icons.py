@@ -8,6 +8,8 @@ the handful of glyphs Qt style sheets must reference by URL.
 
 from hashlib import sha1
 from pathlib import Path
+import logging
+import os
 import re
 import stat
 import tempfile
@@ -185,12 +187,19 @@ def _cache_dir() -> Path:
             base.mkdir(parents=True, exist_ok=True)
         except OSError:
             # Stay under the app cache. A random directory avoids a planted
-            # name; never fall through to the system temp directory.
+            # name; never fall through to the system temp directory. A
+            # fallback left by an earlier launch is reused, so a fault that
+            # lasts does not add one directory per launch.
             try:
                 parent.mkdir(parents=True, exist_ok=True)
-                base = Path(tempfile.mkdtemp(prefix="bs-podcasts-icons-", dir=parent))
+                earlier = [
+                    path for path in sorted(parent.glob("bs-podcasts-icons-*"))
+                    if path.is_dir() and not path.is_symlink() and os.access(path, os.W_OK | os.X_OK)
+                ]
+                base = earlier[0] if earlier else Path(tempfile.mkdtemp(prefix="bs-podcasts-icons-", dir=parent))
             except OSError:
                 base = parent / "icons"
+            logging.getLogger("bs_podcasts").warning("The glyph cache folder is unusable; using %s", base)
         _file_dir = base
     return _file_dir
 
