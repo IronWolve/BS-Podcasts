@@ -216,16 +216,34 @@ def generator_metadata(raw, markers=(), root=ROOT):
     return any(needle in folded for needle in needles)
 
 
+def _constant_chain(node):
+    """The string or bytes constants of a constant or of a '+' chain of constants, left
+    to right; None when the node holds anything else."""
+    parts, pending = [], [node]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, ast.BinOp) and isinstance(current.op, ast.Add):
+            pending.extend((current.right, current.left))
+        elif isinstance(current, ast.Constant) and isinstance(current.value, (str, bytes)):
+            parts.append(current.value)
+        else:
+            return None
+    return parts
+
+
 def denied_source_literals(raw, markers=(), root=ROOT):
-    """Read constant values without executing source; adjacent literals are one
-    AST constant, so splitting a private marker cannot bypass the source gate."""
+    """Read constant values without executing source. Adjacent literals are one AST
+    constant and '+' chains of constants are joined here, so splitting a private marker
+    that way cannot bypass the source gate. Joins that need evaluation (names, join(),
+    formatting) are not followed: this guards against accidental names, not a deliberate author."""
     try:
         tree = ast.parse(raw)
     except (SyntaxError, ValueError, UnicodeError):
         return False  # Syntax/import checks still reject malformed source.
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
-            value = node.value.encode('utf-8', 'surrogatepass') if isinstance(node.value, str) else node.value
+        parts = _constant_chain(node)
+        if parts and len({type(part) for part in parts}) == 1:
+            value = ''.join(parts).encode('utf-8', 'surrogatepass') if isinstance(parts[0], str) else b''.join(parts)
             if generator_metadata(value, markers, root):
                 return True
     return False
