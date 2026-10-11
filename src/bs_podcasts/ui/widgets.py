@@ -326,7 +326,10 @@ def icon_button(name: str, tooltip: str, object_name: str = "iconButton", size: 
     button.setIcon(icons.icon(name, COLORS["text"], size, disabled=COLORS["disabled"]))
     button.setIconSize(QSize(size, size))
     button.setToolTip(tooltip)
-    button.setAccessibleName(tooltip)
+    # The name is the label alone: a shortcut hint after the separator is
+    # rewritten in the tooltip when the key is rebound, and a copy here would
+    # keep announcing the old key.
+    button.setAccessibleName(tooltip.split("  ·  ")[0])
     button.setCursor(Qt.CursorShape.PointingHandCursor)
     button.setCheckable(checkable)
     button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
