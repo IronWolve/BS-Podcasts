@@ -251,21 +251,71 @@ class PlaybackService:
 
     def load_episode(self, episode_id: int, autoplay: bool = True, *, cancelled=None, start_position=None,
                      force_stream=False, keep_session=False):
+        # Everything that waits on storage happens here, before the service
+        # lock is taken: library maintenance or a stalled save would otherwise
+        # hold every native event and transport command behind this load.
+        # Nothing changes until the locked block at the end.
+        self._library_ready()
         with self._lock:
             self._guard()
             if cancelled is not None and cancelled():
                 return False
-            if self._retiring_shows:
-                candidate = self.repository.get_episode(episode_id)
-                if candidate is not None and candidate.show_id in self._retiring_shows:
-                    raise PlaybackUnavailable("This podcast is being removed. Choose another episode.")
+            self._flush_listening()
+            self._persist_position(force=True)
+        self._flush_persistence()
+        episode = self.repository.get_episode(episode_id)
+        if episode is None:
+            raise PlaybackUnavailable("Episode was not found.")
+        if episode.show_id in self._retiring_shows:
+            raise PlaybackUnavailable("This podcast is being removed. Choose another episode.")
+        show = self.repository.get_show(episode.show_id)
+        floor = self.repository.write_stamp_floor(episode.id)
+        silence_saved = self.listening.silence_saved() if self.listening else 0.0
+        source = episode.media_url
+        local = False
+        if episode.downloaded_path:
+            downloaded = Path(episode.downloaded_path).expanduser()
+            if downloaded.is_file():
+                source = str(downloaded)
+                local = True
+        if not source:
+            raise PlaybackUnavailable("Episode has no playable media URL or local file.")
+        if not local:
+            # Provenance decides. A locally-imported show stores the file
+            # the user chose as a file:// URL, which is fine; a show that
+            # came from a feed may only name http(s), or a feed could pick
+            # a local file for the engine to open.
+            imported = bool(show is not None and show.source == "local")
+            try:
+                if imported:
+                    source = ensure_media_source(
+                        source, "Local audio path", allow_file_url=True
+                    )
+                else:
+                    source = ensure_web_url(source, "Episode media URL")
+            except UnsafeUrl as exc:
+                raise PlaybackUnavailable(str(exc)) from exc
+        # A finished episode's saved position is its duration; resuming
+        # there plays nothing. Replay restarts from the top.
+        start = float(episode.position_seconds)
+        if episode.duration_seconds and start >= max(0.0, float(episode.duration_seconds) - 2.0):
+            start = 0.0
+        if start_position is not None:
+            start = max(0.0, float(start_position))
+        speed = show.playback_speed if show else 1.0
+        download_first = (not force_stream and not local and is_web_url(source)
+                          and self.repository.get_setting("playback.download_first", "0") == "1")
+        with self._lock:
+            self._guard()
+            if cancelled is not None and cancelled():
+                return False
+            if episode.show_id in self._retiring_shows:
+                raise PlaybackUnavailable("This podcast is being removed. Choose another episode.")
+            self._raise_write_floor(episode.id, floor)
             # keep_session: this is a reopen of the episode already loaded, so
             # the sleep timer and the A-B loop carry over (see REOPEN_KEEPS).
             same = self.snapshot.episode_id == episode_id
             keep = keep_session and same
-            self._flush_listening()
-            self._persist_position(force=True)
-            self._flush_persistence()
             # Sleep is session-scoped: a new load's snapshot has no deadline,
             # so a still-armed timer would pause the NEXT episode unannounced.
             # Opening the episode already on the snapshot (the first Play of a
@@ -273,47 +323,6 @@ class PlaybackService:
             # listening session, so its timer carries on.
             if not same:
                 self.cancel_sleep_timer()
-            episode = self.repository.get_episode(episode_id)
-            if episode is None:
-                raise PlaybackUnavailable("Episode was not found.")
-            if episode.show_id in self._retiring_shows:
-                raise PlaybackUnavailable("This podcast is being removed. Choose another episode.")
-            show = self.repository.get_show(episode.show_id)
-            self._raise_write_floor(episode.id)
-            source = episode.media_url
-            local = False
-            if episode.downloaded_path:
-                downloaded = Path(episode.downloaded_path).expanduser()
-                if downloaded.is_file():
-                    source = str(downloaded)
-                    local = True
-            if not source:
-                raise PlaybackUnavailable("Episode has no playable media URL or local file.")
-            if not local:
-                # Provenance decides. A locally-imported show stores the file
-                # the user chose as a file:// URL, which is fine; a show that
-                # came from a feed may only name http(s), or a feed could pick
-                # a local file for the engine to open.
-                imported = bool(show is not None and show.source == "local")
-                try:
-                    if imported:
-                        source = ensure_media_source(
-                            source, "Local audio path", allow_file_url=True
-                        )
-                    else:
-                        source = ensure_web_url(source, "Episode media URL")
-                except UnsafeUrl as exc:
-                    raise PlaybackUnavailable(str(exc)) from exc
-            # A finished episode's saved position is its duration; resuming
-            # there plays nothing. Replay restarts from the top.
-            start = float(episode.position_seconds)
-            if episode.duration_seconds and start >= max(0.0, float(episode.duration_seconds) - 2.0):
-                start = 0.0
-            if cancelled is not None and cancelled():
-                return False
-            if start_position is not None:
-                start = max(0.0, float(start_position))
-            speed = show.playback_speed if show else 1.0
             kept = {name: getattr(self.snapshot, name)
                     for name in (self.REOPEN_KEEPS if keep else self.SLEEP_KEEPS if same else ())}
             # A load that was refused above leaves the restored episode waiting,
@@ -340,7 +349,7 @@ class PlaybackService:
                 speed=speed,
                 volume=self.snapshot.volume,
                 trim_level=show.trim_level if show else "off",
-                silence_saved=self.listening.silence_saved() if self.listening else 0.0,
+                silence_saved=silence_saved,
                 artwork_path=episode.artwork_path,
                 **kept,
             )
@@ -356,8 +365,7 @@ class PlaybackService:
                 raise
             self._rescued_source = ""
             self._load_autoplay = autoplay
-            if (not force_stream and not local and is_web_url(source)
-                    and self.repository.get_setting("playback.download_first", "0") == "1"):
+            if download_first:
                 # All entrypoints (Play, resume, bookmarks, Next and EOF) share
                 # this policy. The UI starts a bounded download, not a stream.
                 self._deferred_episode_id = episode.id
@@ -385,7 +393,8 @@ class PlaybackService:
                 self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED, download_request=0, message="")
                 self._emit()
                 return
-            self.load_episode(episode_id, autoplay=True, start_position=self._desired_position)
+            start = self._desired_position
+        self.load_episode(episode_id, autoplay=True, start_position=start)
 
     def update_preview_artwork(self, source: str, path: str):
         with self._lock:
@@ -427,18 +436,21 @@ class PlaybackService:
             source = ensure_web_url(source, "Stream URL")
         except UnsafeUrl as exc:
             raise PlaybackUnavailable(str(exc)) from exc
+        # Retire the outgoing library episode: persist its position and
+        # clear the stored current-playback row so a relaunch resumes it
+        # deliberately, not on top of this transient stream. Listening
+        # buckets flush to the outgoing show before the snapshot changes.
+        # The saves are queued under the lock and awaited without it.
         with self._lock:
             self._guard()
             if cancelled is not None and cancelled():
                 return False
-            # Retire the outgoing library episode: persist its position and
-            # clear the stored current-playback row so a relaunch resumes it
-            # deliberately, not on top of this transient stream. Listening
-            # buckets flush to the outgoing show before the snapshot changes.
             self._flush_listening()
             if self.snapshot.episode_id is not None:
                 self._persist_position(force=True)
-            self._flush_persistence()
+        self._flush_persistence()
+        with self._lock:
+            self._guard()
             if cancelled is not None and cancelled():
                 return False
             if self.snapshot.episode_id is not None:
@@ -527,6 +539,17 @@ class PlaybackService:
         self.load_episode(deferred, autoplay=autoplay)
         return True
 
+    def _episode_to_open(self):
+        """The library episode a Play has to open first, or None.
+
+        Called with the lock held; it changes nothing, so the caller can leave
+        the lock before the load, which waits on storage."""
+        if self._deferred_episode_id is not None:
+            return self._deferred_episode_id
+        if self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR} and self.snapshot.source:
+            return self.snapshot.episode_id  # None for a transient stream, which reloads without the library
+        return None
+
     def play_pause(self):
         with self._lock:
             self._guard()
@@ -537,27 +560,29 @@ class PlaybackService:
             if self.snapshot.download_request:
                 if self._load_autoplay:
                     self.pause()
-                else:
-                    self.load_episode(self.snapshot.episode_id, autoplay=True, start_position=self._desired_position)
+                    return
+                opening, start = self.snapshot.episode_id, self._desired_position
+            else:
+                opening, start = self._episode_to_open(), None
+            if opening is None:
+                if self.snapshot.state == PlaybackState.LOADING:
+                    self._load_autoplay = not self._load_autoplay
+                    if not self._resolving:
+                        (self.engine.play if self._load_autoplay else self.engine.pause)()
+                    self._emit()
+                elif self.snapshot.state == PlaybackState.PLAYING:
+                    self._load_autoplay = False
+                    self.engine.pause()
+                elif self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR} and self.snapshot.source:
+                    # After EOF the engine has unloaded the file; a bare
+                    # engine.play() does nothing. Reload the same source.
+                    self._replay_current()
+                elif self.snapshot.source:
+                    self._load_autoplay = True
+                    if not self._resolving:
+                        self.engine.play()
                 return
-            if self._materialize(autoplay=True):
-                return
-            if self.snapshot.state == PlaybackState.LOADING:
-                self._load_autoplay = not self._load_autoplay
-                if not self._resolving:
-                    (self.engine.play if self._load_autoplay else self.engine.pause)()
-                self._emit()
-            elif self.snapshot.state == PlaybackState.PLAYING:
-                self._load_autoplay = False
-                self.engine.pause()
-            elif self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR} and self.snapshot.source:
-                # After EOF the engine has unloaded the file; a bare
-                # engine.play() does nothing. Reload the same source.
-                self._replay_current()
-            elif self.snapshot.source:
-                self._load_autoplay = True
-                if not self._resolving:
-                    self.engine.play()
+        self.load_episode(opening, autoplay=True, start_position=start)
 
     def play(self):
         with self._lock:
@@ -566,15 +591,17 @@ class PlaybackService:
                 logger.info("Playback play requested: state=%s position=%.1fs",
                             self.snapshot.state.value, self.snapshot.position)
             self.intent_revision += 1
-            if self._materialize(autoplay=True):
+            opening = self._episode_to_open()
+            if opening is None:
+                if self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR} and self.snapshot.source:
+                    self._replay_current()
+                elif self.snapshot.source:
+                    self._load_autoplay = True
+                    if not self._resolving:
+                        self.engine.play()
+                    self._emit()
                 return
-            if self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR} and self.snapshot.source:
-                self._replay_current()
-            elif self.snapshot.source:
-                self._load_autoplay = True
-                if not self._resolving:
-                    self.engine.play()
-                self._emit()
+        self.load_episode(opening, autoplay=True)
 
     def _replay_current(self, position=None, autoplay=True, keep_notice=False):
         """Restart the finished item (library episode or transient stream).
@@ -673,21 +700,22 @@ class PlaybackService:
         from ..netlimits import request_scope
         with self._lock:
             self._guard()
-            episode = self.repository.get_episode(episode_id)
-            if episode is None:
-                raise PlaybackUnavailable("Episode was not found.")
-            if episode.show_id in self._retiring_shows:
-                raise PlaybackUnavailable("This podcast is being removed. Choose another episode.")
-            show = self.repository.get_show(episode.show_id)
-            local = Path(episode.downloaded_path).expanduser() if episode.downloaded_path else None
-            if local is not None and local.is_file():
-                source = str(local)
-            elif show is not None and show.source == "local":
-                source = ensure_media_source(episode.media_url, "Local audio path", allow_file_url=True)
-            else:
-                source = ensure_web_url(episode.media_url, "Episode media URL")
-            from ..urlguard import ensure_external_media_file
-            source = ensure_external_media_file(source)
+        self._library_ready()
+        episode = self.repository.get_episode(episode_id)
+        if episode is None:
+            raise PlaybackUnavailable("Episode was not found.")
+        if episode.show_id in self._retiring_shows:
+            raise PlaybackUnavailable("This podcast is being removed. Choose another episode.")
+        show = self.repository.get_show(episode.show_id)
+        local = Path(episode.downloaded_path).expanduser() if episode.downloaded_path else None
+        if local is not None and local.is_file():
+            source = str(local)
+        elif show is not None and show.source == "local":
+            source = ensure_media_source(episode.media_url, "Local audio path", allow_file_url=True)
+        else:
+            source = ensure_web_url(episode.media_url, "Episode media URL")
+        from ..urlguard import ensure_external_media_file
+        source = ensure_external_media_file(source)
         if is_web_url(source):
             # The same host screen the internal player applies: a feed must not
             # make the system opener request a loopback, link-local or metadata
@@ -699,6 +727,8 @@ class PlaybackService:
                 raise PlaybackUnavailable(str(exc)) from exc
         with self._lock:
             self._guard()
+            if episode.show_id in self._retiring_shows:
+                raise PlaybackUnavailable("This podcast is being removed. Choose another episode.")
             self.pause()
             ExternalPlayerEngine().load(source, autoplay=True)
 
@@ -716,12 +746,14 @@ class PlaybackService:
             if show_id in self._retiring_shows:
                 raise PlaybackUnavailable("This podcast is already being removed.")
             self._retiring_shows.add(show_id)
-            try:
-                if self.snapshot.show_id == show_id:
-                    self.stop()
-            except BaseException:
+            stopping = self.snapshot.show_id == show_id
+        try:
+            if stopping:
+                self.stop()  # waits on storage, so not under the lock
+        except BaseException:
+            with self._lock:
                 self._retiring_shows.discard(show_id)
-                raise
+            raise
 
     def end_show_retirement(self, show_id: int):
         """Removal worker/finalizer phase; no native-player operation."""
@@ -732,12 +764,15 @@ class PlaybackService:
         with self._lock:
             self._guard()
             self.intent_revision += 1
-            if self.snapshot.episode_id is not None:
-                self.repository.dequeue(self.snapshot.episode_id)
-            queue = [episode for episode in self.repository.list_queue()
-                     if episode.show_id not in self._retiring_shows]
-            if queue:
-                self.load_episode(queue[0].id, autoplay=True)
+            current = self.snapshot.episode_id
+        # The queue is read and changed without the service lock.
+        self._library_ready()
+        if current is not None:
+            self.repository.dequeue(current)
+        queue = [episode for episode in self.repository.list_queue()
+                 if episode.show_id not in self._retiring_shows]
+        if queue:
+            self.load_episode(queue[0].id, autoplay=True)
 
     def previous(self):
         self.seek(0.0)
@@ -786,15 +821,16 @@ class PlaybackService:
                 self._load_autoplay = True
                 self.snapshot = replace(self.snapshot, state=PlaybackState.LOADING)
                 self.seek(seconds, autoplay=True)
-            elif same and self._engine_loaded:
+                return
+            if same and self._engine_loaded:
                 # A chapter click is a play intent here as well: it moves a
                 # paused episode and starts it, as it does for one not loaded.
                 self._load_autoplay = True
                 self.seek(seconds, autoplay=True)
                 if self.snapshot.state == PlaybackState.PAUSED and not self._resolving:
                     self.engine.play()
-            else:
-                self.load_episode(episode_id, start_position=seconds, autoplay=True, cancelled=cancelled)
+                return
+        self.load_episode(episode_id, start_position=seconds, autoplay=True, cancelled=cancelled)
 
     def current_identity(self):
         # No lock on purpose: the window thread asks, and the lock can be held
@@ -820,12 +856,15 @@ class PlaybackService:
                 return
             if relative:
                 seconds = max(0.0, self.snapshot.position + seconds)
-                if self.snapshot.duration and seconds > self.snapshot.duration:
-                    self.next()
-                    return
+                past_end = bool(self.snapshot.duration) and seconds > self.snapshot.duration
             elif seconds < 0 or (self.snapshot.duration > 0 and seconds > self.snapshot.duration):
                 return
-            self.seek(seconds)
+            else:
+                past_end = False
+            if not past_end:
+                self.seek(seconds)
+                return
+        self.next()  # reads the library, so not under the lock
 
     def _global_skip(self, name: str, default: int, low: int, high: int) -> int:
         """The Settings skip length, bounded like a new podcast's own."""
@@ -1386,14 +1425,17 @@ class PlaybackService:
                 if self._dead or generation != self._load_generation or self.snapshot.source != source:
                     return  # Stop, a new load or the watchdog already decided.
                 position, autoplay = self._desired_position, self._load_autoplay
-                try:
-                    if episode_id is not None:
-                        self.load_episode(episode_id, autoplay=autoplay, start_position=position,
-                                          force_stream=True, keep_session=True)
-                    else:
+            try:
+                if episode_id is not None:
+                    # Reads the library, so it runs without the service lock.
+                    self.load_episode(episode_id, autoplay=autoplay, start_position=position,
+                                      force_stream=True, keep_session=True)
+                else:
+                    with self._lock:
                         self._replay_current(position=position, autoplay=autoplay, keep_notice=True)
-                except Exception as exc:
-                    logger.error("Playback stream recovery failed: %s", redact(exc))
+            except Exception as exc:
+                logger.error("Playback stream recovery failed: %s", redact(exc))
+                with self._lock:
                     self._cancel_load_watchdog()
                     self._resolving = False
                     self._load_autoplay = False
@@ -1528,12 +1570,14 @@ class PlaybackService:
         self._last_write_stamp = max(time.time(), self._last_write_stamp + 0.000001)
         return self._last_write_stamp
 
-    def _raise_write_floor(self, episode_id=None):
+    def _raise_write_floor(self, episode_id=None, floor=None):
         # Stored stamps survive restarts. Before writing a row, issue stamps
         # above its stored one, so a clock that has moved back since the
-        # previous run cannot make every later save match no row.
-        self._last_write_stamp = max(self._last_write_stamp,
-                                     self.repository.write_stamp_floor(episode_id))
+        # previous run cannot make every later save match no row. `floor` is
+        # the stored stamp when the caller already read it outside the lock.
+        if floor is None:
+            floor = self.repository.write_stamp_floor(episode_id)
+        self._last_write_stamp = max(self._last_write_stamp, floor)
 
     def _set_current_playback(self, episode_id, state, deferred=None):
         stamp = self._write_stamp()
