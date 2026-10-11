@@ -3379,6 +3379,7 @@ class SearchOverlay(QFrame):
         self.card.layout().setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
         self.card.layout().setSpacing(SPACE["md"])
         self.results.setMinimumHeight(scaled_px(240))
+        self._fit_card()
         heights = {"podcast": 54, "episode": 62, "directory": 42}
         for row in range(self.results.count()):
             item = self.results.item(row)
@@ -3386,12 +3387,17 @@ class SearchOverlay(QFrame):
             if payload and payload[0] in heights:
                 item.setSizeHint(QSize(0, scaled_px(heights[payload[0]])))
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
+    def _fit_card(self):
+        """Card width for the overlay's current size and text scale; the
+        layout alone would give it its size hint."""
         margin = min(SPACE["xl"], max(4, self.width() // 20))
         self.layout().setContentsMargins(margin, margin, margin, margin)
         self.card.setMinimumWidth(0)
         self.card.setFixedWidth(max(1, min(scaled_px(760), self.width() - 2 * margin)))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_card()
         self.results.setMinimumHeight(0)
         self.results.setMaximumHeight(max(40, self.height() - scaled_px(170)))
 
