@@ -943,15 +943,13 @@ class DownloadService:
             self.downloads.progress(episode_id, DownloadState.ERROR, done, total, str(exc))
             self._emit(episode_id, DownloadState.ERROR, done, total, str(exc))
             raise
-        except requests.RequestException as exc:
+        except requests.RequestException:
             if cancellation.is_set():
                 return self._park(episode_id, partial)
-            done = partial.stat().st_size if partial.exists() else 0
-            message = describe_network_error(exc, "the episode link")
-            self.downloads.progress(
-                episode_id, DownloadState.ERROR, done, 0, message
-            )
-            self._emit(episode_id, DownloadState.ERROR, done, 0, message)
+            # download() retries this. The row keeps its state while it backs
+            # off (an Error row offers Retry, which does nothing while the
+            # transfer is still registered); the Error is recorded there after
+            # the last attempt.
             raise
         except OSError as exc:
             if cancellation.is_set():
