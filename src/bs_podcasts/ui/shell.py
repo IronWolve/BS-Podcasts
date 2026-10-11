@@ -2088,9 +2088,9 @@ class MainWindow(QMainWindow):
             return
         library = self.library
 
-        def apply(_count):
+        def apply(added):
             self._reload_queue()
-            self._notify(f"Added {len(ids)} episode{'s' if len(ids) != 1 else ''} to Up Next", "success", "Show", self._show_queue)
+            self._notify(f"Added {added} episode{'s' if added != 1 else ''} to Up Next", "success", "Show", self._show_queue)
 
         # One transaction on a worker instead of one commit per row on the
         # click thread.
@@ -2101,9 +2101,9 @@ class MainWindow(QMainWindow):
             return
         ids = [episode_id for episode_id in ids if episode_id]
         if ids and self._confirm_bulk(len(ids), "Add to Up Next"):
-            def apply(_count):
+            def apply(added):
                 self._reload_queue()
-                self._notify(f"Added {len(ids)} episode{'s' if len(ids) != 1 else ''} to Up Next", "success", "Show", self._show_queue)
+                self._notify(f"Added {added} episode{'s' if added != 1 else ''} to Up Next", "success", "Show", self._show_queue)
             self._run_read(lambda: self.library.enqueue_many(ids), apply, 'queue-selection', pool=self.commands, coalesce=False)
 
     def _podcast_settings(self):
