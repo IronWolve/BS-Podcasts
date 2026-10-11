@@ -26,7 +26,10 @@ def private_path(name, tokens=()):
     return (not parts or parts[0].lower() in PRIVATE_ROOTS
             or any(part.lower() in PRIVATE_NAMES for part in parts)
             or any(part.startswith('.') for part in parts if part not in {'.gitignore', '.gitattributes'})
-            or PurePosixPath(name).suffix.lower() in {'.db', '.sqlite', '.sqlite3', '.log', '.pcap', '.key', '.pem'}
+            or PurePosixPath(name).suffix.lower() in {'.db', '.sqlite', '.sqlite3', '.db-wal', '.db-shm', '.sqlite-journal',
+                                                      '.log', '.pcap', '.key', '.pem', '.p12', '.pfx', '.jks', '.keystore',
+                                                      '.kdbx', '.bak'}
+            or any(part.lower().endswith('.env') for part in parts)
             or any(token.casefold() in folded for token in tokens if token))
 
 
