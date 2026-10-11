@@ -2,3 +2,4 @@
 packaging/licenses/Native-bundled-third-party.txt -whitespace
 packaging/licenses/Python-bundled-third-party.txt -whitespace
 packaging/licenses/Qt-6.11.2-third-party.txt -whitespace
+src/bs_podcasts/assets/fonts/OFL.txt -whitespace
