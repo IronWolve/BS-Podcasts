@@ -1,6 +1,6 @@
 """Optional Linux MPRIS service implemented with bundled QtDBus."""
 
-from PySide6.QtCore import ClassInfo, Property, QObject, Qt, Slot, QUrl
+from PySide6.QtCore import ClassInfo, Property, QObject, Qt, Signal, Slot, QUrl
 from PySide6.QtDBus import QDBusAbstractAdaptor, QDBusConnection, QDBusMessage, QDBusObjectPath
 from hashlib import sha256
 import math
@@ -71,6 +71,9 @@ class _RootAdaptor(QDBusAbstractAdaptor):
 
 @ClassInfo({"D-Bus Interface": "org.mpris.MediaPlayer2.Player"})
 class _PlayerAdaptor(QDBusAbstractAdaptor):
+    # The position, in microseconds, after it moved other than by playing.
+    Seeked = Signal("qlonglong")
+
     def __init__(self, host):
         super().__init__(host)
         self.host = host
@@ -221,6 +224,7 @@ class MprisController(QObject):
         self._artwork_pending = False
         self._artwork_retry_after = 0.0
         self._artwork_token = 0
+        self._position_seen = None
         self.root_adaptor = _RootAdaptor(self)
         self.player_adaptor = _PlayerAdaptor(self)
         bus = QDBusConnection.sessionBus()
@@ -241,7 +245,10 @@ class MprisController(QObject):
     def _playback_changed(self, _snapshot):
         if not self.available:
             return
-        self._refresh_artwork(self.playback.snapshot)
+        snapshot = self.playback.snapshot
+        self._refresh_artwork(snapshot)
+        if self._position_jumped(snapshot):
+            self.player_adaptor.Seeked.emit(int(snapshot.position * 1_000_000))
         # Emit on change only. Every 10 Hz position tick used to broadcast
         # the full property map; the spec also says Position
         # is never signalled through PropertiesChanged.
@@ -263,6 +270,20 @@ class MprisController(QObject):
         )
         message.setArguments(["org.mpris.MediaPlayer2.Player", changed, []])
         QDBusConnection.sessionBus().send(message)
+
+    def _position_jumped(self, snapshot):
+        """True when the position of the same track moved other than by playing.
+
+        A client assumes a playing track advances at its rate and a paused one
+        stands still; Seeked tells it when that is wrong, a seek from a client
+        or from the app."""
+        now = time.monotonic()
+        track = (snapshot.episode_id, snapshot.source, snapshot.load_generation)
+        previous = self._position_seen
+        self._position_seen = (track, snapshot.position, now, snapshot.speed if str(snapshot.state) == "playing" else 0.0)
+        if previous is None or previous[0] != track or not math.isfinite(snapshot.position):
+            return False
+        return abs(snapshot.position - (previous[1] + (now - previous[2]) * previous[3])) > 1.0
 
     def _refresh_artwork(self, snapshot):
         key = (snapshot.artwork_path, snapshot.load_generation)
