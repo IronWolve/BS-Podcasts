@@ -36,6 +36,12 @@ def prune_previous_deployments(root, keep=3, retain=None):
     return removed
 
 
+def receipt_source(snapshot):
+    """The commit and dirty state that stage() recorded for this snapshot, in the shape the currency check reads."""
+    origin = json.loads((snapshot/'.build-origin.json').read_text(encoding='utf-8'))
+    return {'commit': origin.get('commit'), 'dirty': bool(origin.get('dirty', True))}
+
+
 def install_entrypoints(workspace, destination, previous, report=None, changed=None):
     changed = [] if changed is None else changed
     template = '''#!/usr/bin/env bash
@@ -108,6 +114,7 @@ def _deploy_staged(workspace, destination, temporary, prune, report):
     deployed = [*runtime.values(), 'native/libmpv.so.2', 'native/native-build.json']
     record = {'version':version,'built_at':datetime.now(timezone.utc).isoformat(),
               'source_sha256':source_digest(snapshot),
+              'source':receipt_source(snapshot),
               'files':{relative:file_digest(temporary/relative) for relative in deployed},
               'native':receipt}
     (temporary/'deployment.json').write_text(json.dumps(record,indent=2)+'\n')
