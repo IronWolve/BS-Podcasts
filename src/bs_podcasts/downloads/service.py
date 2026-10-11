@@ -209,6 +209,12 @@ class DownloadService:
         self._retiring_episodes = set()
         self._deleting_episodes = set()
         self._listeners = []
+        # Listener failures already logged, so one that fails on every
+        # progress event is reported once, not once per event.
+        self._listener_failures = set()
+        # Where the last limited missing-file pass stopped; the next one
+        # carries on from there.
+        self._missing_check_offset = 0
         self._lock = Lock()
         # Queued tickets waiting to be recorded as rows, and the episodes whose
         # row write is in flight; `_settled` wakes callers waiting on one.
@@ -577,7 +583,7 @@ class DownloadService:
         ]
         if limit is not None and eligible:
             count = min(len(eligible), max(1, int(limit)))
-            offset = getattr(self, "_missing_check_offset", 0) % len(eligible)
+            offset = self._missing_check_offset % len(eligible)
             eligible = (eligible[offset:] + eligible[:offset])[:count]
             self._missing_check_offset = offset + count
         checked = []
@@ -1255,5 +1261,8 @@ class DownloadService:
         for listener in tuple(self._listeners):
             try:
                 listener(event)
-            except Exception:
-                continue
+            except Exception as exc:
+                name = getattr(listener, "__qualname__", type(listener).__name__)
+                if (name, type(exc)) not in self._listener_failures:
+                    self._listener_failures.add((name, type(exc)))
+                    _log.warning("Download listener %s failed: %s [%s]", name, exc, type(exc).__name__)
