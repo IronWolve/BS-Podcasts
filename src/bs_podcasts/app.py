@@ -991,6 +991,7 @@ def main() -> int:
                 _ShowWatcher(old, rebuild_when_possible)
             return
         pending["rebuild"] = False
+        began = time.monotonic()
         view_state = old._capture_view_state() if old is not None else None
         quit_on_close = app.quitOnLastWindowClosed()
         if old is not None:
@@ -1026,8 +1027,14 @@ def main() -> int:
                         QCoreApplication.sendPostedEvents(old, QEvent.Type.DeferredDelete)
                     except RuntimeError:
                         pass  # the loop already deleted it
+                closed = time.monotonic()
                 apply_app_stylesheet(app)
+                styled = time.monotonic()
                 build_window(view_state)
+                # Same idea as the startup phase line: a slow rebuild on a
+                # large library shows up in a normal log.
+                logger.info("window rebuild: close=%.2fs stylesheet=%.2fs window=%.2fs",
+                            closed - began, styled - closed, time.monotonic() - styled)
             except Exception:
                 if state["window"] is old:
                     state["window"] = None  # deleted; the quit handlers must not reach into it
