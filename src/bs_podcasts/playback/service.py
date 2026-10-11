@@ -1360,8 +1360,12 @@ class PlaybackService:
                               if getattr(session, "supports_deadlines", False)
                               else ensure_fetchable(source, "Episode media URL"))
                     with session.get(source, stream=True, timeout=(8, 15), allow_redirects=True) as response:
-                        return str(response.url) if response.status_code < 400 else ""
-        except Exception:
+                        if response.status_code < 400:
+                            return str(response.url)
+                        logger.info("Playback redirect resolution failed: HTTP %s", response.status_code)
+                        return ""
+        except Exception as exc:
+            logger.info("Playback redirect resolution failed: %s: %s", type(exc).__name__, redact(exc))
             return ""
 
     def _start_redirect_rescue(self) -> bool:
