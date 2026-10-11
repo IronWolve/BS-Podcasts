@@ -1,6 +1,7 @@
 """Current public podcast-chart reader using serialized page data."""
 
 import json
+import logging
 import re
 import time
 from threading import Lock
@@ -54,13 +55,17 @@ class DirectoryCharts:
         if cached and time.time() - cached[0] < self.cache_seconds:
             return cached[1]
 
+        primary = None
         try:
             results = self._full_chart(chart_type, chart_category)
             if results:
                 self._store(key, results, revision)
                 return results
-        except DirectoryError:
-            pass
+        except DirectoryError as exc:
+            primary = exc
+            logging.getLogger(__name__).info(
+                "Directory %s chart: full chart failed, trying the page: %s", chart_type, exc
+            )
 
         import requests  # session use above has already imported it; needed for the except below
 
@@ -87,7 +92,10 @@ class DirectoryCharts:
             if not isinstance(shelves, list):
                 raise DirectoryError("Directory chart shelves are not a list.")
         except (requests.RequestException, ValueError, KeyError, IndexError, TypeError, RecursionError) as exc:
-            raise DirectoryError(describe_network_error(exc, "the directory")) from exc
+            detail = describe_network_error(exc, "the directory")
+            if primary is not None:
+                detail = f"{detail} (the full chart also failed: {primary})"
+            raise DirectoryError(detail) from exc
 
         wanted = CHART_TITLES[chart_type]
         shelf = next(
