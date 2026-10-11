@@ -61,6 +61,19 @@ class DownloadRepository:
             row = connection.execute(self._select() + " WHERE d.episode_id=?", (episode_id,)).fetchone()
         return self._record(row) if row else None
 
+    def records_by_ids(self, episode_ids) -> dict[int, DownloadRecord]:
+        """Fetch download records in bounded batches, keyed by episode id."""
+        ids = list(dict.fromkeys(int(value) for value in episode_ids if value))
+        result = {}
+        with self.database.connect() as connection:
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                query = self._select() + " WHERE d.episode_id IN (" + ",".join("?" for _ in batch) + ")"
+                for row in connection.execute(query, batch):
+                    record = self._record(row)
+                    result[record.episode_id] = record
+        return result
+
     def list(self) -> list[DownloadRecord]:
         with self.database.connect() as connection:
             rows = connection.execute(self._select() + " ORDER BY d.updated_at DESC").fetchall()

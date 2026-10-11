@@ -1097,8 +1097,11 @@ class DownloadService:
             return used_by_app, None, None
         return used_by_app, usage.free, usage.total
 
-    def cleanup_preview(self, episode_id: int):
-        return self.downloads.cleanup_preview(episode_id)
+    def records_by_ids(self, episode_ids) -> dict:
+        return self.downloads.records_by_ids(episode_ids)
+
+    def cleanup_preview(self, episode_id: int, *, record=None):
+        return self.downloads.cleanup_preview(episode_id, record=record)
 
     def retention_candidates(self, show, keep=()) -> list:
         """Downloads a podcast's retention rule may remove right now.
