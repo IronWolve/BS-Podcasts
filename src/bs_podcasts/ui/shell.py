@@ -165,7 +165,7 @@ def _fetch_feed_preview(fetcher, feed_url, checkpoint=lambda: None):
     `checkpoint` runs between the request and the parse (a deadline check)."""
     from ..feeds.parser import parse_feed
 
-    response = fetcher.fetch(feed_url)
+    response = fetcher.fetch(feed_url, reuse_recent=True)
     checkpoint()
     return prepare_preview(parse_feed(response.content, base_url=response.final_url))
 
