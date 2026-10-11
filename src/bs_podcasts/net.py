@@ -257,7 +257,7 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
                 response = bounded_call(work, state, dispose=abort_response)
                 state.expires = state.started + budget
                 _fail_long_retry_after(response, state, host)
-                if not streaming:
+                if not streaming and response.ok:
                     response.content
                 return response
             except NetworkDeadline as exc:
