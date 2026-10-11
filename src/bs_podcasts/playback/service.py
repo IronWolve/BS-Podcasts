@@ -184,6 +184,7 @@ class PlaybackService:
     STREAM_RECOVERY_WINDOW = 600.0
     START_TOLERANCE = 10.0
     NOTICE_SECONDS = 12.0  # how long the can't-seek notice stays on the player bar
+    SLEEP_RECHECK = 15.0  # longest a sleep timer waits before it compares the wall clock again
     SEEK_UNSUPPORTED = "This server can’t seek, so playback started from the beginning. Your saved position was kept."
     RECONNECTING = "Reconnecting…"
     # Snapshot fields that belong to the listening session, not to one opening
@@ -979,10 +980,27 @@ class PlaybackService:
                 return
             deadline = time.time() + seconds
             self.snapshot = replace(self.snapshot, sleep_deadline=deadline)
-            self._sleep_timer = Timer(seconds, self._sleep_expired, args=(self._sleep_token,))
-            self._sleep_timer.daemon = True
-            self._sleep_timer.start()
+            self._arm_sleep_timer(deadline)
             self._emit()
+
+    def _arm_sleep_timer(self, deadline: float):
+        # The countdown on screen is wall-clock time, but a timer counts on the
+        # monotonic clock, which a suspend stops and a clock change does not
+        # touch. Wait in short steps and compare the shown deadline each time.
+        wait = max(0.0, min(self.SLEEP_RECHECK, deadline - time.time()))
+        self._sleep_timer = Timer(wait, self._sleep_tick, args=(self._sleep_token,))
+        self._sleep_timer.daemon = True
+        self._sleep_timer.start()
+
+    def _sleep_tick(self, token):
+        with self._lock:
+            if self._dead or token != self._sleep_token:
+                return
+            deadline = self.snapshot.sleep_deadline
+            if deadline is not None and deadline - time.time() > 0.5:
+                self._arm_sleep_timer(deadline)  # the shown deadline is not here yet
+                return
+        self._sleep_expired(token)
 
     def set_sleep_at_end(self):
         """Stop when the current episode ends instead of after N minutes."""
