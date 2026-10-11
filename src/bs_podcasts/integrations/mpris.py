@@ -79,7 +79,11 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
 
     @Property(str)
     def PlaybackStatus(self):
-        state = str(self.host.playback.snapshot.state)
+        playback = self.host.playback
+        state = str(playback.snapshot.state)
+        if state == "loading":
+            # A stream that is opening with autoplay set is about to play.
+            return "Playing" if getattr(playback, "_load_autoplay", False) else "Paused"
         return "Playing" if state == "playing" else "Paused" if state == "paused" else "Stopped"
 
     @Property(float)
@@ -166,7 +170,9 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
 
     @Slot()
     def PlayPause(self):
-        self._command("play_pause")
+        # The action that matches the reported status, not a toggle that
+        # reverses while a stream is still opening.
+        self._command("pause" if self.PlaybackStatus == "Playing" else "play")
 
     @Slot()
     def Stop(self):
