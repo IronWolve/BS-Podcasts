@@ -23,6 +23,7 @@ from hashlib import sha256
 import logging
 import re
 import shutil
+import sqlite3
 import stat
 import time
 
@@ -1000,11 +1001,31 @@ class DownloadService:
         # `done` is the transfer's own byte count and equals the file size.
         # Calling stat() here let a concurrent delete turn a complete,
         # correctly-named file into an ERROR record at 0/0.
-        self.downloads.complete(episode_id, str(target), done, length_verified=length_verified)
+        self._record_complete(episode_id, target, done, length_verified)
         note_completed_download(target)
         self._emit(episode_id, DownloadState.COMPLETE, done, done,
                    "" if length_verified else "Audio length is unverified; automatic cleanup will keep this file.")
         return self.downloads.get(episode_id)
+
+    COMPLETE_WRITE_DELAYS = (0.25, 1.0, 2.0)
+
+    def _record_complete(self, episode_id: int, target: Path, done: int, length_verified: bool):
+        """Write the complete row for a file that is already in place.
+
+        A database error here, with the file already renamed, would leave an
+        Error row beside a finished file, and the next Retry would transfer
+        the whole episode again. A locked or busy database usually clears in
+        a moment, so the write is tried again before the error is allowed
+        to stand."""
+        delays = self.COMPLETE_WRITE_DELAYS
+        for attempt in range(len(delays) + 1):
+            try:
+                self.downloads.complete(episode_id, str(target), done, length_verified=length_verified)
+                return
+            except sqlite3.Error:
+                if attempt == len(delays):
+                    raise
+                time.sleep(delays[attempt])
 
     @staticmethod
     def _duration_matches(path: Path, expected: float) -> bool:
