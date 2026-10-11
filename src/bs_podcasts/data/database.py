@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -12,9 +13,17 @@ import weakref
 import tempfile
 import time
 import stat
-from .files import private_file
+from .files import atomic_write, private_file
 
 _log = logging.getLogger("bs_podcasts")
+
+# Optimize and Reindex copy the whole library into backups/ first. After each
+# copy the oldest copies this code wrote are removed so the newest few stay.
+# Only names recorded in the ledger file are ever removed (see _prune_backups).
+BACKUPS_KEPT = 5
+_BACKUP_LEDGER = ".created-backups"
+_BACKUP_NAME = re.compile(r"library-\d{8}-\d{6}-\d{6}\.db")
+_backup_lock = threading.Lock()
 
 
 class _Connection(sqlite3.Connection):
@@ -425,7 +434,42 @@ class Database:
             os.replace(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)
+        self._prune_backups(directory, target.name)
         return target
+
+    @staticmethod
+    def _prune_backups(directory: Path, created: str):
+        """Keep the newest BACKUPS_KEPT copies this code wrote; remove older ones.
+
+        backups/ also holds copies this code did not write: an earlier
+        version's, a hand-made one, copies of a damaged library. Only a name
+        that backup() recorded in the ledger (one name per line), that is the
+        exact name backup() writes, and that is still a regular file can be
+        removed, so those are never touched and opening a library prunes
+        nothing. A failure here never fails the backup it follows; a copy
+        that could not be removed stays listed and is tried again next time.
+        """
+        ledger = directory / _BACKUP_LEDGER
+        with _backup_lock:
+            try:
+                try:
+                    listed = ledger.read_text(encoding="utf-8", errors="replace").split("\n")
+                except FileNotFoundError:
+                    listed = []
+                owned = sorted({name for name in (*listed, created) if _BACKUP_NAME.fullmatch(name)
+                                and (directory / name).is_file() and not (directory / name).is_symlink()})
+                kept = []
+                for index, name in enumerate(owned):
+                    if index < len(owned) - BACKUPS_KEPT:
+                        try:
+                            (directory / name).unlink(missing_ok=True)
+                            continue
+                        except OSError as exc:
+                            _log.warning("Could not remove old library backup %s: %s", name, exc)
+                    kept.append(name)
+                atomic_write(ledger, "".join(name + "\n" for name in kept).encode("utf-8"))
+            except OSError as exc:
+                _log.warning("Could not prune old library backups: %s", exc)
 
     def reindex(self):
         with self._lock.exclusive():
