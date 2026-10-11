@@ -1421,7 +1421,12 @@ class MainWindow(QMainWindow):
             if not self._closed or self._keep_services:
                 self._business_bridge.completed.emit(payload)
         elif not self._closed:
-            self._bridge.completed.emit(payload)
+            try:
+                self._bridge.completed.emit(payload)
+            except RuntimeError:
+                # The window and its child bridge were deleted between the
+                # flag test above and the emit; nothing is left to receive it.
+                pass
         elif self._keep_services and payload[0] in {'read', 'command'}:
             # Old view callbacks cannot be invoked, but completed mutations
             # still need to refresh the replacement view's durable state.
