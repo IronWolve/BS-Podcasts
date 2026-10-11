@@ -342,11 +342,17 @@ class DownloadService:
 
         Returns 1 while it is still running, so a quit can count it among the
         background work it did not wait out. Its thread is a daemon outside
-        the job pools and is otherwise unaccounted for.
+        the job pools and is otherwise unaccounted for. Downloads it has not
+        recorded yet are named in a warning, since a quit loses them.
         """
         with self._settled:
             self._settled.wait_for(lambda: not self._intent_writer, max(0.0, timeout))
-            return int(self._intent_writer)
+            running = int(self._intent_writer)
+            unrecorded = len(self._recording) + sum(
+                1 for episode_id, ticket in self._intents if self._queued.get(episode_id) is ticket)
+        if unrecorded:
+            _log.warning("Quit left %d queued download(s) unrecorded; queue them again after a restart.", unrecorded)
+        return running
 
     def _await_intent(self, episode_id: int):
         """Let an in-flight queued-row write land before the row is read or rewritten.
