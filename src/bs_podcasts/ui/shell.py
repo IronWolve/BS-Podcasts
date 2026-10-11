@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
-from ..config import APP_NAME, RELEASES_URL, RELEASES_API_URL, app_version
+from ..config import APP_NAME, RELEASES_URL, RELEASES_API_URL, app_version, cache_dir
 from ..logging_setup import log_path
 from ..domain import DownloadState, FeedData, FeedEpisodeData, Health
 from ..domain.times import format_media_time
@@ -2545,7 +2545,7 @@ class MainWindow(QMainWindow):
         return (
             data_root, database_path, download_path, download_text, artwork_path,
             self._format_bytes(artwork_bytes) if include_usage else "Calculating…",
-            os.environ.get("TMPDIR", "System temporary directory"), str(log_path()),
+            str(cache_dir() / "probes"), str(log_path()),
             backups_text,
         )
 
