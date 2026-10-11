@@ -3375,8 +3375,13 @@ class NowPlayingView(QFrame):
             selection.cursor = cursor
             selection.format.setBackground(QColor(COLORS["accent_soft"]))
             self.transcript.setExtraSelections([selection])
-            if self._transcript_user_scrolled or self.transcript.textCursor().hasSelection():
+            selected = self.transcript.textCursor().hasSelection()
+            if self._transcript_user_scrolled or selected:
+                # A selection holds the view too; say so, as a manual scroll does.
+                if selected:
+                    self.follow_transcript_button.show()
                 return
+            self.follow_transcript_button.hide()
             self._ignore_transcript_scroll = True
             self.transcript.setTextCursor(QTextCursor(block))
             self.transcript.ensureCursorVisible()
