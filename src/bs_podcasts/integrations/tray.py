@@ -38,6 +38,7 @@ class TrayController:
         self.playback = playback
         self._message_callback = None
         self._connected = False
+        self._revision = 0
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         tray = QSystemTrayIcon(_tray_icon(), window)
@@ -88,8 +89,14 @@ class TrayController:
     def _playback_changed(self, snapshot):
         if self.tray is None:
             return
+        # Engine-thread emissions arrive through a queued connection, so an
+        # older snapshot can land after a newer one; the window drops those too.
+        revision = getattr(snapshot, "revision", 0)
+        if revision and revision < getattr(self, "_revision", 0):
+            return
+        self._revision = revision
         if not snapshot.source:
-            texts = ("Nothing playing", APP_TITLE, "Play / Pause")
+            texts =("Nothing playing", APP_TITLE, "Play / Pause")
         else:
             title = snapshot.title if len(snapshot.title) <= 60 else snapshot.title[:57] + "…"
             state = str(snapshot.state)
