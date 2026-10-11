@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 
 from . import icons
 from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
-from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
+from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, connect_hover_readout, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
 from .widgets import fit_combo_width, quiet_signals
 from .widgets import PlainTextLabel, wheel_needs_focus, exec_menu, FlowLayout
 from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, reduced_motion, scaled_px, system_theme, theme_name
@@ -1341,6 +1341,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         view.setAccessibleName(f"{title} list")
         self.delegate = EpisodeDelegate(view, reorder=reorder)
         view.setItemDelegate(self.delegate)
+        connect_hover_readout(self.delegate)
         self._init_list(view, EpisodeModel(items), EmptyState(*empty, glyph=glyph))
         self.view.selectionModel().selectionChanged.connect(self._selection_changed)
         self._connect_filter_box()
@@ -1702,6 +1703,7 @@ class HomePage(BasePage, _ListPageMixin):
         view.setAccessibleName("New episodes")
         self.delegate = EpisodeDelegate(view)
         view.setItemDelegate(self.delegate)
+        connect_hover_readout(self.delegate)
         self._init_list(
             view,
             EpisodeModel(()),

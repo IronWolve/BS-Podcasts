@@ -600,6 +600,10 @@ class EpisodeDelegate(QStyledItemDelegate):
     # attribute (mutated from Settings, like theme COLORS) so every list
     # shares the value; views need doItemsLayout() after a change.
     SNIPPET_LINES = 2
+    # Hover readouts are shown by the view that owns this delegate (see
+    # widgets.connect_hover_readout), so this module never imports the widgets.
+    hoverRequested = Signal(str, int, int)
+    hoverCleared = Signal()
 
     def __init__(self, parent=None, compact: bool = False, reorder: bool = False):
         super().__init__(parent)
@@ -639,16 +643,13 @@ class EpisodeDelegate(QStyledItemDelegate):
     def helpEvent(self, event, view, option, index):
         """Keep the episode tooltip anchored to the row that owns it."""
         if not self.hover_allowed(view):
-            from .widgets import hide_hover_bubble
-            hide_hover_bubble()
+            self.hoverCleared.emit()
             QToolTip.hideText()
             return True
         if event.type() == QEvent.Type.ToolTip and index.isValid():
             item = index.data(ItemRoles.ITEM)
             if self.can_queue(item) and self.queue_rect(option.rect).contains(event.pos()):
-                from .widgets import hide_hover_bubble
-
-                hide_hover_bubble()
+                self.hoverCleared.emit()
                 QToolTip.showText(event.globalPos(), "Add to Up Next", view)
                 return True
             if self.can_open_show(item) and self.show_rect(option.rect, item).contains(event.pos()):
@@ -656,14 +657,10 @@ class EpisodeDelegate(QStyledItemDelegate):
                 return True
             tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
             if tooltip:
-                from .widgets import show_hover_bubble
-
                 point = event.globalPos()
-                show_hover_bubble(tooltip, point.x(), point.y() - 6)
+                self.hoverRequested.emit(tooltip, point.x(), point.y() - 6)
                 return True
-        from .widgets import hide_hover_bubble
-
-        hide_hover_bubble()
+        self.hoverCleared.emit()
         QToolTip.hideText()
         return False
 

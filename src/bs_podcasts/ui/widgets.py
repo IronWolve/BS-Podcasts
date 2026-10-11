@@ -1868,6 +1868,12 @@ def hide_hover_bubble():
         _shared_bubble.hide()
 
 
+def connect_hover_readout(delegate):
+    """The view that owns an item delegate shows and hides its hover readouts."""
+    delegate.hoverRequested.connect(show_hover_bubble)
+    delegate.hoverCleared.connect(hide_hover_bubble)
+
+
 class SeekSlider(QSlider):
     """Click-to-seek slider with hover time readout and chapter markers."""
 
@@ -2477,6 +2483,7 @@ class ContextPanel(QFrame):
     def attach_queue_model(self, model, delegate):
         self.queue_view.setModel(model)
         self.queue_view.setItemDelegate(delegate)
+        connect_hover_readout(delegate)
         model.order_changed.connect(self.queue_reordered)
 
     def set_queue(self, episodes):
