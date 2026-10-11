@@ -6299,6 +6299,7 @@ class MainWindow(QMainWindow):
             layout.addWidget(choose, 1)
             layout.addWidget(remove)
             action.setDefaultWidget(row)
+            action.setData(query)
             # Enter on a highlighted row runs that search, as a click does.
             action.triggered.connect(choose.click)
             menu.addAction(action)
@@ -6307,6 +6308,9 @@ class MainWindow(QMainWindow):
             clear = menu.addAction("Clear all")
             clear.setToolTip("Clear all recent searches")
             clear.triggered.connect(self._clear_discover_search_history)
+        # The remove buttons are pointer targets inside the menu: Delete on
+        # the highlighted row removes it (see eventFilter).
+        menu.setProperty("bsSearchHistory", True)
         field = self.discover_page.header.search
         menu.setMinimumWidth(max(240, field.width()))
         return menu
@@ -8017,6 +8021,18 @@ class MainWindow(QMainWindow):
             # the only keyboard way to a non-contiguous selection.
             event.accept()
             return True
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}
+            and isinstance(watched, QMenu)
+            and watched.property("bsSearchHistory")
+        ):
+            action = watched.activeAction()
+            query = action.data() if action is not None else None
+            if isinstance(query, str) and query:
+                self._remove_discover_search(query)
+                watched.close()
+                return True
         if (
             event.type() == QEvent.Type.KeyPress
             and event.key() == Qt.Key.Key_Space
