@@ -318,6 +318,7 @@ class MainWindow(QMainWindow):
         self._discover_newest_total = 0
         self._discover_newest_done = 0
         self._discover_newest_summary = ""
+        self._discover_newest_beyond = 0
         self._newest_dates = OrderedDict()
         self._discover_scan_toast = False
         self._discover_scan_cancelled = False
@@ -6197,6 +6198,8 @@ class MainWindow(QMainWindow):
     # How long a feed's newest date, read by the Newest sort, answers a rescan.
     NEWEST_DATE_SECONDS = 3600
     NEWEST_DATE_ENTRIES = 2000
+    # Cards whose feed one Newest scan reads (the Result depth default is 200).
+    NEWEST_SCAN_LIMIT = 200
 
     def _start_directory_request(self, operation: str, value, force: bool = False):
         key = (operation, repr(value))
@@ -7976,11 +7979,19 @@ class MainWindow(QMainWindow):
         }
         current_urls = set(current_items)
         self._discover_newest_pending.intersection_update(current_urls)
-        missing = {
+        missing = [
             feed_url
-            for feed_url in current_urls
+            for feed_url in current_items
             if not current_items[feed_url].latest_sort_key and feed_url not in self._previews
-        }
+        ]
+        # Each card costs a download of its whole feed, so one scan covers a
+        # bounded number of cards, in display order; the rest stay undated.
+        pending = self._discover_newest_pending
+        room = max(0, self.NEWEST_SCAN_LIMIT - self._discover_newest_done - len(pending))
+        fresh = [feed_url for feed_url in missing if feed_url not in pending]
+        self._discover_newest_beyond = max(0, len(fresh) - room)
+        allowed = set(fresh[:room])
+        missing = [feed_url for feed_url in missing if feed_url in pending or feed_url in allowed]
         if not missing:
             self._finish_discover_newest_scan()
             return
@@ -7998,9 +8009,10 @@ class MainWindow(QMainWindow):
         # Cumulative: rows added mid-scan grow the total instead of
         # resetting the "N of M" count back to 1.
         self._discover_newest_total = self._discover_newest_done + len(self._discover_newest_pending)
-        self.discover_page.set_discover_summary(
-            f"Checking newest episode dates for {self._discover_newest_total} podcasts… Cards will update together."
-        )
+        beyond = self._discover_newest_beyond
+        what = (f"the first {self._discover_newest_total} podcasts; {beyond} more stay undated" if beyond
+                else f"{self._discover_newest_total} podcasts")
+        self.discover_page.set_discover_summary(f"Checking newest episode dates for {what}… Cards will update together.")
         self._update_newest_scan_toast()
         self._pump_discover_newest_scan()
 
@@ -8114,6 +8126,7 @@ class MainWindow(QMainWindow):
         self._discover_newest_active.clear()
         self._discover_newest_total = 0
         self._discover_newest_done = 0
+        beyond, self._discover_newest_beyond = self._discover_newest_beyond, 0
         if self._discover_newest_summary:
             self.discover_page.set_discover_summary(self._discover_newest_summary)
         self._discover_newest_summary = ""
@@ -8136,7 +8149,8 @@ class MainWindow(QMainWindow):
             if cancelled:
                 self._notify("Scan stopped — sorted with the dates found so far", "info")
             else:
-                self._notify(f"Release-date scan finished for {scanned} podcasts", "success")
+                left = f"; {beyond} more are listed without a date" if beyond else ""
+                self._notify(f"Release-date scan finished for {scanned} podcasts{left}", "success")
 
     def _store_preview(self, feed_url: str, feed):
         self._previews.protect(self._preview_episodes_url, self._pending_episodes_url)
