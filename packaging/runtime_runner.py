@@ -11,7 +11,7 @@ from runtime_state import process_stamp, read_record, process_state, runtime_loc
 
 DEPLOYMENT = Path(__file__).resolve().parent
 PROJECT = DEPLOYMENT.parent.parent
-PID_FILE = PROJECT/'tmp/bs-podcasts.pid.json'
+PID_FILE = PROJECT/'.cache/bs-podcasts.pid.json'
 _LIBRARY_FILES = ('library.db', 'library.db-wal', 'library.db-shm')
 _ADOPTED = 'library-adopted.json'
 # (state, text) lines for the console, filled while the data folder is chosen.
@@ -120,8 +120,21 @@ def adopt_library(found, project=None):
     return sibling
 
 
+def _legacy_pid_file():
+    # Earlier launchers kept the record in tmp/, which may be cleared while the app runs.
+    return PROJECT/'tmp/bs-podcasts.pid.json'
+
+
 def record():
-    return read_record(PROJECT, PID_FILE)
+    return read_record(PROJECT, PID_FILE) or read_record(PROJECT, _legacy_pid_file())
+
+
+def retire_records():
+    """Call while holding runtime_lock. Retire a stale record, here or in the old place."""
+    retired = retire_stale(PROJECT, PID_FILE)
+    if _legacy_pid_file() != PID_FILE:
+        retired = retire_stale(PROJECT, _legacy_pid_file()) or retired
+    return retired
 
 
 def running(value):
@@ -299,7 +312,7 @@ def _launch(args,extra,report,app_started):
             retired=False
             if process_state(PROJECT,current)=='stale':
                 with runtime_lock(PROJECT):
-                    retired=retire_stale(PROJECT,PID_FILE)
+                    retired=retire_records()
             report.line('info','BS Podcasts is not running from this deployment.')
             report.stats([('stopped','nothing (no running copy)'),('stale record','retired' if retired else 'none')])
             return 0
@@ -346,7 +359,7 @@ def _launch(args,extra,report,app_started):
         return 0
     with runtime_lock(PROJECT,inherit=True):
         _describe(args,report)
-        retire_stale(PROJECT,PID_FILE)
+        retire_records()
         value={'kind':'bs-podcasts-runtime','project':str(PROJECT),'pid':os.getpid(),'started':process_stamp(os.getpid())}
         signals={}
         try:
