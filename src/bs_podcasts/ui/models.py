@@ -26,7 +26,7 @@ def _repaint_target(option):
 
 
 @dataclass(frozen=True)
-class Podcast:
+class ShowRow:
     title: str
     author: str
     episode_count: int
@@ -55,7 +55,7 @@ class Podcast:
 
 
 @dataclass(frozen=True)
-class Episode:
+class EpisodeRow:
     title: str
     show: str
     published: str

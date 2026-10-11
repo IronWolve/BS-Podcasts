@@ -490,7 +490,7 @@ def _read_image(path: str, width: int, height: int) -> QImage:
     return image.scaled(width, height, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
 
-def prepare_previews(paths, limit=1):
+def decode_preview_images(paths, limit=1):
     """Worker-only previews for artwork a producer just replaced.
 
     Stops after `limit` paths; its one caller passes a single path. The

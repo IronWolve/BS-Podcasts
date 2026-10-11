@@ -73,7 +73,7 @@ from ..domain.times import MAX_MEDIA_SECONDS, media_seconds, format_media_time
 from ..markup import SafeFeedHtml, linkify, plain_snippet
 from ..urlguard import is_web_url
 from . import icons
-from .models import Podcast
+from .models import ShowRow
 from .pixmaps import cover, initials
 from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, play_button_size, reduced_motion, scaled_px, theme_name
 
@@ -2582,7 +2582,7 @@ class ContextPanel(QFrame):
 
     def update_podcast_artwork(self, podcast):
         current = self._current_item
-        if not isinstance(current, Podcast) or (
+        if not isinstance(current, ShowRow) or (
             current.show_id, current.feed_url, current.title
         ) != (podcast.show_id, podcast.feed_url, podcast.title):
             return

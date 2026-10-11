@@ -4,7 +4,7 @@ from collections.abc import MutableMapping
 from dataclasses import fields
 
 
-def prepare_preview(feed):
+def with_retained_size(feed):
     """Compute conservative retained size on the feed-fetch worker."""
     if not hasattr(feed, '_preview_bytes'):
         cost = 1024
@@ -47,7 +47,7 @@ class FeedResultCache(MutableMapping):
         self.bytes -= self._items.pop(key)[1]
 
     def __setitem__(self, key, value):
-        cost = prepare_preview(value)._preview_bytes + 4 * len(key)
+        cost = with_retained_size(value)._preview_bytes + 4 * len(key)
         if key in self._items:
             del self[key]
         if cost > self.max_bytes:

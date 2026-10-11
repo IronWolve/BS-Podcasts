@@ -52,13 +52,13 @@ from ..downloads import AutomaticCleanupSkipped
 from ..jobs import JobResult, JobRunner, JobStatus
 from ..jobs.commands import CommandQueue
 from ..services.library import LibraryService, bounded_float, bounded_int
-from ..services.preview_cache import FeedResultCache, prepare_preview
+from ..services.preview_cache import FeedResultCache, with_retained_size
 from ..urlguard import is_web_url
 from ..privacy import feed_label, redact
 from ..data.database import is_corruption_error
 from . import icons
-from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, ItemRoles, Podcast as UiPodcast, plain_snippet, set_item_tooltips
-from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, prepare_previews, install_previews
+from .models import EpisodeRow, EpisodeDelegate, EpisodeModel, ItemRoles, ShowRow, plain_snippet, set_item_tooltips
+from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, decode_preview_images, install_previews
 from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_accent_token
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, SettingsPage, KeyboardMenu, _ListPageMixin
 from .shortcuts import ShortcutManager
@@ -202,7 +202,7 @@ def _fetch_feed_preview(fetcher, feed_url, checkpoint=lambda: None):
 
     response = fetcher.fetch(feed_url, reuse_recent=True)
     checkpoint()
-    feed = prepare_preview(parse_feed(response.content, base_url=response.final_url))
+    feed = with_retained_size(parse_feed(response.content, base_url=response.final_url))
     _latest_episode(feed)
     return feed
 
@@ -2127,12 +2127,12 @@ class MainWindow(QMainWindow):
         page = page or self.pages.currentWidget()
         if not hasattr(page, "selected_items"):
             return []
-        return [item.episode_id for item in page.selected_items() if isinstance(item, UiEpisode) and item.episode_id]
+        return [item.episode_id for item in page.selected_items() if isinstance(item, EpisodeRow) and item.episode_id]
 
     def _queue_selected(self):
         page = self.pages.currentWidget()
         items = page.selected_items() if hasattr(page, "selected_items") else []
-        self._queue_many([item for item in items if isinstance(item, UiEpisode)])
+        self._queue_many([item for item in items if isinstance(item, EpisodeRow)])
 
     BULK_CONFIRM_ROWS = 20
 
@@ -3847,7 +3847,7 @@ class MainWindow(QMainWindow):
         return {key: show for show in shows for key in cls._feed_keys(show)}
 
     @classmethod
-    def _merge_subscription(cls, item: UiPodcast, show) -> UiPodcast:
+    def _merge_subscription(cls, item: ShowRow, show) -> ShowRow:
         if LibraryService.normalize_feed_url(item.feed_url) not in cls._feed_keys(show):
             return item
         return replace_item(item, episode_count=show.episode_count, new_count=show.new_count,
@@ -4189,10 +4189,10 @@ class MainWindow(QMainWindow):
         self._exec_dialog(EpisodeInfoDialog(episode, show, self._format_bytes, self))
 
     def _show_context_information(self, item):
-        if isinstance(item, UiEpisode):
+        if isinstance(item, EpisodeRow):
             self._show_episode_information(item, self._episode_show_info(item))
             return
-        if isinstance(item, UiPodcast):
+        if isinstance(item, ShowRow):
             source = None
             if item.show_id and self.library is not None:
                 source = self._stored_show(item.show_id)
@@ -4216,7 +4216,7 @@ class MainWindow(QMainWindow):
         feed = self._previews.get(feed_url)
         card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
         if card is None and feed is not None:
-            card = UiPodcast(
+            card = ShowRow(
                 feed.title or "Podcast", feed.author, len(feed.episodes), 0,
                 ACCENTS[3], feed_url=feed_url, description=feed.description,
                 website_url=feed.website_url, artwork_url=feed.artwork_url,
@@ -4302,7 +4302,7 @@ class MainWindow(QMainWindow):
         )
 
     def _create_episode_menu(self, episode):
-        if not isinstance(episode, UiEpisode):
+        if not isinstance(episode, EpisodeRow):
             return None
         show = self._episode_show_info(episode)
         if not episode.episode_id:
@@ -4325,7 +4325,7 @@ class MainWindow(QMainWindow):
             self._add_episode_copy_menu(menu, episode, show)
             return menu
         page = self.pages.currentWidget()
-        selected = [item for item in getattr(page, "selected_items", list)() if isinstance(item, UiEpisode)]
+        selected = [item for item in getattr(page, "selected_items", list)() if isinstance(item, EpisodeRow)]
         targets = selected if len(selected) > 1 and episode in selected else [episode]
         many = len(targets) > 1
         menu = QMenu(self)
@@ -4611,8 +4611,8 @@ class MainWindow(QMainWindow):
                 JobResult(JobStatus.OK, value=(path, accent, True, token)))
             self._request_reload()
             current = self.context.current_item()
-            if isinstance(item, UiEpisode):
-                same = isinstance(current, UiEpisode) and (
+            if isinstance(item, EpisodeRow):
+                same = isinstance(current, EpisodeRow) and (
                     (episode_id and current.episode_id == episode_id) or
                     (not episode_id and not current.episode_id and current.media_url == item.media_url))
                 if same:
@@ -4736,7 +4736,7 @@ class MainWindow(QMainWindow):
                 return None
             item = self._ui_episode(updated)
             item = replace_item(item, accent=dominant_color(path, item.accent))
-            return item, path != old_path or before != cache.signature(Path(path)), prepare_previews([path], 1), False, artwork_accent_token(path)
+            return item, path != old_path or before != cache.signature(Path(path)), decode_preview_images([path], 1), False, artwork_accent_token(path)
 
     def _resolved_episode_artwork(self, item):
         known = self._episode_artwork_resolved.get((item.episode_id, item.artwork_url))
@@ -4792,7 +4792,7 @@ class MainWindow(QMainWindow):
                 self._ui_episode_cache.pop(episode_id, None)
             self._convert_revision += 1
         current = self.context.current_item()
-        if isinstance(current, UiEpisode) and (current.episode_id, current.artwork_url) in changes:
+        if isinstance(current, EpisodeRow) and (current.episode_id, current.artwork_url) in changes:
             self._refresh_context_item(current, update(current))
 
     def _delete_played_quietly(self, episode_ids=None, confirm=False, if_enabled=False):
@@ -5067,7 +5067,7 @@ class MainWindow(QMainWindow):
         if bookmark is None:
             return
         seconds = bookmark.position_seconds
-        item = UiEpisode(title=bookmark.title, show=bookmark.show_title, published="", duration="", progress=0.0, state="Bookmark", accent="",
+        item = EpisodeRow(title=bookmark.title, show=bookmark.show_title, published="", duration="", progress=0.0, state="Bookmark", accent="",
                          episode_id=episode_id, bookmark_id=bookmark.id, bookmark_position=bookmark.position_seconds, detail=bookmark.episode_title)
         menu = QMenu(self)
         menu.addAction(icons.icon("play", COLORS["text"], 16), f"Play from {format_media_time(seconds)}", lambda: self._play_bookmark(item))
@@ -7715,7 +7715,7 @@ class MainWindow(QMainWindow):
             is_chart = bool(candidate.chart_type)
             meta_parts = [part for part in (candidate.author, candidate.genre) if part]
             podcasts.append(
-                UiPodcast(
+                ShowRow(
                     title=candidate.title if is_chart else saved.title if saved else candidate.title,
                     author=(candidate.author if is_chart else saved.author if saved else candidate.author) or candidate.genre or "Podcast directory",
                     episode_count=saved.episode_count if saved else 0,
@@ -8102,7 +8102,7 @@ class MainWindow(QMainWindow):
         if watched is self.context.queue_view.viewport() and event.type() == QEvent.Type.ContextMenu:
             index = self.context.queue_view.indexAt(event.pos())
             item = index.data(Qt.ItemDataRole.UserRole + 1) if index.isValid() else None
-            if isinstance(item, UiEpisode):
+            if isinstance(item, EpisodeRow):
                 menu = QMenu(self)
                 menu.addAction(icons.icon("play", COLORS["text"], 16), "Play now", lambda: self._play_episode(item.episode_id))
                 menu.addAction(icons.icon("next", COLORS["text"], 16), "Play next", lambda: self._queue_to_front(item.episode_id))
@@ -8123,7 +8123,7 @@ class MainWindow(QMainWindow):
             return
         mode, tab = self.context.mode(), self.context.tabs.currentIndex()
         scroll = self.context.selected_scroll.verticalScrollBar().value()
-        if isinstance(item, UiPodcast):
+        if isinstance(item, ShowRow):
             self.context.show_podcast(item)
             feed = self._previews.get(item.feed_url)
             if feed is not None and not item.show_id:
@@ -8142,11 +8142,11 @@ class MainWindow(QMainWindow):
         if item is None:
             self.context.show_empty()
             return
-        if isinstance(item, UiPodcast):
+        if isinstance(item, ShowRow):
             self.context.show_podcast(item)
             if item.feed_url and not item.show_id:
                 self._preview_after_pause(item.feed_url)
-        elif isinstance(item, UiEpisode):
+        elif isinstance(item, EpisodeRow):
             self.context.show_episode(item)
             self.context.set_playing(self._playing_episode_id, self._playing_state == "playing", self._playing_state == "loading")
             self._load_listening_details(item.episode_id)
@@ -8412,7 +8412,7 @@ class MainWindow(QMainWindow):
         podcast_artwork = card.artwork_path if card else ""
         podcast_accent = card.accent if card else ACCENTS[3]
         items = [
-            UiEpisode(
+            EpisodeRow(
                 title=episode.title, show=feed.title, published=self._display_date(episode.published_at),
                 duration=self._display_duration(episode.duration_seconds), progress=0.0, state="Preview", accent=podcast_accent,
                 description=episode.description, artwork_path=podcast_artwork,
@@ -8571,7 +8571,7 @@ class MainWindow(QMainWindow):
                     self._ui_episode_cache.pop(next(iter(self._ui_episode_cache)))
         return result
 
-    def _with_download_state(self, item: UiEpisode, record) -> UiEpisode:
+    def _with_download_state(self, item: EpisodeRow, record) -> EpisodeRow:
         """Reflect an in-flight download on an episode row anywhere in the app."""
         if record is None:
             return item
@@ -8601,13 +8601,13 @@ class MainWindow(QMainWindow):
             if record.state.value != "complete"
         }
 
-    def _ui_episode_live(self, episode, active=None) -> UiEpisode:
+    def _ui_episode_live(self, episode, active=None) -> EpisodeRow:
         """One episode, carrying its download state like a list row would."""
         if active is None:
             active = self._active_downloads()
         return self._with_download_state(self._ui_episode(episode), active.get(episode.id))
 
-    def _with_preview(self, item: UiPodcast, feed) -> UiPodcast:
+    def _with_preview(self, item: ShowRow, feed) -> ShowRow:
         """Merge fetched feed freshness into an unsubscribed directory card."""
         if feed is None or item.show_id:
             return item
@@ -8645,8 +8645,8 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------------------- converters
     @staticmethod
-    def _ui_podcast(show) -> UiPodcast:
-        return UiPodcast(
+    def _ui_podcast(show) -> ShowRow:
+        return ShowRow(
             title=show.title or feed_label(show.feed_url),
             author=show.author or "Podcast feed",
             episode_count=show.episode_count,
@@ -8667,11 +8667,11 @@ class MainWindow(QMainWindow):
         )
 
     @staticmethod
-    def _ui_episode(episode) -> UiEpisode:
+    def _ui_episode(episode) -> EpisodeRow:
         state = "Played" if episode.played else "In progress" if episode.position_seconds else "New" if episode.is_new else "Unplayed"
         if episode.downloaded_path:
             state = "Downloaded"
-        return UiEpisode(
+        return EpisodeRow(
             title=episode.title,
             show=episode.show_title,
             published=MainWindow._display_date(episode.published_at),
