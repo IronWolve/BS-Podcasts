@@ -10,7 +10,7 @@ import time
 
 from ...domain import Episode, FeedData, Health, Show
 from ...domain.models import DEFAULT_TRIM_LEVEL, TRIM_LEVELS
-from ...domain.times import media_seconds
+from ...domain.times import MAX_MEDIA_SECONDS, media_seconds
 from ...privacy import redact
 from ..database import Database
 from ..files import (
@@ -1030,7 +1030,7 @@ class LibraryRepository:
 
     def set_observed_duration(self, episode_id: int, seconds: float):
         import math
-        if not math.isfinite(seconds) or not 0 < seconds <= 2**31:
+        if not math.isfinite(seconds) or not 0 < seconds <= MAX_MEDIA_SECONDS:
             return
         with self.database.connect() as connection:
             connection.execute(
