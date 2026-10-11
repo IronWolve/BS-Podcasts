@@ -141,6 +141,7 @@
 !/src/bs_podcasts/data/migrations/025_episode_search.sql
 !/src/bs_podcasts/data/migrations/026_download_length_verification.sql
 !/src/bs_podcasts/data/migrations/027_refresh_error.sql
+!/src/bs_podcasts/data/migrations/028_show_move_counts.sql
 !/src/bs_podcasts/data/repositories/__init__.py
 !/src/bs_podcasts/data/repositories/downloads.py
 !/src/bs_podcasts/data/repositories/library.py
