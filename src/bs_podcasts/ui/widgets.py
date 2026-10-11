@@ -4163,6 +4163,9 @@ class PlayerBar(QFrame):
         self.title.setToolTip(
             plain_tooltip(self._now_title) if title != self._now_title else "Show now playing"
         )
+        self._elide_show_label(avail)
+
+    def _elide_show_label(self, avail: int):
         # A playback notice ("Reconnecting…") borrows the show line until the
         # service clears it; the show name comes straight back afterwards.
         line = getattr(self, "_now_notice", "") or self._now_show
@@ -4361,6 +4364,16 @@ class PlayerBar(QFrame):
             self._balance_zones()
 
     # -- state -------------------------------------------------------------
+    def _apply_live_status(self, snapshot):
+        """Update only the status line and the notice on the show line; the
+        icons, tooltips and layout balance of a full refresh are unaffected
+        by a buffering or notice change."""
+        quiet = str(snapshot.state) == "error" or self._download_wait
+        self._now_notice = "" if quiet else (snapshot.message or "")
+        self._elide_show_label(self._now_text_width())
+        self.set_transport_state(str(snapshot.state) == "loading", getattr(snapshot, "buffering", None),
+                                 getattr(self, "_streaming", False))
+
     def set_snapshot(self, snapshot):
         import time
         self._engine_volume = float(snapshot.volume)
@@ -4377,12 +4390,18 @@ class PlayerBar(QFrame):
             snapshot.state, snapshot.episode_id, snapshot.title, snapshot.show_title,
             snapshot.source, snapshot.speed, snapshot.volume, snapshot.ab_start,
             snapshot.ab_end, snapshot.trim_level, snapshot.sleep_deadline,
-            snapshot.artwork_path, snapshot.message, snapshot.buffering, snapshot.duration,
+            snapshot.artwork_path, snapshot.duration,
             getattr(snapshot, "sleep_at_end", False),
             getattr(snapshot, "download_request", 0),
             getattr(snapshot, "show_id", 0),
         )
+        # Buffering and the playback notice change often during a stall and
+        # touch only two text lines, so they are tracked apart from the rest.
+        live_key = (snapshot.message, snapshot.buffering)
         if chrome_key == getattr(self, "_chrome_key", None):
+            if live_key != getattr(self, "_live_key", None):
+                self._live_key = live_key
+                self._apply_live_status(snapshot)
             position = media_seconds(snapshot.position) or 0.0
             if not self._slider_busy():
                 self.slider.blockSignals(True)
@@ -4395,6 +4414,7 @@ class PlayerBar(QFrame):
                 self.slider.setAccessibleDescription(description)
             return
         self._chrome_key = chrome_key
+        self._live_key = live_key
         self._download_wait = bool(getattr(snapshot, 'download_request', 0))
         # Identifies the loaded track for the seek-drag guard. Source is part
         # of it because a directory preview has no durable episode id.
