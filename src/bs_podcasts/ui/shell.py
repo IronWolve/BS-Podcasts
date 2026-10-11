@@ -2179,9 +2179,10 @@ class MainWindow(QMainWindow):
                 return ()  # not None: an EMPTY read result would raise the error banner
             candidates = downloads.retention_candidates(show, keep=self._retention_spared(playback, keep))
             previews, unavailable = [], 0
+            records = downloads.records_by_ids([item.id for item in candidates])
             for item in candidates:
                 try:
-                    preview = downloads.cleanup_preview(item.id)
+                    preview = downloads.cleanup_preview(item.id, record=records.get(item.id))
                 except OSError:
                     # Its folder cannot be reached right now: leave that file
                     # alone and keep looking at the podcast's other downloads.
@@ -4832,9 +4833,10 @@ class MainWindow(QMainWindow):
 
         def work():
             previews, unavailable = [], 0
+            records = downloads.records_by_ids(ids)
             for episode_id in ids:
                 try:
-                    preview = downloads.cleanup_preview(episode_id)
+                    preview = downloads.cleanup_preview(episode_id, record=records.get(episode_id))
                 except OSError:
                     # Its folder cannot be reached right now: leave that file
                     # alone and keep looking at the others.
