@@ -61,7 +61,6 @@ GLYPHS = {
     "download": "M12 4v11M7 10l5 5 5-5M5 19h14",
     "downloaded": "M5 12l5 5L20 7",
     "check": "M5 12l5 5L20 7",
-    "more": "M6 12a1 1 0 1 0 0 .01M12 12a1 1 0 1 0 0 .01M18 12a1 1 0 1 0 0 .01",
     "sort": "M4 6h16M7 12h10M10 18h4",
     "sleep": "M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z",
     "chapters": "M5 5h14M5 12h9M5 19h14M17 10l3 2-3 2z",
@@ -71,14 +70,12 @@ GLYPHS = {
     "list": "M4 6h16M4 12h16M4 18h16",
     "panel": "M4 5h16v14H4zM15 5v14",
     "playing": "M5 14v5M9 9v10M13 12v7M17 5v14M21 10v9",
-    "menu": "M4 7h16M4 12h16M4 17h16",
     "warning": "M12 4l9 16H3zM12 10v4M12 17.5v.01",
     "info": "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v5M12 8v.01",
     "offline": "M3 3l18 18M8.5 8.6A9 9 0 0 0 5 12M12 20h.01M15.5 15.5a5 5 0 0 0-7 0M18.5 12a9 9 0 0 0-9.4-3.5",
     "queue-add": "M4 6h12M4 12h12M4 18h7M18 14v6M15 17h6",
     "rss": "M5 19a1 1 0 1 0 0 .01M5 11a8 8 0 0 1 8 8M5 5a14 14 0 0 1 14 14",
     "folder": "M3 6h6l2 2h10v11H3z",
-    "shortcut": "M4 7h16v10H4zM8 14h8",
 }
 
 
