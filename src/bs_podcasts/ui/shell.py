@@ -691,7 +691,7 @@ class MainWindow(QMainWindow):
         self.podcast_page.remove_problems_requested.connect(self._remove_unreachable)
         self.settings_page.reset_library_requested.connect(self._reset_library)
         self.discover_page.card_action_requested.connect(self._discover_card_action)
-        self.episode_page.hero.play_latest_requested.connect(lambda: self._play_latest(self._hero_show_id))
+        self.episode_page.hero.play_latest_requested.connect(lambda: self._play_latest(self._hero_show_id, toggle=True))
         self.episode_page.hero.refresh_requested.connect(self._refresh_episode_view)
         self.episode_page.hero.subscribe_requested.connect(lambda: self._subscribe_url(self._preview_episodes_url))
         self.episode_page.hero.website_requested.connect(lambda: self._open_url(self._hero_website))
@@ -3977,7 +3977,10 @@ class MainWindow(QMainWindow):
             plain_snippet(podcast.description, 220), True, bool(self._hero_website),
         )
 
-    def _play_latest(self, show_id: int):
+    def _play_latest(self, show_id: int, toggle: bool = False):
+        """Play the newest episode. A control labelled Play leaves a playing
+        episode playing; the hero button, which turns into Pause, passes
+        `toggle` to pause it."""
         if self.library is None:
             return
         library, commands = self.library, self.commands
@@ -3985,10 +3988,13 @@ class MainWindow(QMainWindow):
         def apply(episodes):
             if commands is not None and not commands.current(token):
                 return
-            if episodes:
-                self._play_or_toggle(episodes[0].id)
-            else:
+            if not episodes:
                 self._notify("This podcast has no playable episodes yet.", "info")
+                return
+            if (not toggle and self.playback is not None and episodes[0].id == self._playing_episode_id
+                    and self._playing_state in {"playing", "loading"}):
+                return
+            self._play_or_toggle(episodes[0].id)
         self._run_read(lambda: library.episodes(show_id=show_id, limit=1), apply, "play-latest")
 
     def _podcast_menu(self, podcast, global_position):
