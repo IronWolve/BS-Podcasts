@@ -322,6 +322,9 @@ class MainWindow(QMainWindow):
         # Last download records delivered to the UI, by episode id: the
         # click-time dedup reads this instead of querying SQLite on the Qt thread.
         self._download_records_seen = {}
+        # Episodes whose download started, finished or stopped and whose rows
+        # still need re-reading (see _download_state_changed).
+        self._download_rows_pending = set()
         self._download_tickets = {}
         self._samples_lock = threading.Lock()
         self._unsubscribing = set()
@@ -2778,7 +2781,7 @@ class MainWindow(QMainWindow):
     # other read reports on the page that was showing when it was asked for.
     _PAGE_READS = {"downloads": "download_page", "bookmarks": "bookmark_page", "queue": "playlist_page"}
     _BACKGROUND_READS = ("new-badge", "reconcile-missing", "download-capacity", "show-summaries", "scheduled-refresh",
-                         "visible-artwork", "settings-reload", "playback-metadata", "history-times",
+                         "visible-artwork", "settings-reload", "playback-metadata", "history-times", "download-rows",
                          "download-notice-", "refresh-notice-", "auto-download-", "retention-")
 
     def _read_owner(self, key: str):
@@ -5519,7 +5522,7 @@ class MainWindow(QMainWindow):
         self._download_tickets[episode_id] = ticket
         runner = (self.play_download_jobs or self.download_jobs) if priority else self.download_jobs
         future = runner.submit(self.downloads.download, episode_id, ticket)
-        self._request_reload()
+        self._download_state_changed(episode_id)
         self._pending_jobs.add(future)
 
         def finished(completed):
@@ -5686,10 +5689,78 @@ class MainWindow(QMainWindow):
         if not self._download_reload_timer.isActive():
             self._download_reload_timer.start()
 
+    def _download_state_changed(self, episode_id: int):
+        """A download started, finished or stopped. Only that episode's rows
+        change, so they are re-read on the progress flush's timer instead of
+        reloading the library; changes within one tick share one read."""
+        self._download_rows_pending.add(episode_id)
+        if not self._download_reload_timer.isActive():
+            self._download_reload_timer.start()
+
+    def _flush_download_rows(self):
+        ids = tuple(self._download_rows_pending)
+        if not ids or self.library is None or self.downloads is None:
+            return
+        repository, downloads = self.library.repository, self.downloads
+
+        def work():
+            records = list(downloads.records())
+            episodes = repository.episodes_by_ids(ids)
+            rows = self._ui_episodes(list(episodes.values()), records)
+            return {row.episode_id: row for row in rows}
+
+        # Ids stay pending until the read lands: a newer read replaces one
+        # still waiting, and it carries every id the older one had.
+        self._run_read(work, lambda rows: self._apply_download_rows(ids, rows), "download-rows")
+
+    def _apply_download_rows(self, ids, rows):
+        self._download_rows_pending.difference_update(ids)
+
+        def merge(current):
+            row = rows.get(current.episode_id)
+            if row is None or (row.state, row.detail, row.progress, row.downloaded_path) == (
+                    current.state, current.detail, current.progress, current.downloaded_path):
+                return current
+            return replace_item(current, state=row.state, detail=row.detail,
+                                progress=row.progress, downloaded_path=row.downloaded_path)
+
+        def merged(items):
+            changed = [merge(current) for current in items]
+            return changed if any(new is not old for new, old in zip(changed, items)) else items
+
+        def deltas(items):
+            changed = {}
+            for current in items:
+                row = merge(current)
+                if row is not current:
+                    changed[row.episode_id] = row
+            return changed
+
+        for page in (self.episode_page, self.playlist_page, self.history_page):
+            changes = deltas(page._all_items)
+            if changes:
+                page.update_items(changes)
+        for model in (self.home_page.model, self.context.queue_view.model()):
+            changes = deltas(model._items) if model is not None else {}
+            if changes:
+                model.update_items(changes)
+        self._all_episode_items = merged(self._all_episode_items)
+        self._catalog_search_items = merged(getattr(self, "_catalog_search_items", []))
+        self._history_items_shown = merged(self._history_items_shown)
+        if self._last_library_data is not None:
+            for name in ('episodes', 'detail_episodes', 'in_progress', 'queued', 'history'):
+                self._last_library_data[name] = merged(self._last_library_data.get(name, []))
+        # The Downloads page and the active-download counts come from the
+        # download records, which changed with the state.
+        self._reload_downloads()
+
     def _flush_download_progress(self):
         pending = getattr(self, "_download_progress_pending", {})
         self._download_progress_pending = {}
-        if not pending or self._closed:
+        if self._closed:
+            return
+        self._flush_download_rows()
+        if not pending:
             return
         updates = {}
         items = {item.episode_id: item for item in self.download_page._all_items}
@@ -5801,6 +5872,10 @@ class MainWindow(QMainWindow):
             self._finish_page_load(self.download_page)
             self._update_download_chrome()
             self._refresh_download_capacity()
+        active = sum(record.state.value in {"queued", "downloading", "paused"} for record in records)
+        with self._page_guard(None, "the download counts"):
+            self.navigation.set_badge(PAGE_DOWNLOADS, active)
+            self.home_page.summary_buttons[2].set_count(active)
 
     def _update_download_chrome(self):
         records = list(self._download_records_seen.values())
@@ -7123,7 +7198,7 @@ class MainWindow(QMainWindow):
             if self._download_tickets.get(identifier) is not ticket:
                 return
             self._download_tickets.pop(identifier, None)
-        self._request_reload()
+        self._download_state_changed(identifier)
         # A finished job is not a finished download. download() also
         # returns normally when it was absorbed as a duplicate of a live
         # transfer, or when the user paused mid-retry; announcing those as
