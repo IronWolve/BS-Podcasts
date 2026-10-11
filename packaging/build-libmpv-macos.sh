@@ -9,6 +9,16 @@ BS_PYTHON="$BS_VENV/bin/python"
 BS_JOBS="${BS_NATIVE_JOBS:-2}"
 [[ "$BS_JOBS" =~ ^[1-4]$ ]] || exit 2
 BS_WORK="$(mktemp -d "$BS_PROJECT/tmp/macos-native.XXXXXX")"
+# Each run's build log is kept in logs/ when the run ends, whether it succeeded or stopped.
+bs_keep_log() {
+    local status=$?
+    if [[ -f "$BS_WORK/build.log" ]]; then
+        mkdir -p "$BS_PROJECT/logs"
+        cp -- "$BS_WORK/build.log" "$BS_PROJECT/logs/native-macos-$(date -u +%Y%m%dT%H%M%SZ)-status$status.log"
+    fi
+    exit "$status"
+}
+trap bs_keep_log EXIT
 BS_PREFIX="$BS_WORK/prefix"
 BS_SRC="$BS_WORK/src"
 mkdir -p "$BS_PREFIX" "$BS_WORK/tmp"
@@ -108,7 +118,9 @@ fi
 "$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --record "$BS_WORK/out/libmpv.2.dylib"
 BS_CACHE="$BS_PROJECT/.cache/macos-build/libmpv-lgpl"
 if [[ -e "$BS_CACHE" ]]; then
-    mv -- "$BS_CACHE" "$BS_WORK/previous-native"
+    mkdir -p "$BS_PROJECT/.cache/macos-build"
+    BS_PREVIOUS="$(mktemp -d "$BS_PROJECT/.cache/macos-build/previous-libmpv-lgpl-$(date -u +%Y%m%d)-XXXXXX")"
+    mv -- "$BS_CACHE" "$BS_PREVIOUS/libmpv-lgpl"
 fi
 mv -- "$BS_WORK/out" "$BS_CACHE"
 printf 'Native macOS player ready: %s\n' "$BS_CACHE"

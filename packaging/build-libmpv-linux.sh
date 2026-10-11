@@ -27,6 +27,16 @@ if [[ -n "${BS_NATIVE_RESUME:-}" ]]; then
 else
     BS_NATIVE_ROOT="$(mktemp -d "$BS_PROJECT/tmp/linux-native.XXXXXX")"
 fi
+# Each run's build log is kept in logs/ when the run ends, whether it succeeded or stopped.
+bs_keep_log() {
+    local status=$?
+    if [[ -f "$BS_NATIVE_ROOT/build.log" ]]; then
+        mkdir -p "$BS_PROJECT/logs"
+        cp -- "$BS_NATIVE_ROOT/build.log" "$BS_PROJECT/logs/native-linux-$(date -u +%Y%m%dT%H%M%SZ)-status$status.log"
+    fi
+    exit "$status"
+}
+trap bs_keep_log EXIT
 BS_PREFIX="$BS_NATIVE_ROOT/prefix"
 BS_SRC="$BS_NATIVE_ROOT/src"
 BS_JOBS="${BS_NATIVE_JOBS:-2}"
@@ -152,7 +162,7 @@ fi
 BS_CACHE="$BS_PROJECT/.cache/linux-build/libmpv-lgpl"
 mkdir -p "$BS_PROJECT/.cache/linux-build"
 if [[ -e "$BS_CACHE" ]]; then
-    BS_PREVIOUS="$(mktemp -d "$BS_NATIVE_ROOT/previous-native.XXXXXX")"
+    BS_PREVIOUS="$(mktemp -d "$BS_PROJECT/.cache/linux-build/previous-libmpv-lgpl-$(date -u +%Y%m%d)-XXXXXX")"
     mv -- "$BS_CACHE" "$BS_PREVIOUS/libmpv-lgpl"
 fi
 mv -- "$BS_NATIVE_ROOT/out" "$BS_CACHE"

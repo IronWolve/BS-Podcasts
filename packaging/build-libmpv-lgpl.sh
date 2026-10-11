@@ -13,6 +13,16 @@ JOBS="${BS_NATIVE_JOBS:-2}"
 [[ "$JOBS" =~ ^[1-4]$ ]] || { printf 'BS_NATIVE_JOBS must be 1 to 4.\n' >&2; exit 1; }
 TRIPLE=x86_64-w64-mingw32
 mkdir -p "$PREFIX" "$SRC" "$ROOT/tmp"
+# Each run's build log is kept in logs/ when the run ends, whether it succeeded or stopped.
+bs_keep_log() {
+    local status=$?
+    if [[ -f "$ROOT/build.log" ]]; then
+        mkdir -p "$BS_BUILD_WORKSPACE/logs"
+        cp -- "$ROOT/build.log" "$BS_BUILD_WORKSPACE/logs/native-windows-$(date -u +%Y%m%dT%H%M%SZ)-status$status.log"
+    fi
+    exit "$status"
+}
+trap bs_keep_log EXIT
 export TMPDIR="$ROOT/tmp" PYTHONDONTWRITEBYTECODE=1
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
 export PKG_CONFIG_PATH=""
@@ -154,7 +164,7 @@ ${TRIPLE}-strip "$ROOT/out/libmpv-2.dll"
 BS_CACHE="$BS_BUILD_WORKSPACE/.cache/windows-build/libmpv-lgpl"
 mkdir -p "$BS_BUILD_WORKSPACE/.cache/windows-build"
 if [[ -e "$BS_CACHE" ]]; then
-    BS_PREVIOUS="$(mktemp -d "$ROOT/previous-native.XXXXXX")"
+    BS_PREVIOUS="$(mktemp -d "$BS_BUILD_WORKSPACE/.cache/windows-build/previous-libmpv-lgpl-$(date -u +%Y%m%d)-XXXXXX")"
     mv -- "$BS_CACHE" "$BS_PREVIOUS/libmpv-lgpl"
 fi
 mv -- "$ROOT/out" "$BS_CACHE"
