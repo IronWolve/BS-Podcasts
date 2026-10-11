@@ -1,11 +1,12 @@
 from .fetch import FeedFetchError, FeedFetcher, FeedNetworkError, FeedResponse
 from .parser import FeedParseError, parse_feed
-from .refresh import RefreshReport, RefreshService
 
-# Local audio and OPML are only needed when explicitly importing files.
+# Local audio, OPML and refresh are loaded on first use: refresh pulls in the
+# artwork cache, which a plain feed import does not need.
 _LAZY = {
     "LocalAudioError": ".local", "LocalAudioImporter": ".local",
     "OpmlEntry": ".opml", "OpmlError": ".opml", "export_opml": ".opml", "import_opml": ".opml",
+    "RefreshReport": ".refresh", "RefreshService": ".refresh",
 }
 
 
