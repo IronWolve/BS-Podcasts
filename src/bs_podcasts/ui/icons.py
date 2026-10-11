@@ -192,6 +192,19 @@ def _cache_dir() -> Path:
     return _file_dir
 
 
+def _glyph_file_valid(target: Path, size: int) -> bool:
+    # Kept apart so the image reader is released on return, before a bad
+    # file is replaced: some platforms refuse to replace a file that is open.
+    try:
+        if target.is_symlink() or not 0 < target.stat().st_size <= 128 * 1024:
+            return False
+        reader = QImageReader(str(target), b'png')
+        dimensions = reader.size()
+        return dimensions.width() == size and dimensions.height() == size and not reader.read().isNull()
+    except OSError:
+        return False
+
+
 def icon_file(name: str, color: str, size: int) -> str:
     safe_color = re.sub(r"[^0-9A-Za-z]", "", color)
     # The glyph's own path data is part of the name. Keying on name/colour/size
@@ -210,14 +223,7 @@ def icon_file(name: str, color: str, size: int) -> str:
         signature = None
     if signature is None or _verified_files.get(target) != signature:
         _verified_files.pop(target, None)
-        valid = False
-        try:
-            if not target.is_symlink() and 0 < target.stat().st_size <= 128 * 1024:
-                reader = QImageReader(str(target), b'png')
-                dimensions = reader.size()
-                valid = dimensions.width() == size and dimensions.height() == size and not reader.read().isNull()
-        except OSError:
-            pass
+        valid = _glyph_file_valid(target, size)
         if not valid:
             data = QByteArray()
             buffer = QBuffer(data)
