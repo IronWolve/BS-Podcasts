@@ -4387,7 +4387,7 @@ class MainWindow(QMainWindow):
                         continue
                 except (ValueError, TypeError, OverflowError, OSError):
                     pass  # Unknown dates cannot justify excluding a new episode.
-            if episode.is_new and not episode.downloaded_path and episode.id not in active and episode.media_url:
+            if episode.is_new and not episode.downloaded_path and episode.id not in active and is_web_url(episode.media_url):
                 candidates.append(episode)
             if len(candidates) >= limit:
                 break
