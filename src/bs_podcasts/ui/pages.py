@@ -584,11 +584,15 @@ class _ListPageMixin:
     def _cancel_scroll_restore(self):
         self._scroll_restore_revision = getattr(self, '_scroll_restore_revision', 0) + 1
 
+    def _anchor_x(self):
+        """Where the scroll anchor probes a row; a grid probes mid-card."""
+        return 2
+
     def _scroll_anchor(self):
         self._finish_episode_scroll()
         if not self.model.rowCount():
             return None
-        x = max(2, self.view.gridSize().width() // 2) if isinstance(self, PodcastGridPage) else 2
+        x = self._anchor_x()
         for y in range(2, min(40, self.view.viewport().height()), 6):
             index = self.view.indexAt(QPoint(x, y))
             if index.isValid():
@@ -937,6 +941,9 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         self.load_more.setVisible(False)
         self.root.addWidget(self.load_more, alignment=Qt.AlignmentFlag.AlignHCenter)
         self._update_empty()
+
+    def _anchor_x(self):
+        return max(2, self.view.gridSize().width() // 2)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
