@@ -1,12 +1,20 @@
 """Public podcast-directory adapter; no authentication required."""
 
 import logging
+import queue
+import threading
 
 from ..net import SessionSlot, describe_network_error
 from threading import Lock
 
 from ..domain import DirectoryCandidate
+from ..netlimits import Deadline, NetworkDeadline, current_cancel, is_foreground, request_scope
 from .base import DirectoryError
+
+
+# Expansion-term requests in flight at once; the shared header gate admits 12
+# background requests in all, so a browse leaves room for feeds and artwork.
+TERM_WORKERS = 3
 
 
 CATEGORY_IDS = {
@@ -105,7 +113,6 @@ class PublicDirectory:
         )
 
     def browse(self, category: str = "", limit: int = 30) -> list[DirectoryCandidate]:
-        from ..netlimits import Deadline
         check = Deadline(600)
         import time
         fast = limit <= 50
@@ -120,10 +127,8 @@ class PublicDirectory:
             ("podcast", "new podcasts", "popular podcasts", "independent podcasts"),
         )
         genre_id = CATEGORY_IDS.get(category)
-        result_sets = []
-        errors = []
+        batch = []
         for term in (terms[:1] if fast else terms):
-            check.remaining()
             params = {
                 "term": term,
                 "media": "podcast",
@@ -132,10 +137,8 @@ class PublicDirectory:
             }
             if genre_id:
                 params["genreId"] = genre_id
-            try:
-                result_sets.append(self._request(params))
-            except DirectoryError as exc:
-                errors.append(str(exc))
+            batch.append(params)
+        result_sets, errors = self._request_all(batch, check)
         if not result_sets:
             raise DirectoryError("; ".join(errors) or "Directory category unavailable")
 
@@ -151,7 +154,6 @@ class PublicDirectory:
                     continue
                 seen.add(candidate.feed_url)
                 merged.append(candidate)
-        check.remaining()
         if errors:
             # A merge that lost a term is shown, but never stored as the
             # category's answer: the next view asks again for what is missing.
@@ -163,6 +165,69 @@ class PublicDirectory:
             if revision == self._cache_revision:
                 self._browse_cache[cache_key] = (time.monotonic(), merged)
         return merged[:limit]
+
+    def _request_all(self, batch, check):
+        """Run every request in `batch`, a few at a time, under one deadline.
+
+        Returns (result sets in batch order, error messages). A request that
+        fails adds its message to the errors. When the deadline passes after
+        some candidates arrived, those are returned and the unfinished
+        requests are listed as an error; with none, or after a user cancel,
+        the deadline error is raised."""
+        check.remaining()
+        self.session  # create the lazy session once, before workers share it
+        if len(batch) == 1:
+            try:
+                return [self._request(batch[0])], []
+            except DirectoryError as exc:
+                return [], [str(exc)]
+        cancel, foreground = current_cancel(), is_foreground()
+        pending = queue.Queue()
+        for index, params in enumerate(batch):
+            pending.put((index, params))
+        done = queue.Queue()
+        stop = threading.Event()
+
+        def work():
+            # The request scope is per thread; carry the caller's cancel and deadline.
+            with request_scope(cancel, foreground, check):
+                while not stop.is_set():
+                    try:
+                        index, params = pending.get_nowait()
+                    except queue.Empty:
+                        return
+                    try:
+                        done.put((index, self._request(params), None))
+                    except Exception as exc:
+                        done.put((index, None, exc))
+
+        slots = [None] * len(batch)
+        errors = []
+        try:
+            for _ in range(min(len(batch), TERM_WORKERS)):
+                threading.Thread(target=work, name="bs-directory-term", daemon=True).start()
+            received = 0
+            while received < len(batch):
+                remaining = check.remaining()
+                try:
+                    index, results, exc = done.get(timeout=min(.05, remaining))
+                except queue.Empty:
+                    continue
+                received += 1
+                if exc is None:
+                    slots[index] = results
+                elif isinstance(exc, DirectoryError):
+                    errors.append(str(exc))
+                else:
+                    raise exc
+        except NetworkDeadline:
+            cancelled = check.user_cancel is not None and check.user_cancel.is_set()
+            if cancelled or not any(slots):
+                raise
+            errors.append("The directory did not answer every request in time.")
+        finally:
+            stop.set()
+        return [results for results in slots if results is not None], errors
 
     def topic(
         self, category: str, topic: str, limit: int = 30
@@ -223,7 +288,15 @@ class PublicDirectory:
             10, (limit + len(categories) - 1) // len(categories) + len(excluded)
         )
         for category in categories[:2]:
-            for candidate in self.browse(category, per_category):
+            try:
+                found = self.browse(category, per_category)
+            except NetworkDeadline:
+                # Out of time: keep the categories that already answered.
+                cancel = current_cancel()
+                if not merged or (cancel is not None and cancel.is_set()):
+                    raise
+                break
+            for candidate in found:
                 feed_key = key(candidate.feed_url)
                 if feed_key in seen:
                     continue
