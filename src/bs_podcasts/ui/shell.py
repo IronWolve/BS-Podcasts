@@ -6303,7 +6303,7 @@ class MainWindow(QMainWindow):
             if hasattr(self.directory, "invalidate"):
                 self.directory.invalidate()
         cached = self._discover_cache.get(key)
-        if cached is not None and time.time() - cached[0] < self.DISCOVER_CACHE_SECONDS:
+        if cached is not None and time.monotonic() - cached[0] < self.DISCOVER_CACHE_SECONDS:
             # Serve the completed result through the normal apply path: the
             # subscribed/playing overlays are recomputed, artwork paths are
             # already local, and no network or worker is touched.
@@ -7620,13 +7620,15 @@ class MainWindow(QMainWindow):
         cache_key = (operation, repr(value))
         stored = self._discover_cache.get(cache_key)
         if cache_restore:
+            # The snapshot's save time is wall-clock; keep its age on the clock the cache uses.
+            saved = time.monotonic() - max(0.0, time.time() - snapshot["saved_at"])
             self._discover_cache[cache_key] = (
-                snapshot["saved_at"], min(snapshot["limit"], requested_limit), candidates
+                saved, min(snapshot["limit"], requested_limit), candidates
             )
         elif not getattr(candidates, "partial", False) and (stored is None or requested_limit >= stored[1]):
             # A list that lost a term or ran out of time is shown but not kept,
             # so the next view of this category asks again.
-            self._discover_cache[cache_key] = (time.time(), requested_limit, candidates)
+            self._discover_cache[cache_key] = (time.monotonic(), requested_limit, candidates)
             while len(self._discover_cache) > 24:
                 self._discover_cache.pop(next(iter(self._discover_cache)))
         if not cache_restore and not self._discover_exhausted and requested_limit < self._discover_autoload_target(operation):
