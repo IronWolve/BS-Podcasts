@@ -118,20 +118,7 @@ class Database:
     def __init__(self, path: str | Path):
         if sqlite3.sqlite_version_info < (3, 43, 0):
             raise sqlite3.DatabaseError("BS Podcasts requires SQLite 3.43 or newer. Update this application's Python runtime.")
-        self.path = Path(path)
-        self._lock = _SharedExclusiveLock()
-        # One connection per thread instead of one per query. Reopening meant
-        # a fresh sqlite3.connect plus two PRAGMAs on every read, and settings
-        # alone are read dozens of times at startup. The generation counter is
-        # how a cached handle learns the file underneath it was replaced
-        # (repair does an os.replace): each thread notices and reopens its own,
-        # maintenance closes idle handles under the exclusive lock.
-        self._connections = threading.local()
-        self._handles = weakref.WeakSet()
-        self._handles_lock = threading.Lock()
-        self._generation = 0
-        self.last_repair_lost = {}
-        self._preexisting = self.path.is_file() and self.path.stat().st_size > 0
+        self._init_state(path)
         if self.path.is_file() and not self._preexisting:
             # An existing but empty file is damage (full disk, failed copy,
             # quarantine placeholder), not a first launch. Opening it as a
@@ -152,6 +139,23 @@ class Database:
         except BaseException:
             self.close()
             raise
+
+    def _init_state(self, path):
+        """Every attribute a Database needs; recover() builds its object with it too."""
+        self.path = Path(path)
+        self._lock = _SharedExclusiveLock()
+        # One connection per thread instead of one per query. Reopening meant
+        # a fresh sqlite3.connect plus two PRAGMAs on every read, and settings
+        # alone are read dozens of times at startup. The generation counter is
+        # how a cached handle learns the file underneath it was replaced
+        # (repair does an os.replace): each thread notices and reopens its own,
+        # maintenance closes idle handles under the exclusive lock.
+        self._connections = threading.local()
+        self._handles = weakref.WeakSet()
+        self._handles_lock = threading.Lock()
+        self._generation = 0
+        self.last_repair_lost = {}
+        self._preexisting = self.path.is_file() and self.path.stat().st_size > 0
 
     def _backup_candidates(self) -> list:
         """Every non-empty library copy the app keeps, newest first.
@@ -573,18 +577,12 @@ class Database:
         The damaged file and any old sidecars are retained beside backups.
         """
         database = cls.__new__(cls)
-        database.path = Path(path)
+        database._init_state(path)
         info = database.path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise OSError("Library repair requires a regular, unshared file.")
         if info.st_size == 0:
             raise DatabaseIntegrityError("An empty library cannot be repaired from itself. Restore a non-empty library backup.")
-        database._lock = _SharedExclusiveLock()
-        database._connections = threading.local()
-        database._handles = weakref.WeakSet()
-        database._handles_lock = threading.Lock()
-        database._generation = 0
-        database.last_repair_lost = {}
         try:
             return database.repair()
         finally:
