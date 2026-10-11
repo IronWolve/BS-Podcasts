@@ -8,6 +8,7 @@ from ..assets import shell_icon_path
 
 
 APP_TITLE = "BS Podcasts"
+_TOOLTIP_LIMIT = 127
 
 
 def _tray_icon() -> QIcon:
@@ -96,13 +97,19 @@ class TrayController:
             return
         self._revision = revision
         if not snapshot.source:
-            texts =("Nothing playing", APP_TITLE, "Play / Pause")
+            texts = ("Nothing playing", APP_TITLE, "Play / Pause")
         else:
             title = snapshot.title if len(snapshot.title) <= 60 else snapshot.title[:57] + "…"
             state = str(snapshot.state)
+            # The Windows shell keeps only the first 127 characters of a
+            # tooltip: put the app name first and cut the detail, not the name.
+            detail = f"{snapshot.title} — {snapshot.show_title}"
+            room = _TOOLTIP_LIMIT - len(APP_TITLE) - 1
+            if len(detail) > room:
+                detail = detail[:room - 1] + "…"
             texts = (
                 f"{'▶' if state == 'playing' else '⏸'}  {title}",
-                f"{snapshot.title} — {snapshot.show_title}\n{APP_TITLE}",
+                f"{APP_TITLE}\n{detail}",
                 "Pause" if state == "playing" else "Play",
             )
         # Ten position ticks a second reached here; a tray tooltip update is
