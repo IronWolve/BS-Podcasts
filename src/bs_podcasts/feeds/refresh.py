@@ -3,10 +3,12 @@
 from dataclasses import dataclass
 import logging
 import os
+import sqlite3
 import threading
 import time
 
 from ..artwork import ArtworkCache, ArtworkError
+from ..data.database import DatabaseIntegrityError
 from ..data.repositories import LibraryRepository
 from ..domain import Health
 from ..privacy import redact
@@ -16,6 +18,10 @@ from .parser import FeedParseError, parse_feed
 # A feed that answers 304 has the cover it had last time; its cover is looked at
 # again only after this long (the cover cache applies its own, shorter, limit).
 COVER_RECHECK_SECONDS = 7 * 86400
+
+# Failures of the library itself (full disk, busy or damaged database,
+# unreadable file). They say nothing about the feed.
+LOCAL_STORAGE_ERRORS = (sqlite3.OperationalError, DatabaseIntegrityError, OSError)
 
 
 @dataclass(frozen=True)
@@ -32,6 +38,9 @@ class RefreshReport:
     # web page in place of the feed (sign-in page, intercepting network).
     network_error: bool = False
     skipped_suspended: bool = False
+    # The library could not be written; the failure was not counted toward
+    # suspension.
+    local_error: bool = False
 
 
 class RefreshService:
@@ -68,7 +77,7 @@ class RefreshService:
                 return self._refresh_locked(show_id)
             except Exception as exc:
                 logging.getLogger(__name__).exception('Unexpected refresh failure for podcast %s', show_id)
-                return self._failure_report(show_id, str(exc), counted=True)
+                return self._unexpected_report(show_id, exc)
 
     def retry(self, show_id: int) -> RefreshReport:
         """Explicit user retry resumes this show under the same refresh lock."""
@@ -80,9 +89,21 @@ class RefreshService:
                 return self._refresh_locked(show_id)
             except Exception as exc:
                 logging.getLogger(__name__).exception('Manual refresh retry failed for podcast %s', show_id)
-                return self._failure_report(show_id, str(exc), counted=True)
+                return self._unexpected_report(show_id, exc)
 
-    def _failure_report(self, show_id, message, *, counted=False, network=False, health=Health.ERROR):
+    def _unexpected_report(self, show_id, exc):
+        if isinstance(exc, LOCAL_STORAGE_ERRORS):
+            # The library failed, not the feed: report it, but keep it out of
+            # the failure count so a full disk never suspends healthy shows.
+            detail = str(exc).strip() or type(exc).__name__
+            return self._failure_report(
+                show_id,
+                f'The library could not be updated ({detail}). Not counted against this podcast; check free disk space and retry.',
+                local=True,
+            )
+        return self._failure_report(show_id, str(exc), counted=True)
+
+    def _failure_report(self, show_id, message, *, counted=False, network=False, local=False, health=Health.ERROR):
         message = redact(str(message)[:8192])[:2048] or 'The podcast could not be updated; retry for current details.'
         logging.getLogger(__name__).warning('Podcast %s refresh failed: %s', show_id, message)
         try:
@@ -94,7 +115,7 @@ class RefreshService:
         except Exception:
             logging.getLogger(__name__).exception('Could not save refresh failure for podcast %s', show_id)
             health = Health.ERROR
-        return RefreshReport(show_id, health, message=message, network_error=network)
+        return RefreshReport(show_id, health, message=message, network_error=network, local_error=local)
 
     def _refresh_artwork(self, show_id, url, previous_path):
         if self.artwork is None or not url:
@@ -220,4 +241,4 @@ class RefreshService:
             # must still clear the LOADING health it set above, or the show
             # spins forever — across restarts — with no failure bookkeeping.
             logging.getLogger(__name__).exception('Unexpected feed update failure for podcast %s', show_id)
-            return self._failure_report(show_id, str(exc), counted=True)
+            return self._unexpected_report(show_id, exc)
