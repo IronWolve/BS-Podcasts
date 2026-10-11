@@ -8,7 +8,7 @@ import logging
 import os
 import threading
 
-from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 
 
 _system_motion_lock = threading.Lock()
@@ -408,6 +408,30 @@ def app_font(size_px: int | None = None, weight: int = QFont.Weight.Normal) -> Q
     return font
 
 
+def app_palette() -> QPalette:
+    """The application palette from the active theme tokens.
+
+    The stylesheet colours the app's own widgets, but the built-in file dialogs
+    take their window and button colours from the palette. Left to the
+    desktop, the opposite theme put the theme ink on a window of nearly the
+    same colour.
+    """
+    c = COLORS
+    palette = QPalette()
+    role = QPalette.ColorRole
+    for key, token in (
+        (role.Window, "canvas"), (role.WindowText, "text"), (role.Base, "surface"),
+        (role.AlternateBase, "surface_raised"), (role.Text, "text"), (role.Button, "surface_raised"),
+        (role.ButtonText, "text"), (role.ToolTipBase, "surface_raised"), (role.ToolTipText, "text"),
+        (role.Highlight, "accent"), (role.HighlightedText, "on_accent"), (role.PlaceholderText, "subtle"),
+        (role.BrightText, "text_strong"), (role.Link, "blue"),
+    ):
+        palette.setColor(key, QColor(c[token]))
+    for key in (role.WindowText, role.Text, role.ButtonText):
+        palette.setColor(QPalette.ColorGroup.Disabled, key, QColor(c["disabled"]))
+    return palette
+
+
 def apply_app_stylesheet(app) -> bool:
     """Set the app-wide stylesheet only when it actually changed.
 
@@ -421,6 +445,7 @@ def apply_app_stylesheet(app) -> bool:
     if app.property("_bs_applied_qss") == qss:
         return False
     app.setProperty("_bs_applied_qss", qss)
+    app.setPalette(app_palette())
     app.setStyleSheet(qss)
     return True
 
