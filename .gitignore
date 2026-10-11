@@ -73,6 +73,7 @@
 !/packaging/project-start.sh
 !/packaging/project-stop.sh
 !/packaging/project-sync.sh
+!/packaging/prune_helper.py
 !/packaging/render-desktop.py
 !/packaging/release_archives.py
 !/packaging/report.py

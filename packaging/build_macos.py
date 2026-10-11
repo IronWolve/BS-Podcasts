@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import platform
-import re
 import shutil
 import subprocess
 import sys
@@ -16,27 +15,17 @@ from source_manifest import ROOT, stage, source_digest, file_digest, check as ch
 from check_dependencies import check
 from report import Reporter, size_text, tree_size
 from build_manifest import require_keys
+from prune_helper import prune_previous_deployments as prune_rollbacks
 
 
 # Mac rollbacks are named by mkdtemp with this prefix. The shared folder also
 # holds other platforms' rollbacks and staging, which this build never prunes.
 ROLLBACK_PREFIX = 'macos-build-'
-_ROLLBACK_NAME = re.compile(re.escape(ROLLBACK_PREFIX) + r'[a-z0-9_]+')
 
 
 def prune_previous_deployments(root, keep=3, retain=None):
     """Keep the newest `keep` Mac rollbacks (always including `retain`); return removed names."""
-    if not root.is_dir() or root.is_symlink():
-        return []
-    entries = [path for path in root.iterdir()
-               if _ROLLBACK_NAME.fullmatch(path.name) and path.is_dir() and not path.is_symlink()
-               and path != retain]
-    entries.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    removed = []
-    for stale in entries[max(keep - (retain is not None), 0):]:
-        shutil.rmtree(stale)
-        removed.append(stale.name)
-    return removed
+    return prune_rollbacks(root, ROLLBACK_PREFIX, keep=keep, retain=retain)
 
 
 def run(*args, **kwargs):

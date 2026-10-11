@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path, PurePosixPath
-import re
 import shutil
 import tempfile
 import fcntl
@@ -14,27 +13,17 @@ from source_manifest import ROOT, check, checked_version, inventory, package_ver
 from runtime_state import runtime_lock, retire_stale
 from report import Reporter, size_text
 from build_manifest import require_keys
+from prune_helper import prune_previous_deployments as prune_rollbacks
 
 
 # Linux rollbacks are named by mkdtemp with this prefix. The shared folder also
 # holds other platforms' rollbacks and staging, which this build never prunes.
 ROLLBACK_PREFIX = 'linux-build-'
-_ROLLBACK_NAME = re.compile(re.escape(ROLLBACK_PREFIX) + r'[a-z0-9_]+')
 
 
 def prune_previous_deployments(root, keep=3, retain=None):
     """Keep the newest `keep` Linux rollbacks (always including `retain`); return removed names."""
-    if not root.is_dir() or root.is_symlink():
-        return []
-    entries = [path for path in root.iterdir()
-               if _ROLLBACK_NAME.fullmatch(path.name) and path.is_dir() and not path.is_symlink()
-               and path != retain]
-    entries.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    removed = []
-    for stale in entries[max(keep - (retain is not None), 0):]:
-        shutil.rmtree(stale)
-        removed.append(stale.name)
-    return removed
+    return prune_rollbacks(root, ROLLBACK_PREFIX, keep=keep, retain=retain)
 
 
 # Built by this deploy beside the manifest's runtime destinations: the native library folder and the record.
