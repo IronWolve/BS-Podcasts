@@ -7041,6 +7041,13 @@ class MainWindow(QMainWindow):
                 self._finish_discover_newest_scan()
         else:
             self._trim_preview_cache()
+            if kind == "preview-scan":
+                # The card's own preview finished first and took it off the
+                # scan, so this peek was still holding the scan's only slot:
+                # nothing else would start the next one.
+                self._pump_discover_newest_scan()
+                if not self._discover_newest_pending and self._discover_newest_total:
+                    self._finish_discover_newest_scan()
         return
     def _on_download(self, kind, identifier, result):
         if isinstance(identifier, tuple):
