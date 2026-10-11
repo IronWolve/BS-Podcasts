@@ -233,7 +233,7 @@ def read_deny_file(path, required=False):
         if required:
             raise ValueError('Private-path deny file is required.')
         return []
-    tokens = [line.strip() for line in path.read_text(encoding='utf-8').splitlines()
+    tokens = [line.strip() for line in path.read_text(encoding='utf-8-sig').splitlines()
               if line.strip() and not line.strip().startswith('#')]
     if required and not tokens:
         raise ValueError('Private-path deny file has no tokens.')
