@@ -1,8 +1,11 @@
 """Directory provider contract with ordered fallback."""
 
+import logging
 from typing import Protocol
 
 from ..domain import DirectoryCandidate
+
+_log = logging.getLogger(__name__)
 
 
 class DirectoryError(RuntimeError):
@@ -87,83 +90,41 @@ class DirectoryService:
         self.providers = list(providers)
 
     def search(self, query: str, limit: int = 30) -> list[DirectoryCandidate]:
-        return self._first("search", query, limit)
+        return self._fan_out("search", (query,), limit)
 
     def browse(self, category: str = "", limit: int = 30) -> list[DirectoryCandidate]:
-        return self._first("browse", category, limit)
+        return self._fan_out("browse", (category,), limit)
 
     def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:
-        errors = []
-        succeeded = False
-        for provider in self.providers:
-            if not hasattr(provider, "recommend"):
-                continue
-            try:
-                results = provider.recommend(shows, limit)
-            except Exception as exc:
-                errors.append((provider.name, exc))
-                continue
-            succeeded = True
-            if results:
-                return results[:limit]
-        # An empty answer from a working provider is an answer; raise only
-        # when every provider that was asked actually failed.
-        if errors and not succeeded:
-            raise _all_failed(errors)
-        return []
+        return self._fan_out("recommend", (shows,), limit)
 
     def topic(
         self, category: str, topic: str, limit: int = 30
     ) -> list[DirectoryCandidate]:
-        errors = []
-        succeeded = False
-        for provider in self.providers:
-            if not hasattr(provider, "topic"):
-                continue
-            try:
-                results = provider.topic(category, topic, limit)
-            except Exception as exc:
-                errors.append((provider.name, exc))
-                continue
-            succeeded = True
-            if results:
-                return results[:limit]
-        # An empty answer from a working provider is an answer; raise only
-        # when every provider that was asked actually failed.
-        if errors and not succeeded:
-            raise _all_failed(errors)
-        return []
+        return self._fan_out("topic", (category, topic), limit)
 
     def chart(self, chart_type: str, category: str = "", limit: int = 30):
+        return self._fan_out("chart", (chart_type, category), limit)
+
+    def _fan_out(self, method: str, args: tuple, limit: int):
+        """The first non-empty answer from the providers, asked in order.
+
+        A provider that raises, or that lacks `method`, is logged with its
+        traceback and counts as a failure; the next provider is asked. An
+        empty answer is an answer. An error is raised only when no provider
+        answered and at least one failed."""
         errors = []
         succeeded = False
         for provider in self.providers:
-            if not hasattr(provider, "chart"):
-                continue
             try:
-                results = provider.chart(chart_type, category, limit)
+                results = getattr(provider, method)(*args, limit)
             except Exception as exc:
+                _log.warning("Directory provider %s could not answer %s", provider.name, method, exc_info=True)
                 errors.append((provider.name, exc))
                 continue
             succeeded = True
             if results:
                 return results[:limit]
-        # An empty answer from a working provider is an answer; raise only
-        # when every provider that was asked actually failed.
         if errors and not succeeded:
-            raise _all_failed(errors)
-        return []
-
-    def _first(self, method: str, value: str, limit: int):
-        errors = []
-        for provider in self.providers:
-            try:
-                results = getattr(provider, method)(value, limit)
-            except Exception as exc:
-                errors.append((provider.name, exc))
-                continue
-            if results:
-                return results[:limit]
-        if errors and len(errors) == len(self.providers):
             raise _all_failed(errors)
         return []
