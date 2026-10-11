@@ -8724,7 +8724,15 @@ class MainWindow(QMainWindow):
         except ValueError:
             # Some feeds ship literal template junk (Sun, DD MMMM YYY).
             return "Unknown date"
-        now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+        if parsed.tzinfo is None and len(value) > 10:
+            # The parser stores a timed date as naive UTC; a bare date is already a calendar day.
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        if parsed.tzinfo is not None:
+            try:
+                parsed = parsed.astimezone()  # the viewer's calendar day, as the clock below
+            except (OverflowError, OSError, ValueError):
+                pass  # outside the clock's range: the UTC date stands
+        now = datetime.now().astimezone()
         days = (now.date() - parsed.date()).days
         if days == 0:
             return "Today"
