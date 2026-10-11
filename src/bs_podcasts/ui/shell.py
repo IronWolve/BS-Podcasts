@@ -3586,7 +3586,7 @@ class MainWindow(QMainWindow):
     # before, and only its own episode rows.
     def _dropped_payload(self, mime):
         if mime.hasUrls():
-            audio, opml, feeds, unsupported = [], [], [], 0
+            audio, opml, feeds, other, unsupported = [], [], [], [], 0
             for url in mime.urls():
                 if url.isLocalFile():
                     path = url.toLocalFile()
@@ -3596,6 +3596,7 @@ class MainWindow(QMainWindow):
                     elif suffix in self.AUDIO_SUFFIXES:
                         audio.append(path)  # every dropped audio file, not just the first
                     else:
+                        other.append(path)  # a folder or an unsupported file
                         unsupported += 1
                 elif url.scheme().lower() in ("http", "https"):
                     feeds.append(url.toString())
@@ -3604,6 +3605,8 @@ class MainWindow(QMainWindow):
             kinds = sum(bool(values) for values in (audio, opml, feeds))
             if kinds and (kinds > 1 or unsupported or len(opml) > 1 or len(feeds) > 1):
                 return ('mixed', 'This drop mixes input types or includes unsupported items. Drop audio files together, or one feed URL/OPML file at a time. Nothing was imported.')
+            if unsupported and not kinds:
+                return ('other', other)
             if audio:
                 return ("audio", audio)
             if opml:
@@ -3640,6 +3643,8 @@ class MainWindow(QMainWindow):
             self._import_opml_path(value)
         elif kind == "audio":
             self._import_local_audio_paths(value)
+        elif kind == "other":
+            self._import_dropped_other(value)
         else:
             dialog = ConfirmDialog('Subscribe to this podcast?',
                 f'This will add {feed_label(value)} and contact its feed server to fetch episodes.',
@@ -3647,6 +3652,38 @@ class MainWindow(QMainWindow):
             if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
                 return
             self._add_podcast_url(value)
+
+    def _import_dropped_other(self, paths):
+        """A drop of folders or unsupported files: a folder hands over the audio
+        files directly inside it (the batch cap applies); the rest is named."""
+        def work():
+            audio, kinds, empty = [], set(), 0
+            for path in paths:
+                folder = Path(path)
+                if not folder.is_dir():
+                    kinds.add(folder.suffix.lower() or "extensionless")
+                    continue
+                try:
+                    found = sorted(str(entry) for entry in folder.iterdir()
+                                   if entry.suffix.lower() in self.AUDIO_SUFFIXES and not entry.name.startswith(".") and entry.is_file())
+                except OSError:
+                    found = []
+                audio.extend(found)
+                empty += not found
+            return audio, sorted(kinds), empty
+
+        def apply(result):
+            audio, kinds, empty = result
+            if audio:
+                self._import_local_audio_paths(audio)
+                return
+            reasons = ["a dropped folder has no audio files directly inside it"] if empty else []
+            if kinds:
+                reasons.append(f"{', '.join(kinds)} files are not supported")
+            self._notify(f"Nothing was imported: {'; '.join(reasons) or 'that drop is not supported'}. "
+                         "Drop audio files, an OPML file or a feed URL.", "info")
+
+        self._run_read(work, apply, "drop-scan", coalesce=False)
 
     def _add_podcast_url(self, feed_url: str):
         """Subscribe to a feed URL without the dialog (drops, later: CLI)."""
