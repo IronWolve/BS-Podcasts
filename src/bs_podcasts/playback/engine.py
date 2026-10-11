@@ -67,7 +67,7 @@ class MpvEngine:
             # Bounded demuxer cache. `cache=yes` forced the network-style
             # cache (150 MiB forward + 50 MiB back) onto local files too, and
             # a 300 MB WAV cost 280 MB of RSS. 32 MiB forward
-            # is ~6 min of 96 kbps audio; `cache_secs` keeps streams padded
+            # is ~47 min of 96 kbps audio; `cache_secs` keeps streams padded
             # by time when the bitrate is low.
             "cache": "auto",
             "demuxer_max_bytes": "32MiB",
@@ -77,8 +77,7 @@ class MpvEngine:
         defaults.update(options)
         self._local_cache_policy = defaults['cache']
         if os.environ.get("BS_PODCASTS_SILENT") == "1":
-            # Documented for the smoke sweep, previously read by nothing
-            #: route audio to the null device.
+            # Route audio to the null device.
             defaults["ao"] = "null"
         self._last_error = ""
         while True:
