@@ -6564,8 +6564,9 @@ class MainWindow(QMainWindow):
         self._refresh_all()
 
     def _retry_podcast_banner(self):
-        """Retry on the Podcasts page banner refreshes the show that failed,
-        resuming it first when the banner says it is suspended."""
+        """Retry on the Podcasts page banner refreshes the show that failed.
+        A suspended show is resumed by the refresh itself: an explicit
+        refresh re-arms it under the service's per-show lock."""
         show_id, self._podcast_banner_show_id = self._podcast_banner_show_id, 0
         if not show_id or self.library is None:
             self.podcast_page.banner.clear()
