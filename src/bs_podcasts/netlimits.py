@@ -37,8 +37,9 @@ def is_foreground():
     return getattr(_context, 'foreground', False)
 
 
-class NetworkDeadline(TimeoutError):
-    pass
+class NetworkDeadline(Exception):
+    """A network deadline or cancellation. Not an OSError: a broad OSError
+    handler around a request must not turn it into a network failure."""
 
 
 class ResponseTooLarge(ValueError):

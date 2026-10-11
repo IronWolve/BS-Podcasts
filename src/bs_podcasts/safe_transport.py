@@ -2,7 +2,7 @@
 import ipaddress
 import socket
 
-from .netlimits import bounded_call, Deadline, DNS, PLAYBACK_DNS, watch_request_socket
+from .netlimits import bounded_call, Deadline, DNS, NetworkDeadline, PLAYBACK_DNS, watch_request_socket
 from .urlguard import UnsafeUrl, _blocked_reason, ensure_web_url
 
 
@@ -40,6 +40,9 @@ def connect_checked(host, port, timeout=None, source_address=None, socket_option
             if deadline is not None:
                 deadline.remaining()
             return stream
+        except NetworkDeadline:
+            stream.close()
+            raise
         except OSError as exc:
             failure = exc
             stream.close()
@@ -69,6 +72,8 @@ def guarded_adapter(deadline_provider=None, **kwargs):
                 raise NameResolutionError(self.host, self, exc) from exc
             except socket.timeout as exc:
                 raise ConnectTimeoutError(self, "Connection timed out.") from exc
+            except NetworkDeadline:
+                raise
             except OSError as exc:
                 raise NewConnectionError(self, "Could not connect to the server.") from exc
 

@@ -14,6 +14,8 @@ from urllib.parse import urlsplit
 import ipaddress
 import socket
 
+from .netlimits import NetworkDeadline
+
 WEB_SCHEMES = frozenset({"http", "https"})
 
 
@@ -73,6 +75,7 @@ _THIS_NETWORK = ipaddress.IPv4Network("0.0.0.0/8")
 # Well-known DNS64 is IPv4-only. The local prefix may embed a private IPv4 address.
 _NAT64_WELL_KNOWN = ipaddress.IPv6Network("64:ff9b::/96")
 _NAT64_LOCAL = ipaddress.IPv6Network("64:ff9b:1::/48")
+_SIXTOFOUR = ipaddress.IPv6Network("2002::/16")
 
 
 def _rfc6052_ipv4(raw: bytes, prefix_len: int) -> ipaddress.IPv4Address:
@@ -123,10 +126,24 @@ def _address_reason(ip) -> str:
     return ""
 
 
+def _sixtofour_ipv4(ip):
+    """IPv4 embedded in a 6to4 address (2002::/16), else None.
+
+    A 6to4 address carries its IPv4 in bits 16-47, so a 6to4 address that
+    points at a loopback or metadata host is classified like that host.
+    """
+    if isinstance(ip, ipaddress.IPv6Address) and ip in _SIXTOFOUR:
+        return ipaddress.IPv4Address(ip.packed[2:6])
+    return None
+
+
 def _blocked_reason(ip) -> str:
     nat64 = _nat64_ipv4(ip)
     if nat64 is not None:
         return _address_reason(nat64)
+    sixtofour = _sixtofour_ipv4(ip)
+    if sixtofour is not None:
+        return _address_reason(sixtofour)
     mapped = getattr(ip, "ipv4_mapped", None) or ip
     return _address_reason(mapped)
 
@@ -161,7 +178,7 @@ def _addresses(host: str) -> list:
         deadline = Deadline(8)
         infos = bounded_call(lambda: socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP),
                              deadline, gate=PLAYBACK_DNS if deadline.foreground else DNS)
-    except OSError as exc:  # resolver failure, timeout or busy workers
+    except (OSError, NetworkDeadline) as exc:  # resolver failure, timeout or busy workers
         raise UnresolvedHost(f"Could not resolve {host} safely: {exc}") from exc
     except UnicodeError as exc:
         raise UnsafeUrl(f"Could not resolve {host} safely: {exc}") from exc
