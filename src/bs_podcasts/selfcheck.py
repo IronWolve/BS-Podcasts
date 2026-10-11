@@ -6,7 +6,6 @@ import importlib.util
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import ctypes.util
 import os
 import sys
 import time
