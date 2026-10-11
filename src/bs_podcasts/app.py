@@ -6,6 +6,7 @@ import sys
 import threading
 import sqlite3
 import time
+import traceback
 import json
 import hashlib
 from pathlib import Path
@@ -31,6 +32,7 @@ from .jobs import JobRunner
 from .jobs.commands import CommandQueue
 from .logging_setup import configure_logging
 from .playback import LazyMpvEngine, PlaybackService
+from .privacy import redact
 from .services import LibraryService, ListeningService
 from .ui.shell import MainWindow, shutdown_exports
 from .ui.theme import app_font, apply_app_stylesheet, apply_theme, apply_typography, load_fonts, resolve_theme
@@ -39,18 +41,14 @@ from .ui.theme import app_font, apply_app_stylesheet, apply_theme, apply_typogra
 def _write_crash_file(text: str):
     """All diagnostic sinks share redaction and private project storage."""
     from .logging_setup import write_crash_file
-    from .privacy import redact
 
     write_crash_file(f"BS Podcasts {app_version()}\n{redact(text)}\n")
 
 
 def _install_excepthook():
-    from .privacy import redact
     logger = logging.getLogger("bs_podcasts")
 
     def hook(exc_type, exc_value, exc_traceback):
-        import traceback
-
         text = redact("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
         logger.error("Unhandled exception:\n%s", text)
         _write_crash_file(text)
@@ -64,8 +62,6 @@ def _install_excepthook():
     def thread_hook(args):
         if args.exc_type is SystemExit:
             return
-        import traceback
-
         text = redact("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
         logger.error("Unhandled exception in thread %s:\n%s", getattr(args.thread, "name", "?"), text)
         _write_crash_file(f"[thread {getattr(args.thread, 'name', '?')}]\n{text}")
@@ -74,8 +70,6 @@ def _install_excepthook():
 
     def unraisable_hook(unraisable):
         # Errors in finalizers and callbacks: redacted into the log, not raw stderr.
-        import traceback
-
         try:
             text = redact("".join(traceback.format_exception(
                 unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback)))
@@ -88,8 +82,6 @@ def _install_excepthook():
 
 def _install_toolkit_messages(per_minute: int = 50):
     """Route the UI toolkit's own warnings through the redacting log, rate-limited."""
-    import time
-
     from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 
     logger = logging.getLogger("bs_podcasts.toolkit")
@@ -127,9 +119,6 @@ def _install_toolkit_messages(per_minute: int = 50):
 
 def _install_stall_monitor(app, threshold_ms: int = 150):
     """BS_PODCASTS_TRACE=1: log main-thread stalls with the stack that caused them."""
-    import time
-    from PySide6.QtCore import QTimer
-
     logger = logging.getLogger("bs_podcasts.trace")
     main_thread_id = threading.get_ident()
     beat = {"at": time.monotonic()}
@@ -145,8 +134,6 @@ def _install_stall_monitor(app, threshold_ms: int = 150):
             late = time.monotonic() - beat["at"]
             if late * 1000 >= threshold_ms and beat["at"] != reported:
                 frame = sys._current_frames().get(main_thread_id)
-                import traceback
-
                 stack = "".join(traceback.format_stack(frame)[-6:]) if frame else "(no frame)"
                 logger.warning("main thread stalled %.0f ms; main-thread stack:\n%s", late * 1000, stack)
                 reported = beat["at"]
@@ -549,8 +536,6 @@ def _finalize_unclosed(commands, playback, grace_seconds: float = 2.0) -> int:
     closed the queue through the window; then this does nothing."""
     if commands.closing:
         return 0
-    import time
-
     commands.finish(playback.shutdown)
     deadline = time.monotonic() + grace_seconds
     return _join_playback_shutdown(commands, playback, deadline)
@@ -716,21 +701,21 @@ def _start_library_services(database):
 
 
 def main() -> int:
-    import time as _time
-
     # Startup phase marks, logged once the window is up. When a platform
     # stalls at launch (the Mac build took 11 s to show), one run of the app
     # names the guilty phase instead of a remote guessing game.
-    _marks = [("start", _time.monotonic())]
+    _marks = [("start", time.monotonic())]
 
     def _mark(name: str):
-        _marks.append((name, _time.monotonic()))
+        _marks.append((name, time.monotonic()))
 
     app = create_application()
     _mark("qt-app")
     try:
         incoming = _cli_file_args(sys.argv[1:])
     except (ValueError, TypeError, UnicodeError) as exc:
+        # ui.dialogs stays a deferred import in main(): only the error paths
+        # need it, and a normal launch does not load it here.
         from .ui.dialogs import StartupErrorDialog
         dialog = StartupErrorDialog('File arguments not accepted', str(exc))
         dialog.exec(); dialog.deleteLater()
@@ -743,7 +728,7 @@ def main() -> int:
     from .data.lease import LibraryLease, LibraryInUseError
 
     lease = None
-    lease_wait_until = _time.monotonic() + 30.0
+    lease_wait_until = time.monotonic() + 30.0
     while lease is None:
         try:
             lease = LibraryLease(root / "library.db")
@@ -777,7 +762,7 @@ def main() -> int:
                     'No files were imported. Retry after it has closed, or after closing its dialog or restarting the updated app.')
                 dialog.exec(); dialog.deleteLater()
                 return 1
-            if _time.monotonic() >= lease_wait_until:
+            if time.monotonic() >= lease_wait_until:
                 dialog = StartupErrorDialog(
                     "BS Podcasts is starting or closing",
                     "The library is still in use by another instance. It may be "
@@ -785,7 +770,7 @@ def main() -> int:
                 )
                 dialog.exec()
                 return 1
-            _time.sleep(0.25)
+            time.sleep(0.25)
     server = _claim_single_instance(app)
     _mark("single-instance")
     notice = None
@@ -1073,13 +1058,13 @@ def main() -> int:
     # leave. Non-daemon worker threads would otherwise hold the process open.
     # One deadline for all pools: four independent 3 s joins let a quit take
     # up to 12 s while background work drained.
-    deadline = _time.monotonic() + 3.0
+    deadline = time.monotonic() + 3.0
     busy = _join_playback_shutdown(commands, playback, deadline)
     for pool in (jobs, download_jobs, play_download_jobs, refresh_jobs, network_jobs, artwork_jobs):
-        busy += pool.join(max(0.0, deadline - _time.monotonic()))
-    busy += shutdown_exports(max(0.0, deadline - _time.monotonic()))
+        busy += pool.join(max(0.0, deadline - time.monotonic()))
+    busy += shutdown_exports(max(0.0, deadline - time.monotonic()))
     from .ui.pixmaps import shutdown_decodes
-    busy += shutdown_decodes(max(0.0, deadline - _time.monotonic()))
+    busy += shutdown_decodes(max(0.0, deadline - time.monotonic()))
     if busy:
         logging.getLogger("bs_podcasts").warning("Exiting with %d background job(s) still running.", busy)
         if not _close_busy_database(database, grace_seconds=0.1):
