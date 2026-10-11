@@ -226,9 +226,11 @@ def build(output, macos=None, plain=False):
         'Then bash start.sh --check --plain; bash start.sh launches the GUI.\n'
         'This is not a self-contained Linux binary. No developer checkout is required.\n'
         'After moving the folder, preserve/rename dists/linux/.venv and rerun setup.sh.\n'
-        'The library is stored in a folder named BS-Podcasts-data next to this versioned folder, so another version opens the same library.\n'
+        'The library is stored in a folder named BS-Podcasts-data next to this folder, whatever this folder is called, so another version opens the same library.\n'
         'If BS-Podcasts-data has no library yet and this folder already contains data/library.db, this folder\'s data directory is used instead.\n'
-        'A single library under an older version folder is reused without moving it. If several exist, set BS_PODCASTS_DATA_DIR to choose one.\n'
+        'A single library under an older version folder is copied into BS-Podcasts-data the first time this version starts, and a notice says so. '
+        'The older folder is left as it was and its downloaded episodes are not copied, so keep it until you have moved what you need. '
+        'If several exist, set BS_PODCASTS_DATA_DIR to choose one.\n'
         'Logs and caches stay in this versioned folder.\n'
         'Do not include those private files when redistributing or updating the application.\n').encode()
     scan_inputs(linux_files, tokens)
