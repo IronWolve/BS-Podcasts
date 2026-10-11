@@ -7,6 +7,7 @@ from functools import lru_cache
 from html import escape as html_escape, unescape as html_unescape
 from html.parser import HTMLParser
 import re
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import (
@@ -1155,6 +1156,18 @@ class StateBanner(QFrame):
             self.state_changed.emit("")
 
 
+class _ToastEntry(NamedTuple):
+    """One waiting or preempted toast, in the order show_message takes it."""
+
+    message: str
+    tone: str
+    action: str
+    callback: object
+    duration_ms: int
+    on_close: object
+    owner: object
+
+
 class Toast(QFrame):
     """Transient confirmation anchored above the player bar; auto-dismisses."""
 
@@ -1220,6 +1233,7 @@ class Toast(QFrame):
         self._closing = False
         self._sticky = False
         self._sticky_entry = None
+        self._owner = None
         self._overflow = 0
         self._animation.finished.connect(self._animation_finished)
         self.hide()
@@ -1244,17 +1258,17 @@ class Toast(QFrame):
             duration_ms = self.ACTION_MS if action else self.NOTICE_MS
         showing = self.isVisible() and not self._closing
         if showing and self._sticky and duration_ms > 0:
-            self._sticky_entry = (self.text.text(), self.property('tone') or 'loading', self.action.text(), self._callback, 0, self._on_close, self._owner)
+            self._sticky_entry = _ToastEntry(self.text.text(), self.property('tone') or 'loading', self.action.text(), self._callback, 0, self._on_close, self._owner)
             self._animation.stop()
             self._timer.stop()
             self.hide()
             showing = False
         if showing:
-            entry = (message, tone, action, callback, duration_ms, on_close, owner)
-            duplicate = self.text.text() == message or any(queued[0] == message for queued in self._queue)
+            entry = _ToastEntry(message, tone, action, callback, duration_ms, on_close, owner)
+            duplicate = self.text.text() == message or any(queued.message == message for queued in self._queue)
             if callback is not None:
                 for index, queued in enumerate(self._queue):
-                    if queued[0] == message:
+                    if queued.message == message:
                         self._queue[index] = entry
                 if self.text.text() == message:
                     self._callback = callback
@@ -1348,13 +1362,13 @@ class Toast(QFrame):
 
     def update_message(self, message: str, owner=None):
         """Refresh a visible toast's text in place (progress ticks)."""
-        if owner is not None and getattr(self, "_owner", None) != owner:
-            if self._sticky_entry is not None and self._sticky_entry[6] == owner:
-                self._sticky_entry = (message, *self._sticky_entry[1:])
+        if owner is not None and self._owner != owner:
+            if self._sticky_entry is not None and self._sticky_entry.owner == owner:
+                self._sticky_entry = self._sticky_entry._replace(message=message)
                 return True
             for index, queued in enumerate(self._queue):
-                if queued[6] == owner:
-                    self._queue[index] = (message, *queued[1:])
+                if queued.owner == owner:
+                    self._queue[index] = queued._replace(message=message)
                     return True
             return False
         if not self.isVisible() or self._closing:
@@ -1366,10 +1380,10 @@ class Toast(QFrame):
         return True
 
     def dismiss_owner(self, owner):
-        self._queue[:] = [queued for queued in self._queue if queued[6] != owner]
-        if self._sticky_entry is not None and self._sticky_entry[6] == owner:
+        self._queue[:] = [queued for queued in self._queue if queued.owner != owner]
+        if self._sticky_entry is not None and self._sticky_entry.owner == owner:
             self._sticky_entry = None
-        if getattr(self, "_owner", None) == owner:
+        if self._owner == owner:
             self.dismiss()
 
     def reposition(self):
