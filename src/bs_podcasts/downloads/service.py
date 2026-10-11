@@ -49,6 +49,10 @@ class _TruncatedDownload(DownloadError):
     """The transfer ended before the expected Content-Length; safe to retry."""
 
 
+class _TransferStalled(DownloadError):
+    """The watchdog ended a connection that stopped delivering data; safe to retry."""
+
+
 class _RangeContinuation(DownloadError):
     """A complete range leg; request the next leg without spending a retry."""
 
@@ -106,6 +110,9 @@ class _StallWatch:
         self._bytes = 0
         self._stop = Event()
         self.message = ""
+        # Set only for the too-slow verdict, before `message`; the paused and
+        # maximum-duration verdicts are final.
+        self.stalled = False
 
     def start(self):
         Thread(target=self._run, name="bs-download-watch", daemon=True).start()
@@ -131,6 +138,7 @@ class _StallWatch:
             elif now - window_started < self._window:
                 continue
             elif self._bytes - seen < self._min_bytes:
+                self.stalled = True
                 self.message = f"Transfer stalled ({(self._bytes - seen) // 1024} KB in {int(self._window)} s). Retry in a moment."
             if self.message:
                 try:
@@ -164,7 +172,7 @@ def _guarded_chunks(response, stall: "_StallWatch"):
         yield from response.iter_content(4 * 1024)
     except requests.RequestException:
         if stall.message:
-            raise DownloadError(stall.message)
+            raise (_TransferStalled if stall.stalled else DownloadError)(stall.message)
         raise
     finally:
         stall.stop()
@@ -419,7 +427,7 @@ class DownloadService:
                         except _RangeContinuation:
                             continue
                     raise DownloadError("Server supplied too many tiny ranges; retry to resume.")
-                except (_TruncatedDownload, _StaleResume, requests.RequestException) as exc:
+                except (_TruncatedDownload, _TransferStalled, _StaleResume, requests.RequestException) as exc:
                     last_error = exc
                 record = self.downloads.get(episode_id)
                 if cancellation.is_set() or (record is not None and record.state == DownloadState.PAUSED):
@@ -884,7 +892,7 @@ class DownloadService:
                 os.fsync(handle.fileno())
             stall.stop()
             if stall.message:
-                raise DownloadError(stall.message)
+                raise (_TransferStalled if stall.stalled else DownloadError)(stall.message)
             if not done:
                 raise DownloadError("Server returned empty audio.")
             if total and done < total:
@@ -908,7 +916,7 @@ class DownloadService:
             if cancellation.is_set():
                 return self._park(episode_id, partial)
             raise
-        except _TruncatedDownload:
+        except (_TruncatedDownload, _TransferStalled):
             if cancellation.is_set():
                 return self._park(episode_id, partial)
             raise
