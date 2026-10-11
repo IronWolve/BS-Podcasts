@@ -143,15 +143,37 @@ function Publish-Application {
                 $published += $name
             }
         } catch {
+            # Undo every step that can still be undone, and report the first error with
+            # what was and was not put back, instead of stopping at the first failed restore.
+            $failure = $_
+            $restored = @()
+            $unrestored = @()
             [array]::Reverse($published)
             foreach ($name in $published) {
-                Move-Item -LiteralPath (Join-Path $Target $name) -Destination (Join-Path $incoming $name)
+                try {
+                    Move-Item -LiteralPath (Join-Path $Target $name) -Destination (Join-Path $incoming $name)
+                    $restored += "new $name"
+                } catch {
+                    $unrestored += ("new {0} (still in the destination; {1})" -f $name, $_.Exception.Message)
+                }
             }
             [array]::Reverse($retired)
             foreach ($name in $retired) {
-                Move-Item -LiteralPath (Join-Path $previous $name) -Destination (Join-Path $Target $name)
+                if (Test-Path -LiteralPath (Join-Path $Target $name)) {
+                    # The new copy is still there; moving the old one in would nest it inside.
+                    $unrestored += ("previous {0} (kept in {1})" -f $name, $previous)
+                    continue
+                }
+                try {
+                    Move-Item -LiteralPath (Join-Path $previous $name) -Destination (Join-Path $Target $name)
+                    $restored += "previous $name"
+                } catch {
+                    $unrestored += ("previous {0} (kept in {1}; {2})" -f $name, $previous, $_.Exception.Message)
+                }
             }
-            throw
+            if ($unrestored.Count -eq 0) { throw $failure }
+            throw ("{0}`nRollback was incomplete. Restored: {1}. Not restored: {2}. The new build is in {3}." -f
+                $failure.Exception.Message, ($restored -join ", "), ($unrestored -join "; "), $incoming)
         }
         if (Test-Path -LiteralPath $incoming) {
             Remove-Item -LiteralPath $incoming -Recurse -Force
@@ -159,7 +181,17 @@ function Publish-Application {
         if ($PruneOldDeployments) {
             Remove-OldDeployments -Root $MetadataRoot -Retain $previous
         }
-        Write-State ok "Previous application and manifest retained: $previous"
+        if ($retired.Count -gt 0) {
+            Write-State ok ("Previous artifacts retained ({0}): {1}" -f ($retired -join ", "), $previous)
+        } else {
+            Write-State info "No previous artifacts were present, so none were retained."
+        }
+    } catch {
+        # The new build was moved out of the build work folder before the swap.
+        if (Test-Path -LiteralPath $incoming) {
+            Write-State warn "The new build is no longer in the build work folder. It is retained at $incoming"
+        }
+        throw
     } finally {
         $lease.Dispose()
     }
