@@ -252,7 +252,6 @@ class PlaybackService:
             # so a still-armed timer would pause the NEXT episode unannounced.
             if not keep:
                 self.cancel_sleep_timer()
-            self._deferred_episode_id = None
             episode = self.repository.get_episode(episode_id)
             if episode is None:
                 raise PlaybackUnavailable("Episode was not found.")
@@ -295,6 +294,9 @@ class PlaybackService:
                 start = max(0.0, float(start_position))
             speed = show.playback_speed if show else 1.0
             kept = {name: getattr(self.snapshot, name) for name in self.REOPEN_KEEPS} if keep else {}
+            # A load that was refused above leaves the restored episode waiting,
+            # so the next Play tries again and shows the reason again.
+            self._deferred_episode_id = None
             self._begin_load(start, autoplay, keep_target=keep)
             if not self._volume_applied:
                 try:
@@ -490,7 +492,6 @@ class PlaybackService:
         deferred = getattr(self, "_deferred_episode_id", None)
         if deferred is None:
             return False
-        self._deferred_episode_id = None
         # No re-seek afterwards. load_episode() is the single authority on the
         # start position and already restarts a finished episode from zero;
         # re-applying the snapshot's own position here put a completed episode
@@ -1182,8 +1183,9 @@ class PlaybackService:
             self._start_target = None
         self._load_autoplay = bool(autoplay)
         self._desired_position = max(0.0, float(position))
-        prepare = getattr(self.engine, "prepare_load", None)
         try:
+            # The lookup can build the engine's native core, so it can fail too.
+            prepare = getattr(self.engine, "prepare_load", None)
             self._engine_generation = prepare() if callable(prepare) else None
             if prepare is None:
                 pause = getattr(self.engine, "pause", None)
