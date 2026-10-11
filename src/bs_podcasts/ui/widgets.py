@@ -3803,10 +3803,10 @@ class PlayerBar(QFrame):
         self.show_label = PlainTextLabel("Choose an episode to begin")
         self.show_label.setObjectName("playerShow")
         # The show name is a link to that podcast's episode list (the title
-        # opens Now Playing). Click or Enter/Space when focused; cursor and
-        # tooltip follow whether a library show is actually behind it.
+        # opens Now Playing). Click or Enter/Space when focused; cursor,
+        # tooltip and tab stop follow whether a library show is behind it.
         self._now_show_id = 0
-        self.show_label.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.show_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.show_label.setAttribute(Qt.WidgetAttribute.WA_Hover, True)  # QSS :hover needs it on a QLabel
         self.show_label.setProperty("linked", "false")
         self.show_label.installEventFilter(self)
@@ -4335,6 +4335,11 @@ class PlayerBar(QFrame):
         linked = "true" if self._now_show_id else "false"
         self.show_label.setCursor(
             Qt.CursorShape.PointingHandCursor if self._now_show_id else Qt.CursorShape.ArrowCursor
+        )
+        # Enter, Space and clicks do nothing without a library show, so the
+        # label is a tab stop only while it opens one.
+        self.show_label.setFocusPolicy(
+            Qt.FocusPolicy.TabFocus if self._now_show_id else Qt.FocusPolicy.NoFocus
         )
         if self.show_label.property("linked") != linked:
             # Dynamic property drives the :hover rule; repolish so it applies.
