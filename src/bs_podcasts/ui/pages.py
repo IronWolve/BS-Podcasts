@@ -1700,13 +1700,19 @@ class HomePage(BasePage, _ListPageMixin):
         in_progress = list(in_progress)
         latest = list(latest)
         self._resume_lead = in_progress[: self.RESUME_ROWS]
-        self.model.replace(self._resume_lead + latest[:30])
+        shown = latest[:30]
+        self.model.replace(self._resume_lead + shown)
         if self._resume_lead:
             self.latest_title.title.setText("Continue listening")
             self.latest_title.set_count(len(in_progress), show_link=True)
         else:
             self.latest_title.title.setText(self._latest_text)
-            self.latest_title.set_count(len(latest))
+            # "See all" opens the New filter. When nothing is flagged new, the
+            # section falls back to unplayed episodes that filter does not
+            # hold, so there is no list to open: hide the link and count only
+            # the rows listed here.
+            has_new = any(episode.is_new for episode in shown)
+            self.latest_title.set_count(len(latest) if has_new else len(shown), show_link=has_new)
         self._restore_selection(key, True, selected, anchor)
 
     def set_items(self, items, heading: str | None = None):  # compatibility
