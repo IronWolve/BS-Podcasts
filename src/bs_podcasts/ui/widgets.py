@@ -4542,7 +4542,7 @@ class PlayerBar(QFrame):
         self._set_hint(self.volume, f'{action} · Volume {value}%')
 
     def _toggle_mute(self):
-        self._request_volume(0.0 if self._volume > 0 else self._last_audible_volume)
+        self._request_volume(0.0 if int(round(self._volume)) > 0 else self._last_audible_volume)
 
     def _slider_busy(self) -> bool:
         """A drag or a burst of wheel/key steps owns the handle; playback
