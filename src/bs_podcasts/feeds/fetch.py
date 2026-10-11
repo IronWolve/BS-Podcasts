@@ -240,7 +240,10 @@ NOTHING_DATED = ("", "")
 class FeedFetcher:
     # The fetcher gives the concise feed-specific size error. The transport
     # backstop is also a response error, never a network timeout.
-    session = SessionSlot(max_redirects=5, max_response_bytes=MAX_RESPONSE_BYTES + 1024 * 1024)
+    # A feed may be up to the byte cap, so the budget for the whole transfer
+    # is longer than the 60 seconds a small request gets: 20 MB needs about
+    # 170 KB/s to finish in 120 seconds.
+    session = SessionSlot(max_redirects=5, max_response_bytes=MAX_RESPONSE_BYTES + 1024 * 1024, total_timeout=120)
 
     def __init__(self, session=None):
         self.session = session
