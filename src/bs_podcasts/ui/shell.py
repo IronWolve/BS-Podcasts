@@ -3426,6 +3426,8 @@ class MainWindow(QMainWindow):
         message = f"Imported {len(added)} subscription{'s' if len(added) != 1 else ''}"
         skipped = getattr(added, 'skipped', 0)
         errors = getattr(added, 'errors', ())
+        if added and self._background_paused():
+            message += " · episodes load when background work resumes"
         if skipped:
             message += f" · {skipped} skipped (already saved or unsupported)"
         if errors:
