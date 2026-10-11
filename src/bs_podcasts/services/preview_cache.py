@@ -1,4 +1,4 @@
-"""Byte- and count-bounded feed previews; no Qt or network ownership."""
+"""Byte- and count-bounded cache of feed results; no Qt or network ownership."""
 from collections import OrderedDict
 from collections.abc import MutableMapping
 from dataclasses import fields
@@ -21,7 +21,7 @@ def prepare_preview(feed):
     return feed
 
 
-class PreviewCache(MutableMapping):
+class FeedResultCache(MutableMapping):
     def __init__(self, max_bytes=16*1024*1024, max_entries=64):
         self.max_bytes, self.max_entries = max_bytes, max_entries
         self.bytes = 0

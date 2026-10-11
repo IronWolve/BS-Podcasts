@@ -52,7 +52,7 @@ from ..downloads import AutomaticCleanupSkipped
 from ..jobs import JobResult, JobRunner, JobStatus
 from ..jobs.commands import CommandQueue
 from ..services.library import LibraryService, _bounded_float, _bounded_int
-from ..services.preview_cache import PreviewCache, prepare_preview
+from ..services.preview_cache import FeedResultCache, prepare_preview
 from ..urlguard import is_web_url
 from ..privacy import feed_label, redact
 from ..data.database import is_corruption_error
@@ -347,7 +347,7 @@ class MainWindow(QMainWindow):
         self._discover_displayed_key = None
         self._discover_retry_request = None
         self._discover_visited = bool(view_state and view_state.get("discover_visited"))
-        self._previews = PreviewCache()
+        self._previews = FeedResultCache()
         self._preview_pending = set()
         # The selected card's feed is requested once the selection rests, so
         # stepping through cards does not queue one download per card passed.
