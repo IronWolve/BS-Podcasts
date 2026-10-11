@@ -173,6 +173,8 @@ class MpvEngine:
             if self._http_sources.get(uri) != source:
                 stream.close()
                 raise ValueError('This playback request was cancelled.')
+            # A stream the player already closed has nothing left to cancel.
+            self._http_streams = [open_stream for open_stream in self._http_streams if not open_stream.cancelled.is_set()]
             self._http_streams.append(stream)
         stream.open()
         return stream
