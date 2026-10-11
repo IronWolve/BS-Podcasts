@@ -182,6 +182,7 @@ _disk_load_lock = threading.Lock()
 _disk_lock = threading.Lock()
 _disk_write_lock = threading.Lock()
 _save_error_logged = False
+_accents_dirty = False  # Tints changed since the last save.
 _SAMPLE_SIZE = 24
 MAX_METADATA = 4096
 MAX_ACCENT_FILE = 2 * 1024 * 1024
@@ -243,7 +244,7 @@ def _read_disk() -> None:
 
 
 def _save_disk() -> None:
-    global _save_error_logged
+    global _save_error_logged, _accents_dirty
     target = _cache_file()
     with _disk_write_lock:
         # Serialize writers, but never hold the GUI lookup lock during I/O.
@@ -253,6 +254,7 @@ def _save_disk() -> None:
                        "signature": _dominant_signatures.get(path)}
                 for path, color in _dominant.items()
             }
+            _accents_dirty = False
         payload = json.dumps({"version": 1, "items": items}).encode('utf-8')
         while len(payload) > MAX_ACCENT_FILE and items:
             for path in list(items)[:max(1, len(items)//2)]:
@@ -262,6 +264,7 @@ def _save_disk() -> None:
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             atomic_write(target, payload)
         except OSError:
+            _accents_dirty = True
             if not _save_error_logged:
                 _save_error_logged = True
                 logging.getLogger("bs_podcasts").debug("Could not save the artwork tint table", exc_info=True)
@@ -332,6 +335,7 @@ def dominant_color(path: str, fallback: str = "", compute: bool = True) -> str:
     `compute=False` returns a cached or fallback tint without decoding the
     image — first paint must not wait on a full-library JPEG scan.
     """
+    global _accents_dirty
     if not path:
         return fallback
     if compute:
@@ -358,6 +362,7 @@ def dominant_color(path: str, fallback: str = "", compute: bool = True) -> str:
     # the Qt thread reads, and a reader landing between the two assignments
     # saw a colour whose freshness stamp belonged to the previous file.
     with _disk_lock:
+        _accents_dirty = True
         _dominant[path] = result
         _dominant_mtime[path] = stamp
         _dominant_signatures[path] = signature
@@ -408,6 +413,7 @@ def save_accents() -> None:
 
 def prune_accents():
     """Worker-only disk checks; keep deleted artwork out of persisted metadata."""
+    global _accents_dirty
     with _disk_lock:
         paths = list(_dominant)
     missing = [path for path in paths if not os.path.isfile(path)]
@@ -417,7 +423,10 @@ def prune_accents():
             _dominant_mtime.pop(path, None)
             _dominant_signatures.pop(path, None)
         _bound_accents()
-    _save_disk()
+        _accents_dirty = _accents_dirty or bool(missing)
+        dirty = _accents_dirty
+    if dirty:
+        _save_disk()
 
 
 def initials(text: str) -> str:
@@ -666,12 +675,14 @@ def _schedule_decode(key: str, path: str, width: int, height: int, notify) -> No
 
 def invalidate_artwork(path: str, *, accent_token=None):
     """Called on the GUI thread when a producer publishes/replaces an image."""
+    global _accents_dirty
     _revisions[path] = next(_revision_ids)
     _revision_for(path)
     _preview_cache.drop(path)
     with _disk_lock:
         current = (_dominant.get(path), _dominant_signatures.get(path))
         if accent_token is None or current != accent_token or current[1] is None:
+            _accents_dirty = _accents_dirty or path in _dominant
             _dominant.pop(path, None)
             _dominant_mtime.pop(path, None)
             _dominant_signatures.pop(path, None)
