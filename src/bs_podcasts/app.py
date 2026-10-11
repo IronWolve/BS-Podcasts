@@ -458,6 +458,10 @@ def _set_instance_callbacks(server, on_raise, on_files):
                 accepted = callbacks['files'](paths)
             except (ValueError, TypeError, UnicodeError):
                 accepted = False
+            except Exception:
+                # The sender needs an answer, not silence until the timer.
+                logging.getLogger('bs_podcasts').exception('File request callback failed')
+                accepted = False
             if accepted:
                 callbacks['raise_']()
             finish(b'files-queued' if accepted else b'err')
