@@ -3795,7 +3795,6 @@ class PlayerBar(QFrame):
         # tooltip follow whether a library show is actually behind it.
         self._now_show_id = 0
         self.show_label.setFocusPolicy(Qt.FocusPolicy.TabFocus)
-        self.show_label.setAccessibleName("Open this podcast")
         self.show_label.setAttribute(Qt.WidgetAttribute.WA_Hover, True)  # QSS :hover needs it on a QLabel
         self.show_label.setProperty("linked", "false")
         self.show_label.installEventFilter(self)
@@ -4395,6 +4394,11 @@ class PlayerBar(QFrame):
         # already spelled out on the status line below.
         quiet = str(snapshot.state) == "error" or self._download_wait
         self._now_notice = "" if quiet else (snapshot.message or "")
+        # The visible labels are elided; the accessible names carry the full
+        # title and name the show the link opens (a plain label otherwise).
+        self.title.setAccessibleName(self._now_title)
+        self.show_label.setAccessibleName(
+            f"Open podcast {self._now_show}" if self._now_show_id and self._now_show else "")
         self._elide_now_labels()
         self.art.set_artwork(snapshot.artwork_path, initials(snapshot.show_title or snapshot.title), "")
         self._duration = media_seconds(snapshot.duration) or 0.0
