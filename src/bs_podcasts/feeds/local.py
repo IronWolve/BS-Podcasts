@@ -24,6 +24,11 @@ PROBE_TIMEOUT = 12
 MAX_PROBE_RESULT = 64 * 1024
 
 
+def _storable(name: str) -> str:
+    """A file name as text the library can store; bytes that are not UTF-8 become U+FFFD."""
+    return os.fsencode(name).decode("utf-8", "replace")
+
+
 def read_metadata(source: Path) -> dict:
     """Use an owned, bounded native probe without touching the active player."""
     from ..config import cache_dir
@@ -92,11 +97,14 @@ class LocalAudioImporter:
         after = source.stat()
         if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
             raise LocalAudioError('Audio file changed while reading; retry the import.')
+        # The path is hashed as the file system names it: a name that is not
+        # valid UTF-8 has no strict UTF-8 encoding, and the same bytes must
+        # keep the same identity.
         identity = sha256(
-            f"{source}:{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8")
+            os.fsencode(f"{source}:{stat.st_size}:{stat.st_mtime_ns}")
         ).hexdigest()
-        show_title = metadata['album'] or source.parent.name or "Local audio"
-        episode_title = metadata['title'] or source.stem
+        show_title = metadata['album'] or _storable(source.parent.name) or "Local audio"
+        episode_title = metadata['title'] or _storable(source.stem)
         media_url = source.as_uri()
         mime = mimetypes.guess_type(source.name)[0] or "audio/*"
         feed = FeedData(
