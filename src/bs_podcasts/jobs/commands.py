@@ -76,8 +76,9 @@ class CommandQueue:
     def submit_latest(self, key, work, keep=True):
         """Replace a pending setting without moving it across another command.
 
-        Replacements return the same Future; callers should attach completion
-        handling only once to that future.
+        A command for another key is a boundary too: the earlier setting is
+        no longer replaced after it. Replacements return the same Future;
+        callers should attach completion handling only once to that future.
         """
         with self._lock:
             if self.closing:
@@ -89,6 +90,8 @@ class CommandQueue:
                     slot[0] = work
                     self._pending[future] = self._pending[future] or keep
                     return future
+            # A new queue entry is a FIFO boundary for every other replaceable slot.
+            self._latest.clear()
             slot = [work]
             def run():
                 with self._lock:
