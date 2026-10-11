@@ -199,11 +199,14 @@ class DirectoryCharts:
             if script_url.startswith("/"):
                 script_url = "https://podcasts.apple.com" + script_url
             # The script URL is scraped from page content; only the
-            # directory's own hosts may serve the bundle a bearer token is
-            # about to be read from.
+            # directory's own hosts, over https, may serve the bundle a
+            # bearer token is about to be read from.
             from urllib.parse import urlsplit
 
-            host = (urlsplit(script_url).hostname or "").lower()
+            parts = urlsplit(script_url)
+            if parts.scheme != "https":
+                raise DirectoryError("Directory script was not served over https.")
+            host = (parts.hostname or "").lower()
             if not (host == "podcasts.apple.com" or host.endswith(".apple.com") or host.endswith(".mzstatic.com")):
                 raise DirectoryError(f"Directory script came from an unexpected host: {host}")
             bundle = self.session.get(script_url, timeout=(8, 20))
