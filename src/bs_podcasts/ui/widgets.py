@@ -720,7 +720,9 @@ class SearchField(QLineEdit):
 def combo_chrome_px(combo) -> int:
     """Pixels a combo's QSS chrome (padding + arrow subcontrol) takes from its
     width. Measured from the style, not guessed: a hardcoded allowance
-    under-measures and the widest option still clips under the arrow."""
+    under-measures and the widest option still clips under the arrow. A style
+    that reports something absurd falls back to a measured-good default
+    rather than a width that would swallow the field."""
     from PySide6.QtCore import QRect
     from PySide6.QtWidgets import QStyle, QStyleOptionComboBox
 
@@ -731,7 +733,8 @@ def combo_chrome_px(combo) -> int:
     field = combo.style().subControlRect(
         QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxEditField, combo
     )
-    return probe_width - field.width()
+    chrome = probe_width - field.width()
+    return chrome if 0 < chrome < probe_width else scaled_px(66)
 
 
 def fit_combo_width(combo, floor: int = 0) -> int:

@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 from . import icons
 from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
-from .widgets import combo_chrome_px as widgets_combo_chrome_px
+from .widgets import fit_combo_width
 from .widgets import PlainTextLabel, wheel_needs_focus, exec_menu, FlowLayout
 from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, reduced_motion, scaled_px, system_theme, theme_name
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
@@ -2394,27 +2394,11 @@ class SettingsPage(BasePage):
         self.ui_font.setCurrentIndex(index if index >= 0 else 0)
         self.ui_font.blockSignals(False)
 
-    @staticmethod
-    def combo_chrome_px(combo) -> int:
-        """Shared with the podcast-settings dialog, which had its own caged
-        combos; the measurement lives in widgets so both use one rule."""
-        chrome = widgets_combo_chrome_px(combo)
-        # Sanity bound kept from the original: a style that reports something
-        # absurd falls back to a measured-good default rather than a width
-        # that would swallow the field.
-        return chrome if 0 < chrome < scaled_px(400) else scaled_px(66)
-
     def _fit_field(self, field, floor: int):
         """Uniform field width, but never narrower than the widest option —
-        an elided dropdown entry ("200 results · dire…") is a bad look."""
-        width = floor
-        if isinstance(field, QComboBox):
-            metrics = field.fontMetrics()
-            widest = max(
-                (metrics.horizontalAdvance(field.itemText(i)) for i in range(field.count())),
-                default=0,
-            )
-            width = max(floor, widest + self.combo_chrome_px(field) + scaled_px(8))
+        an elided dropdown entry ("200 results · dire…") is a bad look. Combos
+        use the width rule shared with the podcast-settings dialog."""
+        width = fit_combo_width(field, floor) if isinstance(field, QComboBox) else floor
         field.setFixedWidth(width)
 
     def apply_metrics(self):
