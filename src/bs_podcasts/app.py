@@ -579,7 +579,11 @@ def _finalize_unclosed(commands, playback, grace_seconds: float = 2.0) -> int:
     On Windows sign-out or shutdown the toolkit emits aboutToQuit and the
     system ends the process right after it, so neither the window's close
     drain nor the code after exec() runs. An ordinary Quit has already
-    closed the queue through the window; then this does nothing."""
+    closed the queue through the window; then this does nothing.
+
+    The wait holds the toolkit thread for up to `grace_seconds`, on this path
+    only, by design: after this signal nothing runs that could finish the kept
+    commands, so the wait cannot move after exec() or onto a helper thread."""
     if commands.closing:
         return 0
     commands.finish(playback.shutdown)
