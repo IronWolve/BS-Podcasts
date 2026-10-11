@@ -263,14 +263,17 @@ class _ListPageMixin:
     def _begin_artwork_scroll(self, *_args):
         if not hasattr(self, '_artwork_scroll_timer'):
             return
-        from .pixmaps import set_artwork_scrolling
-        set_artwork_scrolling(self.view, True)
-        self._scroll_hover_position = QCursor.pos()
-        self.view.setProperty('episodeHoverSuppressed', True)
-        self.view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
-        QToolTip.hideText()
-        hide_hover_bubble()
-        self.view.viewport().update()
+        # The hold starts once per gesture; later value changes only extend
+        # it, so a smooth scroll does not repaint the whole viewport per frame.
+        if not self._artwork_scroll_timer.isActive():
+            from .pixmaps import set_artwork_scrolling
+            set_artwork_scrolling(self.view, True)
+            self._scroll_hover_position = QCursor.pos()
+            self.view.setProperty('episodeHoverSuppressed', True)
+            self.view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+            QToolTip.hideText()
+            hide_hover_bubble()
+            self.view.viewport().update()
         self._artwork_scroll_timer.start(200)
 
     def _end_artwork_scroll(self):
