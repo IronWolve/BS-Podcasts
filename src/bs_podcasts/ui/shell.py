@@ -4851,7 +4851,7 @@ class MainWindow(QMainWindow):
 
         def work():
             episode = library.episode(episode_id)
-            record = next((r for r in downloads.records() if r.episode_id == episode_id), None) if downloads and episode else None
+            record = downloads.record_for(episode_id) if downloads and episode else None
             return episode, record
 
         self._run_read(work, lambda data: self._open_download_menu(episode_id, global_position, *data), "download-menu")
