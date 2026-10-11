@@ -92,7 +92,7 @@ episode_information_text = _lazy_dialog("episode_information_text")
 from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, ItemRoles, Podcast as UiPodcast, plain_snippet, set_item_tooltips
 from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, prepare_previews, install_previews
 from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_accent_token
-from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage, _KeyboardMenu
+from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage, _KeyboardMenu, _ListPageMixin
 from .shortcuts import ShortcutManager
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
 from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu
@@ -438,6 +438,22 @@ class MainWindow(QMainWindow):
         self._reload_again = False
         self._reload_callbacks = []
         self._read_tokens = {}
+        # The active and the next read per key (see `_run_read`).
+        self._read_active = {}
+        self._read_waiting = {}
+        # State that the first event needing it used to create on demand.
+        self._download_reconcile_inflight = False
+        self._preview_warm_started = False
+        self._artwork_prepared = False
+        self._episode_navigation_restore = None
+        self._pending_episode_artwork = {}
+        self._episode_artwork_apply_scheduled = False
+        self._download_progress_pending = {}
+        self._download_progress_revision = 0
+        self._download_record_revisions = {}
+        self._download_capacity = None
+        self._download_capacity_checked = (None, 0.0)
+        self._playback_identity = None
         self._convert_lock = threading.Lock()
         self._convert_revision = 0
         self._download_reload_timer = QTimer(self)
@@ -977,8 +993,8 @@ class MainWindow(QMainWindow):
         views = {}
         for index in range(self.page_count):
             page = self.pages.widget(index)
-            if not hasattr(page, "_current_key"):
-                continue
+            if not isinstance(page, _ListPageMixin):
+                continue  # not a list page: nothing of it to restore
             views[str(index)] = {
                 "current": page._current_key(), "selected": page._selected_keys(),
                 "scroll": page.scroll_position(),
@@ -1422,7 +1438,7 @@ class MainWindow(QMainWindow):
             self._refresh_shows(shows, quiet=True)
 
     def _refresh_if_stale(self):
-        if getattr(self, "_stale_check_done", False):
+        if self._stale_check_done:
             return  # already triggered by the first library load
         self._stale_check_done = True
         if self.library is None or self.jobs is None or getattr(self.refresh, "refresh", None) is None or self._background_paused():
@@ -2424,7 +2440,7 @@ class MainWindow(QMainWindow):
         if self.downloads is None or self._closed:
             return
         self._later(60_000, self._reconcile_missing_downloads)
-        if getattr(self, "_download_reconcile_inflight", False):
+        if self._download_reconcile_inflight:
             return
         self._download_reconcile_inflight = True
         downloads = self.downloads
@@ -2624,7 +2640,7 @@ class MainWindow(QMainWindow):
         detail_show_id = self._hero_show_id
         detail_episodes = self._ui_episodes(self.library.episodes(show_id=detail_show_id, limit=None), records) if detail_show_id else []
         previews = {}
-        if self.jobs is not None and not getattr(self, '_artwork_prepared', False):
+        if self.jobs is not None and not self._artwork_prepared:
             paths = [getattr(getattr(self.playback, 'snapshot', None), 'artwork_path', '')]
             if self.library.setting('ui.page', '0') == str(PAGE_PODCASTS):
                 ordered = stored_shows
@@ -2843,9 +2859,6 @@ class MainWindow(QMainWindow):
         if coalesce and executor is not self.commands:
             token = self._read_tokens.get(key, 0) + 1
             self._read_tokens[key] = token
-            if not hasattr(self, '_read_active'):
-                self._read_active = {}
-                self._read_waiting = {}
             if key in self._read_active:
                 self._read_waiting[key] = (work, apply, key, executor, token, owner)
                 future = self._read_active[key][1]
@@ -3211,12 +3224,12 @@ class MainWindow(QMainWindow):
         with self._page_guard(None, "the playing marker"):
             self._apply_playing_marker()
         self._prime_accents(show.artwork_path for show in stored_shows)
-        if self.jobs is not None and not getattr(self, '_preview_warm_started', False):
+        if self.jobs is not None and not self._preview_warm_started:
             self._preview_warm_started = True
             paths = list(dict.fromkeys(show.artwork_path for show in stored_shows
                                        if show.artwork_path and show.artwork_path not in preview_images))[:256]
             self._later(50, lambda: self._warm_library_artwork(paths))
-        if not getattr(self, "_stale_check_done", True):
+        if not self._stale_check_done:
             # First successful load: the window has its data, so the heavy
             # stale-feed sweep can start without competing with first paint.
             self._later(250, self._refresh_if_stale)
@@ -3830,7 +3843,7 @@ class MainWindow(QMainWindow):
         def apply(data):
             show = data[0]
             if show is not None:
-                restore = getattr(self, '_episode_navigation_restore', None)
+                restore = self._episode_navigation_restore
                 old_history = self._history_navigation
                 if restore and restore['show_id'] == show_id:
                     self._history_navigation = True
@@ -3865,7 +3878,7 @@ class MainWindow(QMainWindow):
         self._update_navigation_controls()
 
     def _restore_episode_navigation(self):
-        saved = getattr(self, '_episode_navigation_restore', None)
+        saved = self._episode_navigation_restore
         if not saved or saved['show_id'] != self._hero_show_id:
             return
         self._episode_navigation_restore = None
@@ -4590,9 +4603,9 @@ class MainWindow(QMainWindow):
         return item
 
     def _apply_episode_artwork(self, item):
-        pending = self.__dict__.setdefault("_pending_episode_artwork", {})
+        pending = self._pending_episode_artwork
         pending[(item.episode_id, item.artwork_url)] = item
-        if not getattr(self, "_episode_artwork_apply_scheduled", False):
+        if not self._episode_artwork_apply_scheduled:
             self._episode_artwork_apply_scheduled = True
             # A backfill finishes several covers a second; each flush walks
             # every loaded row, so completions share one pass per window.
@@ -4600,7 +4613,7 @@ class MainWindow(QMainWindow):
 
     def _flush_episode_artwork(self):
         self._episode_artwork_apply_scheduled = False
-        changes, self._pending_episode_artwork = getattr(self, "_pending_episode_artwork", {}), {}
+        changes, self._pending_episode_artwork = self._pending_episode_artwork, {}
         if self._closed or not changes:
             return
         for key, item in changes.items():
@@ -5680,10 +5693,8 @@ class MainWindow(QMainWindow):
     def _download_progress(self, event):
         # Progress arrives every 256 KB; coalesce only the changed rows.
         self._note_download_rate(event)
-        pending = getattr(self, "_download_progress_pending", None)
-        if pending is None:
-            self._download_progress_pending = pending = {}
-        self._download_progress_revision = getattr(self, "_download_progress_revision", 0) + 1
+        pending = self._download_progress_pending
+        self._download_progress_revision += 1
         pending[event.episode_id] = (self._download_progress_revision, event)
         if not self._download_reload_timer.isActive():
             self._download_reload_timer.start()
@@ -5754,7 +5765,7 @@ class MainWindow(QMainWindow):
         self._reload_downloads()
 
     def _flush_download_progress(self):
-        pending = getattr(self, "_download_progress_pending", {})
+        pending = self._download_progress_pending
         self._download_progress_pending = {}
         if self._closed:
             return
@@ -5766,9 +5777,7 @@ class MainWindow(QMainWindow):
         missing = False
         with self._samples_lock:
             samples = dict(self._download_samples)
-        revisions = getattr(self, "_download_record_revisions", None)
-        if revisions is None:
-            self._download_record_revisions = revisions = {}
+        revisions = self._download_record_revisions
         for episode_id, (revision, event) in pending.items():
             record = self._download_records_seen.get(episode_id)
             item = items.get(episode_id)
@@ -5818,7 +5827,7 @@ class MainWindow(QMainWindow):
         return record.state.value.title()
 
     def _read_download_items(self):
-        revision = getattr(self, "_download_progress_revision", 0)
+        revision = self._download_progress_revision
         items = []
         records = self.downloads.records()
         episodes = self.library.repository.episodes_by_ids(record.episode_id for record in records)
@@ -5856,7 +5865,7 @@ class MainWindow(QMainWindow):
         items, records, revision = payload
         # A record query can finish after newer progress already reached Qt.
         previous = self._download_records_seen
-        revisions = getattr(self, "_download_record_revisions", {})
+        revisions = self._download_record_revisions
         records = [previous.get(record.episode_id, record)
                    if revisions.get(record.episode_id, 0) > revision
                    else record for record in records]
@@ -5895,7 +5904,7 @@ class MainWindow(QMainWindow):
             for episode_id in [key for key in self._download_samples if key not in live]:
                 del self._download_samples[episode_id]
         used = sum(record.bytes_done for record in records if record.state == DownloadState.COMPLETE)
-        capacity = getattr(self, "_download_capacity", None)
+        capacity = self._download_capacity
         free = capacity[1] if capacity is not None and capacity[0] == str(self.downloads.directory) else None
         low = "  ·  low on space" if free is not None and free < 1024 ** 3 else ""
         detail = f"{self._format_bytes(free)} free{low}" if free is not None else "checking storage…"
@@ -5915,7 +5924,7 @@ class MainWindow(QMainWindow):
             return
         directory = str(self.downloads.directory)
         now = time.monotonic()
-        checked = getattr(self, "_download_capacity_checked", (None, 0.0))
+        checked = self._download_capacity_checked
         if checked[0] == directory and now - checked[1] < 30.0:
             return
         self._download_capacity_checked = (directory, now)
@@ -6974,7 +6983,7 @@ class MainWindow(QMainWindow):
     def _on_read(self, kind, identifier, result):
         key, token, apply, *owners = identifier
         if token is not None:
-            active = getattr(self, '_read_active', {}).get(key)
+            active = self._read_active.get(key)
             if active is not None and active[0] == token:
                 self._read_active.pop(key)
                 waiting = self._read_waiting.pop(key, None)
@@ -8590,8 +8599,8 @@ class MainWindow(QMainWindow):
         self._closed = True
         if not self._keep_services:
             _QUITTING.set()
-        getattr(self, '_read_waiting', {}).clear()
-        for _token, future in tuple(getattr(self, '_read_active', {}).values()):
+        self._read_waiting.clear()
+        for _token, future in tuple(self._read_active.values()):
             if future is not None:
                 future.cancel()
         self._episode_artwork_waiting.clear()
