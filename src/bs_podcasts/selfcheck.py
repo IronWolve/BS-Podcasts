@@ -126,7 +126,7 @@ def _storage_checks(root, checks, errors):
 def main() -> int:
     started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--self-check', action='store_true')
+    parser.add_argument('--self-check', action='store_true', help='accepted for launcher compatibility; has no effect')
     parser.add_argument('--self-check-dir', type=Path)
     parser.add_argument('--plain', action='store_true', help='no colour')
     args = parser.parse_args()
