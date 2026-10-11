@@ -60,6 +60,16 @@ _EPISODE_SYNC_COLUMNS = (
     "episode_type", "explicit", "enclosure_bytes",
 )
 
+# What every episode read returns: the row, its show's title and the artwork to
+# show (the episode's own picture, else the show's). Kept as one text so the
+# reads cannot drift apart.
+_EPISODE_COLUMNS = (
+    "e.*, s.title AS show_title, "
+    "COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path"
+)
+_EPISODE_FROM = "FROM episodes e JOIN shows s ON s.id=e.show_id"
+_EPISODE_SELECT = "SELECT " + _EPISODE_COLUMNS + " " + _EPISODE_FROM
+
 
 class LibraryRepository:
     def __init__(self, database: Database):
@@ -129,10 +139,7 @@ class LibraryRepository:
     def list_episodes(
         self, show_id: int | None = None, limit: int | None = 500, offset: int = 0
     ) -> list[Episode]:
-        sql = (
-            "SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM episodes e "
-            "JOIN shows s ON s.id=e.show_id"
-        )
+        sql = _EPISODE_SELECT
         params: list[object] = []
         if show_id is not None:
             sql += " WHERE e.show_id=?"
@@ -153,8 +160,7 @@ class LibraryRepository:
     def get_episode(self, episode_id: int) -> Episode | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                """SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM episodes e
-                   JOIN shows s ON s.id=e.show_id WHERE e.id=?""",
+                _EPISODE_SELECT + " WHERE e.id=?",
                 (episode_id,),
             ).fetchone()
         return self._episode(row) if row else None
@@ -162,10 +168,7 @@ class LibraryRepository:
     def list_history(self, limit: int = 200, offset: int = 0) -> list[Episode]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                """SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM episodes e
-                   JOIN shows s ON s.id=e.show_id
-                   WHERE e.last_played IS NOT NULL
-                   ORDER BY e.last_played DESC LIMIT ? OFFSET ?""",
+                _EPISODE_SELECT + " WHERE e.last_played IS NOT NULL ORDER BY e.last_played DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
         return [self._episode(row) for row in rows]
@@ -181,20 +184,14 @@ class LibraryRepository:
     def list_favorites(self) -> list[Episode]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                """SELECT e.*, s.title AS show_title,
-                   COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path
-                   FROM episodes e JOIN shows s ON s.id=e.show_id
-                   WHERE e.favorite=1 ORDER BY e.published_at DESC, e.id DESC"""
+                _EPISODE_SELECT + " WHERE e.favorite=1 ORDER BY e.published_at DESC, e.id DESC"
             ).fetchall()
         return [self._episode(row) for row in rows]
 
     def list_in_progress(self) -> list[Episode]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT e.*, s.title AS show_title, "
-                "COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path "
-                "FROM episodes e JOIN shows s ON s.id=e.show_id "
-                "WHERE e.played=0 AND e.position_seconds>0 "
+                _EPISODE_SELECT + " WHERE e.played=0 AND e.position_seconds>0 "
                 "ORDER BY e.last_played DESC, e.id DESC").fetchall()
         return [self._episode(row) for row in rows]
 
@@ -203,8 +200,7 @@ class LibraryRepository:
     ) -> list[Episode]:
         """Downloaded episodes a feed rule may remove; favorites never qualify."""
         eligible = (
-            "FROM episodes e JOIN shows s ON s.id=e.show_id "
-            "WHERE e.show_id=? AND e.downloaded_path != '' AND e.favorite=0 "
+            _EPISODE_FROM + " WHERE e.show_id=? AND e.downloaded_path != '' AND e.favorite=0 "
             "AND EXISTS (SELECT 1 FROM downloads d WHERE d.episode_id=e.id AND d.state='complete' AND d.length_verified=1)"
         )
         newest_first = " ORDER BY e.published_at DESC, e.id DESC"
@@ -244,8 +240,7 @@ class LibraryRepository:
                 # The same conditions again: a row that stopped qualifying
                 # since the first read is dropped, never removed.
                 rows = connection.execute(
-                    "SELECT e.*, s.title AS show_title, "
-                    "COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path "
+                    "SELECT " + _EPISODE_COLUMNS + " "
                     + eligible + " AND e.id IN (" + ",".join("?" for _ in batch) + ")" + newest_first,
                     (show_id, *batch),
                 ).fetchall()
@@ -381,10 +376,7 @@ class LibraryRepository:
                 batch = ids[start:start + 500]
                 placeholders = ",".join("?" for _ in batch)
                 rows.extend(connection.execute(
-                    f"""SELECT e.*, s.title AS show_title,
-                        COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path
-                        FROM episodes e JOIN shows s ON s.id=e.show_id
-                        WHERE e.id IN ({placeholders})""", batch).fetchall())
+                    _EPISODE_SELECT + f" WHERE e.id IN ({placeholders})", batch).fetchall())
         return {row["id"]: self._episode(row) for row in rows}
 
     def episode_count(self) -> int:
@@ -866,9 +858,8 @@ class LibraryRepository:
     def list_queue(self) -> list[Episode]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                """SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM queue q
-                   JOIN episodes e ON e.id=q.episode_id
-                   JOIN shows s ON s.id=e.show_id ORDER BY q.position"""
+                "SELECT " + _EPISODE_COLUMNS + " FROM queue q JOIN episodes e ON e.id=q.episode_id "
+                "JOIN shows s ON s.id=e.show_id ORDER BY q.position"
             ).fetchall()
         return [self._episode(row) for row in rows]
 
@@ -1306,8 +1297,7 @@ class LibraryRepository:
             ).fetchall()
             predicate, parameters = self._episode_search_predicate(connection, query)
             episode_rows = connection.execute(
-                """SELECT e.*, s.title AS show_title, COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path FROM episodes e
-                   JOIN shows s ON s.id=e.show_id WHERE """ + predicate + " ORDER BY e.published_at DESC,e.id DESC LIMIT ?",
+                _EPISODE_SELECT + " WHERE " + predicate + " ORDER BY e.published_at DESC,e.id DESC LIMIT ?",
                 parameters + (limit,),
             ).fetchall()
         return (
@@ -1323,8 +1313,7 @@ class LibraryRepository:
         with self.database.connect() as connection:
             predicate, parameters = self._episode_search_predicate(connection, query)
             rows = connection.execute(
-                "SELECT e.*,s.title AS show_title,COALESCE(NULLIF(e.episode_artwork_path,''),s.artwork_path) AS artwork_path "
-                "FROM episodes e JOIN shows s ON s.id=e.show_id WHERE " + predicate
+                _EPISODE_SELECT + " WHERE " + predicate
                 + " ORDER BY e.published_at DESC,e.id DESC LIMIT ? OFFSET ?",
                 parameters + (limit,offset)).fetchall()
         return [self._episode(row) for row in rows]
@@ -1332,7 +1321,7 @@ class LibraryRepository:
     def search_episode_count(self, query: str) -> int:
         with self.database.connect() as connection:
             predicate, parameters = self._episode_search_predicate(connection, query)
-            return connection.execute("SELECT COUNT(*) FROM episodes e JOIN shows s ON s.id=e.show_id WHERE "
+            return connection.execute("SELECT COUNT(*) " + _EPISODE_FROM + " WHERE "
                                       + predicate, parameters).fetchone()[0]
 
     @staticmethod
