@@ -3,6 +3,7 @@
 from PySide6.QtCore import ClassInfo, Property, QObject, Qt, Slot, QUrl
 from PySide6.QtDBus import QDBusAbstractAdaptor, QDBusConnection, QDBusMessage, QDBusObjectPath
 from hashlib import sha256
+import math
 from pathlib import Path
 import stat
 import time
@@ -87,7 +88,7 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
 
     @Rate.setter
     def Rate(self, value):
-        if not self.CanControl:
+        if not self.CanControl or not math.isfinite(value):
             return
         self._command("set_speed", value)
 
@@ -111,7 +112,7 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
 
     @Volume.setter
     def Volume(self, value):
-        if not self.CanControl:
+        if not self.CanControl or not math.isfinite(value):
             return
         self._command("set_volume", float(value) * 100)
 
