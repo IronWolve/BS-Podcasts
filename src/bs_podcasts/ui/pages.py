@@ -1319,6 +1319,8 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         if reorder:
             self.view.setDragDropMode(QListView.DragDropMode.InternalMove)
             self.view.setDefaultDropAction(Qt.DropAction.MoveAction)
+            self.view.setAccessibleDescription("Alt+Up and Alt+Down move the selected episode up or down")
+            self.view.installEventFilter(self)
             self.model.order_changed.connect(self.order_changed)
         else:
             self.view.setDragDropMode(QListView.DragDropMode.NoDragDrop)
@@ -1489,7 +1491,24 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self.chips.set_compact(narrow)
         self._update_sort_button()
 
+    def move_queue_row(self, step: int):
+        """Keyboard counterpart of dragging a row: move the current episode
+        one place up (-1) or down (+1). The model reports the new order
+        exactly as it does for a drop."""
+        index = self.view.currentIndex()
+        if not index.isValid():
+            return
+        target = index.row() + step
+        if 0 <= target < self.model.rowCount():
+            self.model.moveRows(index.parent(), index.row(), 1, index.parent(), target if step < 0 else target + 1)
+            self.view.scrollTo(self.view.currentIndex())
+
     def eventFilter(self, watched, event):
+        if (watched is self.view and self.reorder and event.type() == QEvent.Type.KeyPress
+                and event.modifiers() == Qt.KeyboardModifier.AltModifier
+                and event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down)):
+            self.move_queue_row(-1 if event.key() == Qt.Key.Key_Up else 1)
+            return True
         if watched is self.view.viewport():
             if self._queue_button_event(self.view, self.delegate, event):
                 return True
