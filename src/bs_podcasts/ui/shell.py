@@ -6162,7 +6162,7 @@ class MainWindow(QMainWindow):
             layout = QHBoxLayout(row)
             layout.setContentsMargins(6, 2, 4, 2)
             layout.setSpacing(4)
-            choose = QPushButton(query)
+            choose = QPushButton(mnemonic_safe(query))
             choose.setObjectName("popoverItem")
             choose.setCursor(Qt.CursorShape.PointingHandCursor)
             choose.setToolTip(f"Search for {query}")
