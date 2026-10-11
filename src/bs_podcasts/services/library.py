@@ -115,8 +115,8 @@ class LibraryService:
         skip_back = _bounded_int(self.setting("playback.skip_back", "15"), 15, 5, 120)
         skip_forward = _bounded_int(self.setting("playback.skip_forward", "30"), 30, 5, 300)
         auto_continue = self.setting("playback.auto_continue", "1") == "1"
-        from ..feeds.parser import _clamp_title
-        fallback = _clamp_title(title.strip() or feed_label(feed_url))
+        from ..feeds.parser import clamp_title
+        fallback = clamp_title(title.strip() or feed_label(feed_url))
         try:
             # A website link from an imported file is kept only as a web address,
             # the same rule the link follows when it is opened.
@@ -284,7 +284,7 @@ class LibraryService:
             if not delete_files and retired:
                 # Cancellation may leave app-owned partials after queue rows
                 # retire. Keep them for explicit recovery, never surprise-delete.
-                self.repository._remember_orphans(retired)
+                self.repository.remember_orphans(retired)
             return result
 
     def rearm(self, show_id: int):
