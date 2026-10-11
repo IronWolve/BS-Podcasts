@@ -320,18 +320,54 @@ class ArtworkCache:
             while len(self._checked) > 4096:
                 self._checked.popitem(last=False)
 
-    def _record_checked(self, path):
+    @staticmethod
+    def _validator(value):
+        """A validator header value that is safe to store and send back, or ''."""
+        if isinstance(value, str) and 0 < len(value) <= 256 and value.isascii() and value.isprintable():
+            return value
+        return ''
+
+    def _record_checked(self, path, etag='', modified=''):
         stamp = self.signature(path)
         if stamp is None:
             return
         checked = time.time()
         self._remember_checked(path, stamp, checked)
+        record = {'signature': stamp, 'checked': checked}
+        if etag:
+            record['etag'] = etag
+        if modified:
+            record['modified'] = modified
         try:
             write_replace(path.with_suffix('.checked'), json.dumps(
-                {'signature': stamp, 'checked': checked}, separators=(',', ':')
+                record, separators=(',', ':')
             ).encode('utf-8'))
         except OSError:
             pass  # Cache metadata is optional; retain the valid artwork.
+
+    def _stored_validators(self, path):
+        """(signature, etag, last-modified) the server gave for the cached cover, or None.
+
+        Only while the marker still describes this exact file and the file
+        still decodes, so a 304 can never keep a cover that is damaged or was
+        replaced by something else."""
+        stamp = self.signature(path)
+        if stamp is None:
+            return None
+        marker = path.with_suffix('.checked')
+        try:
+            if marker.is_symlink():
+                return None
+            with marker.open('rb') as handle:
+                record = json.loads(handle.read(4096))
+            if tuple(record['signature']) != stamp:
+                return None
+            etag, modified = self._validator(record.get('etag')), self._validator(record.get('modified'))
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+            return None
+        if not (etag or modified) or not self.valid_file(path):
+            return None
+        return stamp, etag, modified
 
     def _matches_content(self, target, digest, size):
         stamp = self.signature(target)
@@ -385,7 +421,8 @@ class ArtworkCache:
             try:
                 deadline.remaining()
                 ensure_fetchable(url, 'Artwork URL')
-                result = self._fetch_locked(url, target)
+                result = (self._fetch_locked(url, target, force=True) if force
+                          else self._fetch_locked(url, target))
             except Exception:
                 cancel = current_cancel()
                 if cancel is None or not cancel.is_set():
@@ -417,14 +454,32 @@ class ArtworkCache:
                     del self._url_locks[url]
                     self._active_files.discard(self.path_for(url).name)
 
-    def _fetch_locked(self, url: str, target: Path) -> Path:
+    def _fetch_locked(self, url: str, target: Path, force: bool = False) -> Path:
         import requests
 
         self.directory.mkdir(parents=True, exist_ok=True)
         partial = target.with_suffix(".part")
         response = None
         try:
-            response = self.session.get(url, timeout=(8, 20), stream=True)
+            # An explicit refetch downloads again; otherwise ask the server
+            # whether the cover it gave us last time has changed.
+            known = None if force else self._stored_validators(target)
+            headers = {}
+            if known is not None:
+                if known[1]:
+                    headers['If-None-Match'] = known[1]
+                if known[2]:
+                    headers['If-Modified-Since'] = known[2]
+            response = self.session.get(url, timeout=(8, 20), stream=True, **({'headers': headers} if headers else {}))
+            if headers and response.status_code == 304:
+                if self.signature(target) != known[0] or not self.valid_file(target):
+                    raise ArtworkError('The cached artwork changed while it was being checked.')
+                self._record_checked(
+                    target,
+                    etag=self._validator(response.headers.get('ETag')) or known[1],
+                    modified=self._validator(response.headers.get('Last-Modified')) or known[2],
+                )
+                return target
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "").lower().split(";", 1)[0].strip()
             if content_type and not content_type.startswith("image/") and content_type not in GENERIC_CONTENT_TYPES:
@@ -459,7 +514,11 @@ class ArtworkCache:
                 partial.unlink()
             else:
                 os.replace(partial, target)
-            self._record_checked(target)
+            self._record_checked(
+                target,
+                etag=self._validator(response.headers.get('ETag')),
+                modified=self._validator(response.headers.get('Last-Modified')),
+            )
             return target
         except ArtworkError:
             partial.unlink(missing_ok=True)
