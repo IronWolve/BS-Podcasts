@@ -15,7 +15,7 @@ report() {
   if [[ -x "$python" ]]; then
     "$python" -B -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from report import Reporter; Reporter().line(sys.argv[2], sys.argv[3])' "$HERE" "$state" "$text"
   else
-    if [[ "$state" == ok ]]; then printf 'OK   %s\n' "$text"; else printf 'FAIL %s\n' "$text"; fi
+    case "$state" in ok) printf 'OK   %s\n' "$text" ;; info) printf '     %s\n' "$text" ;; *) printf 'FAIL %s\n' "$text" ;; esac
   fi
 }
 # Label and value pairs under a Stats heading, through the same Reporter; nothing is printed without the project Python.
@@ -24,6 +24,8 @@ report_stats() {
   [[ -x "$python" ]] || return 0
   "$python" -B -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from report import Reporter; a = sys.argv[2:]; Reporter().stats(list(zip(a[::2], a[1::2])))' "$HERE" "$@"
 }
+DRY_RUN=0
+[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
 if [[ "${1:-}" == "--status" ]]; then
   # Read-only: report whether the installed entry still reaches a project.
   failed=0
@@ -67,6 +69,14 @@ except (OSError, ValueError, KeyError):
 ' "$WORKSPACE/dists/linux"
 # The recorded project folder is kept one per line.
 [[ "$WORKSPACE" != *$'\n'* ]] || { echo 'The project path contains a line break. No desktop files changed.' >&2; exit 1; }
+if (( DRY_RUN )); then
+  # Everything above only read the inputs; this stops before the first write.
+  report info "Dry run: nothing written. The install would write:"
+  for size in 32 64 128 256 512; do report info "  $ICONS/${size}x${size}/apps/bs-podcasts.png"; done
+  report info "  $LAUNCHER_DIR/launch.sh and $LAUNCHER_DIR/project-root"
+  report info "  $APPS/bs-podcasts.desktop"
+  exit 0
+fi
 mkdir -p "$APPS"
 TEMPORARIES=()
 cleanup() { for file in "${TEMPORARIES[@]}"; do [[ ! -e "$file" ]] || rm -- "$file"; done; }
