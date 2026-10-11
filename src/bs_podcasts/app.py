@@ -693,6 +693,10 @@ def _start_library_services(database):
         DownloadRepository(database),
         library.setting("downloads.directory", "") or default_downloads_dir(),
     )
+    # The download service reads a library setting, so it is built second;
+    # bind it here so removing a show cancels its downloads with or without
+    # a window.
+    library.downloads = downloads
     # Nothing resumes by itself, so a row left mid-transfer by the previous
     # run describes a worker that no longer exists. Park it as paused now, or
     # the UI offers a Pause that silently does nothing until the app restarts.
