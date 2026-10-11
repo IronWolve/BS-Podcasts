@@ -53,9 +53,29 @@ function Remove-OldDeployments {
     } | Sort-Object LastWriteTime -Descending)
     $leave = [Math]::Max($Keep - 1, 0)
     if ($dirs.Count -le $leave) { return }
-    foreach ($dir in $dirs[$leave..($dirs.Count - 1)]) {
+    $doomed = @($dirs[$leave..($dirs.Count - 1)])
+    # Name exactly what would be removed, with sizes, and delete only after a typed yes.
+    $total = [long]0
+    foreach ($dir in $doomed) {
+        $bytes = [long]((Get-ChildItem -LiteralPath $dir.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum)
+        $total += $bytes
+        Write-State info ("{0}  {1}" -f $dir.FullName, (Format-Size $bytes))
+    }
+    Write-State warn ("Rollback folders older than the newest {0}: {1} folders, {2}" -f $Keep, $doomed.Count, (Format-Size $total))
+    if ([Console]::IsInputRedirected) {
+        Write-State warn "No interactive input, so nothing was removed. Run the script from a terminal to confirm."
+        return
+    }
+    $answer = ""
+    try { $answer = Read-Host "Type YES to delete the folders listed above" } catch { $answer = "" }
+    if ($answer -cne "YES") {
+        Write-State info "Not confirmed. Nothing was removed."
+        return
+    }
+    foreach ($dir in $doomed) {
         Remove-Item -LiteralPath $dir.FullName -Recurse -Force
     }
+    Write-State ok ("Removed {0} rollback folders, {1}" -f $doomed.Count, (Format-Size $total))
 }
 
 function Remove-BuildRoot {
@@ -322,7 +342,7 @@ try {
         "app size" = Format-Size $size
         "launcher" = $copiedExe
         "launcher SHA-256" = $hash.Hash
-        "rollbacks pruned" = $(if ($PruneOldDeployments) { "older than the newest 3" } else { "none (opt-in)" })
+        "rollbacks pruned" = $(if ($PruneOldDeployments) { "older than the newest 3, listed and removed only after confirmation" } else { "none (opt-in)" })
     }
 
     if ($setup) {
