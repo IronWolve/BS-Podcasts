@@ -7092,7 +7092,8 @@ class MainWindow(QMainWindow):
                     self._submit_read(*waiting)
         if self._closed or (token is not None and self._read_tokens.get(key) != token):
             return
-        if result.status == JobStatus.OK:
+        if result.status in {JobStatus.OK, JobStatus.EMPTY}:
+            # EMPTY is a read whose work returned None, as in `_on_command`.
             apply(result.value)
         else:
             # The banner said "Opening…"; without this it never resolves.
