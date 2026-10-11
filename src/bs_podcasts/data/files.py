@@ -1,6 +1,7 @@
 """Small atomic writes that never borrow a predictable sidecar filename."""
 import os
 from pathlib import Path
+import sys
 import tempfile
 import stat
 
@@ -44,6 +45,23 @@ def open_private(path: Path, mode='wb'):
         raise
 
 
+def flush_to_drive(descriptor: int) -> None:
+    """fsync, and on macOS also empty the drive's own write cache.
+
+    There fsync(2) only hands the data to the drive; the F_FULLFSYNC fcntl
+    forces it out. Where that is refused (some network or removable volumes)
+    plain fsync is the best available, so it is the fallback.
+    """
+    if sys.platform == "darwin":
+        try:
+            import fcntl
+            fcntl.fcntl(descriptor, fcntl.F_FULLFSYNC)
+            return
+        except (ImportError, AttributeError, OSError):
+            pass
+    os.fsync(descriptor)
+
+
 def atomic_write(path: Path, content: bytes, durable: bool = True) -> Path:
     """Replace `path` whole. `durable=False` skips the disk flushes, for
     files that are rebuilt when missing; the rename stays atomic."""
@@ -55,7 +73,7 @@ def atomic_write(path: Path, content: bytes, durable: bool = True) -> Path:
             handle.write(content)
             handle.flush()
             if durable:
-                os.fsync(handle.fileno())
+                flush_to_drive(handle.fileno())
         os.replace(temporary, path)
         if durable:
             sync_directory(path.parent)
@@ -77,7 +95,7 @@ def sync_directory(directory: Path) -> None:
     except OSError:
         return
     try:
-        os.fsync(descriptor)
+        flush_to_drive(descriptor)
     except OSError:
         pass
     finally:
