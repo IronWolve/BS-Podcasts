@@ -2,11 +2,11 @@
 
 from dataclasses import dataclass
 from html import unescape
-from html.parser import HTMLParser
 import json
 import re
 
 from ..net import USER_AGENT, describe_network_error, make_session
+from ..markup import TranscriptHTML, markup_text
 from ..urlguard import UnsafeUrl, ensure_fetchable
 from ..domain.times import media_seconds, media_interval
 
@@ -102,34 +102,6 @@ _TIMING_LINE = re.compile(r"^\s*(?:\d{1,6}:)?\d{1,2}:\d{2}[.,]\d{1,3}\s+-->\s+(?
 _TAGS = re.compile(r"<[^<>]+>")
 # A WebVTT NOTE or STYLE block: the keyword, then whitespace or the line end.
 _NOTE_OR_STYLE_BLOCK = re.compile(r"(?:NOTE|STYLE)(?:\s|$)")
-_SKIP_HTML = {"script", "style"}
-
-
-class _TranscriptHTML(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self._skip = []
-        self.parts = []
-
-    def handle_starttag(self, tag, attrs):
-        name = tag.lower()
-        if name in _SKIP_HTML:
-            self._skip.append(name)
-        elif not self._skip and name in {"br", "p", "div", "li", "tr"}:
-            self.parts.append(" ")
-
-    def handle_endtag(self, tag):
-        name = tag.lower()
-        if self._skip and name == self._skip[-1]:
-            self._skip.pop()
-        elif not self._skip and name in {"p", "div", "li", "tr"}:
-            self.parts.append(" ")
-
-    def handle_data(self, data):
-        if not self._skip:
-            self.parts.append(data)
-
-
 def _html_text(value: str) -> str:
     # HTMLParser intentionally treats script/style as raw text. Recover a
     # malformed missing close only at a subsequent block tag, discarding the
@@ -142,15 +114,14 @@ def _html_text(value: str) -> str:
         block = re.search(r"<(?:p|div|section|article|h[1-6]|li|table)\b", tail, re.I)
         return tail[block.start():] if block else ""
     value = re.sub(r"<(script|style)\b[^>]*>(.*?)(?:</\1\s*>|$)", repair, value, flags=re.I | re.S)
-    parser = _TranscriptHTML()
+    parser = TranscriptHTML()
     parser.feed(value)
     parser.close()
     return "".join(parser.parts).strip()
 
 
 def _decoded_text(content: bytes) -> str:
-    from .fetch import _markup_text
-    return _markup_text(content, "utf-8").replace("\r\n", "\n")
+    return markup_text(content, "utf-8").replace("\r\n", "\n")
 
 
 def _chapter_title(text: str) -> str:

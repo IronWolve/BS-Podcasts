@@ -177,6 +177,7 @@
 !/src/bs_podcasts/jobs/commands.py
 !/src/bs_podcasts/jobs/runner.py
 !/src/bs_podcasts/logging_setup.py
+!/src/bs_podcasts/markup.py
 !/src/bs_podcasts/net.py
 !/src/bs_podcasts/netlimits.py
 !/src/bs_podcasts/privacy.py

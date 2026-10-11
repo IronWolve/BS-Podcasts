@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QTextLayo
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QToolTip
 
 from ..domain.times import format_media_time
+from ..markup import plain_snippet
 from . import icons
 from .pixmaps import cover, initials
 from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, ARTWORK_OVERLAY, ARTWORK_LIGHT_INK, app_font, scaled_dim, scaled_px
@@ -98,35 +99,7 @@ class ItemRoles:
     ITEM = Qt.ItemDataRole.UserRole + 1
 
 
-# An unclosed comment or instruction runs to the end of the text, so each
-# opener is scanned once instead of once per later opener.
-_TAG = re.compile(r"</?[A-Za-z][A-Za-z0-9:-]*(?:\s+[A-Za-z_:][\w:.-]*\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s<>]+))*\s*/?>|<!--.*?(?:-->|\Z)|<![A-Za-z][^<>]*>|<\?.*?(?:\?>|\Z)", re.S)
-_WS = re.compile(r"\s+")
 _LONG_TOKEN = re.compile(r"\S{32,}")
-# Code blocks drop with their contents. An unclosed one runs to the end of the
-# text, the way a browser reads it, so each opener is still scanned once.
-_CODE_ELEMENT = re.compile(r"<(script|style|noscript)(?=[\s/>])[^<>]*>.*?(?:</\1\s*>|\Z)", re.I | re.S)
-_CDATA_MARKER = re.compile(r"<!\[CDATA\[|\]\]>")
-
-
-def _strip_markup(text: str) -> str:
-    text = _CODE_ELEMENT.sub(" ", text)
-    text = _CDATA_MARKER.sub(" ", text)
-    return _TAG.sub(" ", text)
-
-
-def plain_snippet(text: str, limit: int = 240) -> str:
-    """One-line plain-text preview of possibly-HTML show notes."""
-    if not text:
-        return ""
-    text = text[:16384]
-    # Strip, unescape, strip again: feeds double-escape markup often enough
-    # that unescaping reveals fresh tags ("&lt;b&gt;bold&lt;/b&gt;"), which a
-    # single pre-unescape strip left visible as literal angle brackets.
-    stripped = html.unescape(_strip_markup(text))
-    stripped = _strip_markup(stripped)
-    collapsed = _WS.sub(" ", stripped).strip()
-    return collapsed[:limit]
 
 
 # Hover preview pop-ups over podcast/episode items; off unless the user turns

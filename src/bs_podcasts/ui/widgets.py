@@ -6,8 +6,6 @@ from contextlib import contextmanager
 from dataclasses import replace
 from functools import lru_cache
 from html import escape as html_escape, unescape as html_unescape
-from html.parser import HTMLParser
-import re
 from typing import NamedTuple
 import time
 import weakref
@@ -72,6 +70,7 @@ from PySide6.QtWidgets import (
 
 from ..assets import icon_path
 from ..domain.times import MAX_MEDIA_SECONDS, media_seconds, format_media_time
+from ..markup import SafeFeedHtml, linkify, plain_snippet
 from ..urlguard import is_web_url
 from . import icons
 from .models import Podcast
@@ -147,113 +146,6 @@ def _selectable_labels(*labels):
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
 
 
-class _SafeFeedHtml(HTMLParser):
-    """Small allow-list sanitizer for untrusted feed descriptions."""
-
-    ALLOWED = {
-        "p", "br", "b", "strong", "i", "em", "u", "s", "ul", "ol", "li",
-        "blockquote", "code", "pre", "h1", "h2", "h3", "h4", "h5", "h6", "a",
-    }
-    VOID = {"br"}
-    BLOCKED = {"script", "style", "iframe", "embed", "svg"}
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts = []
-        self._blocked = 0
-        self._anchors = []
-        self._block_stack = []
-
-    def handle_starttag(self, tag, attrs):
-        tag = tag.lower()
-        if tag == "img" or tag == "embed":
-            return
-        if self._block_stack and self._block_stack[-1] == "svg" and tag in {"p", "div", "ul", "ol", "h1", "h2", "h3"}:
-            self._block_stack.pop()
-            self._blocked = max(0, self._blocked - 1)
-        if tag in self.BLOCKED:
-            self._blocked += 1
-            self._block_stack.append(tag)
-            return
-        if self._blocked or tag not in self.ALLOWED:
-            return
-        if tag == "a":
-            href = next((value for name, value in attrs if name.lower() == "href"), "") or ""
-            if not is_web_url(href):
-                self._anchors.append(False)
-                self.parts.append("<span>")
-                return
-            self._anchors.append(True)
-            self.parts.append(f'<a href="{html_escape(href, quote=True)}">')
-            return
-        self.parts.append(f"<{tag}>")
-
-    def handle_startendtag(self, tag, attrs):
-        self.handle_starttag(tag, attrs)
-        self.handle_endtag(tag)
-
-    def handle_endtag(self, tag):
-        tag = tag.lower()
-        if tag == "embed":
-            return
-        if tag == "object":
-            return  # Object tags are discarded; their fallback text is readable.
-        if tag in self.BLOCKED:
-            if tag in self._block_stack:
-                index = len(self._block_stack) - 1 - self._block_stack[::-1].index(tag)
-                del self._block_stack[index:]
-                self._blocked = len(self._block_stack)
-            return
-        if self._blocked or tag not in self.ALLOWED or tag in self.VOID:
-            return
-        if tag == "a":
-            self.parts.append("</a>" if self._anchors and self._anchors.pop() else "</span>")
-        else:
-            self.parts.append(f"</{tag}>")
-
-    def handle_data(self, data):
-        if self._blocked:
-            return
-        # Never linkify inside an existing anchor — that would nest <a> tags.
-        inside_anchor = bool(self._anchors) and self._anchors[-1]
-        rendered = html_escape(data) if inside_anchor else linkify(data)
-        self.parts.append(rendered.replace("\n", "<br>"))
-
-
-# Bare URLs in show notes: with a scheme, as www., or as host/path (which is
-# how feeds usually write "megaphone.fm/adchoices"). A bare "Node.js" or
-# "audio.mp3" has no path segment, so it is left alone.
-_URL_PATTERN = re.compile(
-    r"""(?<![A-Za-z0-9_.-])(?P<url>
-        https?://[^\s<>"']+
-        | www\.[^\s<>"']+
-        | [A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9\-]+)+/[^\s<>"']*
-    )""",
-    re.VERBOSE,
-)
-_URL_TRAILING = ".,;:!?)]}>'\""
-
-
-def linkify(text: str) -> str:
-    """Escape text and turn bare URLs into HTTP(S) links."""
-    result = []
-    position = 0
-    for match in _URL_PATTERN.finditer(text or ""):
-        raw = match.group("url")
-        trimmed = raw.rstrip(_URL_TRAILING.replace(")", ""))
-        while trimmed.endswith(")") and trimmed.count(")") > trimmed.count("("):
-            trimmed = trimmed[:-1]
-        if not trimmed:
-            continue
-        href = trimmed if trimmed.lower().startswith(("http://", "https://")) else f"https://{trimmed}"
-        result.append(html_escape(text[position:match.start()]))
-        result.append(f'<a href="{html_escape(href, quote=True)}">{html_escape(trimmed)}</a>')
-        result.append(html_escape(raw[len(trimmed):]))
-        position = match.end()
-    result.append(html_escape(text[position:]))
-    return "".join(result)
-
-
 # Feed links must read as links inside the rich-text views.
 def _link_style() -> str:
     """Resolve document colors when the themed surface is constructed."""
@@ -304,7 +196,7 @@ def _render_feed_html(text: str) -> str:
         return ""
     if "<" not in text or ">" not in text:
         return linkify(html_unescape(text)).replace("\n", "<br>")
-    parser = _SafeFeedHtml()
+    parser = SafeFeedHtml()
     parser.feed(text)
     parser.close()
     return "".join(parser.parts)
@@ -1810,7 +1702,6 @@ class HeroCard(QFrame):
         self.title.setText(title)
         self.meta.setText(meta)
         self.meta.setToolTip(meta)
-        from .models import plain_snippet
         summary = plain_snippet(description, 241)
         self.description.setText(summary[:240].rstrip() + "…" if len(summary) > 240 else summary)
         self.description.setToolTip(description)

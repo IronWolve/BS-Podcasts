@@ -2,13 +2,13 @@
 
 from collections import OrderedDict
 from dataclasses import dataclass, replace
-from html.parser import HTMLParser
 from http import HTTPStatus
 import re
 import threading
 import time
 from urllib.parse import urljoin, urlsplit
 
+from ..markup import FeedLinkFound, FeedLinkParser, markup_text
 from ..net import USER_AGENT, SessionSlot, describe_network_error
 from ..urlguard import ensure_fetchable, UnresolvedHost, UnsafeUrl
 
@@ -72,7 +72,7 @@ def _http_feed_error(response) -> FeedFetchError:
                 body.extend(chunk[:1024 - len(body)])
                 if len(body) >= 1024:
                     break
-            text = _markup_text(bytes(body), getattr(response, "encoding", None))
+            text = markup_text(bytes(body), getattr(response, "encoding", None))
             text = " ".join("".join(c for c in text if c.isprintable() or c.isspace()).split())
             if text and not text.startswith("<"):
                 message += f" Server says: {redact(text)[:400]}"
@@ -135,25 +135,6 @@ def _answered_by(response, url: str) -> bool:
     return any(_comparable(hop) == wanted for hop in chain if hop)
 
 
-def _markup_text(body: bytes, encoding: str | None) -> str:
-    """Body text for the XML sniff and HTML discovery. Never raises.
-
-    The header charset is only a hint here: the feed body reaches the XML
-    parser as raw bytes. An unknown or non-text label (`utf8mb4`, `none`,
-    `base64`) falls back to UTF-8 instead of failing the fetch.
-    """
-    if body.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
-        return body.decode("utf-32", "replace")
-    if body.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return body.decode("utf-16", "replace")
-    if body.startswith(b"\xef\xbb\xbf"):
-        return body.decode("utf-8-sig", "replace")
-    try:
-        return body.decode((encoding or "").strip() or "utf-8", "replace")
-    except (LookupError, ValueError):
-        return body.decode("utf-8", "replace")
-
-
 # A DOCTYPE that is not HTML's, such as the RSS 0.91 header naming an external
 # DTD. Quoted identifiers and an internal subset may hold ">"; the parser
 # decides about the subset later. Looked for in a bounded window only.
@@ -196,11 +177,11 @@ def _opening_markup(text: str) -> str:
 
 
 def _body_lead(body, encoding) -> str:
-    lead = _opening_markup(_markup_text(bytes(body[:_SNIFF_BYTES]), encoding))
+    lead = _opening_markup(markup_text(bytes(body[:_SNIFF_BYTES]), encoding))
     if not lead and len(body) > _SNIFF_BYTES:
         # Rare long comments/prologs still deserve the old correct answer;
         # ordinary feeds never allocate a full-body text copy for sniffing.
-        lead = _opening_markup(_markup_text(bytes(body), encoding))
+        lead = _opening_markup(markup_text(bytes(body), encoding))
     return lead
 
 
@@ -220,39 +201,6 @@ def _permanent_canonical(response) -> str:
     if chosen and chosen != first:
         return chosen
     return ""
-
-
-class _FeedLinkFound(Exception):
-    """Ends the parse: the feed link and the base that resolves it are known."""
-
-
-class _FeedLinkParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.href = ""
-        self.base = ""
-        self.in_body = False
-
-    def handle_starttag(self, tag, attrs):
-        if tag.lower() == "base" and not self.base:
-            self.base = dict(attrs).get("href", "") or ""
-        elif tag.lower() == "body":
-            self.in_body = True
-        elif tag.lower() == "link" and not self.href:
-            values = {key.lower(): value for key, value in attrs if value is not None}
-            relations = {part.lower() for part in values.get("rel", "").split()}
-            mime = values.get("type", "").lower()
-            if "alternate" in relations and mime in {
-                "application/rss+xml",
-                "application/atom+xml",
-                "application/xml",
-                "text/xml",
-            }:
-                self.href = values.get("href", "").strip()
-        # A base element belongs in the head, so once the body starts or one
-        # was seen, nothing later in the page changes the answer.
-        if self.href and (self.base or self.in_body):
-            raise _FeedLinkFound
 
 
 # What peek_latest answers for a feed it read in full but could not date: no
@@ -473,10 +421,10 @@ class FeedFetcher:
             if allow_discovery and not looks_like_xml and (
                 "text/html" in content_type or lead.startswith("<!doctype html")
             ):
-                parser = _FeedLinkParser()
+                parser = FeedLinkParser()
                 try:
-                    parser.feed(_markup_text(body, getattr(response, "encoding", None)))
-                except _FeedLinkFound:
+                    parser.feed(markup_text(body, getattr(response, "encoding", None)))
+                except FeedLinkFound:
                     pass
                 if not parser.href:
                     raise FeedWrongAnswerError("HTML page does not advertise a podcast feed.")
