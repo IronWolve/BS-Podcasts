@@ -276,7 +276,7 @@ class MainWindow(QMainWindow):
         self.playback = playback
         self.downloads = downloads
         if library is not None:
-            library.downloads, library.playback = downloads, playback
+            library.downloads = downloads
         self.listening = listening
         self.setObjectName("mainWindow")
         self.setWindowTitle(APP_NAME)
