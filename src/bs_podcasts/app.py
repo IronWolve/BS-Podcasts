@@ -299,7 +299,14 @@ def _load_system_motion_preference(cache):
 
 
 def _instance_name() -> str:
-    return f"{APP_ID}-{getpass.getuser()}"
+    try:
+        user = getpass.getuser()
+    except (KeyError, OSError, ImportError):
+        # No login variable and no password-database entry (some containers
+        # and service accounts): the numeric id names the endpoint just as
+        # stably, and startup goes on.
+        user = str(os.getuid()) if hasattr(os, 'getuid') else 'user'
+    return f"{APP_ID}-{user}"
 
 
 _FILE_SUFFIXES = frozenset({'.opml', '.xml', '.mp3', '.m4a', '.ogg', '.opus', '.wav', '.flac', '.aac', '.m4b'})
