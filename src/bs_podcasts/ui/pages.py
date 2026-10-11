@@ -1581,9 +1581,9 @@ class SummaryCard(QPushButton):
         text.addWidget(self.number)
         text.addWidget(self.label)
         layout.addLayout(text, 1)
-        self.icon = PlainTextLabel()
-        self.icon.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
-        layout.addWidget(self.icon)
+        self.glyph_label = PlainTextLabel()
+        self.glyph_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+        layout.addWidget(self.glyph_label)
         self._label_text = label
         self._count = 0
         self._podcast_count = None
@@ -1594,7 +1594,7 @@ class SummaryCard(QPushButton):
         self.setMinimumWidth(scaled_px(150))
         self.layout().setContentsMargins(SPACE["lg"], SPACE["md"], SPACE["lg"], SPACE["md"])
         self.layout().setSpacing(SPACE["md"])
-        self.icon.setPixmap(icons.pixmap(self._glyph, COLORS["subtle"], scaled_px(22), self.devicePixelRatioF()))
+        self.glyph_label.setPixmap(icons.pixmap(self._glyph, COLORS["subtle"], scaled_px(22), self.devicePixelRatioF()))
 
     def set_count(self, count: int):
         self._count = count
