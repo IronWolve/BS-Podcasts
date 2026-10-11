@@ -3869,15 +3869,18 @@ class PlayerBar(QFrame):
         self.speed.clicked.connect(self._show_speed)
         self.bookmark = icon_button("bookmark-add", "Bookmark this moment  ·  Ctrl+B")
         self.bookmark.clicked.connect(self.bookmark_requested)
-        self.ab = icon_button("loop", "A–B repeat: set point A  ·  Ctrl+Shift+A", checkable=True)
+        self.ab = icon_button("loop", "A–B repeat", checkable=True)
+        self._set_hint(self.ab, "A–B repeat: set point A  ·  Ctrl+Shift+A")
         self.ab.clicked.connect(lambda: (self.ab.setChecked(self._ab_active), self.ab_requested.emit()))
-        self.trim = icon_button("trim", "Silence trim: off  ·  Ctrl+T", checkable=True)
+        self.trim = icon_button("trim", "Silence trim", checkable=True)
+        self._set_hint(self.trim, "Silence trim: off  ·  Ctrl+T")
         self.trim.clicked.connect(lambda: (self.trim.setChecked(self._trim_active), self.trim_requested.emit()))
         self.sleep = icon_button("sleep", "Sleep timer", checkable=True)
         self.sleep_popover = SleepPopover(self)
         self.sleep_popover.sleep_selected.connect(self.sleep_requested)
         self.sleep.clicked.connect(lambda: (self.sleep.setChecked(self._sleep_active), self.sleep_popover.show_above(self.sleep)))
-        self.queue = icon_button("panel", "Show Up Next", checkable=True)
+        self.queue = icon_button("panel", "Up Next panel", checkable=True)
+        self._set_hint(self.queue, "Show Up Next")
         self.queue.clicked.connect(self.context_requested)
         self.volume = icon_button("volume", "Mute", checkable=True)
         self.volume.clicked.connect(self._toggle_mute)
@@ -3929,6 +3932,14 @@ class PlayerBar(QFrame):
         self._refresh_chrome()
 
     # -- configuration -----------------------------------------------------
+    @staticmethod
+    def _set_hint(button, hint: str):
+        """A checkable button announces its own pressed state, so its accessible
+        name stays constant; the tooltip and accessible description carry the
+        current state and what a press does."""
+        button.setToolTip(hint)
+        button.setAccessibleDescription(hint)
+
     def set_tray_available(self, available: bool):
         self.tray_button.setEnabled(available)
         hint = ("Minimize to tray — keep playing" if available
@@ -4365,15 +4376,15 @@ class PlayerBar(QFrame):
         self._sleep_active = snapshot.sleep_deadline is not None or getattr(snapshot, "sleep_at_end", False)
         if snapshot.ab_start is None:
             self.ab.setChecked(False)
-            self.ab.setToolTip("A–B repeat: set point A  ·  Ctrl+Shift+A")
+            self._set_hint(self.ab, "A–B repeat: set point A  ·  Ctrl+Shift+A")
         elif snapshot.ab_end is None:
             self.ab.setChecked(True)
-            self.ab.setToolTip(f"A set at {self._time(snapshot.ab_start)} — click to set B")
+            self._set_hint(self.ab, f"A set at {self._time(snapshot.ab_start)} — click to set B")
         else:
             self.ab.setChecked(True)
-            self.ab.setToolTip(f"Repeating {self._time(snapshot.ab_start)}–{self._time(snapshot.ab_end)} — click to clear")
+            self._set_hint(self.ab, f"Repeating {self._time(snapshot.ab_start)}–{self._time(snapshot.ab_end)} — click to clear")
         self.trim.setChecked(snapshot.trim_level != "off")
-        self.trim.setToolTip(f"Silence trim: {snapshot.trim_level}  ·  Ctrl+T")
+        self._set_hint(self.trim, f"Silence trim: {snapshot.trim_level}  ·  Ctrl+T")
         sleeping = snapshot.sleep_deadline is not None or getattr(snapshot, "sleep_at_end", False)
         self.sleep_popover.set_deadline(snapshot.sleep_deadline, getattr(snapshot, "sleep_at_end", False))
         self.sleep.setChecked(sleeping)
@@ -4411,7 +4422,7 @@ class PlayerBar(QFrame):
 
     def set_queue_open(self, open_: bool):
         self.queue.setChecked(open_)
-        self.queue.setToolTip("Hide Up Next" if open_ else "Show Up Next")
+        self._set_hint(self.queue, "Hide Up Next" if open_ else "Show Up Next")
 
     def eventFilter(self, watched, event):
         # The show name is installed during __init__, before `volume` exists;
@@ -4474,8 +4485,7 @@ class PlayerBar(QFrame):
         self.volume.setChecked(value == 0)
         action = 'Unmute' if value == 0 else 'Mute'
         self.volume.setIcon(icons.icon('mute' if value == 0 else 'volume', COLORS['text'], 20, disabled=COLORS['disabled']))
-        self.volume.setToolTip(f'{action} · Volume {value}%')
-        self.volume.setAccessibleName(action)
+        self._set_hint(self.volume, f'{action} · Volume {value}%')
 
     def _toggle_mute(self):
         self._request_volume(0.0 if self._volume > 0 else self._last_audible_volume)
