@@ -766,10 +766,6 @@ def main() -> int:
                 return 1
             _time.sleep(0.25)
     server = _claim_single_instance(app)
-    if server is None:
-        _close_local_server(server)
-        lease.close()
-        return 0
     _mark("single-instance")
     notice = None
     database = None
