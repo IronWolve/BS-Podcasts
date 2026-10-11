@@ -221,11 +221,12 @@ def icon_file(name: str, color: str, size: int) -> str:
     if not _HEX_COLOR.fullmatch(color):
         raise ValueError(f"Stylesheet glyph colour must be #RRGGBB, not {color!r}")
     safe_color = re.sub(r"[^0-9A-Za-z]", "", color)
-    # The glyph's own path data is part of the name. Keying on name/colour/size
-    # alone meant `target.exists()` was checked but never freshness, so a user
-    # who had generated the PNG once kept it forever — an edited glyph would
-    # never reach them.
-    digest = sha1(GLYPHS.get(name, "").encode("utf-8")).hexdigest()[:8]
+    # The whole SVG template is part of the name, colour left out (the colour is
+    # already in it). Keying on name/colour/size alone meant `target.exists()`
+    # was checked but never freshness, so a user who had generated the PNG once
+    # kept it forever — an edited glyph, stroke or wrapper never reached them.
+    template = svg(name, "") if name in GLYPHS else b""
+    digest = sha1(template).hexdigest()[:8]
     target = _cache_dir() / f"{name}-{safe_color}-{size}-{digest}.png"
     if target.is_symlink():
         _verified_files.pop(target, None)
