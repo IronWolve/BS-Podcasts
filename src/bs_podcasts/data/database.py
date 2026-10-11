@@ -361,7 +361,8 @@ class Database:
     @classmethod
     def migration_pending(cls, path) -> bool:
         """True when opening `path` would back up and migrate an existing
-        library — the caller can show something before that blocks."""
+        library, or when that cannot be told — the caller can show
+        something before that blocks."""
         path = Path(path)
         try:
             if not path.is_file() or path.stat().st_size == 0:
@@ -374,10 +375,16 @@ class Database:
         probe.path = path
         try:
             return bool(versions - probe._applied_versions_readonly())
-        except (sqlite3.Error, DatabaseIntegrityError):
+        except DatabaseIntegrityError:
             # This is only the optional startup-status hint. A real open
             # reports unknown/unreadable schema without taking a blind backup.
             return False
+        except sqlite3.Error as exc:
+            # A probe that failed for any other reason does not show that no
+            # upgrade is due: the real open may still back up and migrate, so
+            # it must take the worker path with the notice. Damage the open
+            # refuses before any backup stays False.
+            return not is_corruption_error(exc)
 
     def _applied_versions_readonly(self) -> set:
         """Applied migration versions, read without writing to the file."""
