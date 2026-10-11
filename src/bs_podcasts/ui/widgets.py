@@ -1232,7 +1232,7 @@ class Toast(QFrame):
         self._on_close = None
         self._closing = False
         self._sticky = False
-        self._sticky_entry = None
+        self._sticky_entries = []
         self._owner = None
         self._overflow = 0
         self._animation.finished.connect(self._animation_finished)
@@ -1258,7 +1258,7 @@ class Toast(QFrame):
             duration_ms = self.ACTION_MS if action else self.NOTICE_MS
         showing = self.isVisible() and not self._closing
         if showing and self._sticky and duration_ms > 0:
-            self._sticky_entry = _ToastEntry(self.text.text(), self.property('tone') or 'loading', self.action.text(), self._callback, 0, self._on_close, self._owner)
+            self._sticky_entries.append(_ToastEntry(self.text.text(), self.property('tone') or 'loading', self.action.text(), self._callback, 0, self._on_close, self._owner))
             self._animation.stop()
             self._timer.stop()
             self.hide()
@@ -1363,9 +1363,10 @@ class Toast(QFrame):
     def update_message(self, message: str, owner=None):
         """Refresh a visible toast's text in place (progress ticks)."""
         if owner is not None and self._owner != owner:
-            if self._sticky_entry is not None and self._sticky_entry.owner == owner:
-                self._sticky_entry = self._sticky_entry._replace(message=message)
-                return True
+            for index, pushed in enumerate(self._sticky_entries):
+                if pushed.owner == owner:
+                    self._sticky_entries[index] = pushed._replace(message=message)
+                    return True
             for index, queued in enumerate(self._queue):
                 if queued.owner == owner:
                     self._queue[index] = queued._replace(message=message)
@@ -1381,8 +1382,7 @@ class Toast(QFrame):
 
     def dismiss_owner(self, owner):
         self._queue[:] = [queued for queued in self._queue if queued.owner != owner]
-        if self._sticky_entry is not None and self._sticky_entry.owner == owner:
-            self._sticky_entry = None
+        self._sticky_entries[:] = [pushed for pushed in self._sticky_entries if pushed.owner != owner]
         if self._owner == owner:
             self.dismiss()
 
@@ -1451,7 +1451,7 @@ class Toast(QFrame):
             return
         self._closing = False
         self.hide()
-        if self._queue or self._overflow or self._sticky_entry:
+        if self._queue or self._overflow or self._sticky_entries:
             from .theme import reduced_motion
             QTimer.singleShot(0 if reduced_motion() else 120, self, self._show_next)
 
@@ -1461,9 +1461,8 @@ class Toast(QFrame):
         elif self._overflow:
             count, self._overflow = self._overflow, 0
             self.show_message(f"{count} additional notices were grouped while feedback was busy.")
-        elif self._sticky_entry:
-            entry, self._sticky_entry = self._sticky_entry, None
-            self.show_message(*entry)
+        elif self._sticky_entries:
+            self.show_message(*self._sticky_entries.pop(0))
 
     def _action(self):
         if self._closing or not self.action.isEnabled():
