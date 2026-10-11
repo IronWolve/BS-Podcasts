@@ -1461,6 +1461,11 @@ class Toast(QFrame):
             QTimer.singleShot(self._motion_ms(120), self, self._show_next)
 
     def _show_next(self):
+        if self.isVisible() and not self._closing and not self._sticky:
+            # A notice landed in the gap after the close and is showing; popping
+            # the head now would re-queue it behind the entries after it. The
+            # showing notice's own close comes back here.
+            return
         if self._queue:
             self.show_message(*self._queue.pop(0))
         elif self._overflow:
