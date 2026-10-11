@@ -141,14 +141,18 @@ def _finish_macos(workspace, work, prune, report):
     except BaseException:
         for source,destination in reversed(published): destination.rename(source)
         for destination in reversed(retired): (previous/destination.name).rename(destination)
+        if not any(previous.iterdir()): previous.rmdir()  # a rolled-back publish leaves nothing to recover
         raise
-    # Rollbacks are user recovery data: pruning is an explicit opt-in, as on Windows.
-    pruned=prune_previous_deployments(workspace/'.cache/previous-deployments',retain=previous) if prune else None
+    # Rollbacks are user recovery data: pruning is an explicit opt-in, as on Windows. An empty folder holds
+    # nothing to recover (a first build retires nothing), so it is neither kept, counted nor reported.
+    retained=previous if any(previous.iterdir()) else None
+    if retained is None: previous.rmdir()
+    pruned=prune_previous_deployments(workspace/'.cache/previous-deployments',retain=retained) if prune else None
     signed=bool(os.environ.get('BS_PODCASTS_SIGN_IDENTITY'))
     app_files,app_bytes=tree_size(target/app.name)
     report.ok(f'Built and headless/relocation-verified BS Podcasts {version}: {target}')
     (report.ok if signed else report.warn)('Signing: '+('Developer ID; notarization still separate' if signed else 'ad-hoc only; not notarized'))
-    report.ok(f'Previous artifacts retained: {previous}')
+    if retained is not None: report.ok(f'Previous artifacts retained: {retained}')
     if pruned is None:
         report.info('Older rollbacks kept (--prune-old-deployments keeps only the newest 3).')
     report.stats([('version',version),('app files',str(app_files)),('app size',size_text(app_bytes)),

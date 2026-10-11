@@ -130,9 +130,9 @@ def _deploy_staged(workspace, destination, temporary, prune, report):
                            f'built {built_names}, expected {publish}.')
     # Preserve the prior runtime; never replace personal settings, data or venv.
     previous = workspace/'.cache/previous-deployments'/temporary.name
-    previous.mkdir(parents=True)
     with runtime_lock(workspace):
         retire_stale(workspace)
+        previous.mkdir(parents=True)
         retired, published, launchers = [], [], []
         try:
             for name in publish:
@@ -158,12 +158,19 @@ def _deploy_staged(workspace, destination, temporary, prune, report):
                 (destination/name).rename(temporary/name)
             for name in reversed(retired):
                 (previous/name).rename(destination/name)
+            if not any(previous.iterdir()):
+                previous.rmdir()  # a rolled-back publish leaves nothing to recover
             raise
-    # Rollbacks are user recovery data: pruning is an explicit opt-in, as on Windows.
-    pruned = prune_previous_deployments(workspace/'.cache/previous-deployments', retain=previous) if prune else None
+    # Rollbacks are user recovery data: pruning is an explicit opt-in, as on Windows. An empty folder holds
+    # nothing to recover, so it is neither kept, counted nor reported.
+    retained = previous if any(previous.iterdir()) else None
+    if retained is None:
+        previous.rmdir()
+    pruned = prune_previous_deployments(workspace/'.cache/previous-deployments', retain=retained) if prune else None
     deployed_bytes = sum((destination/relative).stat().st_size for relative in deployed)
     report.ok(f'Built BS Podcasts {version}: {destination}')
-    report.ok(f'Rollback retained: {previous}')
+    if retained is not None:
+        report.ok(f'Rollback retained: {retained}')
     if pruned is None:
         report.info('Older rollbacks kept (--prune-old-deployments keeps only the newest 3).')
     report.info('No dependencies installed and no application started. Run ./start.sh when ready.')
