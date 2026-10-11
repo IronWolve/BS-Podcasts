@@ -151,6 +151,10 @@ def _integrity_report(database):
         raise
 
 
+# The job runner's answer when its queue is full; the request never ran.
+_BUSY_ANSWER = "Background requests are busy"
+
+
 def _fetch_feed_preview(fetcher, feed_url, checkpoint=lambda: None):
     """Fetch and parse one feed as a preview, on a worker. The details pane and
     the newest-date scan's fallback both run this, so they cannot drift apart.
@@ -291,6 +295,15 @@ class MainWindow(QMainWindow):
         self._discover_visited = bool(view_state and view_state.get("discover_visited"))
         self._previews = PreviewCache()
         self._preview_pending = set()
+        # The selected card's feed is requested once the selection rests, so
+        # stepping through cards does not queue one download per card passed.
+        self._preview_futures = {}
+        self._preview_wanted = ""
+        self._preview_retries = {}
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(300)
+        self._preview_timer.timeout.connect(self._preview_selected)
         self._discover_newest_pending = set()
         self._discover_newest_waiting = []
         self._discover_newest_active = set()
@@ -7192,8 +7205,10 @@ class MainWindow(QMainWindow):
             self._discover_newest_active.discard(identifier)
         else:
             self._preview_pending.discard(identifier)
+            self._preview_futures.pop(identifier, None)
         newest_scan = identifier in self._discover_newest_pending
         if result.status == JobStatus.OK:
+            self._preview_retries.pop(identifier, None)
             peek = isinstance(result.value, PeekFeed)
             if newest_scan:
                 card = next((item for item in self.discover_page._all_items if item.feed_url == identifier), None)
@@ -7208,6 +7223,8 @@ class MainWindow(QMainWindow):
                 self._apply_preview(identifier, result.value, update_grid=not newest_scan)
         elif kind != "preview-scan":
             message = result.message or "unknown error"
+            if message.startswith(_BUSY_ANSWER) and self._retry_busy_preview(identifier):
+                return
             self.context.show_preview_error(identifier, message)
             if self._pending_episodes_url == identifier:
                 self._pending_episodes_url = ""
@@ -7887,13 +7904,15 @@ class MainWindow(QMainWindow):
 
     def _show_item(self, item):
         self._context_revision += 1
+        self._preview_timer.stop()
+        self._preview_wanted = ""
         if item is None:
             self.context.show_empty()
             return
         if isinstance(item, UiPodcast):
             self.context.show_podcast(item)
             if item.feed_url and not item.show_id:
-                self._preview_feed(item.feed_url)
+                self._preview_after_pause(item.feed_url)
         elif isinstance(item, UiEpisode):
             self.context.show_episode(item)
             self.context.set_playing(self._playing_episode_id, self._playing_state == "playing", self._playing_state == "loading")
@@ -8188,6 +8207,43 @@ class MainWindow(QMainWindow):
             self.navigation.select(PAGE_EPISODES)
         self._finish_view_restore()
 
+    def _preview_after_pause(self, feed_url: str):
+        """Show the selected card's feed details: at once from the cache or a
+        request already on its way, otherwise after the selection rests."""
+        if feed_url in self._previews or feed_url in self._preview_pending:
+            self._preview_feed(feed_url)
+            return
+        self._preview_wanted = feed_url
+        self._preview_timer.start()
+
+    def _preview_still_wanted(self, feed_url: str) -> bool:
+        return bool(feed_url) and not self._closed and (
+            feed_url == self._pending_episodes_url
+            or getattr(self.context._current_item, "feed_url", "") == feed_url)
+
+    def _preview_selected(self):
+        feed_url, self._preview_wanted = self._preview_wanted, ""
+        if not self._preview_still_wanted(feed_url):
+            return
+        # A request still waiting in the pool for a card the user has left
+        # is dropped; one already running finishes and is cached.
+        for url, future in list(self._preview_futures.items()):
+            if url != feed_url and url != self._pending_episodes_url and future.cancel():
+                self._preview_futures.pop(url, None)
+                self._preview_pending.discard(url)
+        self._preview_feed(feed_url)
+
+    def _retry_busy_preview(self, feed_url: str) -> bool:
+        """A busy answer means the request never ran: ask again shortly while
+        the card is still wanted, a few times, instead of showing an error."""
+        tries = self._preview_retries.get(feed_url, 0)
+        if tries >= 5 or not self._preview_still_wanted(feed_url):
+            self._preview_retries.pop(feed_url, None)
+            return False
+        self._preview_retries[feed_url] = tries + 1
+        self._later(1000, lambda: self._preview_still_wanted(feed_url) and self._preview_feed(feed_url, silent=True))
+        return True
+
     def _preview_feed(self, feed_url: str, silent: bool = False):
         """Fetch a directory result's feed in the background to fill the details pane."""
         cached = self._previews.get(feed_url)
@@ -8205,10 +8261,13 @@ class MainWindow(QMainWindow):
             return _fetch_feed_preview(fetcher, feed_url)
 
         future = self.network_jobs.submit(work)
+        self._preview_futures[feed_url] = future
         self._pending_jobs.add(future)
 
         def finished(completed):
             self._pending_jobs.discard(completed)
+            if completed.cancelled():
+                return  # dropped while waiting; its owner already cleared the pending mark
             try:
                 result = completed.result()
             except Exception as exc:
