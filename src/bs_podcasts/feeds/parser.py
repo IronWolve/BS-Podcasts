@@ -3,6 +3,7 @@
 from collections import deque
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
+from html import escape
 from io import BytesIO
 import xml.etree.ElementTree as ET
 import re
@@ -58,6 +59,32 @@ def _text(element, *names) -> str:
     child = _first(element, *names)
     if child is None:
         return ""
+    return "".join(child.itertext()).strip()
+
+
+def _markup(element) -> str:
+    """The text and child elements of `element` as HTML source.
+
+    Joining the text drops the tags, so the paragraphs of XHTML show notes ran
+    together. Names lose their namespace; the notes renderer keeps the tags it
+    allows and drops the rest.
+    """
+    parts = [escape(element.text or "", quote=False)]
+    for child in element:
+        name = _local(child.tag)
+        attributes = "".join(f' {_local(key)}="{escape(value)}"' for key, value in child.attrib.items())
+        parts.append(f"<{name}{attributes}>{_markup(child)}</{name}>{escape(child.tail or '', quote=False)}")
+    return "".join(parts)
+
+
+def _notes(element, *names) -> str:
+    """Show notes: the first of `names` as text, or as markup when it holds
+    child elements (Atom XHTML content, an unescaped RSS description)."""
+    child = _first(element, *names)
+    if child is None:
+        return ""
+    if len(child):
+        return _markup(child).strip()
     return "".join(child.itertext()).strip()
 
 
@@ -317,7 +344,7 @@ def _rss_episode(item) -> FeedEpisodeData | None:
     return FeedEpisodeData(
         external_id=external,
         title=_clamp_title(title),
-        description=_description(_text(item, "description", "summary", "encoded")),
+        description=_description(_notes(item, "description", "summary", "encoded")),
         media_url=media_url,
         mime_type=mime,
         published_at=published,
@@ -384,7 +411,7 @@ def _atom_episode(entry) -> FeedEpisodeData | None:
     return FeedEpisodeData(
         external_id=external,
         title=_clamp_title(title),
-        description=_description(_text(entry, "summary", "content")),
+        description=_description(_notes(entry, "summary", "content")),
         media_url=media_url,
         mime_type=mime,
         published_at=published,
