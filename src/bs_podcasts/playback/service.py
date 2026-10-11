@@ -186,9 +186,10 @@ class PlaybackService:
     RECONNECTING = "Reconnecting…"
     # Snapshot fields that belong to the listening session, not to one opening
     # of the file: a reopen of the same episode (stream recovery) keeps them.
-    # The reconnect notice rides along until the file has loaded again.
+    # The reconnect notice rides along until the file has loaded again. Any
+    # other load of the episode already on screen keeps them all but the notice.
     REOPEN_KEEPS = ("sleep_deadline", "sleep_expired_count", "sleep_at_end", "ab_start", "ab_end", "message")
-    SLEEP_KEEPS = REOPEN_KEEPS[:3]
+    SAME_KEEPS = REOPEN_KEEPS[:5]
 
     @staticmethod
     def _best_effort(what: str, work):
@@ -320,11 +321,11 @@ class PlaybackService:
             # so a still-armed timer would pause the NEXT episode unannounced.
             # Opening the episode already on the snapshot (the first Play of a
             # restored one, the end of a download wait, a replay) is the same
-            # listening session, so its timer carries on.
+            # listening session, so its timer and A-B loop carry on.
             if not same:
                 self.cancel_sleep_timer()
             kept = {name: getattr(self.snapshot, name)
-                    for name in (self.REOPEN_KEEPS if keep else self.SLEEP_KEEPS if same else ())}
+                    for name in (self.REOPEN_KEEPS if keep else self.SAME_KEEPS if same else ())}
             # A load that was refused above leaves the restored episode waiting,
             # so the next Play tries again and shows the reason again.
             self._deferred_episode_id = None
