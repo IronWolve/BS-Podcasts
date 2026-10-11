@@ -8,7 +8,6 @@ from html import escape as html_escape, unescape as html_unescape
 from html.parser import HTMLParser
 import re
 from typing import NamedTuple
-from urllib.parse import urlsplit
 
 from PySide6.QtCore import (
     QEvent,
@@ -452,7 +451,6 @@ class NavigationRail(QFrame):
     about_requested = Signal()
     episodes_dropped = Signal(list)
     page_menu_requested = Signal(int, object)
-    EPISODES_INDEX = 2
     QUEUE_INDEX = 3
     IDS_MIME = "application/x-bs-podcasts-episode-ids"
 
@@ -733,8 +731,7 @@ def combo_chrome_px(combo) -> int:
     under-measures and the widest option still clips under the arrow. A style
     that reports something absurd falls back to a measured-good default
     rather than a width that would swallow the field."""
-    from PySide6.QtCore import QRect
-    from PySide6.QtWidgets import QStyle, QStyleOptionComboBox
+    from PySide6.QtWidgets import QStyleOptionComboBox
 
     probe_width = scaled_px(400)
     option = QStyleOptionComboBox()
