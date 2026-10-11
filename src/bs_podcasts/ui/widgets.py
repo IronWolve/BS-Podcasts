@@ -2237,7 +2237,6 @@ class ContextPanel(QFrame):
     play_episode_requested = Signal(int)
     play_preview_requested = Signal(object)
     queue_episode_requested = Signal(int)
-    dequeue_requested = Signal(int)
     download_episode_requested = Signal(int)
     seek_requested = Signal(int, float)
     transcript_search_requested = Signal(int, str)
@@ -2249,7 +2248,6 @@ class ContextPanel(QFrame):
     queue_reordered = Signal(list)
     information_requested = Signal(object)
     favorite_requested = Signal(object, bool)
-    closed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
