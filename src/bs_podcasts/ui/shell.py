@@ -168,6 +168,9 @@ _HINT_EVENTS = frozenset({QEvent.Type.ToolTip, QEvent.Type.Enter})
 # never `_closed`. It is shared because the worker of a window that was since
 # rebuilt must still see a Quit made in its replacement.
 _QUITTING = threading.Event()
+# Guards the in-flight job set that every window shares (it is handed from a
+# window to its rebuilt replacement). Done callbacks run on worker threads.
+_JOBS_LOCK = threading.RLock()
 # Export media's own worker (see MainWindow._export_pool).
 _EXPORT_RUNNER = None
 
@@ -217,15 +220,25 @@ def _latest_episode(feed):
     return feed._preview_latest
 
 
+def _job_add(jobs, future):
+    with _JOBS_LOCK:
+        jobs.add(future)
+
+
+def _job_discard(jobs, future):
+    with _JOBS_LOCK:
+        jobs.discard(future)
+
+
 def _track_job(window, future, kind, identifier, classify=None, drop_cancelled=False):
     """Hand a background future's outcome to `window` as one completion tagged
     `kind`: the future is forgotten, an exception becomes an error result
     (`classify` may map it to another result), and the completion is emitted.
     `drop_cancelled` emits nothing for a cancelled future."""
-    window._pending_jobs.add(future)
+    _job_add(window._pending_jobs, future)
 
     def finished(completed):
-        window._pending_jobs.discard(completed)
+        _job_discard(window._pending_jobs, completed)
         if drop_cancelled and completed.cancelled():
             return
         try:
@@ -1395,10 +1408,11 @@ class MainWindow(QMainWindow):
             return result
 
         future = self.jobs.submit(work)
-        self._pending_jobs.add(future)
+        _job_add(self._pending_jobs, future)
         def finished(completed):
-            self._pending_jobs.discard(completed)
-            self._cache_pruning = False
+            with _JOBS_LOCK:
+                self._pending_jobs.discard(completed)
+                self._cache_pruning = False
         future.add_done_callback(finished)
 
     def _live_artwork_paths(self):
@@ -2900,8 +2914,10 @@ class MainWindow(QMainWindow):
 
     def reads_pending(self) -> bool:
         """True while any background read, coalescing timer or search debounce is outstanding."""
+        with _JOBS_LOCK:
+            jobs = tuple(self._pending_jobs)
         return (
-            any(not future.done() for future in tuple(self._pending_jobs))
+            any(not future.done() for future in jobs)
             or (self.commands is not None and self.commands.pending())
             or self._reload_timer.isActive()
             or self._download_reload_timer.isActive()
@@ -5423,11 +5439,12 @@ class MainWindow(QMainWindow):
                 self._playback_command('set_volume', volume)
                 return
             future = self.commands.submit_latest('volume', lambda: self.playback.set_volume(volume), keep=True)
-            if future in self._pending_jobs:
-                return
-            self._pending_jobs.add(future)
+            with _JOBS_LOCK:
+                if future in self._pending_jobs:
+                    return
+                self._pending_jobs.add(future)
             def finished(done):
-                self._pending_jobs.discard(done)
+                _job_discard(self._pending_jobs, done)
                 if not done.cancelled():
                     self._emit_completed(('command', None, done.result()))
             future.add_done_callback(finished)
@@ -6735,8 +6752,8 @@ class MainWindow(QMainWindow):
             self._pump_directory_artwork()
         if not self._directory_artwork_active and not self._directory_artwork_waiting and self.jobs is not None:
             future = self.jobs.submit(save_accents)
-            self._pending_jobs.add(future)  # tracked, so Quit can cancel it like other jobs
-            future.add_done_callback(self._pending_jobs.discard)
+            _job_add(self._pending_jobs, future)  # tracked, so Quit can cancel it like other jobs
+            future.add_done_callback(lambda done, jobs=self._pending_jobs: _job_discard(jobs, done))
 
     # ------------------------------------------------------------------ refresh
     def _set_episode_refresh_enabled(self, enabled: bool):
@@ -8931,10 +8948,13 @@ class MainWindow(QMainWindow):
             # Window is being rebuilt (theme change); services stay alive.
             super().closeEvent(event)
             return
-        for future in tuple(self._pending_jobs):
+        with _JOBS_LOCK:
+            jobs = tuple(self._pending_jobs)
+        for future in jobs:
             if self.commands is None or not self.commands.retained(future):
                 future.cancel()
-        self._pending_jobs.clear()
+        with _JOBS_LOCK:
+            self._pending_jobs.clear()
         if self.commands is not None:
             self.commands.finish(self.playback.shutdown if self.playback is not None else None)
         elif self.playback is not None:
