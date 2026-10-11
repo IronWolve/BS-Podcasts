@@ -8,6 +8,7 @@ from PySide6.QtCore import QAbstractListModel, QEvent, QMimeData, QModelIndex, Q
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QTextLayout
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QToolTip
 
+from ..domain.times import format_media_time
 from . import icons
 from .pixmaps import cover, initials
 from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, ARTWORK_OVERLAY, ARTWORK_LIGHT_INK, app_font, scaled_dim, scaled_px
@@ -304,7 +305,7 @@ class EpisodeModel(QAbstractListModel):
                 "Played" if item.played else "Unplayed",
                 "Favorite" if item.favorite else "", "New" if item.is_new else "",
                 item.state, item.duration, item.published,
-                f"Position {item.position_seconds:g} seconds" if item.position_seconds else "",
+                f"Position {format_media_time(item.position_seconds)}" if item.position_seconds else "",
             ) if value)
         if role == Qt.ItemDataRole.DisplayRole:
             return item.title
