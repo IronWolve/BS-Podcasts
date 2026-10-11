@@ -215,17 +215,20 @@ def _parse_json_transcript(text: str) -> list[SegmentData]:
 def _parse_cues(text: str) -> list[SegmentData]:
     segments = []
     for block in re.split(r"\n\s*\n", text.strip()):
-        lines = [line.strip() for line in block.split("\n") if line.strip()]
-        if not lines:
-            continue
-        timing = next((line for line in lines if _TIMING_LINE.fullmatch(line)), None)
-        if timing is None:
-            continue
-        start_text, _arrow, end_text = timing.partition("-->")
-        body_lines = [line for line in lines if line is not timing and not line.isdigit() and not line.startswith(("WEBVTT", "NOTE", "STYLE"))]
-        body = unescape(_TAGS.sub("", " ".join(body_lines))).strip()
-        if body:
-            segments.append(SegmentData(text=body, start_seconds=_stamp(start_text), end_seconds=_stamp(end_text)))
+        # A timing line starts a cue; the lines after it are its words. Lines
+        # before the first timing line are a cue identifier or header, and a
+        # block with no blank line between cues holds more than one cue.
+        cues = []
+        for line in (line.strip() for line in block.split("\n")):
+            if _TIMING_LINE.fullmatch(line):
+                cues.append((line, []))
+            elif cues and line and not line.isdigit() and not line.startswith(("WEBVTT", "NOTE", "STYLE")):
+                cues[-1][1].append(line)
+        for timing, body_lines in cues:
+            start_text, _arrow, end_text = timing.partition("-->")
+            body = unescape(_TAGS.sub("", " ".join(body_lines))).strip()
+            if body:
+                segments.append(SegmentData(text=body, start_seconds=_stamp(start_text), end_seconds=_stamp(end_text)))
     return _merge_short(segments)
 
 
