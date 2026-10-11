@@ -963,11 +963,13 @@ class FlowLayout(QLayout):
         return True
 
     def heightForWidth(self, width):
-        return self._arrange(QRect(0, 0, width, 0), measure=True)
+        margins = self.contentsMargins()
+        inner = self._arrange(QRect(0, 0, width - margins.left() - margins.right(), 0), measure=True)
+        return inner + margins.top() + margins.bottom()
 
     def setGeometry(self, rect):
         super().setGeometry(rect)
-        self._arrange(rect, measure=False)
+        self._arrange(self.contentsRect(), measure=False)
 
     def sizeHint(self):
         return self.minimumSize()
