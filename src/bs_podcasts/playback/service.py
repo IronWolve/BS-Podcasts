@@ -1172,6 +1172,10 @@ class PlaybackService:
                     if self._dead:
                         return
                     try:
+                        # A position save queued behind maintenance cannot land
+                        # until it ends; refuse now instead of waiting out the
+                        # flush. The save stays queued and lands afterwards.
+                        self._library_ready()
                         self._flush_persistence()
                         with self._lock:
                             if self._dead:
