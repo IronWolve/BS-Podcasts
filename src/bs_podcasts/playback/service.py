@@ -174,6 +174,7 @@ class PlaybackService:
 
     LOAD_TIMEOUT = 25.0
     RESOLVE_TIMEOUT = 55.0  # HTTP resolver has its own 45-second total budget
+    WEB_LOAD_TIMEOUT = 55.0  # the stream's own open (connect, headers, first bytes) can take about 50 s
     STREAM_RECOVERY_LIMIT = 3
     STREAM_RECOVERY_WINDOW = 600.0
     START_TOLERANCE = 10.0
@@ -201,7 +202,10 @@ class PlaybackService:
         # retried load of the SAME episode+source would otherwise be killed
         # instantly by the previous attempt's already-running watchdog.
         self._load_token += 1
-        timeout = self.RESOLVE_TIMEOUT if self._resolving else self.LOAD_TIMEOUT
+        if self._resolving:
+            timeout = self.RESOLVE_TIMEOUT
+        else:
+            timeout = self.WEB_LOAD_TIMEOUT if is_web_url(source) else self.LOAD_TIMEOUT
         timer = Timer(timeout, self._load_timed_out, args=(self._load_token,))
         timer.daemon = True
         timer.start()
