@@ -20,9 +20,10 @@ Qt / PySide6 / Shiboken (The Qt Company)
 mpv / libmpv (Windows libmpv-2.dll; Linux libmpv.so.2; macOS libmpv.2.dylib)
   License: GNU Lesser General Public License v2.1 or later
   (licenses/LGPL-2.1.txt). This copy is configured in LGPL mode (-Dgpl=false).
-  The macOS build includes mpv-coreaudio-only.patch, supplied with the matching
-  sources (build-file change dated 2026-09-28), which adds an existing upstream utility file to the CoreAudio-only
-  build. Other mpv source code is unmodified.
+  The macOS build applies mpv-coreaudio-only.patch, supplied with the matching
+  sources. It is a build-file change, dated 2026-09-28, that adds one existing
+  upstream utility file to the CoreAudio-only build. Other mpv source code is
+  unmodified.
   https://mpv.io / https://github.com/mpv-player/mpv
 
 FFmpeg (statically linked into the bundled libmpv on each platform)
@@ -58,8 +59,9 @@ Fribidi (statically linked into the bundled libmpv on Windows, Linux, and macOS)
   https://github.com/fribidi/fribidi
 
 python-mpv
-  License: GNU Lesser General Public License v2.1 or later
-  (licenses/LGPL-2.1.txt)
+  License: dual-licensed, GNU General Public License v2 or later, or GNU
+  Lesser General Public License v2.1 or later. This copy is used under the
+  LGPL v2.1 or later (licenses/LGPL-2.1.txt).
   https://github.com/jaseg/python-mpv
 
 Python (python.org) and its standard library
@@ -89,12 +91,18 @@ Inter font family
 Additional bundled/transitive software
   Qt 6.11.2 third-party copyright and license texts:
   licenses/Qt-6.11.2-third-party.txt
-  Pillow 12.3.0 and its native image libraries; setuptools 84.0.0 and its
-  vendored runtime modules; packaging 26.3; PyInstaller 6.22.3 bootloader
-  exception and Apache runtime hooks; macOS macholib 1.16.4; related notices:
+  packaging 26.3; PyInstaller 6.22.3 bootloader exception and Apache runtime
+  hooks; macOS macholib 1.16.4; related notices:
   licenses/Python-bundled-third-party.txt
   Native player, FreeType internals, MIT fast_float on macOS, and Windows
   MinGW/GCC runtime exception: licenses/Native-bundled-third-party.txt
+  Pillow 12.3.0 and setuptools 84.0.0 are excluded from the packaged
+  application: they are installed only in the build environment, the Windows
+  and macOS specs drop them, and the Linux runtime does not install them.
+  Their licence texts remain in licenses/Python-bundled-third-party.txt.
+  The build-time tools altgraph, pefile, pyinstaller-hooks-contrib and
+  pywin32-ctypes support the Windows freezing step and are not imported by the
+  application.
 
 FFmpeg uses code from the Independent JPEG Group. This software is based in
 part on the work of the Independent JPEG Group. The relevant JPEG source
