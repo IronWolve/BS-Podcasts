@@ -12,6 +12,7 @@ from typing import NamedTuple
 
 from ..domain import FeedData, FeedEpisodeData
 from ..domain.media import BINARY_AUDIO_TYPES
+from ..domain.times import MAX_MEDIA_SECONDS
 from .safety import UnsupportedEncoding, contains_dtd, normalize_xml, normalize_html_entities
 
 
@@ -177,7 +178,7 @@ def _duration(value: str) -> int:
             parts = [int(part) for part in raw[:-1]]
             parts.append(float(raw[-1]))
             seconds = sum(part * 60**index for index, part in enumerate(reversed(parts)))
-        return int(seconds) if math.isfinite(seconds) and 0 <= seconds <= 2**31 else 0
+        return int(seconds) if math.isfinite(seconds) and 0 <= seconds <= MAX_MEDIA_SECONDS else 0
     except (TypeError, ValueError, OverflowError):
         return 0
 

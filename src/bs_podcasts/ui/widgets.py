@@ -70,7 +70,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..assets import icon_path
-from ..domain.times import media_seconds, format_media_time
+from ..domain.times import MAX_MEDIA_SECONDS, media_seconds, format_media_time
 from ..urlguard import is_web_url
 from . import icons
 from .models import Podcast
@@ -4512,7 +4512,7 @@ class PlayerBar(QFrame):
         self._elide_now_labels()
         self.art.set_artwork(snapshot.artwork_path, initials(snapshot.show_title or snapshot.title), "")
         self._duration = media_seconds(snapshot.duration) or 0.0
-        span = min(2**31 - 1, max(1000, int(self._duration)))
+        span = min(MAX_MEDIA_SECONDS - 1, max(1000, int(self._duration)))
         if self.slider.maximum() != span:
             self.slider.setRange(0, span)
         position = media_seconds(snapshot.position) or 0.0
