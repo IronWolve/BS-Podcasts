@@ -733,7 +733,9 @@ class PlaybackService:
             if episode.show_id in self._retiring_shows:
                 raise PlaybackUnavailable("This podcast is being removed. Choose another episode.")
             self.pause()
-            ExternalPlayerEngine().load(source, autoplay=True)
+        # The launch can be slow (a process start); native events and the load
+        # watchdog need the service lock meanwhile.
+        ExternalPlayerEngine().load(source, autoplay=True)
 
     def clear_episode_progress(self, targets):
         """Ordered reset, excluding the loaded session and draining older saves."""
