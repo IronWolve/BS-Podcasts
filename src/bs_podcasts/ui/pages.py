@@ -1249,6 +1249,8 @@ class EpisodeListPage(BasePage, _ListPageMixin):
     played_selected_requested = Signal(list)
     clear_progress_requested = Signal()
 
+    _narrow = None  # compact state last applied to the chip row and sort button
+
     def __init__(
         self,
         title="Episodes",
@@ -1488,6 +1490,9 @@ class EpisodeListPage(BasePage, _ListPageMixin):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         narrow = event.size().width() < scaled_px(COMPACT_PAGE_PX)
+        if narrow == self._narrow:
+            return
+        self._narrow = narrow
         self.chips.set_compact(narrow)
         self._update_sort_button()
 
