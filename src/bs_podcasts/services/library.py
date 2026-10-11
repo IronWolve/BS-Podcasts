@@ -9,7 +9,7 @@ import logging
 from ..data.repositories import LibraryRepository
 from ..domain import FeedData
 from ..privacy import feed_label
-from ..urlguard import UnsafeUrl, ensure_web_url
+from ..urlguard import UnsafeUrl, ensure_web_url, normalize_feed_url as _normalize_feed_url
 
 
 class SubscriptionImport(list):
@@ -73,24 +73,8 @@ class LibraryService:
             connection.execute("UPDATE shows SET etag='', last_modified='' WHERE source <> 'local'")
         self.repository.set_setting(self.VALIDATORS_RESET_SETTING, "1")
 
-    @staticmethod
-    def normalize_feed_url(url: str) -> str:
-        """Key used to spot the same feed behind http/https, www, trailing slashes,
-        the scheme's default port and a trailing dot on the host."""
-        parsed = urlparse(url.strip())
-        credentials, separator, host = parsed.netloc.rpartition("@")
-        host, colon, port = host.lower().rpartition(":")
-        if not colon or "]" in port:
-            # No port (or the last colon sits inside a bracketed IPv6 address).
-            host, port = host + colon + port, ""
-        host = host.removesuffix(".")
-        if port and port != {"http": "80", "https": "443"}.get(parsed.scheme):
-            host = f"{host}:{port}"
-        if host.startswith("www."):
-            host = host[4:]
-        path = parsed.path.rstrip("/") or "/"
-        authority = (credentials + separator if separator else "") + host
-        return f"{authority}{path}" + (f"?{parsed.query}" if parsed.query else "")
+    # The key rule lives in urlguard; this name stays for existing callers.
+    normalize_feed_url = staticmethod(_normalize_feed_url)
 
     def find_subscription(self, feed_url: str):
         key = self.normalize_feed_url(feed_url)

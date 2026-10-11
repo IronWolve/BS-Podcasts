@@ -152,6 +152,7 @@
 !/src/bs_podcasts/directories/__init__.py
 !/src/bs_podcasts/directories/base.py
 !/src/bs_podcasts/directories/catalog.py
+!/src/bs_podcasts/directories/categories.py
 !/src/bs_podcasts/directories/charts.py
 !/src/bs_podcasts/directories/persistent.py
 !/src/bs_podcasts/domain/__init__.py

@@ -10,8 +10,9 @@ from threading import Lock
 
 from ..domain import DirectoryCandidate
 from ..netlimits import Deadline, NetworkDeadline, current_cancel, is_foreground, request_scope
-from ..urlguard import is_web_url
+from ..urlguard import is_web_url, normalize_feed_url
 from .base import CandidateList, DirectoryError, failure_text, is_unreachable
+from .categories import CATEGORY_IDS
 
 
 # Expansion-term requests in flight at once; the shared header gate admits 12
@@ -24,28 +25,6 @@ CACHE_SECONDS = 900
 # The most rows one directory request asks for; the search and chart APIs accept 200.
 MAX_ROWS = 200
 
-
-CATEGORY_IDS = {
-    "Arts": 1301,
-    "Business": 1321,
-    "Comedy": 1303,
-    "Education": 1304,
-    "Fiction": 1483,
-    "Government": 1511,
-    "Health & Fitness": 1512,
-    "History": 1487,
-    "Kids & Family": 1305,
-    "Leisure": 1502,
-    "Music": 1310,
-    "News": 1489,
-    "Religion & Spirituality": 1314,
-    "Science": 1533,
-    "Society & Culture": 1324,
-    "Sports": 1545,
-    "Technology": 1318,
-    "True Crime": 1488,
-    "TV & Film": 1309,
-}
 
 CATEGORY_TOPICS = {
     "Arts": ("Books", "Design", "Fashion & Beauty", "Food", "Performing Arts", "Visual Arts"),
@@ -152,8 +131,7 @@ class PublicDirectory:
                 network=bool(errors) and all(is_unreachable(exc) for exc in errors),
             )
 
-        from ..services.library import LibraryService
-        key = LibraryService.normalize_feed_url
+        key = normalize_feed_url
         merged = CandidateList()
         seen = set()
         longest = max(len(results) for results in result_sets)
@@ -271,8 +249,7 @@ class PublicDirectory:
         self.charts.invalidate()
 
     def recommend(self, shows, limit: int = 30) -> list[DirectoryCandidate]:
-        from ..services.library import LibraryService
-        key = LibraryService.normalize_feed_url
+        key = normalize_feed_url
         shows = list(shows)
         excluded = {key(url) for show in shows for url in (show.feed_url, getattr(show, 'canonical_url', '')) if url}
         categories = []

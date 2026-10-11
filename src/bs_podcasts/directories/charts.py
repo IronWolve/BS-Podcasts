@@ -11,7 +11,8 @@ from ..net import SessionSlot, describe_network_error
 from ..domain import DirectoryCandidate
 from ..urlguard import is_web_url
 from .base import DirectoryError, failure_text
-from .catalog import CACHE_SECONDS, CATEGORY_IDS, MAX_ROWS, REQUEST_TIMEOUT
+from .catalog import CACHE_SECONDS, MAX_ROWS, REQUEST_TIMEOUT
+from .categories import CATEGORY_IDS
 
 
 CHART_TITLES = {

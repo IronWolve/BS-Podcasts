@@ -10,7 +10,7 @@ Qt-free on purpose: feeds, playback, and services import it too, and nothing
 here may drag `requests` (or its ~150 ms import) into a startup path.
 """
 
-from urllib.parse import urlsplit
+from urllib.parse import urlparse, urlsplit
 import ipaddress
 import socket
 
@@ -57,6 +57,25 @@ def ensure_web_url(value, what: str = "URL") -> str:
     if parts.scheme.lower() == 'http' and parts.username is not None:
         raise UnsafeUrl("URLs containing credentials require HTTPS.")
     return text
+
+
+def normalize_feed_url(url: str) -> str:
+    """Key used to spot the same feed behind http/https, www, trailing slashes,
+    the scheme's default port and a trailing dot on the host."""
+    parsed = urlparse(url.strip())
+    credentials, separator, host = parsed.netloc.rpartition("@")
+    host, colon, port = host.lower().rpartition(":")
+    if not colon or "]" in port:
+        # No port (or the last colon sits inside a bracketed IPv6 address).
+        host, port = host + colon + port, ""
+    host = host.removesuffix(".")
+    if port and port != {"http": "80", "https": "443"}.get(parsed.scheme):
+        host = f"{host}:{port}"
+    if host.startswith("www."):
+        host = host[4:]
+    path = parsed.path.rstrip("/") or "/"
+    authority = (credentials + separator if separator else "") + host
+    return f"{authority}{path}" + (f"?{parsed.query}" if parsed.query else "")
 
 
 # Ranges an untrusted feed has no business steering the app at. Private LAN
