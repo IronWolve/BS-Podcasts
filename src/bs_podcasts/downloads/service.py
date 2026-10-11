@@ -1,5 +1,6 @@
 """Resumable, cancellable downloads with atomic completion."""
 
+import codecs
 from dataclasses import dataclass, replace
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +28,7 @@ import shutil
 import sqlite3
 import stat
 import time
+import unicodedata
 
 from ..net import SessionSlot, describe_network_error
 from ..urlguard import UnresolvedHost, UnsafeUrl, ensure_fetchable, SAFE_MEDIA_SUFFIXES, unsafe_media_payload
@@ -79,14 +81,23 @@ def _looks_like_document(head: bytes, final: bool = False) -> bool:
     do not. The artwork rule used before let through a page with an inline
     SVG, one opening with a comment, a bare heading and plain "Not Found"
     text. Plain text is judged on 64 bytes, or on a whole shorter body when
-    `final`, so a first chunk that splits a binary header is not refused.
+    `final`, so a first chunk that splits a binary header is not refused. A
+    leading UTF-8 byte-order mark is skipped, and text counts when it decodes
+    as UTF-8 without control characters, so non-ASCII pages are caught too.
     """
     stripped = head.lstrip()
+    if stripped.startswith(codecs.BOM_UTF8):
+        stripped = stripped[len(codecs.BOM_UTF8):].lstrip()
     if stripped[:1] in (b"<", b"{", b"["):
         return True
     if len(stripped) < 64 and not final:
         return False
-    return all(32 <= byte < 127 or byte in b"\t\n\r" for byte in stripped[:64])
+    try:
+        # Not final: a character cut off by the 64-byte slice is no error.
+        text = codecs.getincrementaldecoder("utf-8")().decode(stripped[:64])
+    except UnicodeDecodeError:
+        return False
+    return all(char in "\t\n\r" or unicodedata.category(char) != "Cc" for char in text)
 
 
 @dataclass(frozen=True)
