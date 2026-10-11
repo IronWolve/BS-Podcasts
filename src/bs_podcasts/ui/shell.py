@@ -5287,7 +5287,9 @@ class MainWindow(QMainWindow):
                 return ""
             if str(playback.snapshot.state) == 'loading':
                 return "This episode is still opening; try the chapter control when it is ready."
-            chapter = finder(snapshot.episode_id, float(snapshot.position))
+            # The position now, not the one at key press: an earlier queued
+            # jump may already have moved it.
+            chapter = finder(snapshot.episode_id, float(playback.snapshot.position))
             if chapter is None:
                 return "No next chapter" if direction > 0 else "No previous chapter"
             if playback.current_identity() == identity:
