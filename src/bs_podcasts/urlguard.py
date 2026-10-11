@@ -210,12 +210,16 @@ def _addresses(host: str) -> list:
     return found
 
 
-def ensure_fetchable(value, what: str = "URL") -> str:
+def ensure_fetchable(value, what: str = "URL", resolve: bool = True) -> str:
     """Scheme-check `value`, then refuse hosts the app should never reach.
 
     This is an early screen. The app's HTTP adapter also checks and pins the
     addresses used for its actual connection, closing the DNS-rebinding gap.
     Native/external players have their own transport; this is not their sandbox.
+
+    `resolve=False` skips the lookup of a host name. Only a caller whose
+    connection screens every address it connects to may pass it; literal
+    addresses are still refused here.
     """
     text = ensure_web_url(value, what)
     host = _split(text).hostname or ""
@@ -224,6 +228,8 @@ def ensure_fetchable(value, what: str = "URL") -> str:
     except ValueError:
         literal = None
     lookup = host if literal is not None else _idna_host(host)
+    if literal is None and not resolve:
+        return text
     for ip in ([literal] if literal is not None else _addresses(lookup)):
         reason = _blocked_reason(ip)
         if reason:

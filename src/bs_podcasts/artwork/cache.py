@@ -482,8 +482,10 @@ class ArtworkCache:
                 raise ArtworkError('Artwork is temporarily unavailable; retry shortly.')
             try:
                 deadline.remaining()
-                ensure_fetchable(url, 'Artwork URL')
-                result = (self._fetch_locked(url, target, force=True) if force
+                # The request's connection resolves the host and screens every
+                # address it uses; a lookup here would repeat it for one download.
+                ensure_fetchable(url, 'Artwork URL', resolve=False)
+                result =(self._fetch_locked(url, target, force=True) if force
                           else self._fetch_locked(url, target))
             except Exception:
                 cancel = current_cancel()
