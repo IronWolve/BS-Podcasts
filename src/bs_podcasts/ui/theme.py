@@ -63,6 +63,10 @@ DARK = {
     "surface_raised": "#222C42",
     "surface_soft": "#2E3A54",
     "border": "#3A4763",
+    # Outlines of text fields, combo/spin boxes, search fields and checkbox
+    # indicators: >= 3:1 on canvas, nav, surface and surface_raised (WCAG 1.4.11);
+    # `border` is a separator tone and sits at 1.5-2.1:1.
+    "control_border": "#7A89A6",
     "hairline": "rgba(255, 255, 255, 0.07)",
     "text": "#E4E8F0",
     "text_strong": "#FFFFFF",
@@ -91,6 +95,7 @@ LIGHT = {
     "surface_raised": "#F1F4F9",
     "surface_soft": "#E3E8F1",
     "border": "#C9D2E0",
+    "control_border": "#76809A",  # >= 3:1 on canvas, nav, surface, surface_raised
     "hairline": "rgba(15, 23, 42, 0.14)",
     "text": "#1B2233",
     "text_strong": "#0B0F18",
@@ -195,7 +200,7 @@ def apply_theme(name: str):
     COLORS.update(palette)
     if high_contrast():
         ink = COLORS['text_strong']
-        COLORS.update(text=ink, muted=ink, subtle=ink, border=ink, hairline=ink)
+        COLORS.update(text=ink, muted=ink, subtle=ink, border=ink, control_border=ink, hairline=ink)
     _rebuild_semantic()
 
 
@@ -482,22 +487,22 @@ def stylesheet() -> str:
 
     /* ---------- Inputs ---------- */
     QLineEdit#searchField {{
-        background: {c['surface']}; border: 1px solid {c['hairline']};
+        background: {c['surface']}; border: 1px solid {c['control_border']};
         border-radius: {r['md']}px; padding: {sp(8)}px {sp(12)}px {sp(8)}px {sp(34)}px;
         selection-background-color: {c['accent']}; selection-color: {c['on_accent']};
     }}
-    QLineEdit#searchField:hover {{ border-color: {c['border']}; }}
+    QLineEdit#searchField:hover {{ border-color: {c['muted']}; }}
     QLineEdit {{ placeholder-text-color: {c['subtle']}; }}
     QLineEdit#searchField:focus {{ border: 1px solid {c['accent']}; background: {c['surface_raised']}; }}
     QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QKeySequenceEdit {{
         background: {c['surface']}; color: {c['text']};
-        border: 1px solid {c['border']}; border-radius: {r['sm']}px;
+        border: 1px solid {c['control_border']}; border-radius: {r['sm']}px;
         padding: {sp(6)}px {sp(10)}px; min-height: {sp(20)}px;
         selection-background-color: {c['accent']};
         selection-color: {c['on_accent']};
     }}
     QLineEdit:hover, QTextEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover,
-    QComboBox:hover, QKeySequenceEdit:hover {{ border-color: {c['subtle']}; }}
+    QComboBox:hover, QKeySequenceEdit:hover {{ border-color: {c['muted']}; }}
     QLineEdit:focus, QTextEdit:focus, QSpinBox:focus,
     QDoubleSpinBox:focus, QComboBox:focus, QKeySequenceEdit:focus {{
         border-color: {c['accent']};
@@ -540,9 +545,9 @@ def stylesheet() -> str:
     QCheckBox {{ spacing: {sp(10)}px; }}
     QCheckBox::indicator {{
         width: {sp(18)}px; height: {sp(18)}px; border-radius: 5px;
-        border: 1px solid {c['border']}; background: {c['surface']};
+        border: 1px solid {c['control_border']}; background: {c['surface']};
     }}
-    QCheckBox::indicator:hover {{ border-color: {c['subtle']}; }}
+    QCheckBox::indicator:hover {{ border-color: {c['muted']}; }}
     QCheckBox::indicator:checked {{
         background: {c['accent']}; border-color: {c['accent']};
         image: url({{icon:check:{c['on_accent']}:14}});
