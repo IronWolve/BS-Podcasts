@@ -312,6 +312,7 @@ class DownloadService:
             with self._lock:
                 if not self._intents:
                     self._intent_writer = False
+                    self._settled.notify_all()
                     return
                 episode_id, ticket = self._intents.popleft()
                 if (self._queued.get(episode_id) is not ticket or episode_id in self._cancellations
@@ -333,6 +334,17 @@ class DownloadService:
                 with self._settled:
                     self._recording.discard(episode_id)
                     self._settled.notify_all()
+
+    def join_intents(self, timeout: float = 3.0) -> int:
+        """Wait up to `timeout` seconds for the queued-row writer to finish.
+
+        Returns 1 while it is still running, so a quit can count it among the
+        background work it did not wait out. Its thread is a daemon outside
+        the job pools and is otherwise unaccounted for.
+        """
+        with self._settled:
+            self._settled.wait_for(lambda: not self._intent_writer, max(0.0, timeout))
+            return int(self._intent_writer)
 
     def _await_intent(self, episode_id: int):
         """Let an in-flight queued-row write land before the row is read or rewritten.
