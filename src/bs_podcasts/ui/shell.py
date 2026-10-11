@@ -4885,20 +4885,15 @@ class MainWindow(QMainWindow):
     def _restore_bookmarks(self, saved):
         if self.listening is None or not saved:
             return
-        repository, library = self.listening.repository, self.library
+        repository = self.listening.repository
 
         def work():
-            # Oldest first, so the restored bookmarks keep their order. One
-            # whose episode was removed since the delete is skipped.
-            restored = 0
-            for bookmark in sorted(saved, key=lambda bookmark: bookmark.created_at):
-                if library is not None and library.episode(bookmark.episode_id) is None:
-                    continue
-                repository.add_bookmark(bookmark.episode_id, bookmark.position_seconds, bookmark.title)
-                restored += 1
-            return restored
+            # Original ids and times are kept where free; a bookmark whose
+            # episode was removed since the delete is skipped and counted.
+            return repository.restore_bookmarks(saved)
 
-        def apply(restored):
+        def apply(result):
+            restored = result[0]
             self._bookmarks_changed()
             if restored == len(saved):
                 return
