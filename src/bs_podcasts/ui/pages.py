@@ -2493,7 +2493,8 @@ class SettingsPage(BasePage):
         editor = self._shortcut_editors.get(name)
         if editor is not None:
             editor.blockSignals(True)
-            editor.setKeySequence(previous)
+            # Portable text, as stored and as set_shortcuts parses it.
+            editor.setKeySequence(QKeySequence(previous, QKeySequence.SequenceFormat.PortableText))
             editor.blockSignals(False)
         self.shortcut_error.setText(message)
         self.shortcut_error.show()
