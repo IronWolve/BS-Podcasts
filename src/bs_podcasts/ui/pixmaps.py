@@ -1,4 +1,18 @@
-"""Cached, cover-cropped, rounded artwork pixmaps shared by widgets and delegates."""
+"""Cached, cover-cropped, rounded artwork pixmaps shared by widgets and delegates.
+
+Who owns the module-level state (workers only decode, sample and save):
+  GUI thread only, no lock: the artwork and preview caches, the preview path
+    tuples, the episode frame tables, _watchers, _waiting, _revisions and
+    _revision_ids.
+  _disk_lock: the tint table (_dominant, _dominant_mtime,
+    _dominant_signatures) and _accents_dirty. Workers sample and save it;
+    missing_accents tests membership without the lock, one atomic read.
+    _disk_loaded is set under _disk_load_lock and _save_error_logged is
+    written inside _disk_write_lock.
+  _decode_lock: _decoder, _bridge, _inflight, _decoding_paths, _failed and
+    writes to _decode_stopped. _remember_failed expects its caller to hold it.
+  The decode worker only: _decode_errors_logged.
+"""
 
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -742,10 +756,13 @@ def _source(path: str, width: int, height: int, sync: bool = False, notify=None)
     cached = _artwork_cache.find(key)
     if cached is not None and not cached.isNull():
         return cached
-    if key in _failed:
-        if not sync and time.monotonic() - _failed[key] < 5:
-            return None
-        _failed.pop(key, None)
+    with _decode_lock:
+        failed_at = _failed.get(key)
+        if failed_at is not None and (sync or time.monotonic() - failed_at >= 5):
+            del _failed[key]
+            failed_at = None
+    if failed_at is not None:
+        return None
     if sync or _sync_forced():
         image = _read_image(path, width, height)
         if image.isNull():
