@@ -1373,15 +1373,14 @@ class MainWindow(QMainWindow):
             return
         live = self._live_artwork_paths()
         def preview():
-            keep = self._referenced_artwork() | live
             # The same files the clear will remove, not every unreferenced one:
             # fresh and just-used files are skipped by the clear.
-            stale = cache.candidates(keep)
-            return keep, stale, sum(size for _path, size in stale)
+            stale = cache.candidates(self._referenced_artwork() | live)
+            return stale, sum(size for _path, size in stale)
 
         self._run_read(preview, lambda result: self._confirm_clear_artwork_cache(cache, *result), "cache-preview")
 
-    def _confirm_clear_artwork_cache(self, cache, keep, stale, total):
+    def _confirm_clear_artwork_cache(self, cache, stale, total):
         if not stale:
             self._notify("No unused artwork to remove")
             return
@@ -1392,8 +1391,11 @@ class MainWindow(QMainWindow):
         )
         if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
+        # A row may have started to use a file while the dialog was open, so
+        # the files to keep are worked out again now, not taken from the preview.
+        live = self._live_artwork_paths()
         self._run_read(
-            lambda: cache.prune(keep, None),
+            lambda: cache.prune(self._referenced_artwork() | live, None),
             self._artwork_cache_cleared,
             "cache-clear",
             coalesce=False,
