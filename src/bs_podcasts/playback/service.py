@@ -180,6 +180,7 @@ class PlaybackService:
     # of the file: a reopen of the same episode (stream recovery) keeps them.
     # The reconnect notice rides along until the file has loaded again.
     REOPEN_KEEPS = ("sleep_deadline", "sleep_expired_count", "sleep_at_end", "ab_start", "ab_end", "message")
+    SLEEP_KEEPS = REOPEN_KEEPS[:3]
 
     @staticmethod
     def _best_effort(what: str, work):
@@ -244,13 +245,17 @@ class PlaybackService:
                     raise PlaybackUnavailable("This podcast is being removed. Choose another episode.")
             # keep_session: this is a reopen of the episode already loaded, so
             # the sleep timer and the A-B loop carry over (see REOPEN_KEEPS).
-            keep = keep_session and self.snapshot.episode_id == episode_id
+            same = self.snapshot.episode_id == episode_id
+            keep = keep_session and same
             self._flush_listening()
             self._persist_position(force=True)
             self._flush_persistence()
             # Sleep is session-scoped: a new load's snapshot has no deadline,
             # so a still-armed timer would pause the NEXT episode unannounced.
-            if not keep:
+            # Opening the episode already on the snapshot (the first Play of a
+            # restored one, the end of a download wait, a replay) is the same
+            # listening session, so its timer carries on.
+            if not same:
                 self.cancel_sleep_timer()
             episode = self.repository.get_episode(episode_id)
             if episode is None:
@@ -293,7 +298,8 @@ class PlaybackService:
             if start_position is not None:
                 start = max(0.0, float(start_position))
             speed = show.playback_speed if show else 1.0
-            kept = {name: getattr(self.snapshot, name) for name in self.REOPEN_KEEPS} if keep else {}
+            kept = {name: getattr(self.snapshot, name)
+                    for name in (self.REOPEN_KEEPS if keep else self.SLEEP_KEEPS if same else ())}
             # A load that was refused above leaves the restored episode waiting,
             # so the next Play tries again and shows the reason again.
             self._deferred_episode_id = None
