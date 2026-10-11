@@ -332,8 +332,14 @@ class MpvEngine:
             return
         self._dead = True
         self._cancel_http()
-        player, self._player = self._player, None
-        player.terminate()
+        # The event thread checks the flag and issues its opening seek and
+        # pause under this lock. Taking the lock waits out a call already in
+        # flight; later events see the flag and send nothing. Terminate only
+        # afterwards, and outside the lock, because it joins the event thread.
+        with self._state_lock:
+            player, self._player = self._player, None
+        if player is not None:
+            player.terminate()
 
     def _set(self, name: str, value) -> None:
         """Complete commands in caller order, off the GUI thread.
