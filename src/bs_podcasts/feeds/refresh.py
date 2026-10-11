@@ -1,6 +1,6 @@
 """Canonical feed refresh pipeline and crash-budget application."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 import os
 import sqlite3
@@ -209,6 +209,9 @@ class RefreshService:
                 return RefreshReport(show_id, health, not_modified=True, artwork_path=artwork_path)
 
             feed = parse_feed(response.content, base_url=response.final_url)
+            # The body is not needed past the parse, and the cover download
+            # below can take a minute: do not keep the feed bytes alive for it.
+            response = replace(response, content=b"")
             imported = self.repository.import_feed(show_id, feed)
             health = Health.OK if feed.episodes and not feed.truncated else Health.PARTIAL
             self.repository.record_refresh_success(
