@@ -901,11 +901,15 @@ class LibraryRepository:
             visible = set(requested)
             reordered = iter(requested)
             requested = [next(reordered) if episode_id in visible else episode_id for episode_id in existing]
-            for position, episode_id in enumerate(requested, start=1):
-                connection.execute(
-                    "UPDATE queue SET position=? WHERE episode_id=?",
-                    (position, episode_id),
-                )
+            self._write_queue_order(connection, requested)
+
+    @staticmethod
+    def _write_queue_order(connection, episode_ids):
+        for position, episode_id in enumerate(episode_ids, start=1):
+            connection.execute(
+                "UPDATE queue SET position=? WHERE episode_id=?",
+                (position, episode_id),
+            )
 
     def update_position(self, episode_id: int, seconds: float, stamp: float | None = None, *, finish: bool = False):
         """Save a playback position ordered by `stamp`.
@@ -1031,10 +1035,13 @@ class LibraryRepository:
             return connection.execute("DELETE FROM queue").rowcount
 
     def queue_to_front(self, episode_id: int):
-        ids = [episode.id for episode in self.list_queue()]
-        if episode_id in ids:
-            ids.remove(episode_id)
-        self.reorder_queue([episode_id] + ids)
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            ids = [row[0] for row in connection.execute("SELECT episode_id FROM queue ORDER BY position")]
+            if episode_id in ids:
+                ids.remove(episode_id)
+                ids.insert(0, episode_id)
+            self._write_queue_order(connection, ids)
 
     _PLAYED_FIELDS = ("played", "is_new", "position_seconds", "last_played")
 
