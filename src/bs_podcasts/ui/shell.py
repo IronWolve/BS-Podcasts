@@ -15,6 +15,7 @@ import tempfile
 import time
 import weakref
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QByteArray, QEvent, QObject, QTimer, QUrl, Signal, Qt
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
@@ -5597,13 +5598,20 @@ class MainWindow(QMainWindow):
             return []
         source = snapshot.source or ""
         if source.startswith(("http://", "https://")):
-            from urllib.parse import urlsplit
-
             playing = "  ·  ".join(part for part in ("Streaming", urlsplit(source).hostname or "") if part)
         elif source:
             playing = "Downloaded file"
         else:
             playing = ""
+        audio_url = episode.media_url or ""
+        try:
+            parts = urlsplit(audio_url)
+        except ValueError:
+            audio_url = ""
+        else:
+            if parts.scheme in ("http", "https") and parts.netloc:
+                # Scheme, host and path only: a query string can carry an access token.
+                audio_url = f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}{parts.path}"
         format_parts = [self._pretty_mime(episode.mime_type)]
         if episode.enclosure_bytes:
             format_parts.append(self._format_bytes(episode.enclosure_bytes))
@@ -5614,7 +5622,7 @@ class MainWindow(QMainWindow):
                 number = f"Season {episode.season_number}  ·  {number}"
         return [
             ("PLAYING", playing),
-            ("AUDIO URL", episode.media_url),
+            ("AUDIO URL", audio_url),
             ("FORMAT", "  ·  ".join(part for part in format_parts if part)),
             ("PUBLISHED", self._display_full_date(episode.published_at)),
             ("EPISODE", number),
