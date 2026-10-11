@@ -111,7 +111,7 @@ def _xdg_user_dir(name: str, fallback: str) -> Path:
             if line.startswith(f"XDG_{name}_DIR="):
                 value = line.split("=", 1)[1].strip().strip('"')
                 return Path(value.replace("$HOME", str(Path.home()))).expanduser()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     return Path.home() / fallback
 
