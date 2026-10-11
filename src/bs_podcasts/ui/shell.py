@@ -1085,18 +1085,22 @@ class MainWindow(QMainWindow):
             page = self.discover_page
             for widget in (page.chart, page.category, page.topic):
                 widget.blockSignals(True)
-            page.chart.setCurrentIndex(max(0, min(page.chart.count() - 1, controls[0])))
-            page.category.setCurrentText(controls[1])
-            page.set_category_topics(controls[1])
-            page.topic.setCurrentText(controls[2])
-            for widget in (page.chart, page.category, page.topic):
-                widget.blockSignals(False)
+            try:
+                page.chart.setCurrentIndex(max(0, min(page.chart.count() - 1, controls[0])))
+                page.category.setCurrentText(controls[1])
+                page.set_category_topics(controls[1])
+                page.topic.setCurrentText(controls[2])
+            finally:
+                for widget in (page.chart, page.category, page.topic):
+                    widget.blockSignals(False)
             kind = page.chart.currentData()
             self._set_explore_controls(kind == "explore", kind in {"explore", "top_shows", "trending"})
             page.set_discover_summary(state.get("discover_summary", ""))
             page.blockSignals(True)
-            page.set_discover_sort(state.get("discover_sort", "rank"))
-            page.blockSignals(False)
+            try:
+                page.set_discover_sort(state.get("discover_sort", "rank"))
+            finally:
+                page.blockSignals(False)
         self._pending_view_restore = state
         self._restoring_view = True
         try:
