@@ -3288,6 +3288,7 @@ class NowPlayingView(QFrame):
     def prepare_episode(self, episode_id):
         if getattr(self, "_episode_id", 0) != episode_id:
             self._episode_id = 0
+            self._show_id = 0
             self.chapter_list.clear()
             self.bookmark_list.clear()
             self.transcript.clear()
