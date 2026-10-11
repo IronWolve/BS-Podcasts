@@ -543,17 +543,15 @@ class DownloadService:
         'downloading' or 'queued' describes a worker that no longer exists.
         Left alone it offers the user a Pause that silently does nothing.
         """
-        parked = 0
-        for record in self.downloads.list():
-            if record.state in {DownloadState.DOWNLOADING, DownloadState.QUEUED}:
-                self.downloads.progress(
-                    record.episode_id,
-                    DownloadState.PAUSED,
-                    record.bytes_done,
-                    record.bytes_total,
-                )
-                parked += 1
-        return parked
+        # One statement for every parked row: a commit per row ran ahead of
+        # the first window when many queued rows had piled up.
+        with self.downloads.database.connect() as connection:
+            return connection.execute(
+                "UPDATE downloads SET state=?, error_message='', updated_at=MAX(updated_at+0.000001, ?) "
+                "WHERE state IN (?, ?)",
+                (DownloadState.PAUSED.value, time.time(),
+                 DownloadState.DOWNLOADING.value, DownloadState.QUEUED.value),
+            ).rowcount
 
     MISSING_FILE_MESSAGE = "Downloaded file is missing — retry to download it again."
     STALL_WINDOW_SECONDS = 30.0
