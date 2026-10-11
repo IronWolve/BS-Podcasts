@@ -8016,6 +8016,7 @@ class MainWindow(QMainWindow):
 
         def work():
             from ..domain import FeedEpisodeData
+            from ..feeds.fetch import FeedFetchError
             from ..feeds.parser import parse_feed
             from ..netlimits import Deadline, NetworkDeadline, request_scope
 
@@ -8025,10 +8026,14 @@ class MainWindow(QMainWindow):
                 peek = None
                 try:
                     peek = fetcher.peek_latest(feed_url)
-                except NetworkDeadline:
+                except (NetworkDeadline, FeedFetchError):
+                    # The full fetch would get the same answer (an error
+                    # status, an oversized feed, a network failure): end this
+                    # card instead of asking the server a second time.
                     raise
                 except Exception:
-                    pass
+                    logging.getLogger("bs_podcasts").warning(
+                        "The newest-date peek for %s failed; reading the whole feed", feed_label(feed_url), exc_info=True)
                 deadline.remaining()
                 if peek is not None:
                     title, published_at = peek
