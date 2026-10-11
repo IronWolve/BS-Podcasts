@@ -3870,14 +3870,13 @@ class PlayerBar(QFrame):
         self.slider.setRange(0, 1000)
         self.slider.setAccessibleName("Playback position")
         self.slider.setValue(0)
-        self.slider.sliderPressed.connect(self._capture_drag_duration)
+        self.slider.sliderPressed.connect(self._capture_drag_track)
         self.slider.sliderReleased.connect(self._seek_from_slider)
         self._step_timer = QTimer(self)
         self._step_timer.setSingleShot(True)
         self._step_timer.setInterval(200)
         self._step_timer.timeout.connect(self._flush_step_seek)
         self._step_pending = False
-        self._step_duration = 0.0
         self._step_track = None
         self.slider.user_step.connect(self._seek_from_step)
         self.remaining = PlainTextLabel("−0:00")
@@ -4541,28 +4540,29 @@ class PlayerBar(QFrame):
         ticks must not pull it back to the engine position meanwhile."""
         return self.slider.isSliderDown() or self._step_timer.isActive()
 
-    def _capture_drag_duration(self):
+    def _capture_drag_track(self):
         # A drag supersedes steps still waiting for their trailing seek.
         self._step_timer.stop()
         self._step_pending = False
-        # If auto-advance swaps tracks mid-drag, the release must seek within
-        # the track the user was dragging, not near the end of the new one.
-        self._drag_duration = self._duration
+        # If auto-advance swaps tracks mid-drag, the release must not apply
+        # the proportion the user set on this track to the new one.
         self._drag_track = getattr(self, "_track_key", None)
 
     def _seek_from_slider(self):
-        duration = getattr(self, "_drag_duration", 0.0) or self._duration
         started_on = getattr(self, "_drag_track", None)
-        self._drag_duration = 0.0
         self._drag_track = None
-        # Capturing the duration alone was not enough: seek() acts on whatever
-        # the engine currently holds, so finishing a scrub after EOF advanced
-        # to the next episode applied the old track's proportion to the new
-        # one. A drag that outlived its episode is simply dropped.
+        self._seek_to_handle(started_on)
+
+    def _seek_to_handle(self, started_on):
+        # The handle is drawn on the live duration and slider range, so the
+        # seek uses those too. seek() acts on whatever the engine currently
+        # holds, so finishing a scrub after EOF advanced to the next episode
+        # applied the old track's proportion to the new one. A drag that
+        # outlived its episode is simply dropped.
         if started_on is not None and started_on != getattr(self, "_track_key", None):
             return
-        if duration:
-            self.seek_requested.emit(duration * self.slider.value() / max(1, self.slider.maximum()))
+        if self._duration:
+            self.seek_requested.emit(self._duration * self.slider.value() / max(1, self.slider.maximum()))
 
     def _seek_from_step(self):
         """Wheel notches and key repeats arrive faster than the engine can
@@ -4572,17 +4572,15 @@ class PlayerBar(QFrame):
         if self._step_timer.isActive():
             self._step_pending = True
         else:
-            self._step_duration = self._duration
             self._step_track = getattr(self, "_track_key", None)
-            self._seek_from_slider()
+            # A step during a drag leaves the drag's own track guard in place.
+            self._seek_to_handle(getattr(self, "_drag_track", None))
         self._step_timer.start()
 
     def _flush_step_seek(self):
         if self._step_pending:
             self._step_pending = False
-            self._drag_duration = self._step_duration
-            self._drag_track = self._step_track
-            self._seek_from_slider()
+            self._seek_to_handle(self._step_track)
 
     def _show_speed(self):
         self.speed_popover.set_current(self._speed)
