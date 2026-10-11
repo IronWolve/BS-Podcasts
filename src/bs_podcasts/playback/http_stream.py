@@ -2,7 +2,7 @@
 import logging
 import re
 import time
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 
 from ..net import make_session
 from ..netlimits import abort_response
@@ -22,6 +22,10 @@ RESUME_PROGRESS = 256 * 1024
 COOLDOWN_WAIT_CAP = 15.0
 # Waits before each retry of a seek whose range request failed in transit.
 SEEK_RETRY_DELAYS = (0.25, 0.5, 1.0)
+# A block of audio (16 KB) must arrive within this long, about 270 B/s, the
+# floor the download path uses. A connection that trickles slower never trips
+# the read timeout, so it is cut and reopened at the current byte.
+STALL_SECONDS = 60.0
 
 logger = logging.getLogger("bs_podcasts")
 
@@ -72,6 +76,11 @@ class HttpStream:
         self._resume_failures = 0
         self._resumed_at = 0
         self._failed = False
+        # (start, response) while read() waits for a block of audio, and the
+        # response the stall watchdog cut off.
+        self._waiting = None
+        self._stalled = None
+        self._watching = False
         self._on_error = on_error or (lambda message: None)
         # A reported failure is withdrawn once a later open succeeds (a seek
         # after the error), so a normal end is not reported as that failure.
@@ -167,6 +176,9 @@ class HttpStream:
             if self._failed:
                 self._failed = False
                 self._on_recovered()
+            if not self._watching:
+                self._watching = True
+                Thread(target=self._watch, name='bs-stream-watch', daemon=True).start()
         except BaseException:
             abort_response(response)
             raise
@@ -175,13 +187,15 @@ class HttpStream:
         if size <= 0 or self.cancelled.is_set() or self._eof:
             return b''
         while not self._buffer:
+            response = self._response
+            self._waiting = (time.monotonic(), response)
             try:
                 self._buffer = next(self._chunks)
                 continue
             except StopIteration:
                 if self.cancelled.is_set():
                     return b''
-                if self.size is None or self.position >= self.size:
+                if not self._was_cut(response) and (self.size is None or self.position >= self.size):
                     # Unknown length ends where the server stops; a known
                     # length is complete. Overruns are refused below.
                     if self._more_follows():
@@ -198,6 +212,12 @@ class HttpStream:
                 if self.cancelled.is_set():
                     return b''
                 failure = exc
+            finally:
+                self._waiting = None
+            if self._was_cut(response):
+                # The watchdog cut this connection off; its end is not an EOF.
+                self._stalled = None
+                failure = TimeoutError(f'no audio data for {STALL_SECONDS:.0f} s')
             try:
                 self._resume(failure)
             except _Cancelled:
@@ -212,6 +232,23 @@ class HttpStream:
         if self._resume_failures and self.position - self._resumed_at >= RESUME_PROGRESS:
             self._resume_failures = 0
         return data
+
+    def _was_cut(self, response):
+        return response is not None and self._stalled is response
+
+    def _watch(self):
+        """Cut a connection that has delivered no block of audio for
+        STALL_SECONDS. The read timeout only catches silence, and a body that
+        keeps sending a few bytes never goes quiet. Only time the reader
+        spends waiting counts: a native player that has stopped reading (a
+        full cache, a pause) is not a stall."""
+        while not self.cancelled.wait(min(1.0, STALL_SECONDS / 4)):
+            waiting = self._waiting
+            if waiting is not None and time.monotonic() - waiting[0] > STALL_SECONDS:
+                self._waiting = None
+                self._stalled = waiting[1]
+                logger.warning("Audio stream stalled at byte %s: no data for %.0f s", self.position, STALL_SECONDS)
+                abort_response(waiting[1])
 
     def _more_follows(self):
         """Ask whether bytes remain after a body that has no length.
