@@ -971,6 +971,8 @@ def main() -> int:
                 apply_app_stylesheet(app)
                 build_window(view_state)
             except Exception:
+                if state["window"] is old:
+                    state["window"] = None  # deleted; the quit handlers must not reach into it
                 app.quit()  # no window is left to show
                 raise
             finally:
