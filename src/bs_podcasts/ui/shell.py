@@ -2049,13 +2049,31 @@ class MainWindow(QMainWindow):
             if show is None or (not show.retention_keep and not show.retention_days):
                 return ()  # not None: an EMPTY read result would raise the error banner
             candidates = downloads.retention_candidates(show, keep=self._retention_spared(playback, keep))
-            previews = [downloads.cleanup_preview(item.id) for item in candidates]
-            return show, [preview for preview in previews if preview is not None]
+            previews, unavailable = [], 0
+            for item in candidates:
+                try:
+                    preview = downloads.cleanup_preview(item.id)
+                except OSError:
+                    # Its folder cannot be reached right now: leave that file
+                    # alone and keep looking at the podcast's other downloads.
+                    unavailable += 1
+                    continue
+                if preview is not None:
+                    previews.append(preview)
+            return show, previews, unavailable
 
         def apply(value):
             if not value:
                 return
-            show, previews = value
+            show, previews, unavailable = value
+            if unavailable:
+                plural = "" if unavailable == 1 else "s"
+                logging.getLogger("bs_podcasts").warning(
+                    "Retention left %s download%s of podcast %s alone: the download folder cannot be reached",
+                    unavailable, plural, show.id)
+                if not background:
+                    self._notify(f"{unavailable} download{plural} of {show.title} could not be checked "
+                                 "because their folder is not available", "info")
             if previews:
                 self._confirm_retention(show, previews, preview_required, keep, background)
 
