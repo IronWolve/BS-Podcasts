@@ -23,6 +23,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAccessible,
+    QAccessibleAnnouncementEvent,
     QAccessibleEvent,
     QColor,
     QFont,
@@ -3417,6 +3418,8 @@ class SearchOverlay(QFrame):
     menu_requested = Signal(object, object)
     closed = Signal()
 
+    HINT = "↑↓ to move  ·  Enter opens details  ·  Esc to close"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("searchOverlay")
@@ -3451,7 +3454,7 @@ class SearchOverlay(QFrame):
         card_layout.addWidget(self.results, 1)
         # Say what Enter does per result kind: mixed lists made one bare
         # "open" ambiguous between opening a podcast and playing an episode.
-        self.hint = PlainTextLabel("↑↓ to move  ·  Enter opens details  ·  Esc to close")
+        self.hint = PlainTextLabel(self.HINT)
         self.hint.setWordWrap(True)
         self.hint.setObjectName("settingHint")
         card_layout.addWidget(self.hint)
@@ -3461,7 +3464,9 @@ class SearchOverlay(QFrame):
         self._timer.setSingleShot(True)
         self._timer.setInterval(160)
         self._timer.timeout.connect(self._emit_query)
+        self._announced = None
         self.field.installEventFilter(self)
+        self.results.installEventFilter(self)
         self.hide()
 
     def apply_metrics(self):
@@ -3513,11 +3518,35 @@ class SearchOverlay(QFrame):
     def _debounce(self, _text):
         self.results.clear()
         self._result_query = None
+        self._announced = None
+        self.results.setAccessibleDescription("")
+        self.hint.setText(self.HINT)
         self._timer.start()
+
+    def _report_count(self, podcasts, episodes, query: str):
+        """Say how many results there are: on the hint line, in the list's
+        description and as a polite announcement for screen readers."""
+        parts = []
+        if podcasts:
+            shown = len(podcasts[:6])
+            parts.append(f"{shown} podcast{'s' if shown != 1 else ''}")
+        if episodes:
+            shown = len(episodes[:12])
+            of = f" of {len(episodes)}" if len(episodes) > 12 else ""
+            parts.append(f"{shown}{of} episode{'s' if len(episodes) != 1 else ''}")
+        summary = ", ".join(parts) if parts else ("No matches in your library" if query else "")
+        self.hint.setText(f"{summary}  ·  {self.HINT}" if summary else self.HINT)
+        self.results.setAccessibleDescription(summary)
+        if summary and summary != self._announced and self.isVisible():
+            self._announced = summary
+            announcement = QAccessibleAnnouncementEvent(self.results, summary)
+            announcement.setPoliteness(QAccessible.AnnouncementPoliteness.Polite)
+            QAccessible.updateAccessibility(announcement)
 
     def set_results(self, podcasts, episodes, query: str):
         self._result_query = query
         self.results.clear()
+        self._report_count(podcasts, episodes, query)
         if podcasts:
             self._section("PODCASTS")
             for podcast in podcasts[:6]:
@@ -3590,18 +3619,50 @@ class SearchOverlay(QFrame):
             self.results.setCurrentItem(item)
             self.menu_requested.emit(payload, self.results.viewport().mapToGlobal(position))
 
+    def _results_key(self, event) -> bool:
+        """Keys pressed while the result list has focus: Up from the first
+        result and any typing go back to the text field."""
+        key = event.key()
+        if key == Qt.Key.Key_Escape:
+            self.hide()
+            self.closed.emit()
+            return True
+        if key == Qt.Key.Key_Up:
+            first = next((row for row in range(self.results.count())
+                          if self.results.item(row).flags() & Qt.ItemFlag.ItemIsSelectable), None)
+            if self.results.currentRow() == first:
+                self.field.setFocus()
+                return True
+            return False
+        text = event.text()
+        modifiers = event.modifiers()
+        typing = (text.isprintable() and bool(text) and not modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
+        if typing or key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) or event.matches(QKeySequence.StandardKey.Paste):
+            self.field.setFocus()
+            QApplication.sendEvent(self.field, event)
+            return True
+        return False
+
     def eventFilter(self, watched, event):
+        if watched is self.results and event.type() == QEvent.Type.KeyPress:
+            return self._results_key(event)
         if watched is self.field and event.type() == QEvent.Type.KeyPress:
             key = event.key()
             if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
                 row = self.results.currentRow()
                 step = 1 if key == Qt.Key.Key_Down else -1
                 candidate = row + step
+                moved = False
                 while 0 <= candidate < self.results.count():
                     if self.results.item(candidate).flags() & Qt.ItemFlag.ItemIsSelectable:
                         self.results.setCurrentRow(candidate)
+                        moved = True
                         break
                     candidate += step
+                # Focus follows the highlight, so assistive technology sees
+                # the row Enter will open. Down always enters the results.
+                if moved or (step > 0 and self.results.currentItem() is not None):
+                    self.results.setFocus()
                 return True
             if key == Qt.Key.Key_Escape:
                 self.hide()
