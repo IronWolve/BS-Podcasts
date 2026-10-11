@@ -171,7 +171,3 @@ def set_file_logging(enabled: bool) -> bool:
         _unshare(handler)
         handler.close()
     return True
-
-
-def file_logging_enabled() -> bool:
-    return _file_logging_enabled
