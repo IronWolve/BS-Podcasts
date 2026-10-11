@@ -1016,7 +1016,8 @@ class LibraryRepository:
         with self.database.connect() as connection:
             cursor = connection.execute(
                 "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), "
-                "position_seconds=CASE WHEN ?=0 AND duration_seconds>0 AND position_seconds>=duration_seconds-2 "
+                "position_seconds=CASE WHEN ?=0 AND COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds)>0 "
+                "AND position_seconds>=COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds)-2 "
                 "THEN 0 ELSE position_seconds END, played=?, is_new=0 WHERE show_id=? AND played!=?",
                 (int(played), int(played), show_id, int(played)),
             )
