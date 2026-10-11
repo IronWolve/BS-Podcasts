@@ -120,6 +120,9 @@ class PlaybackService:
         self._desired_position = 0.0
         self._engine_loaded = False
         self._deferred_episode_id = None
+        # An episode that ended after the command queue closed: its completion
+        # was refused, so the shutdown finalizer does it (see _dispatch).
+        self._unfinished_end = None
         # The episode that is current but whose file has not loaded yet in
         # this run (restored, still opening, or failed to open). Saving its
         # position would mark it played and not new without any listening.
@@ -1025,6 +1028,7 @@ class PlaybackService:
             if self._dead:
                 return
             self._persist_position(force=True)
+            unfinished, self._unfinished_end = self._unfinished_end, None
             self._close_silence_window()
             if self._unsaved_silence > 0 and self.listening:
                 self._persistence.submit('silence', self.listening.add_silence_saved,
@@ -1039,6 +1043,8 @@ class PlaybackService:
                     self.snapshot.episode_id, PlaybackState.SHUTDOWN.value
                 )
             self.snapshot = replace(self.snapshot, state=PlaybackState.SHUTDOWN)
+        if unfinished is not None:
+            self._best_effort("episode completion", lambda: self._complete_episode(unfinished))
         # Terminate mpv *outside* the lock: its event thread may be waiting in
         # _engine_event for this lock, and terminate() joins that thread.
         try:
@@ -1229,7 +1235,8 @@ class PlaybackService:
                                 message="Playback ended, but saving completion failed. " + reason,
                                 buffering=None, completed_episode_id=0)
                             self._emit()
-                self._dispatch(finish)
+                if not self._dispatch(finish):
+                    self._unfinished_end = finished_snapshot
                 return
             elif event.kind == "external_ready":
                 self._cancel_load_watchdog()
@@ -1286,7 +1293,9 @@ class PlaybackService:
             self._emit()
 
     def _dispatch(self, work):
-        """Run follow-up work from a native event on the ordered command queue."""
+        """Run follow-up work from a native event on the ordered command queue.
+
+        Returns False when the queue refused the work because it is closing."""
         if self._command_dispatcher is not None:
             queued = self._command_dispatcher(work)
         else:
@@ -1296,14 +1305,17 @@ class PlaybackService:
             queued = self._event_commands.submit(work, keep=True)
         # A closing queue hands back a finished error result and never runs the
         # work (for an ended episode, its completion); do not drop that silently.
+        accepted = True
         try:
             from ..jobs.runner import JobStatus
             if queued is not None and queued.done() and not queued.cancelled():
                 result = queued.result()
                 if result.status == JobStatus.ERROR:
+                    accepted = False
                     logger.warning("Playback follow-up work was not accepted: %s", redact(result.message))
         except Exception:
             pass  # only a log line; never let it disturb the native event
+        return accepted
 
     def _begin_load(self, position: float, autoplay: bool, keep_target: bool = False):
         self._load_started_at = time.monotonic()
