@@ -190,6 +190,7 @@ class PlaybackService:
     SLEEP_RECHECK = 15.0  # longest a sleep timer waits before it compares the wall clock again
     SEEK_UNSUPPORTED = "This server can’t seek, so playback started from the beginning. Your saved position was kept."
     RECONNECTING = "Reconnecting…"
+    SLEEP_NOT_PAUSED = "Sleep timer ended, but playback could not be paused."
     # Snapshot fields that belong to the listening session, not to one opening
     # of the file: a reopen of the same episode (stream recovery) keeps them.
     # The reconnect notice rides along until the file has loaded again. Any
@@ -1817,8 +1818,11 @@ class PlaybackService:
             self._sleep_timer = None
             try:
                 self.pause()
-            except Exception:
-                pass  # nothing loaded, or the engine is gone — sleep just ends
+            except Exception as exc:
+                # The engine refused the pause, so audio may still be running:
+                # keep the cause in the log and tell the listener on the bar.
+                logger.warning("Sleep timer could not pause playback: %s", redact(exc))
+                self.snapshot = replace(self.snapshot, message=self.SLEEP_NOT_PAUSED)
             finally:
                 self.snapshot = replace(self.snapshot, sleep_deadline=None,
                                         sleep_expired_count=self.snapshot.sleep_expired_count + 1)
