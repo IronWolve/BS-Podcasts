@@ -222,27 +222,37 @@ def _permanent_canonical(response) -> str:
     return ""
 
 
+class _FeedLinkFound(Exception):
+    """Ends the parse: the feed link and the base that resolves it are known."""
+
+
 class _FeedLinkParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.href = ""
         self.base = ""
+        self.in_body = False
 
     def handle_starttag(self, tag, attrs):
         if tag.lower() == "base" and not self.base:
             self.base = dict(attrs).get("href", "") or ""
-        if self.href or tag.lower() != "link":
-            return
-        values = {key.lower(): value for key, value in attrs if value is not None}
-        relations = {part.lower() for part in values.get("rel", "").split()}
-        mime = values.get("type", "").lower()
-        if "alternate" in relations and mime in {
-            "application/rss+xml",
-            "application/atom+xml",
-            "application/xml",
-            "text/xml",
-        }:
-            self.href = values.get("href", "").strip()
+        elif tag.lower() == "body":
+            self.in_body = True
+        elif tag.lower() == "link" and not self.href:
+            values = {key.lower(): value for key, value in attrs if value is not None}
+            relations = {part.lower() for part in values.get("rel", "").split()}
+            mime = values.get("type", "").lower()
+            if "alternate" in relations and mime in {
+                "application/rss+xml",
+                "application/atom+xml",
+                "application/xml",
+                "text/xml",
+            }:
+                self.href = values.get("href", "").strip()
+        # A base element belongs in the head, so once the body starts or one
+        # was seen, nothing later in the page changes the answer.
+        if self.href and (self.base or self.in_body):
+            raise _FeedLinkFound
 
 
 # What peek_latest answers for a feed it read in full but could not date: no
@@ -452,7 +462,10 @@ class FeedFetcher:
                 "text/html" in content_type or lead.startswith("<!doctype html")
             ):
                 parser = _FeedLinkParser()
-                parser.feed(_markup_text(bytes(body), getattr(response, "encoding", None)))
+                try:
+                    parser.feed(_markup_text(bytes(body), getattr(response, "encoding", None)))
+                except _FeedLinkFound:
+                    pass
                 if not parser.href:
                     raise FeedWrongAnswerError("HTML page does not advertise a podcast feed.")
                 discovered = urljoin(urljoin(response.url, parser.base), parser.href)
