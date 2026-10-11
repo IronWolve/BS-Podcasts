@@ -403,7 +403,7 @@ class _ListPageMixin:
             start = min(start, self.model.rowCount() - 1)
             visible = max(1, self.view.viewport().height() // row_height + 1)
             end = min(self.model.rowCount(), start + min(48, visible * 2))
-            items = self.model._items[start:end]
+            items = self.model.items()[start:end]
             from .pixmaps import prefetch_artwork
             prefetch_artwork((item.artwork_path for item in items), self.view)
         self.episode_artwork_requested.emit(items)
@@ -523,7 +523,7 @@ class _ListPageMixin:
 
     def selected_items(self):
         rows = sorted({index.row() for index in self.view.selectionModel().selectedIndexes()})
-        return [self.model._items[row] for row in rows if 0 <= row < len(self.model._items)]
+        return [self.model.items()[row] for row in rows if 0 <= row < len(self.model.items())]
 
     def _current_key(self):
         index = self.view.currentIndex()
@@ -615,7 +615,7 @@ class _ListPageMixin:
         target = None
         wanted = {normalized(value) for value in (selected_keys or ())}
         rows = []
-        for row, item in enumerate(self.model._items):
+        for row, item in enumerate(self.model.items()):
             row_key = self._key(item)
             if key is not None and row_key == key and target is None:
                 target = row
@@ -652,7 +652,7 @@ class _ListPageMixin:
                 if revision != self._scroll_restore_revision:
                     return
                 if anchor is not None:
-                    for row, item in enumerate(self.model._items):
+                    for row, item in enumerate(self.model.items()):
                         if self._key(item) == anchor[0]:
                             self.view.scrollTo(self.model.index(row, 0), QAbstractItemView.ScrollHint.PositionAtTop)
                             if not self._row_aligned_scroll:
@@ -974,7 +974,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         first = self.view.verticalScrollBar().value() // max(1, grid.height()) * columns
         rows = self.view.viewport().height() // max(1, grid.height()) + 3
         start, end = max(0, first - columns), min(self.model.rowCount(), first + rows * columns)
-        prefetch_artwork((item.artwork_path for item in self.model._items[start:end]), self.view)
+        prefetch_artwork((item.artwork_path for item in self.model.items()[start:end]), self.view)
 
     def set_items(self, items, preserve_scroll: bool = False):
         key = self._current_key()
@@ -1417,7 +1417,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
     def _sync_clear_progress(self):
         if self.clear_progress_button is not None:
             self.clear_progress_button.setEnabled(any(
-                item.episode_id > 0 and item.position_seconds > 0 for item in self.model._items))
+                item.episode_id > 0 and item.position_seconds > 0 for item in self.model.items()))
 
     def set_catalog_query(self, query: str):
         """The library search whose results the list holds. While the filter
