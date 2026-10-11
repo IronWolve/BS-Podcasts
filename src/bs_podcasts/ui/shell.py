@@ -51,7 +51,7 @@ from ..jobs.commands import CommandQueue
 from ..services.library import LibraryService, _bounded_float, _bounded_int
 from ..services.preview_cache import PreviewCache, prepare_preview
 from ..urlguard import is_web_url
-from ..privacy import feed_label
+from ..privacy import feed_label, redact
 from ..data.database import is_corruption_error
 from . import icons
 from .models import ItemRoles
@@ -4587,9 +4587,11 @@ class MainWindow(QMainWindow):
                 repository.set_episode_artwork_path(episode.id, '', expected_url=episode.artwork_url)
             try:
                 path = str(cache.fetch(episode.artwork_url))
-            except Exception:
+            except Exception as exc:
                 if cancel.is_set():
                     return None
+                logging.getLogger("bs_podcasts").info(
+                    "Episode artwork fetch failed (%s): %s", type(exc).__name__, redact(exc)[:120])
                 updated = repository.get_episode(episode.id)
                 if updated is None or updated.artwork_url != episode.artwork_url:
                     return None
