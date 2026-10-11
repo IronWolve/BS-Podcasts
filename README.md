@@ -46,10 +46,10 @@ Choose the latest package for your operating system from the repository's
 | --- | --- |
 | Windows x64 | Extract the ZIP and open `BS Podcasts.exe`. Keep the complete `BS Podcasts` folder together, including `_internal`. |
 | macOS — Apple Silicon | Extract the ZIP and open `BS Podcasts.app`. Requires macOS 14 or later. |
-| Linux x86-64 | Extract the archive, run `bash setup.sh`, then `bash start.sh`. Requires Python 3.14.7+, glibc 2.43+ and compatible desktop/audio libraries. |
+| Linux x86-64 | Extract the archive, run `bash setup.sh`, then `bash start.sh`. Requires Python 3.14.7+, the glibc version and the desktop/audio libraries listed in INSTALL.txt in the archive. |
 
-The Windows package is unsigned. The macOS package is ad-hoc signed and not
-notarized, so your operating system may display a warning. Only run packages you
+The Windows package is unsigned. The macOS package is not notarized, so your operating system may display a
+warning; the signature it carries is recorded in its manifest. Only run packages you
 trust. Close the app before replacing it during an update.
 
 ## Your library
