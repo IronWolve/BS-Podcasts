@@ -1120,19 +1120,34 @@ class DownloadService:
         existing = {record.episode_id: record for record in records}
         episodes = self.library.episodes_by_ids(queued.keys()) if queued else {}
         for episode_id, ticket in queued.items():
-            episode = episodes.get(episode_id)
-            if episode is None:
-                continue
-            state = DownloadState.PAUSED if ticket.is_set() else DownloadState.QUEUED
-            if episode_id in existing:
-                existing[episode_id] = replace(existing[episode_id], state=state)
-            else:
-                target = self._target(episode_id, episode.media_url)
-                existing[episode_id] = DownloadRecord(
-                    id=-episode_id, episode_id=episode_id, source_url=episode.media_url,
-                    target_path=str(target), partial_path=str(target.with_suffix(target.suffix + ".part")),
-                    state=state, episode_title=episode.title, show_title=episode.show_title)
+            listed = self._listed_queued(episode_id, ticket, existing.get(episode_id), episodes.get(episode_id))
+            if listed is not None:
+                existing[episode_id] = listed
         return list(existing.values())
+
+    def record_for(self, episode_id: int):
+        """The record records() lists for one episode, read without listing every row."""
+        with self._lock:
+            ticket = self._queued.get(episode_id)
+        record = self.downloads.get(episode_id)
+        if ticket is None:
+            return record
+        listed = self._listed_queued(episode_id, ticket, record, self.library.get_episode(episode_id))
+        return record if listed is None else listed
+
+    def _listed_queued(self, episode_id: int, ticket: Event, record, episode):
+        """How a queued ticket is listed: its row with the ticket's state, or a
+        row-less record built from the episode. None when the episode is gone."""
+        if episode is None:
+            return None
+        state = DownloadState.PAUSED if ticket.is_set() else DownloadState.QUEUED
+        if record is not None:
+            return replace(record, state=state)
+        target = self._target(episode_id, episode.media_url)
+        return DownloadRecord(
+            id=-episode_id, episode_id=episode_id, source_url=episode.media_url,
+            target_path=str(target), partial_path=str(target.with_suffix(target.suffix + ".part")),
+            state=state, episode_title=episode.title, show_title=episode.show_title)
 
     def storage(self, records=None) -> tuple[int, int | None, int | None]:
         records = list(records) if records is not None else self.records()
