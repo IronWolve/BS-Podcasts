@@ -55,7 +55,13 @@ from ..urlguard import is_web_url
 from ..privacy import feed_label, redact
 from ..data.database import is_corruption_error
 from . import icons
-from .models import ItemRoles
+from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, ItemRoles, Podcast as UiPodcast, plain_snippet, set_item_tooltips
+from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, prepare_previews, install_previews
+from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_accent_token
+from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, SettingsPage, _KeyboardMenu, _ListPageMixin
+from .shortcuts import ShortcutManager
+from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
+from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu
 
 
 class _lazy_dialog:
@@ -91,13 +97,6 @@ RemovePodcastDialog = _lazy_dialog("RemovePodcastDialog")
 ShortcutsDialog = _lazy_dialog("ShortcutsDialog")
 TextInputDialog = _lazy_dialog("TextInputDialog")
 episode_information_text = _lazy_dialog("episode_information_text")
-from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, ItemRoles, Podcast as UiPodcast, plain_snippet, set_item_tooltips
-from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, prepare_previews, install_previews
-from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_accent_token
-from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, SettingsPage, _KeyboardMenu, _ListPageMixin
-from .shortcuts import ShortcutManager
-from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
-from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu
 
 
 PAGE_HOME, PAGE_PODCASTS, PAGE_EPISODES, PAGE_QUEUE, PAGE_DOWNLOADS, PAGE_DISCOVER, PAGE_BOOKMARKS, PAGE_HISTORY, PAGE_SETTINGS = range(9)
