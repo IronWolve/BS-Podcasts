@@ -2364,7 +2364,7 @@ class MainWindow(QMainWindow):
 
             message = label or f"Marked {count} episode{'s' if count != 1 else ''} as {'played' if played else 'unplayed'}"
             if cleanup:
-                message += " · Automatic download cleanup applies"
+                message += " · Automatic download cleanup applies; a deleted download is not restored by Undo"
             self._notify(message, "success", "Undo status" if cleanup else "Undo", undo)
             if cleanup:
                 # Several episodes, a whole podcast or a "hide this" action
