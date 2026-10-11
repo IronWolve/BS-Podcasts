@@ -933,7 +933,8 @@ class LibraryRepository:
                 row["episode_id"]
                 for row in connection.execute("SELECT episode_id FROM queue ORDER BY position").fetchall()
             ]
-            requested = list(dict.fromkeys(episode_id for episode_id in episode_ids if episode_id in existing))
+            queued = set(existing)
+            requested = list(dict.fromkeys(episode_id for episode_id in episode_ids if episode_id in queued))
             visible = set(requested)
             reordered = iter(requested)
             requested = [next(reordered) if episode_id in visible else episode_id for episode_id in existing]
