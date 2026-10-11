@@ -165,7 +165,6 @@ def _deploy_staged(workspace, destination, temporary, prune, report):
 
 if __name__ == '__main__':
     from check_dependencies import check as check_dependencies
-    check_dependencies(ROOT/'packaging/requirements-linux.lock')
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check',action='store_true')
     parser.add_argument('--prune-old-deployments',action='store_true',
@@ -182,6 +181,12 @@ if __name__ == '__main__':
             report.line('warn' if line in skipped else 'ok', line)
         report.stats([('source files', str(count)), ('gates', f'{len(ran) - len(skipped)} checked, {len(skipped)} skipped')])
     else:
+        # The locked environment guards the build only; the source report and --help need none of it.
+        try:
+            check_dependencies(ROOT/'packaging/requirements-linux.lock')
+        except (OSError, RuntimeError, ValueError) as exc:
+            report.fail(f'Dependency check refused the build: {exc}')
+            raise SystemExit(1) from None
         with (ROOT.parent/'.cache/linux-build.lock').open('a+b') as lock:
             try:
                 fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
