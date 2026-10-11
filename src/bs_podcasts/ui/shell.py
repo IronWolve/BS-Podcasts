@@ -4316,8 +4316,8 @@ class MainWindow(QMainWindow):
             wanted = set(ids)
             before = [episode.id for episode in library.queue()]
             removed = [episode_id for episode_id in before if episode_id in wanted]
-            for episode_id in removed:
-                library.dequeue(episode_id)
+            if removed:
+                library.dequeue_many(removed)
             return before, removed
 
         def apply(result):
