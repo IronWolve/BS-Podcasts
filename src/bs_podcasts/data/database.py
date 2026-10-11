@@ -12,7 +12,7 @@ import weakref
 import tempfile
 import time
 import stat
-from .files import private_file
+from .files import private_file, sync_directory
 
 _log = logging.getLogger("bs_podcasts")
 
@@ -415,6 +415,7 @@ class Database:
             with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(temporary)) as destination:
                 source.backup(destination)
             os.replace(temporary, target)
+            sync_directory(target.parent)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -434,6 +435,7 @@ class Database:
                 with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(temporary)) as destination:
                     source.backup(destination)
             os.replace(temporary, target)
+            sync_directory(directory)
         finally:
             temporary.unlink(missing_ok=True)
         return target
@@ -529,6 +531,8 @@ class Database:
                             os.replace(sidecar, saved)
                             moved_sidecars.append((sidecar, saved))
                     os.replace(temporary, self.path)
+                    sync_directory(self.path.parent)
+                    sync_directory(directory)
                 except BaseException:
                     for sidecar, saved in reversed(moved_sidecars):
                         os.replace(saved, sidecar)
