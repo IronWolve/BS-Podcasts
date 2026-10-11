@@ -252,6 +252,9 @@ class MainWindow(QMainWindow):
         self._settings_desired = {}
         self._retained_removals = set()
         self._refresh_requested_shows = set()
+        # The stale-feed check runs once; declared here so it exists before
+        # any library load, including a window built without a library.
+        self._stale_check_done = False
         self._pending_view_restore = None
         self._restoring_view = False
         self.jobs = jobs
@@ -4567,7 +4570,7 @@ class MainWindow(QMainWindow):
             self._episode_artwork_active[key] = cancel
             self._artwork_fetched.add(episode.id)
             future = self.artwork_jobs.submit(self._fetch_episode_artwork, episode, cancel)
-            _track_job(self, future, 'artwork', identity)
+            _track_job(self, future, 'artwork', key)
 
     def _fetch_episode_artwork(self, episode, cancel):
         from ..netlimits import request_scope
