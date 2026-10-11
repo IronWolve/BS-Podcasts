@@ -77,6 +77,21 @@ def write_replace(path: Path, content: bytes) -> Path:
     return path
 
 
+def _replace_retrying(source: Path, target: Path, attempts: int = 4, pause: float = .1) -> None:
+    """os.replace, tried again briefly when the target is held open.
+
+    Where a reader without delete sharing has the stored cover open, the
+    rename is refused until that short-lived reader closes."""
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(pause)
+
+
 class ArtworkError(RuntimeError):
     pass
 
@@ -516,7 +531,7 @@ class ArtworkCache:
             if self._matches_content(target, digest.digest(), size):
                 partial.unlink()
             else:
-                os.replace(partial, target)
+                _replace_retrying(partial, target)
             self._record_checked(
                 target,
                 etag=self._validator(response.headers.get('ETag')),
