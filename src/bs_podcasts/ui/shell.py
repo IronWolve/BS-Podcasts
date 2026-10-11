@@ -243,6 +243,9 @@ class MainWindow(QMainWindow):
         '_refresh_failed', '_refresh_offline', '_refresh_waiting', '_refresh_in_flight',
         '_manual_refresh_in_flight', '_refresh_quiet', '_refresh_catch_up', '_refresh_changed', '_details_fetched', '_artwork_fetched',
         '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved', '_settings_desired', '_retained_removals', '_refresh_requested_shows')
+    # Oldest Back and Forward entries past this are dropped: an episode-view
+    # entry holds the whole selection, and both stacks are saved with the view.
+    _NAVIGATION_HISTORY_LIMIT = 50
 
     def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None):
         super().__init__(parent)
@@ -7782,6 +7785,9 @@ class MainWindow(QMainWindow):
             self.navigation.select(PAGE_EPISODES)
 
     def _update_navigation_controls(self):
+        # Navigation refreshes the Back button on every move; trim there.
+        del self._back_stack[:-self._NAVIGATION_HISTORY_LIMIT]
+        del self._forward_stack[:-self._NAVIGATION_HISTORY_LIMIT]
         for index in range(self.pages.count()):
             page = self.pages.widget(index)
             page.header.back.setVisible(index == self.pages.currentIndex() and bool(self._back_stack))
