@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import zlib
 from functools import lru_cache
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,26 +123,53 @@ _PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
 # the source gate matches them case-insensitively, so this file names none of them.
 _DENIED_ENCODINGS = ('utf-8', 'utf-16-le', 'utf-16-be')
 _PNG_SKIP = (b'IHDR', b'PLTE', b'IDAT', b'IEND')
+_PNG_INFLATE = (b'zTXt', b'iTXt', b'iCCP')
+_PNG_INFLATE_LIMIT = 1 << 24
 _FORBIDDEN_TRAILER = re.compile(r'(?im)^[ \t]*(?:co-authored-by|generated-with)\b')
 _GENERATED_WITH = re.compile(r'(?i)\bgenerated[\s-]+with\b')
 
 
 def _png_chunks(raw):
+    """(chunks, clean): every (type, payload) pair that could be read, and whether
+    the walk ended at IEND and its CRC with nothing after it."""
+    chunks = []
     if not raw.startswith(_PNG_SIGNATURE):
-        return
+        return chunks, False
     index = 8
     while index + 8 <= len(raw):
         length = int.from_bytes(raw[index:index + 4], 'big')
         chunk_type = raw[index + 4:index + 8]
         if len(chunk_type) != 4 or any(byte < 65 or 90 < byte < 97 or byte > 122 for byte in chunk_type):
-            return
+            return chunks, False
         payload_end = index + 8 + length
         if payload_end + 4 > len(raw):
-            return
-        yield chunk_type, raw[index + 8:payload_end]
+            return chunks, False
+        chunks.append((chunk_type, raw[index + 8:payload_end]))
         index = payload_end + 4
         if chunk_type == b'IEND':
-            return
+            return chunks, index == len(raw)
+    return chunks, False
+
+
+def _png_inflated(chunk_type, payload):
+    """The keyword and decompressed text of a compressed chunk; b'' when this chunk
+    is not compressed; None when it cannot be inflated within the size limit."""
+    keyword, separator, rest = payload.partition(b'\0')
+    if not separator:
+        return None
+    if chunk_type == b'iTXt':
+        if rest[:1] != b'\x01':
+            return b''
+        fields = rest[2:].split(b'\0', 2)
+        stream = fields[2] if len(fields) == 3 else b''
+    else:
+        stream = rest[1:]
+    inflater = zlib.decompressobj()
+    try:
+        text = inflater.decompress(stream, _PNG_INFLATE_LIMIT)
+    except zlib.error:
+        return None
+    return None if inflater.unconsumed_tail else keyword + b'\0' + text
 
 
 def _marker_needles(markers):
@@ -150,18 +178,31 @@ def _marker_needles(markers):
 
 
 def generator_metadata(raw, markers=(), root=ROOT):
-    """True when a PNG carries a caBX chunk, or a private marker appears in any case
-    in a PNG text chunk or anywhere in another file (approved public URLs excluded)."""
+    """True when a PNG carries a caBX chunk, does not end cleanly at IEND, or a private
+    marker appears in any case in a PNG text chunk (compressed ones are inflated) or
+    anywhere in another file (approved public URLs excluded)."""
     needles = _marker_needles(markers)
     if raw.startswith(_PNG_SIGNATURE):
-        for chunk_type, payload in _png_chunks(raw):
+        chunks, clean = _png_chunks(raw)
+        # The bare signature (a constant in source) hides nothing; any longer
+        # image that does not end cleanly at IEND is unreadable, so it is refused.
+        if not clean and len(raw) > len(_PNG_SIGNATURE):
+            return True
+        for chunk_type, payload in chunks:
             if chunk_type == b'caBX':
                 return True
             if chunk_type in _PNG_SKIP:
                 continue
-            folded = privacy_scan_bytes(payload, root).lower()
-            if any(needle in folded for needle in needles):
-                return True
+            views = [payload]
+            if chunk_type in _PNG_INFLATE:
+                inflated = _png_inflated(chunk_type, payload)
+                if inflated is None:
+                    return True
+                views.append(inflated)
+            for view in views:
+                folded = privacy_scan_bytes(view, root).lower()
+                if any(needle in folded for needle in needles):
+                    return True
         return False
     folded = privacy_scan_bytes(raw, root).lower()
     return any(needle in folded for needle in needles)
