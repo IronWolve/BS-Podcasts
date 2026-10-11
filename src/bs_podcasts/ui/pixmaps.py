@@ -33,7 +33,7 @@ from . import icons
 from .theme import COLORS, ARTWORK_LIGHT_INK, ARTWORK_DARK_INK, app_font
 from ..data.files import atomic_write
 from ..artwork import previews
-from ..artwork.cache import ARTWORK_FORMATS, MAX_ARTWORK_PIXELS, MAX_ARTWORK_SIDE
+from ..artwork.cache import header_within_limits
 from ..jobs.runner import TrackedExecutor
 
 
@@ -306,10 +306,7 @@ def _artwork_reader(path: str) -> QImageReader:
     reader = QImageReader(path)
     reader.setDecideFormatFromContent(True)
     reader.setAutoTransform(True)
-    size = reader.size()
-    if (bytes(reader.format()).decode("ascii", "replace").lower() not in ARTWORK_FORMATS
-            or not (0 < size.width() <= MAX_ARTWORK_SIDE and 0 < size.height() <= MAX_ARTWORK_SIDE)
-            or size.width() * size.height() > MAX_ARTWORK_PIXELS):
+    if not header_within_limits(reader):
         return QImageReader()
     return reader
 
