@@ -168,7 +168,10 @@ class DirectoryCharts:
             if not isinstance(data, list):
                 raise DirectoryError("Directory chart entries are not a list.")
         except (requests.RequestException, ValueError, KeyError, IndexError, TypeError, RecursionError) as exc:
-            self._developer_token = ""
+            # Only a rejected token justifies scraping a new one; any other
+            # failure leaves it valid and would repeat two large downloads.
+            if getattr(getattr(exc, "response", None), "status_code", None) in (401, 403):
+                self._developer_token = ""
             raise DirectoryError(describe_network_error(exc, "the directory")) from exc
         return [
             candidate
