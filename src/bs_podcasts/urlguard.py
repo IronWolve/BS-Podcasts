@@ -205,6 +205,17 @@ def _is_unc_path(text: str, parts) -> bool:
     return path.startswith("//")
 
 
+def _is_absolute_path(path: str) -> bool:
+    """A full local path: a POSIX or UNC root, or a drive letter and a separator.
+
+    A relative, home-relative ("~") or drive-relative ("C:name") value would be
+    resolved later against the process directory or the home folder.
+    """
+    if path[1:2] == ":" and path[:1].isascii() and path[:1].isalpha():
+        return path[2:3] in ("\\", "/")
+    return path.startswith(("/", "\\\\"))
+
+
 def ensure_media_source(value, what: str = "Media source", allow_file_url: bool = False, allow_unc: bool = False) -> str:
     """A playable source: an http(s) URL, a local path, or — when the caller
     vouches for where it came from — a local `file://` URL.
@@ -230,12 +241,17 @@ def ensure_media_source(value, what: str = "Media source", allow_file_url: bool 
         host = (parts.hostname or "").lower()
         if not allow_unc and ((host and host != "localhost") or _is_unc_path(text, parts)):
             raise UnsafeUrl(f"{what} points at a remote host: {text[:120]!r}")
+        from urllib.parse import unquote
+        if not _is_absolute_path(unquote(parts.path)):
+            raise UnsafeUrl(f"{what} must be an absolute local path: {text[:120]!r}")
         return text
     # No scheme at all, or a Windows drive letter ("C:\..."), is a local path.
     # A UNC share has no scheme either; it is not a local file.
     if not allow_unc and _is_unc_path(text, parts):
         raise UnsafeUrl(f"{what} points at a network path: {text[:120]!r}")
     if not scheme or (len(scheme) == 1 and text[1:2] == ":"):
+        if not _is_absolute_path(text):
+            raise UnsafeUrl(f"{what} must be an absolute local path: {text[:120]!r}")
         return text
     raise UnsafeUrl(f"{what} must be http(s) or a local file: {text[:120]!r}")
 
