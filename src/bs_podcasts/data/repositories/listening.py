@@ -1,5 +1,6 @@
 """Advanced listening metadata and saved collections."""
 
+import math
 import time
 
 from ...domain import Bookmark, Chapter, TranscriptSegment
@@ -183,7 +184,7 @@ class ListeningRepository:
         ]
 
     def add_silence_saved(self, seconds: float):
-        if seconds <= 0:
+        if not math.isfinite(seconds) or seconds <= 0:
             return
         with self.database.connect() as connection:
             connection.execute(
@@ -199,7 +200,7 @@ class ListeningRepository:
         return float(row["silence_saved"] if row else 0)
 
     def add_listening(self, show_id: int, seconds: float):
-        if not show_id or seconds <= 0:
+        if not show_id or not math.isfinite(seconds) or seconds <= 0:
             return
         seconds = float(seconds)
         with self.database.connect() as connection:
