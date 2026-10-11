@@ -1,6 +1,7 @@
 """Small, read-only GitHub release checker. It never installs updates."""
 
 from dataclasses import dataclass
+import logging
 import re
 
 from ..config import RELEASES_API_URL
@@ -30,6 +31,15 @@ def _version_key(value: str):
     return (int(major), int(minor), int(patch), 0 if suffix else 1, suffix or "")
 
 
+def _release_status_sentence(status: int) -> str:
+    """One plain sentence for a failed release request; the status code is logged, not shown."""
+    if status in (403, 429):
+        return "The release service is busy. Try again later."
+    if status >= 500:
+        return "The release service is unavailable right now. Try again later."
+    return "The release service returned an unexpected answer."
+
+
 def check_for_update(installed: str, session=None) -> UpdateResult:
     if not RELEASES_API_URL:
         raise RuntimeError("No release service is configured for this distribution.")
@@ -40,7 +50,10 @@ def check_for_update(installed: str, session=None) -> UpdateResult:
         response = client.get(RELEASES_API_URL, timeout=(5, 12))
         if response.status_code == 404:
             return UpdateResult(installed, "", False, "", "")
-        response.raise_for_status()
+        if response.status_code >= 400:
+            # The URL and the raw status line stay in the log; the user gets one sentence.
+            logging.getLogger('bs_podcasts').warning('Release check failed with HTTP %s', response.status_code)
+            raise RuntimeError(_release_status_sentence(response.status_code))
         payload = response.json()
     finally:
         if response is not None:
