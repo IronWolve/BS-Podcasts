@@ -5842,7 +5842,7 @@ class MainWindow(QMainWindow):
             if changes:
                 page.update_items(changes)
         for model in (self.home_page.model, self.context.queue_view.model()):
-            changes = deltas(model._items) if model is not None else {}
+            changes = deltas(model.items()) if model is not None else {}
             if changes:
                 model.update_items(changes)
         self._all_episode_items = merged(self._all_episode_items)
@@ -7166,11 +7166,11 @@ class MainWindow(QMainWindow):
             for page in (self.home_page, self.podcast_page, self.discover_page, self.episode_page,
                          self.playlist_page, self.history_page, self.download_page, self.bookmark_page):
                 page._all_items = [tint(item) for item in page._all_items]
-                page.model.replace([tint(item) for item in page.model._items])
+                page.model.replace([tint(item) for item in page.model.items()])
                 page._context_item = page.view.currentIndex().data(ItemRoles.ITEM)
             model = self.context.queue_view.model()
             if model is not None:
-                model.replace([tint(item) for item in model._items])
+                model.replace([tint(item) for item in model.items()])
             if self._last_library_data is not None:
                 self._last_library_data = self._retinted(self._last_library_data)
             self._all_episode_items = [tint(item) for item in self._all_episode_items]
@@ -7364,7 +7364,7 @@ class MainWindow(QMainWindow):
         content_changed = result.status == JobStatus.OK and (
             not getattr(result.value, 'not_modified', False) or bool(getattr(result.value, 'artwork_path', '')))
         if not batch_refresh:
-            for item in self.episode_page.model._items:
+            for item in self.episode_page.model.items():
                 if item.show_id == identifier:
                     self._episode_artwork_attempts.pop((item.episode_id, item.artwork_url), None)
         if self.playback is not None and self.playback.snapshot.show_id == identifier:
