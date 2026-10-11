@@ -826,7 +826,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.discover_sort.setIcon(icons.icon("sort", COLORS["muted"], 16))
             self.discover_sort.setCursor(Qt.CursorShape.PointingHandCursor)
             self.discover_sort.setToolTip("Sort results")
-            self.discover_sort.setAccessibleName("Sort Discover results")
+            self.discover_sort.setAccessibleName("Sort Discover results — Chart order")
             self.discover_sort.clicked.connect(self._show_discover_sort_menu)
             self._discover_sort = "rank"
             secondary_filters.addWidget(self.discover_sort)
@@ -884,7 +884,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.sort_button.setObjectName("textButton")
             self.sort_button.setIcon(icons.icon("sort", COLORS["muted"], 16))
             self.sort_button.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.sort_button.setAccessibleName("Sort podcasts")
+            self.sort_button.setAccessibleName("Sort podcasts — Name A–Z")
             self.sort_button.setToolTip("Sorted by name a–z — click to sort by newest episode")
             # Two orders only: a toggle beats a menu for a binary choice.
             self.sort_button.clicked.connect(self._toggle_sort)
@@ -1066,6 +1066,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         keys = list(labels)
         following = labels[keys[(keys.index(key) + 1) % len(keys)]]
         self.sort_button.setText(labels[key])
+        self.sort_button.setAccessibleName(f"Sort podcasts — {labels[key]}")
         self.sort_button.setToolTip(f"Sorted by {labels[key].lower()} — click to sort by {following.lower()}")
         self._apply_filters()
 
@@ -1094,6 +1095,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         self._discover_sort = key
         if self.discover_sort is not None:
             self.discover_sort.setText(label or labels[key])
+            self.discover_sort.setAccessibleName(f"Sort Discover results — {self.discover_sort.text()}")
         needs_scan = key == "newest" and any(
             item.feed_url and not item.show_id and not item.latest_sort_key
             for item in self._all_items
