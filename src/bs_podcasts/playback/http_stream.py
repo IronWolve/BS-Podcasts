@@ -20,6 +20,8 @@ RESUME_PROGRESS = 256 * 1024
 # is this short (an open must still finish inside the player's 25 s load
 # limit); a longer one is reported with its length.
 COOLDOWN_WAIT_CAP = 15.0
+# Waits before each retry of a seek whose range request failed in transit.
+SEEK_RETRY_DELAYS = (0.25, 0.5, 1.0)
 
 logger = logging.getLogger("bs_podcasts")
 
@@ -179,6 +181,11 @@ class HttpStream:
                     # Unknown length ends where the server stops; a known
                     # length is complete. Overruns are refused below.
                     self._eof = True
+                    if self._failed:
+                        # A failed seek left this response playing to its
+                        # end, which is a normal end, not that failure.
+                        self._failed = False
+                        self._on_recovered()
                     return b''
                 failure = None
             except Exception as exc:
@@ -268,15 +275,29 @@ class HttpStream:
             self._buffer = b''
             self._eof = True
             return offset
-        try:
-            self._open(offset)
-            return offset
-        except Exception as exc:
-            # libmpv treats a negative offset as an unsupported/failed seek.
-            # Keep the previous response usable rather than mixing wrong bytes.
-            if not self.cancelled.is_set():
-                logger.warning("Audio stream seek to byte %s failed: %s", offset, _describe(exc))
-            return -1
+        failure = None
+        for attempt in range(len(SEEK_RETRY_DELAYS) + 1):
+            if attempt and self.cancelled.wait(SEEK_RETRY_DELAYS[attempt - 1]):
+                return -1
+            try:
+                self._open(offset)
+                return offset
+            except Exception as exc:
+                failure = exc
+                # A server that cannot seek (or a changed file) will not do
+                # better on a retry; a dropped or refused request may.
+                if self.cancelled.is_set() or _permanent(exc):
+                    break
+        # libmpv treats a negative offset as an unsupported/failed seek.
+        # Keep the previous response usable rather than mixing wrong bytes.
+        if not self.cancelled.is_set():
+            logger.warning("Audio stream seek to byte %s failed: %s", offset, _describe(failure))
+            if not _permanent(failure):
+                # The server can seek; it did not answer. Say so, so this is
+                # not mistaken for a server without range support.
+                self._failed = True
+                self._on_error('The audio server did not answer the seek request. Check the connection and try again.')
+        return -1
 
     def cancel(self):
         self.cancelled.set()
