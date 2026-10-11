@@ -359,6 +359,7 @@ class Database:
                 for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
             }
         self._refuse_newer_schema(applied_versions, shipped)
+        self._refuse_missing_search_module()
         pending = [migration for migration in migrations if int(migration.name.split("_", 1)[0]) not in applied_versions]
         for migration in pending:
             version = int(migration.name.split("_", 1)[0])
@@ -380,6 +381,25 @@ class Database:
                 with self.connect() as connection:
                     connection.execute("INSERT INTO schema_migrations(version) VALUES (?)", (version,))
                 _log.info("Indexed episode search is unavailable in this SQLite runtime; using literal search")
+
+    def _refuse_missing_search_module(self):
+        # Migration 025 skips the search index on a runtime without FTS5, but
+        # a library built where it exists keeps the table and its triggers.
+        # Opened on a runtime without the module, every episode write and
+        # every search would fail, so refuse before any write.
+        with self.connect() as connection:
+            if not connection.execute("SELECT 1 FROM sqlite_master WHERE name='episode_search'").fetchone():
+                return
+            try:
+                connection.execute("CREATE VIRTUAL TABLE temp.fts5_probe USING fts5(x, tokenize='trigram')")
+                connection.execute("DROP TABLE temp.fts5_probe")
+            except sqlite3.OperationalError as exc:
+                if any(text in str(exc).lower() for text in ("no such module", "no such tokenizer")):
+                    raise sqlite3.DatabaseError(
+                        "This library has an episode search index that needs the FTS5 module of SQLite, "
+                        "and this application's Python runtime does not include it. "
+                        "It was left unchanged. Open it with a runtime that includes FTS5."
+                    ) from exc
 
     @staticmethod
     def _refuse_newer_schema(applied, shipped):
