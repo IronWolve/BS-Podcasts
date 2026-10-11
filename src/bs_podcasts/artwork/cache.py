@@ -2,7 +2,7 @@
 
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from threading import Lock
+from threading import Condition, Lock
 from collections import OrderedDict
 import os
 import json
@@ -105,6 +105,10 @@ class ArtworkCache:
         self._url_locks: dict[str, Lock] = {}
         self._active_files = set()
         self._locks_guard = Lock()
+        # Digest of the file prune is unlinking with the guard released, and the
+        # condition that wakes a fetch waiting for it.
+        self._removing = None
+        self._removed = Condition(self._locks_guard)
         self._validated = OrderedDict()
         self._retry_after = OrderedDict()
         self._recent = OrderedDict()
@@ -155,14 +159,22 @@ class ArtworkCache:
         return valid
 
     def _touch(self, path):
+        path = Path(path)
         with self._locks_guard:
-            if self.signature(Path(path)) is None:
+            # Recorded under the guard before the file is looked at: prune either
+            # reserved the file first, and this refuses it, or sees it as recent.
+            if self._removing == path.stem:
                 return False
             self._recent[str(path)] = time.monotonic()
             self._recent.move_to_end(str(path))
             while len(self._recent) > 4096:
                 self._recent.popitem(last=False)
-            return True
+        return self.signature(path) is not None
+
+    def _release_removing(self):
+        with self._locks_guard:
+            self._removing = None
+            self._removed.notify_all()
 
     def files(self):
         try:
@@ -228,15 +240,22 @@ class ArtworkCache:
                     break
                 if path.name in keep_names or stamp[2] / 1e9 >= threshold:
                     continue
+                with self._locks_guard:
+                    if (path.name in self._active_files
+                            or self._recent.get(str(path), 0) > time.monotonic() - 15 * 60):
+                        continue
+                    # Reserved under the guard, so no fetch or touch can use the file
+                    # between the check and the unlink. The unlink runs with the guard
+                    # released: a slow delete stalls only this file's digest.
+                    self._removing = path.stem
                 try:
-                    with self._locks_guard:
-                        if (path.name in self._active_files
-                                or self._recent.get(str(path), 0) > time.monotonic() - 15 * 60
-                                or self.signature(path) != stamp):
-                            continue
-                        path.unlink()
+                    if self.signature(path) != stamp:
+                        continue
+                    path.unlink()
                 except OSError:
                     continue
+                finally:
+                    self._release_removing()
                 try:
                     path.with_suffix('.checked').unlink(missing_ok=True)
                 except OSError:
@@ -263,8 +282,9 @@ class ArtworkCache:
             return removed, freed
 
     def _drop_stale_partials(self, threshold: float) -> None:
-        # The URL lock is checked out before the partial is created, so holding
-        # the guard across the check and unlink cannot race a live fetch.
+        # The URL lock is checked out before the partial is created. A live fetch
+        # is in _active_files under its image name, and a fetch that starts after
+        # the reservation waits for it in _lock_for, so the unlink cannot race it.
         if not self.directory.is_dir():
             return
         try:
@@ -282,24 +302,32 @@ class ArtworkCache:
                     continue
             except OSError:
                 continue
+            with self._locks_guard:
+                # The image name of every URL with a live fetch is in _active_files.
+                if f"{digest}.img" in self._active_files:
+                    continue
+                self._removing = digest
             try:
-                with self._locks_guard:
-                    if any(sha256(url.encode('utf-8')).hexdigest() == digest for url in self._url_locks):
-                        continue
-                    if partial.is_symlink() or not partial.is_file():
-                        continue
-                    if partial.stat().st_mtime_ns / 1e9 >= threshold:
-                        continue
-                    partial.unlink()
+                if partial.is_symlink() or not partial.is_file():
+                    continue
+                if partial.stat().st_mtime_ns / 1e9 >= threshold:
+                    continue
+                partial.unlink()
             except OSError:
                 continue
+            finally:
+                self._release_removing()
 
     def path_for(self, url: str) -> Path:
         digest = sha256(url.encode("utf-8")).hexdigest()
         return self.directory / f"{digest}.img"
 
     def _lock_for(self, url: str) -> Lock:
+        digest = self.path_for(url).stem
         with self._locks_guard:
+            # A fetch never writes beside an unlink of the same file: it waits.
+            while self._removing == digest:
+                self._removed.wait(.05)
             entry = self._url_locks.get(url)
             if entry is None:
                 entry = self._url_locks[url] = [Lock(), 0]
