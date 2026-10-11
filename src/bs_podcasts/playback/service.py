@@ -643,6 +643,7 @@ class PlaybackService:
         System-player controls/position are independent of this application.
         """
         from .external import ExternalPlayerEngine
+        from ..netlimits import request_scope
         with self._lock:
             self._guard()
             episode = self.repository.get_episode(episode_id)
@@ -660,6 +661,17 @@ class PlaybackService:
                 source = ensure_web_url(episode.media_url, "Episode media URL")
             from ..urlguard import ensure_external_media_file
             source = ensure_external_media_file(source)
+        if is_web_url(source):
+            # The same host screen the internal player applies: a feed must not
+            # make the system opener request a loopback, link-local or metadata
+            # address. It resolves names, so it runs without the service lock.
+            try:
+                with request_scope(foreground=True):
+                    source = ensure_fetchable(source, "Episode media URL")
+            except UnsafeUrl as exc:
+                raise PlaybackUnavailable(str(exc)) from exc
+        with self._lock:
+            self._guard()
             self.pause()
             ExternalPlayerEngine().load(source, autoplay=True)
 
