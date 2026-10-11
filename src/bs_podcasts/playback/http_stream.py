@@ -67,6 +67,7 @@ class HttpStream:
         self._validator = ''
         self._eof = False
         self._part_end = None
+        self._delimited = False
         self._expires = time.monotonic() + 24*3600
         self._resume_failures = 0
         self._resumed_at = 0
@@ -149,6 +150,9 @@ class HttpStream:
             self.size = total if total is not None else self.size
             self.position = offset
             self._part_end = part_end
+            # Neither a length nor chunk framing: the body ends where the
+            # connection does, so a cut-off one cannot be told from a whole one.
+            self._delimited = total is None and 'chunked' not in response.headers.get('Transfer-Encoding', '').lower()
             self._buffer = b''
             previous_chunks, self._chunks = self._chunks, iter(response.iter_content(64*1024))
             self._eof = False
@@ -180,6 +184,8 @@ class HttpStream:
                 if self.size is None or self.position >= self.size:
                     # Unknown length ends where the server stops; a known
                     # length is complete. Overruns are refused below.
+                    if self._more_follows():
+                        continue
                     self._eof = True
                     if self._failed:
                         # A failed seek left this response playing to its
@@ -206,6 +212,23 @@ class HttpStream:
         if self._resume_failures and self.position - self._resumed_at >= RESUME_PROGRESS:
             self._resume_failures = 0
         return data
+
+    def _more_follows(self):
+        """Ask whether bytes remain after a body that has no length.
+
+        A body with neither a length nor chunk framing ends where the
+        connection does, so a cut-off one looks complete. A range request at
+        the current byte tells them apart: bytes (206) mean it was cut short
+        and playback goes on from them. "Nothing satisfiable" (416), a server
+        that ignores ranges, or no answer leave the end as it looked."""
+        if not self._delimited or self.position <= 0:
+            return False
+        try:
+            self._open(self.position)
+        except Exception:
+            return False
+        logger.warning("Audio stream ended at byte %s without a length, but the server has more; continuing", self.position)
+        return True
 
     def _resume(self, failure):
         """Reopen at the current byte after a range ends or the connection drops.
