@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 from ..config import APP_NAME, RELEASES_URL, RELEASES_API_URL, app_version
 from ..logging_setup import log_path
 from ..domain import DownloadState, FeedData, FeedEpisodeData, Health
+from ..directories.base import CandidateList
 from ..directories.persistent import PersistentDirectoryCache
 from ..downloads import DownloadError, AutomaticCleanupSkipped
 from ..jobs import JobResult, JobRunner, JobStatus
@@ -6383,7 +6384,7 @@ class MainWindow(QMainWindow):
                         JobResult(JobStatus.OK, value=snapshot),
                     ))
                 candidates = self._directory_request(*request)
-                if not cancel.is_set():
+                if not cancel.is_set() and not getattr(candidates, "partial", False):
                     self._discover_snapshot_cache.save(
                         request[0], request[1], candidates, request[2], previous=snapshot
                     )
@@ -6413,15 +6414,16 @@ class MainWindow(QMainWindow):
             callable_ = self.directory.search if operation == "search" else self.directory.browse
             candidates = callable_(value, limit)
         artwork_cache = self.refresh.artwork if self.refresh is not None else None
+        partial = getattr(candidates, "partial", False)  # a list that lost results is never kept
         candidates = list(candidates)
         if artwork_cache is None:
-            return [(candidate, "") for candidate in candidates]
+            return CandidateList([(candidate, "") for candidate in candidates], partial)
 
         cached = artwork_cache.path_for
         # Paths are deterministic: publish rows without decoding every cache
         # hit. Visible-image workers and the bounded artwork pump validate them.
-        return [(candidate, str(cached(candidate.artwork_url)) if candidate.artwork_url else '')
-                for candidate in candidates]
+        return CandidateList([(candidate, str(cached(candidate.artwork_url)) if candidate.artwork_url else '')
+                              for candidate in candidates], partial)
 
     def _queue_directory_artwork(self):
         seen = self._directory_artwork_completed | {
@@ -7507,7 +7509,9 @@ class MainWindow(QMainWindow):
             self._discover_cache[cache_key] = (
                 snapshot["saved_at"], min(snapshot["limit"], requested_limit), candidates
             )
-        elif stored is None or requested_limit >= stored[1]:
+        elif not getattr(candidates, "partial", False) and (stored is None or requested_limit >= stored[1]):
+            # A list that lost a term or ran out of time is shown but not kept,
+            # so the next view of this category asks again.
             self._discover_cache[cache_key] = (time.time(), requested_limit, candidates)
             while len(self._discover_cache) > 24:
                 self._discover_cache.pop(next(iter(self._discover_cache)))
