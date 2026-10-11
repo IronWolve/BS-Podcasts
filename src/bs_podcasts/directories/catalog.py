@@ -9,7 +9,7 @@ from threading import Lock
 
 from ..domain import DirectoryCandidate
 from ..netlimits import Deadline, NetworkDeadline, current_cancel, is_foreground, request_scope
-from .base import CandidateList, DirectoryError
+from .base import CandidateList, DirectoryError, is_unreachable
 
 
 # Expansion-term requests in flight at once; the shared header gate admits 12
@@ -140,7 +140,10 @@ class PublicDirectory:
             batch.append(params)
         result_sets, errors = self._request_all(batch, check)
         if not result_sets:
-            raise DirectoryError("; ".join(errors) or "Directory category unavailable")
+            raise DirectoryError(
+                "; ".join(map(str, errors)) or "Directory category unavailable",
+                network=bool(errors) and all(is_unreachable(exc) for exc in errors),
+            )
 
         merged = CandidateList()
         seen = set()
@@ -160,7 +163,7 @@ class PublicDirectory:
             # The flag tells the caller not to keep it either.
             merged.partial = True
             logging.getLogger(__name__).debug(
-                "Directory browse %r is partial and not cached: %s", category, "; ".join(errors)
+                "Directory browse %r is partial and not cached: %s", category, "; ".join(map(str, errors))
             )
             return merged[:limit]
         with self._cache_guard:
@@ -171,8 +174,8 @@ class PublicDirectory:
     def _request_all(self, batch, check):
         """Run every request in `batch`, a few at a time, under one deadline.
 
-        Returns (result sets in batch order, error messages). A request that
-        fails adds its message to the errors. When the deadline passes after
+        Returns (result sets in batch order, errors). A request that fails
+        adds its DirectoryError to the errors. When the deadline passes after
         some candidates arrived, those are returned and the unfinished
         requests are listed as an error; with none, or after a user cancel,
         the deadline error is raised."""
@@ -182,7 +185,7 @@ class PublicDirectory:
             try:
                 return [self._request(batch[0])], []
             except DirectoryError as exc:
-                return [], [str(exc)]
+                return [], [exc]
         cancel, foreground = current_cancel(), is_foreground()
         pending = queue.Queue()
         for index, params in enumerate(batch):
@@ -219,7 +222,7 @@ class PublicDirectory:
                 if exc is None:
                     slots[index] = results
                 elif isinstance(exc, DirectoryError):
-                    errors.append(str(exc))
+                    errors.append(exc)
                 else:
                     raise exc
         except NetworkDeadline:
@@ -315,7 +318,9 @@ class PublicDirectory:
             response = self.session.get(self.endpoint, params=params, timeout=(8, 20))
             response.raise_for_status()
         except requests.RequestException as exc:
-            raise DirectoryError(describe_network_error(exc, "the directory")) from exc
+            raise DirectoryError(
+                describe_network_error(exc, "the directory"), network=is_unreachable(exc)
+            ) from exc
         try:
             # response.json() is json.loads; a deeply nested body raises RecursionError.
             payload = response.json()

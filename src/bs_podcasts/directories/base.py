@@ -6,7 +6,38 @@ from ..domain import DirectoryCandidate
 
 
 class DirectoryError(RuntimeError):
-    pass
+    """A directory request failed.
+
+    `network` is True when the directory could not be reached at all, as
+    opposed to answering badly; the window shows its offline notice for it."""
+
+    def __init__(self, *args, network: bool = False):
+        super().__init__(*args)
+        self.network = network
+
+
+def is_unreachable(exc) -> bool:
+    """True when `exc` is a failed connection, raw or wrapped by a provider.
+
+    A TLS failure is a connection error to the requests library, but the
+    directory was reached and answered badly, so it is not an outage."""
+    from requests import exceptions as errors
+
+    while exc is not None:
+        if getattr(exc, "network", False):
+            return True
+        if isinstance(exc, errors.ConnectionError) and not isinstance(exc, errors.SSLError):
+            return True
+        exc = getattr(exc, "__cause__", None)
+    return False
+
+
+def _all_failed(errors) -> DirectoryError:
+    """One error for providers that all failed: unreachable only if each was."""
+    return DirectoryError(
+        "; ".join(f"{name}: {exc}" for name, exc in errors),
+        network=all(is_unreachable(exc) for _name, exc in errors),
+    )
 
 
 class CandidateList(list):
@@ -70,7 +101,7 @@ class DirectoryService:
             try:
                 results = provider.recommend(shows, limit)
             except Exception as exc:
-                errors.append(f"{provider.name}: {exc}")
+                errors.append((provider.name, exc))
                 continue
             succeeded = True
             if results:
@@ -78,7 +109,7 @@ class DirectoryService:
         # An empty answer from a working provider is an answer; raise only
         # when every provider that was asked actually failed.
         if errors and not succeeded:
-            raise DirectoryError("; ".join(errors))
+            raise _all_failed(errors)
         return []
 
     def topic(
@@ -92,7 +123,7 @@ class DirectoryService:
             try:
                 results = provider.topic(category, topic, limit)
             except Exception as exc:
-                errors.append(f"{provider.name}: {exc}")
+                errors.append((provider.name, exc))
                 continue
             succeeded = True
             if results:
@@ -100,7 +131,7 @@ class DirectoryService:
         # An empty answer from a working provider is an answer; raise only
         # when every provider that was asked actually failed.
         if errors and not succeeded:
-            raise DirectoryError("; ".join(errors))
+            raise _all_failed(errors)
         return []
 
     def chart(self, chart_type: str, category: str = "", limit: int = 30):
@@ -112,7 +143,7 @@ class DirectoryService:
             try:
                 results = provider.chart(chart_type, category, limit)
             except Exception as exc:
-                errors.append(f"{provider.name}: {exc}")
+                errors.append((provider.name, exc))
                 continue
             succeeded = True
             if results:
@@ -120,7 +151,7 @@ class DirectoryService:
         # An empty answer from a working provider is an answer; raise only
         # when every provider that was asked actually failed.
         if errors and not succeeded:
-            raise DirectoryError("; ".join(errors))
+            raise _all_failed(errors)
         return []
 
     def _first(self, method: str, value: str, limit: int):
@@ -129,10 +160,10 @@ class DirectoryService:
             try:
                 results = getattr(provider, method)(value, limit)
             except Exception as exc:
-                errors.append(f"{provider.name}: {exc}")
+                errors.append((provider.name, exc))
                 continue
             if results:
                 return results[:limit]
         if errors and len(errors) == len(self.providers):
-            raise DirectoryError("; ".join(errors))
+            raise _all_failed(errors)
         return []
