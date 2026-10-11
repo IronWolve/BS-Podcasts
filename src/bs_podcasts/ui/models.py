@@ -522,10 +522,10 @@ class PodcastDelegate(QStyledItemDelegate):
 
         if item.rank:
             painter.setFont(app_font(11, QFont.Weight.DemiBold))
-            _badge(painter, art.x() + 8 + painter.fontMetrics().horizontalAdvance(f"#{item.rank}") + 16, art.y() + 8, f"#{item.rank}", COLORS["accent"], filled=True)
+            _badge(painter, art.x() + 8 + painter.fontMetrics().horizontalAdvance(f"#{item.rank}") + scaled_dim(16), art.y() + 8, f"#{item.rank}", COLORS["accent"], filled=True)
         if item.is_episode:
             painter.setFont(app_font(11, QFont.Weight.DemiBold))
-            _badge(painter, art.x() + 8 + painter.fontMetrics().horizontalAdvance("EPISODE") + 16, art.bottom() - 28, "EPISODE", COLORS["teal"], filled=True)
+            _badge(painter, art.x() + 8 + painter.fontMetrics().horizontalAdvance("EPISODE") + scaled_dim(16), art.bottom() - 28, "EPISODE", COLORS["teal"], filled=True)
         badge_right = art.right() - 7
         if item.new_count:
             rect = _badge(painter, badge_right, art.y() + 8, f"{item.new_count} new", COLORS["accent"], filled=True)
