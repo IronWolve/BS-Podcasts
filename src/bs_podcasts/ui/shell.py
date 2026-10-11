@@ -3513,6 +3513,7 @@ class MainWindow(QMainWindow):
             self._import_local_audio_path(paths[0])
             return
         library, chosen, skipped = self.library, paths[:self.LOCAL_IMPORT_LIMIT], max(0, len(paths) - self.LOCAL_IMPORT_LIMIT)
+        started_on = self.pages.currentIndex()
 
         def work():
             imported, failed = 0, []
@@ -3528,7 +3529,8 @@ class MainWindow(QMainWindow):
 
         def apply(result):
             imported, failed, left = result
-            self.navigation.select(PAGE_PODCASTS)
+            if self.pages.currentIndex() == started_on:  # a user who moved on stays where they are
+                self.navigation.select(PAGE_PODCASTS)
             self._request_reload()
             message = f"Imported {imported} of {len(chosen)} local audio files"
             if skipped:
