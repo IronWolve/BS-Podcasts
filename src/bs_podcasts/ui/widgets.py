@@ -2099,7 +2099,13 @@ class SeekSlider(QSlider):
             painter.setBrush(cached_color(COLORS["accent_hover"]))
         else:
             painter.setBrush(cached_color(COLORS["accent"]))
-        painter.drawEllipse(handle)
+        if enabled:
+            # The played fill is accent too: a canvas ring keeps the handle's
+            # edge visible where it sits over the fill.
+            painter.setPen(QPen(cached_color(COLORS["canvas"]), 2))
+            painter.drawEllipse(handle.adjusted(1, 1, -1, -1))
+        else:
+            painter.drawEllipse(handle)
         if self.hasFocus():
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor(COLORS["text_strong"]), 2))
