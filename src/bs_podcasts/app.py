@@ -332,6 +332,8 @@ def _incoming_paths(values, *, absolute=False, cwd=None):
             raise ValueError('Options are not accepted; give the files to open as local paths.')
         if '://' in value:
             raise ValueError('URLs are not accepted; give the files to open as local paths.')
+        if os.name == 'nt' and re.match(r'^\\\\\?\\[A-Za-z]:\\', value):
+            value = value[4:]  # the canonical long-path form of a local drive path
         if value.startswith(('//', '\\\\')):
             raise ValueError('Network shares are not accepted; give the files to open as local paths.')
         # A colon is a legal part of a POSIX file name; on Windows it belongs only to the drive prefix.
