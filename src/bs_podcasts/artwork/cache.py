@@ -28,8 +28,10 @@ GENERIC_CONTENT_TYPES = frozenset({
 })
 # Image formats podcast artwork uses. Sniffing alone hands a file to every
 # installed image plugin, including a PDF renderer on Linux that the Windows
-# and Mac builds leave out; anything else falls back to initials.
-ARTWORK_FORMATS = frozenset({"png", "jpeg", "jpg", "gif", "webp", "bmp", "svg", "svgz"})
+# and Mac builds leave out; anything else falls back to initials. Vector
+# formats are left out on purpose: a compressed one inflates far past the
+# byte cap while it is validated, and one can name any local image file.
+ARTWORK_FORMATS = frozenset({"png", "jpeg", "jpg", "gif", "webp", "bmp"})
 # The byte cap bounds compressed size only: a small PNG can declare a canvas
 # that costs hundreds of MiB to decode. Covers are about 3000 px square.
 MAX_ARTWORK_SIDE = 8192
