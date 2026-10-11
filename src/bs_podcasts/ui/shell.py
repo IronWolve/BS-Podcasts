@@ -4237,17 +4237,10 @@ class MainWindow(QMainWindow):
                 # Front of the queue, from any row — not only from Up Next.
                 menu.addAction(icons.icon("next", COLORS["text"], 16), "Play next", lambda: self._queue_to_front(episode.episode_id))
         if not many and is_web_url(episode.media_url):
-            if episode.state in {"Downloading", "Queued"}:
-                menu.addAction(icons.icon("pause", COLORS["text"], 16), "Pause download", lambda: self._pause_download(episode.episode_id))
-            elif episode.state == "Paused":
-                menu.addAction(icons.icon("play", COLORS["text"], 16), "Resume download", lambda: self._download_episode(episode.episode_id))
-                menu.addAction(icons.icon("close", COLORS["text"], 16), "Discard paused download", lambda: self._discard_download(episode.episode_id))
-            elif episode.state == "Error":
-                menu.addAction(icons.icon("download", COLORS["text"], 16), "Retry download", lambda: self._download_episode(episode.episode_id))
-                # A failed download could only be retried; nothing let the
-                # user clear the red ERROR badge off the row.
-                menu.addAction(icons.icon("close", COLORS["text"], 16), "Clear failed download", lambda: self._discard_download(episode.episode_id))
-            elif not downloaded:
+            state_actions = self._download_state_actions(episode.state.lower(), episode.episode_id)
+            for icon, label, callback in state_actions:
+                menu.addAction(icons.icon(icon, COLORS["text"], 16), label, callback)
+            if not state_actions and not downloaded:
                 label = f"Download ({status})" if status_pages else "Download"
                 menu.addAction(icons.icon("download", COLORS["text"], 16), label, lambda: self._download_episode(episode.episode_id))
         elif many and any(is_web_url(item.media_url) and not item.downloaded_path for item in targets):
@@ -4285,7 +4278,7 @@ class MainWindow(QMainWindow):
                 else f"Remove download ({status})"
             )
             if many:
-                remove_download_label = f"Remove {len(targets)} downloads ({status})" if status_pages else f"Remove {len(targets)} downloads"
+                remove_download_label = f"Remove {len(targets)} downloads ({status})"
             menu.addAction(
                 icons.icon("trash", COLORS["text"], 16),
                 remove_download_label,
@@ -4709,26 +4702,37 @@ class MainWindow(QMainWindow):
 
         self._run_read(work, lambda data: self._open_download_menu(episode_id, global_position, *data), "download-menu")
 
+    def _download_state_actions(self, state: str, episode_id: int):
+        """(icon, label, callback) menu entries for a download that is running,
+        paused or failed; the row menu and the download menu both use them.
+        `state` is the lower-case download state; any other state has none."""
+        if state in {"downloading", "queued"}:
+            return [("pause", "Pause download", lambda: self._pause_download(episode_id))]
+        if state == "paused":
+            return [("play", "Resume download", lambda: self._download_episode(episode_id)),
+                    ("close", "Discard paused download", lambda: self._discard_download(episode_id))]
+        if state == "error":
+            # A failed download could only be retried; nothing let the user
+            # clear the red ERROR badge off the row.
+            return [("download", "Retry download", lambda: self._download_episode(episode_id)),
+                    ("close", "Clear failed download", lambda: self._discard_download(episode_id))]
+        return []
+
     def _open_download_menu(self, episode_id, global_position, episode, record):
         if episode is None:
             return
         item = self._ui_episode(episode)
         menu = QMenu(self)
         state = record.state.value if record is not None else ""
-        if state in {"downloading", "queued"}:
-            menu.addAction(icons.icon("pause", COLORS["text"], 16), "Pause download", lambda: self._pause_download(episode_id))
-        elif state == "error":
-            menu.addAction(icons.icon("download", COLORS["text"], 16), "Retry download", lambda: self._download_episode(episode_id))
-            menu.addAction(icons.icon("close", COLORS["text"], 16), "Clear failed download", lambda: self._discard_download(episode_id))
-        elif state == "paused":
-            menu.addAction(icons.icon("play", COLORS["text"], 16), "Resume download", lambda: self._download_episode(episode_id))
-            menu.addAction(icons.icon("close", COLORS["text"], 16), "Discard paused download", lambda: self._discard_download(episode_id))
-        elif state == "complete" and item.downloaded_path:
+        state_actions = self._download_state_actions(state, episode_id)
+        for icon, label, callback in state_actions:
+            menu.addAction(icons.icon(icon, COLORS["text"], 16), label, callback)
+        if state == "complete" and item.downloaded_path:
             menu.addAction(icons.icon("folder", COLORS["text"], 16), "Open file location", lambda: self._open_location(item.downloaded_path))
             menu.addAction(icons.icon("trash", COLORS["text"], 16), "Remove download", lambda: self._delete_downloads([item]))
             if not getattr(record, "length_verified", False):
                 menu.addAction("Verify download length…", lambda: self._verify_download_length(episode_id))
-        else:
+        elif not state_actions:
             menu.addAction(icons.icon("download", COLORS["text"], 16), "Download episode", lambda: self._download_episode(episode_id))
         exec_menu(menu, global_position)
 
