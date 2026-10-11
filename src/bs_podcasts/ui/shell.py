@@ -4044,8 +4044,9 @@ class MainWindow(QMainWindow):
         self._preview_episodes_url = ""
         self.episode_page.banner.show_state("loading", f"Opening {podcast.title}…")
         self._show_hero(podcast, episode_count=podcast.episode_count)
-        self.episode_page.set_filter("All")
+        # Empty the list first: the filter reset then has no old rows to re-filter.
         self.episode_page.set_items([], preserve_scroll=False)
+        self.episode_page.set_filter("All")
 
         def work():
             return self._ui_episodes(self.library.episodes(show_id=podcast.show_id, limit=None))
@@ -7919,7 +7920,8 @@ class MainWindow(QMainWindow):
             self.episode_page.header.action.setToolTip("Refresh all podcasts")
         if self.episode_page.banner.state == "empty":
             self.episode_page.banner.clear()
-        self.episode_page.set_filter(filter_value)
+        if filter_value != self.episode_page._filter:  # set_filter re-filters the old rows
+            self.episode_page.set_filter(filter_value)
         self.episode_page.set_items(episodes)
 
         self._restore_episode_navigation()
