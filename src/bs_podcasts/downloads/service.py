@@ -169,12 +169,14 @@ class _StallWatch:
                         sock = getattr(getattr(raw, "_connection", None), "sock", None)
                     if sock is not None:
                         sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
+                except (AttributeError, OSError) as exc:
+                    # The attribute chain is urllib3-internal, so a missing link is
+                    # expected; a socket error is logged once, then the close below.
+                    _log.debug('Stalled transfer socket was not shut down: %s', exc)
                 try:
                     self._response.close()
-                except Exception:
-                    pass
+                except OSError as exc:
+                    _log.debug('Stalled transfer response did not close cleanly: %s', exc)
                 return
             seen = self._bytes
             window_started = now
@@ -1183,15 +1185,17 @@ class DownloadService:
     def played_previews(self, episode_ids=None):
         """Exact targets for every completed download whose episode is played."""
         previews = []
-        self.played_cleanup_skipped = 0
+        skipped = 0
         for record in self.downloads.played_complete_records(episode_ids):
             try:
                 preview = self.downloads.cleanup_preview(record.episode_id, record=record)
             except OSError:
-                self.played_cleanup_skipped += 1
+                skipped += 1
                 continue
             if preview is not None:
                 previews.append(preview)
+        if skipped:
+            _log.warning('%d played download(s) could not be inspected for cleanup; their files were left alone', skipped)
         return previews
 
     def delete(self, episode_id: int, *, confirmed_paths, automatic=False, played_only=False) -> int:
