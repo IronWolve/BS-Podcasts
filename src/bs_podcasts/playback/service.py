@@ -693,7 +693,8 @@ class PlaybackService:
     def open_external(self, episode_id: int):
         """Explicit user action only: validate a library episode and hand it off.
 
-        Does not change the internal engine or silently choose another player.
+        Pauses the internal engine so the two players do not overlap, but does
+        not switch the snapshot to EXTERNAL or silently choose another player.
         System-player controls/position are independent of this application.
         """
         from .external import ExternalPlayerEngine
