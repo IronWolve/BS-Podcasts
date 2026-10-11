@@ -259,6 +259,9 @@ class LibraryService:
         return self.repository.removal_preview(show_id)
 
     def remove_subscription(self, show_id: int, delete_files: bool = True, confirmed_paths=None) -> dict:
+        """Remove a show. With ``delete_files`` only the files in
+        ``confirmed_paths`` (plus those this removal retired) are deleted;
+        None keeps every other file and the count kept is logged."""
         manager = self.downloads.removing_show(show_id) if self.downloads is not None else nullcontext(())
         with manager as retired:
             paths = None
@@ -271,6 +274,13 @@ class LibraryService:
                 else:
                     paths = [*confirmed_paths, *extra]
             result = self.repository.remove_show(show_id, delete_files, paths)
+            if delete_files and confirmed_paths is None and result:
+                handled = {*result.get("removed_files", ()), *result.get("failed_files", ())}
+                kept = sum(1 for path, _size in result.get("files", ()) if path not in handled)
+                if kept:
+                    logging.getLogger(__name__).warning(
+                        "Removed podcast %s without a confirmed file list; %d downloaded file(s) were left on disk.",
+                        show_id, kept)
             if not delete_files and retired:
                 # Cancellation may leave app-owned partials after queue rows
                 # retire. Keep them for explicit recovery, never surprise-delete.
