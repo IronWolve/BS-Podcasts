@@ -3,12 +3,15 @@
 from PySide6.QtCore import ClassInfo, Property, QObject, Qt, Signal, Slot, QUrl
 from PySide6.QtDBus import QDBusAbstractAdaptor, QDBusConnection, QDBusMessage, QDBusObjectPath
 from hashlib import sha256
+import logging
 import math
 from pathlib import Path
 import stat
 import time
 
 from ..config import APP_ID
+
+_log = logging.getLogger("bs_podcasts")
 
 
 def _local_artwork_path(value):
@@ -229,6 +232,7 @@ class MprisController(QObject):
         self.player_adaptor = _PlayerAdaptor(self)
         bus = QDBusConnection.sessionBus()
         if not bus.isConnected() or not bus.registerService(self.service_name):
+            _log.warning("MPRIS media keys are unavailable: no session bus, or the service name is already taken.")
             return
         self.available = bus.registerObject(
             "/org/mpris/MediaPlayer2",
@@ -237,6 +241,7 @@ class MprisController(QObject):
         )
         if not self.available:
             bus.unregisterService(self.service_name)
+            _log.warning("MPRIS media keys are unavailable: the object could not be exported on the session bus.")
             return
         self._bridge = getattr(window, "_bridge", None)
         if self.available and self._bridge is not None:
