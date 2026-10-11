@@ -2069,9 +2069,12 @@ class SeekSlider(QSlider):
             painter.setBrush(cached_color(COLORS["accent"]))
             painter.drawRoundedRect(QRect(track.x(), track.y(), handle_x - track.x(), track.height()), 3, 3)
         if enabled:
-            painter.setPen(QPen(cached_color(COLORS["nav"]), 2))
             for fraction in self._markers:
                 x = track.x() + int(track.width() * fraction)
+                # No single colour reaches 3:1 on both the accent fill and the
+                # border-coloured rest of the track, so the tick follows the side.
+                tick = COLORS["nav"] if x < handle_x else COLORS["text_strong"]
+                painter.setPen(QPen(cached_color(tick), 2))
                 painter.drawLine(x, centre - 3, x, centre + 3)
             start, end = self._ab
             if start is not None:
