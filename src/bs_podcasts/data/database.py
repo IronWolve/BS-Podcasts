@@ -20,6 +20,13 @@ _log = logging.getLogger("bs_podcasts")
 # waiting exclusive request holds back every new query, so the wait must end.
 _MAINTENANCE_WAIT_SECONDS = 10.0
 
+# backup(), _backup_before_migration() and repair() write a scratch copy with
+# one of these prefixes and rename it on success. A process killed in the
+# middle leaves it behind; opening the library removes the ones older than
+# this process (the library lease keeps a second instance from running one).
+_SCRATCH_PREFIXES = (".library-backup-", ".library-repair-")
+_PROCESS_START = time.time()
+
 
 class _Connection(sqlite3.Connection):
     """Weak-referenceable handle, still used by only one query thread."""
@@ -163,6 +170,24 @@ class Database:
         self.last_repair_lost = {}
         self._preexisting = self.path.is_file() and self.path.stat().st_size > 0
 
+    def _sweep_interrupted_copies(self):
+        """Remove scratch copies an earlier process left when it was killed
+        in the middle of a backup or repair. A copy made since this process
+        started belongs to a live operation and stays, and so does every
+        finished backup (those never carry a scratch name)."""
+        for directory in (self.path.parent, self.path.parent / "backups"):
+            try:
+                found = [p for p in directory.iterdir() if p.name.startswith(_SCRATCH_PREFIXES) and ".tmp" in p.name]
+            except OSError:
+                continue
+            for path in found:
+                try:
+                    info = path.lstat()
+                    if stat.S_ISREG(info.st_mode) and info.st_mtime < _PROCESS_START:
+                        path.unlink()
+                except OSError:
+                    pass
+
     def _backup_candidates(self) -> list:
         """Every non-empty library copy the app keeps, newest first.
 
@@ -305,6 +330,7 @@ class Database:
                 raise
 
     def _initialize(self):
+        self._sweep_interrupted_copies()
         migrations_dir = Path(__file__).with_name("migrations")
         migrations = sorted(migrations_dir.glob("[0-9][0-9][0-9]_*.sql"))
         shipped = {int(m.name.split("_", 1)[0]) for m in migrations}
