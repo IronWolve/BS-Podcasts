@@ -196,9 +196,20 @@ class Database:
         return bool(self._lock._exclusive or self._lock._exclusive_waiting)
 
     def check_integrity(self) -> str:
-        """Run SQLite's quick_check; raise with the report when the file is damaged."""
-        with self.connect() as connection:
-            result = connection.execute("PRAGMA quick_check").fetchone()[0]
+        """Run SQLite's quick_check; raise with the report when the file is damaged.
+
+        Damage that SQLite refuses while preparing the check (a malformed
+        table definition, a page it cannot parse) never reaches a report. It
+        is still damage, so it raises the same error; anything else, such as
+        a busy library, keeps its own error.
+        """
+        try:
+            with self.connect() as connection:
+                result = connection.execute("PRAGMA quick_check").fetchone()[0]
+        except sqlite3.DatabaseError as exc:
+            if is_corruption_error(exc):
+                raise DatabaseIntegrityError(str(exc)) from exc
+            raise
         if result != "ok":
             raise DatabaseIntegrityError(result)
         return result
