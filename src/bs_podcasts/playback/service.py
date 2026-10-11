@@ -1184,15 +1184,23 @@ class PlaybackService:
             elif event.kind == "eof":
                 duration = self.snapshot.duration
                 tolerance = max(10.0, min(60.0, duration * 0.02))
-                if duration > 0 and self.snapshot.position + tolerance < duration:
+                # With no known duration the end cannot be checked at all, and
+                # a network body that carries no length ends where the
+                # connection does, so a cut-off one looks whole. Do not finish
+                # such an episode either.
+                unchecked = (duration <= 0 and self.snapshot.episode_id is not None
+                             and is_web_url(self.snapshot.source))
+                if unchecked or (duration > 0 and self.snapshot.position + tolerance < duration):
                     # A clean close-delimited HTTP EOF cannot prove that a
                     # server delivered the whole episode. Keep queue/progress
                     # intact when known duration clearly says it ended early.
                     self._engine_loaded = False
                     self._cancel_load_watchdog()
+                    message = ("The stream ended before the episode finished. Retry or download it."
+                               if duration > 0 else
+                               "The stream ended, but its length is unknown, so it may be cut short. Retry or download it.")
                     self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR,
-                                            message="The stream ended before the episode finished. Retry or download it.",
-                                            buffering=None)
+                                            message=message, buffering=None)
                     self._persist_position(force=True)
                     self._emit()
                     return
