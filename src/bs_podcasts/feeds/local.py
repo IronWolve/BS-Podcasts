@@ -105,7 +105,6 @@ class LocalAudioImporter:
                 ),
             ),
         )
-        show = self.repository.add_show(media_url, show_title, source="local")
-        self.repository.import_feed(show.id, feed)
+        show = self.repository.add_show(media_url, show_title, source="local", feed=feed)
         self.repository.record_refresh_success(show.id, Health.OK)
         return self.repository.get_show(show.id)

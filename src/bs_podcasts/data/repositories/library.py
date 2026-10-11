@@ -1,5 +1,6 @@
 """Library persistence with no Qt dependencies."""
 
+from contextlib import nullcontext
 from pathlib import Path
 import json
 import logging
@@ -93,6 +94,7 @@ class LibraryRepository:
         skip_forward: int | None = None,
         auto_continue: bool | None = None,
         website_url: str = "",
+        feed: FeedData | None = None,
     ) -> Show:
         settings = (playback_speed, skip_back, skip_forward, auto_continue)
         if any(value is not None for value in settings) and any(value is None for value in settings):
@@ -119,6 +121,10 @@ class LibraryRepository:
                         row["id"],
                     ),
                 )
+            # The feed rows go in this same block, so a failed episode write
+            # also rolls back the show row instead of leaving an empty show.
+            if feed is not None:
+                self.import_feed(row["id"], feed, connection=connection)
         return self.get_show(row["id"])
 
     def get_show(self, show_id: int) -> Show | None:
@@ -248,9 +254,11 @@ class LibraryRepository:
                 candidates.extend(self._episode(row) for row in rows)
         return candidates
 
-    def import_feed(self, show_id: int, feed: FeedData) -> int:
+    def import_feed(self, show_id: int, feed: FeedData, connection=None) -> int:
         now = time.time()
-        with self.database.connect() as connection:
+        # A caller that already holds a connection block writes into that block; its commit covers these rows.
+        scope = nullcontext(connection) if connection is not None else self.database.connect()
+        with scope as connection:
             connection.execute(
                 """UPDATE shows SET
                    title=COALESCE(NULLIF(?, ''), title),
