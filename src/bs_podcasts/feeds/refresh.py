@@ -2,7 +2,9 @@
 
 from dataclasses import dataclass
 import logging
+import os
 import threading
+import time
 
 from ..artwork import ArtworkCache, ArtworkError
 from ..data.repositories import LibraryRepository
@@ -10,6 +12,10 @@ from ..domain import Health
 from ..privacy import redact
 from .fetch import FeedFetchError, FeedFetcher, FeedNetworkError, FeedWrongAnswerError
 from .parser import FeedParseError, parse_feed
+
+# A feed that answers 304 has the cover it had last time; its cover is looked at
+# again only after this long (the cover cache applies its own, shorter, limit).
+COVER_RECHECK_SECONDS = 7 * 86400
 
 
 @dataclass(frozen=True)
@@ -45,6 +51,9 @@ class RefreshService:
         # cheap 304 — and its write is the newer one by construction.
         self._show_locks: dict[int, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        # show id -> (cover URL, monotonic time) of the last successful cover
+        # refresh by this service; each show is only touched under its lock.
+        self._cover_checked: dict[int, tuple[str, float]] = {}
 
     def _lock_for(self, show_id: int) -> threading.Lock:
         with self._locks_guard:
@@ -102,6 +111,7 @@ class RefreshService:
             path = str(self.artwork.fetch(url))
             if path != previous_path:
                 self.repository.set_artwork_path(show_id, path, expected_url=url)
+            self._cover_checked[show_id] = (url, time.monotonic())
             return path if path != previous_path or stamp(path) != before else ''
         except ArtworkError as exc:
             logging.getLogger(__name__).warning('Artwork refresh failed for podcast %s: %s', show_id, redact(exc))
@@ -109,6 +119,12 @@ class RefreshService:
         except Exception:
             logging.getLogger(__name__).exception("Artwork refresh failed for podcast %s", show_id)
             return ''
+
+    def _cover_current(self, show):
+        checked = self._cover_checked.get(show.id)
+        if checked is None or checked[0] != show.artwork_url or not show.artwork_path:
+            return False
+        return 0 <= time.monotonic() - checked[1] < COVER_RECHECK_SECONDS and os.path.isfile(show.artwork_path)
 
     def _refresh_locked(self, show_id: int) -> RefreshReport:
         show = self.repository.get_show(show_id)
@@ -160,7 +176,9 @@ class RefreshService:
                     response.last_modified,
                     stored,
                 )
-                artwork_path = self._refresh_artwork(show_id, show.artwork_url, show.artwork_path)
+                # An unchanged feed keeps its cover: do not ask for it again
+                # (a full download) until the last successful check is a week old.
+                artwork_path = '' if self._cover_current(show) else self._refresh_artwork(show_id, show.artwork_url, show.artwork_path)
                 return RefreshReport(show_id, health, not_modified=True, artwork_path=artwork_path)
 
             feed = parse_feed(response.content, base_url=response.final_url)
