@@ -8179,6 +8179,9 @@ class MainWindow(QMainWindow):
 
     def _discover_sort_changed(self, key: str):
         if key != "newest":
+            # Leaving Newest part-way is a stop: the notice must not say the
+            # scan finished for podcasts it never reached.
+            self._discover_scan_cancelled = True
             self._finish_discover_newest_scan()
             return
         current_items = {
