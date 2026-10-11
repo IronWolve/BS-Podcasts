@@ -311,6 +311,7 @@ def _instance_name() -> str:
 
 _FILE_SUFFIXES = frozenset({'.opml', '.xml', '.mp3', '.m4a', '.ogg', '.opus', '.wav', '.flac', '.aac', '.m4b'})
 _IPC_LIMIT = 8192
+_PROCESS_SERIAL = re.compile(r'-psn_\d+_\d+')
 
 
 def _incoming_paths(values, *, absolute=False, cwd=None):
@@ -350,9 +351,16 @@ def _incoming_paths(values, *, absolute=False, cwd=None):
 
 
 def _cli_file_args(arguments):
-    if not arguments:
-        return []
-    return _incoming_paths(list(arguments))
+    arguments = list(arguments or ())
+    if sys.platform == 'darwin':
+        # Older launch services append a process serial such as -psn_0_12345.
+        # It is not a file and not an option the user gave; every other option
+        # is still refused below.
+        kept = [value for value in arguments if not _PROCESS_SERIAL.fullmatch(str(value))]
+        if len(kept) != len(arguments):
+            logging.getLogger('bs_podcasts').info('Ignored %d process-serial launch argument(s)', len(arguments) - len(kept))
+            arguments = kept
+    return _incoming_paths(arguments) if arguments else []
 
 
 def _profile_key():
