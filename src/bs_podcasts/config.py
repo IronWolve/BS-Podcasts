@@ -151,6 +151,11 @@ def external_environment() -> dict:
                 environment[key] = value
             else:
                 environment.pop(key, None)
+    else:
+        # No readable record: the launcher's folders cannot be told apart
+        # from the caller's, so neither is handed on.
+        for key in ("TMPDIR", "XDG_CACHE_HOME"):
+            environment.pop(key, None)
     for key in _LAUNCHER_ONLY:
         environment.pop(key, None)
     return environment
