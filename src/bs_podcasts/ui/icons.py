@@ -220,12 +220,17 @@ def _glyph_file_valid(target: Path, size: int) -> bool:
 def icon_file(name: str, color: str, size: int) -> str:
     if not _HEX_COLOR.fullmatch(color):
         raise ValueError(f"Stylesheet glyph colour must be #RRGGBB, not {color!r}")
+    if name not in GLYPHS:
+        # A placeholder that names no glyph is a typo in the theme. Skip it, so
+        # the rest of the stylesheet still applies, and say so in the log.
+        logging.getLogger("bs_podcasts").warning("Stylesheet glyph %r is not defined; skipped", name)
+        return ""
     safe_color = re.sub(r"[^0-9A-Za-z]", "", color)
     # The whole SVG template is part of the name, colour left out (the colour is
     # already in it). Keying on name/colour/size alone meant `target.exists()`
     # was checked but never freshness, so a user who had generated the PNG once
     # kept it forever — an edited glyph, stroke or wrapper never reached them.
-    template = svg(name, "") if name in GLYPHS else b""
+    template = svg(name, "")
     digest = sha1(template).hexdigest()[:8]
     target = _cache_dir() / f"{name}-{safe_color}-{size}-{digest}.png"
     if target.is_symlink():
