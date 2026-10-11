@@ -5008,12 +5008,28 @@ class MainWindow(QMainWindow):
             return
         dialog = ConfirmDialog("Clear all history?", f"Clears the entire History, currently {count} episode{'s' if count != 1 else ''}, including entries outside this page or filter. Playback positions and played marks are kept.", "Clear all history", destructive=True, parent=self)
         if self._exec_dialog(dialog) == QDialog.DialogCode.Accepted:
-            def apply(_count):
+            library = self.library
+
+            def work():
+                # The listened-at times go with the clear, so Undo can put
+                # them back on the rows nothing has played since.
+                changes = [((episode.id, episode.show_id, episode.external_id, episode.played, episode.is_new,
+                             episode.position_seconds, episode.last_played),
+                            (episode.played, episode.is_new, episode.position_seconds, None))
+                           for episode in library.history(limit=-1)]
+                library.clear_history()
+                return changes
+
+            def apply(changes):
                 self._request_reload()
-                self._notify("History cleared", "success")
+
+                def undo():
+                    self._run_command(lambda: library.repository.undo_played(changes), lambda _count: self._request_reload())
+
+                self._notify("History cleared", "success", "Undo" if changes else "", undo if changes else None)
             # On the command queue: ordered with other edits and finished
             # before Quit, where the read pool would drop it.
-            self._run_read(self.library.clear_history, apply, 'history-clear', pool=self.commands, coalesce=False, bulk=True)
+            self._run_read(work, apply, 'history-clear', pool=self.commands, coalesce=False, bulk=True)
 
     def _clear_queue(self):
         if self.library is None:
