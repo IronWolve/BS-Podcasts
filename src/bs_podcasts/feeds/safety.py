@@ -41,9 +41,14 @@ def normalize_html_entities(content: bytes) -> bytes:
 
     Called only after the original document passes the DTD/entity guard.
     Unknown names still fail XML parsing; external declarations are not loaded.
+
+    An opener with no closer takes the rest of the text in one step. The XML
+    parser refuses such a document, so nothing after it needs normalising, and
+    a search for a closer that is not there no longer repeats to the end of
+    the text for every opener (quadratic, with the interpreter lock held).
     """
     from html.entities import html5
-    tokens = re.compile(br"<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|&([A-Za-z][A-Za-z0-9]+);", re.S)
+    tokens = re.compile(br"<!\[CDATA\[(?:.*?\]\]>|.*)|<!--(?:.*?-->|.*)|<\?(?:.*?\?>|.*)|&([A-Za-z][A-Za-z0-9]+);", re.S)
     def replace(match):
         name = match[1]
         if name is None:
