@@ -1272,6 +1272,8 @@ class StartupErrorDialog(StyledDialog):
             except Exception as exc:
                 from ..privacy import redact
                 outcome['error'] = redact(exc)
+            except BaseException as exc:
+                outcome['error'] = f"The repair stopped unexpectedly ({type(exc).__name__})."
         self._repair_worker = threading.Thread(target=work, name="bs-startup-repair", daemon=True)
         self._repair_poll = QTimer(self)
         self._repair_poll.setInterval(50)
@@ -1289,7 +1291,7 @@ class StartupErrorDialog(StyledDialog):
                 self.repair_button.setEnabled(True)
                 self._repair_confirmed = False
                 self.repair_button.setText("Repair library…")
-                self.repair_status.setText("Repair failed. " + outcome.get('error', 'The repair worker could not start.'))
+                self.repair_status.setText("Repair failed. " + outcome.get('error', 'The repair stopped unexpectedly.'))
         self._repair_poll.timeout.connect(poll)
         try:
             self._repair_worker.start()
