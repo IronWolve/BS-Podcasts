@@ -322,11 +322,21 @@ class _CursorAwareButton(QPushButton):
             )
 
 
+def refit_icon_button(button, glyph: str = ""):
+    """Draw an icon button's glyph at the current text size. A pixmap is never
+    enlarged to fit a bigger icon size, so the glyph itself is redrawn."""
+    if glyph:
+        button.setProperty("glyph", glyph)
+    size = scaled_px(button.property("glyph_px") or 20)
+    button.setIcon(icons.icon(button.property("glyph"), COLORS["text"], size, disabled=COLORS["disabled"]))
+    button.setIconSize(QSize(size, size))
+
+
 def icon_button(name: str, tooltip: str, object_name: str = "iconButton", size: int = 20, checkable=False):
     button = _CursorAwareButton()
     button.setObjectName(object_name)
-    button.setIcon(icons.icon(name, COLORS["text"], size, disabled=COLORS["disabled"]))
-    button.setIconSize(QSize(size, size))
+    button.setProperty("glyph_px", size)
+    refit_icon_button(button, name)
     button.setToolTip(tooltip)
     # The name is the label alone: a shortcut hint after the separator is
     # rewritten in the tooltip when the key is rebound, and a copy here would
@@ -927,6 +937,7 @@ class PageHeader(QFrame):
 
     def apply_metrics(self):
         self.layout().setSpacing(SPACE["md"])
+        refit_icon_button(self.back)
         self.search.setMinimumWidth(scaled_px(150))
         self.search.setMaximumWidth(scaled_px(240))
 
@@ -1155,6 +1166,7 @@ class StateBanner(QFrame):
     def apply_metrics(self):
         size = scaled_px(18)
         self.icon.setFixedSize(size, size)
+        refit_icon_button(self.dismiss_button)
         self.layout().itemAt(0).layout().setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["sm"], SPACE["sm"])
         self.layout().itemAt(0).layout().setSpacing(SPACE["sm"])
 
@@ -1249,6 +1261,7 @@ class Toast(QFrame):
     def apply_metrics(self):
         size = scaled_px(18)
         self.icon.setFixedSize(size, size)
+        refit_icon_button(self.dismiss_button)
         self.layout().setContentsMargins(SPACE["lg"], SPACE["sm"] + 2, SPACE["sm"], SPACE["sm"] + 2)
         self.layout().setSpacing(SPACE["md"])
 
@@ -2833,6 +2846,7 @@ class ContextPanel(QFrame):
         self.layout().setSpacing(SPACE["md"])
         self._selected_layout.setContentsMargins(0, 0, SPACE["sm"], SPACE["sm"])
         self._queue_layout.setContentsMargins(0, 0, SPACE["sm"], SPACE["sm"])
+        refit_icon_button(self.info_button)
         self.art.set_bounds(scaled_px(120), scaled_px(240))
         self.art.set_side(min(self.art.width() or scaled_px(240), scaled_px(240)))
         self.tabs.setMinimumHeight(scaled_px(150))
@@ -3222,6 +3236,8 @@ class NowPlayingView(QFrame):
     def apply_metrics(self):
         self.layout().setContentsMargins(SPACE["xxl"], SPACE["xl"], SPACE["xxl"], SPACE["xl"])
         self.layout().setSpacing(SPACE["xxl"])
+        refit_icon_button(self.info_button)
+        refit_icon_button(self.close_button)
         self.art.set_bounds(scaled_px(160), scaled_px(420))
         self._bound_left_column()
 
@@ -3846,14 +3862,15 @@ class PlayerBar(QFrame):
         controls.addWidget(self._pad_left)
         self.back = QPushButton("15")
         self.back.setObjectName("textButton")
-        self.back.setIcon(icons.icon("skip-back", COLORS["text"], 20, disabled=COLORS["disabled"]))
-        self.back.setIconSize(QSize(20, 20))
+        self.back.setIcon(icons.icon("skip-back", COLORS["text"], scaled_px(20), disabled=COLORS["disabled"]))
+        self.back.setIconSize(QSize(scaled_px(20), scaled_px(20)))
         self.back.setCursor(Qt.CursorShape.PointingHandCursor)
         self.back.clicked.connect(self.skip_back_requested)
         self.play = QPushButton()
         self.play.setObjectName("playButton")
-        self.play.setIcon(icons.icon("play", COLORS["on_accent"], 22, disabled=COLORS["subtle"]))
-        self.play.setIconSize(QSize(22, 22))
+        self._play_glyph = "play"
+        self.play.setIcon(icons.icon("play", COLORS["on_accent"], scaled_px(22), disabled=COLORS["subtle"]))
+        self.play.setIconSize(QSize(scaled_px(22), scaled_px(22)))
         self.play.setToolTip("Play or pause  ·  Ctrl+Space")
         self.play.setAccessibleName("Play or pause")
         self.play.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -3861,8 +3878,8 @@ class PlayerBar(QFrame):
         self.play.setFixedSize(play_button_size(), play_button_size())
         self.forward = QPushButton("30")
         self.forward.setObjectName("textButton")
-        self.forward.setIcon(icons.icon("skip-forward", COLORS["text"], 20, disabled=COLORS["disabled"]))
-        self.forward.setIconSize(QSize(20, 20))
+        self.forward.setIcon(icons.icon("skip-forward", COLORS["text"], scaled_px(20), disabled=COLORS["disabled"]))
+        self.forward.setIconSize(QSize(scaled_px(20), scaled_px(20)))
         self.forward.setCursor(Qt.CursorShape.PointingHandCursor)
         self.forward.clicked.connect(self.skip_forward_requested)
         self.next = icon_button("next", "Play next in Up Next")
@@ -4209,12 +4226,15 @@ class PlayerBar(QFrame):
         self.now_wrap.setMinimumWidth(scaled_px(180))
         self.speed.setFixedWidth(scaled_px(52))
         skip = scaled_px(20)
+        self.back.setIcon(icons.icon("skip-back", COLORS["text"], skip, disabled=COLORS["disabled"]))
         self.back.setIconSize(QSize(skip, skip))
+        self.forward.setIcon(icons.icon("skip-forward", COLORS["text"], skip, disabled=COLORS["disabled"]))
         self.forward.setIconSize(QSize(skip, skip))
         play = scaled_px(22)
+        self.play.setIcon(icons.icon(self._play_glyph, COLORS["on_accent"], play, disabled=COLORS["subtle"]))
         self.play.setIconSize(QSize(play, play))
         for button in (self.next, self.bookmark, self.ab, self.trim, self.sleep, self.queue, self.volume, self.tray_button):
-            button.setIconSize(QSize(skip, skip))
+            refit_icon_button(button)
         self._tray_gap.changeSize(SPACE["sm"], 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
         self.tools_wrap.layout().invalidate()
         self._volume_metrics()
@@ -4477,7 +4497,8 @@ class PlayerBar(QFrame):
         playing = str(snapshot.state) == "playing"
         loading = str(snapshot.state) == "loading"
         glyph = "refresh" if loading else "pause" if playing else "play"
-        self.play.setIcon(icons.icon(glyph, COLORS["on_accent"], 22, disabled=COLORS["subtle"]))
+        self._play_glyph = glyph
+        self.play.setIcon(icons.icon(glyph, COLORS["on_accent"], scaled_px(22), disabled=COLORS["subtle"]))
         self.play.setToolTip("Opening…" if loading else ("Pause" if playing else "Play") + "  ·  Ctrl+Space")
         self.play.setAccessibleName("Opening; pause when ready" if loading else "Pause" if playing else "Play")
         self.slider.setAccessibleDescription(f"{self._time(position)} of {self._time(self._duration)}")
@@ -4569,7 +4590,7 @@ class PlayerBar(QFrame):
         self.volume_slider.setToolTip(f'Volume {value}%')
         self.volume.setChecked(value == 0)
         action = 'Unmute' if value == 0 else 'Mute'
-        self.volume.setIcon(icons.icon('mute' if value == 0 else 'volume', COLORS['text'], 20, disabled=COLORS['disabled']))
+        refit_icon_button(self.volume, 'mute' if value == 0 else 'volume')
         self._set_hint(self.volume, f'{action} · Volume {value}%')
 
     def _toggle_mute(self):
