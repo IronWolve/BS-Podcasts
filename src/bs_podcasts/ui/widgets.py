@@ -1727,7 +1727,12 @@ class HeroCard(QFrame):
         ):
             button.setText("" if compact else label)
             button.setAccessibleName(label)
-            button.setToolTip(label)
+            # The bare label is a tooltip only while the button is icon-only
+            # and has no hint of its own; per-state hints are left alone.
+            if compact and not button.toolTip():
+                button.setToolTip(label)
+            elif not compact and button.toolTip() == label:
+                button.setToolTip("")
             if compact:
                 button.setFixedSize(side, side)
             else:
