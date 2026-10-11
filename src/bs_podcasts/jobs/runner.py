@@ -1,7 +1,7 @@
 """Bounded background jobs with one typed result surface."""
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, Future
-from threading import BoundedSemaphore
+from threading import BoundedSemaphore, Lock, current_thread
 from dataclasses import dataclass, field
 import logging
 import time
@@ -30,9 +30,34 @@ class JobResult:
     error: BaseException | None = field(default=None, repr=False, compare=False)
 
 
+class TrackedExecutor(ThreadPoolExecutor):
+    """A ThreadPoolExecutor that keeps its own list of worker threads.
+
+    The standard library keeps its workers in a private attribute. Each worker
+    records itself through the initializer hook, so shutdown code can join
+    `threads` through a public property instead.
+    """
+
+    def __init__(self, max_workers: int | None = None, thread_name_prefix: str = ""):
+        self._worker_lock = Lock()
+        self._worker_threads: list = []
+        super().__init__(max_workers=max_workers, thread_name_prefix=thread_name_prefix,
+                         initializer=self._record_worker)
+
+    def _record_worker(self):
+        with self._worker_lock:
+            self._worker_threads.append(current_thread())
+
+    @property
+    def threads(self) -> tuple:
+        """The worker threads started so far."""
+        with self._worker_lock:
+            return tuple(self._worker_threads)
+
+
 class JobRunner:
     def __init__(self, max_workers: int = 4, max_pending: int | None = None):
-        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="bs-job")
+        self._executor = TrackedExecutor(max_workers=max_workers, thread_name_prefix="bs-job")
         self._slots = BoundedSemaphore(max_pending) if max_pending is not None else None
 
     def submit(self, callable_: Callable, *args, **kwargs):
@@ -77,9 +102,10 @@ class JobRunner:
         at exit joining those (non-daemon) threads."""
         self._executor.shutdown(wait=False, cancel_futures=cancel_futures)
         deadline = time.monotonic() + grace_seconds
-        for thread in list(getattr(self._executor, "_threads", ())):
+        threads = self._executor.threads
+        for thread in threads:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             thread.join(remaining)
-        return sum(1 for thread in getattr(self._executor, "_threads", ()) if thread.is_alive())
+        return sum(1 for thread in threads if thread.is_alive())

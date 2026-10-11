@@ -5,12 +5,11 @@ import os
 from pathlib import Path
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PySide6.QtGui import QImage, QImageReader
 
 from ..config import cache_dir
+from ..jobs.runner import TrackedExecutor
 from .cache import write_replace
 
 SIDE = 128
@@ -136,7 +135,7 @@ def queue_save(path, image, stamp):
             return
         _pending.add(identity)
         if _writer is None:
-            _writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix='bs-preview-save')
+            _writer = TrackedExecutor(max_workers=1, thread_name_prefix='bs-preview-save')
         image = image.scaled(SIDE, SIDE, Qt.AspectRatioMode.IgnoreAspectRatio,
                              Qt.TransformationMode.SmoothTransformation)
         try:
@@ -159,7 +158,7 @@ def shutdown(grace_seconds=0):
         return 0
     writer.shutdown(wait=False, cancel_futures=True)
     deadline = time.monotonic() + max(0, grace_seconds)
-    threads = tuple(getattr(writer, '_threads', ()))
+    threads = writer.threads
     for thread in threads:
         thread.join(max(0, deadline - time.monotonic()))
     return sum(thread.is_alive() for thread in threads)

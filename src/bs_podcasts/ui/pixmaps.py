@@ -15,7 +15,6 @@ Who owns the module-level state (workers only decode, sample and save):
 """
 
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
 import logging
@@ -35,6 +34,7 @@ from .theme import COLORS, ARTWORK_LIGHT_INK, ARTWORK_DARK_INK, app_font
 from ..data.files import atomic_write
 from ..artwork import previews
 from ..artwork.cache import ARTWORK_FORMATS, MAX_ARTWORK_PIXELS, MAX_ARTWORK_SIDE
+from ..jobs.runner import TrackedExecutor
 
 
 class _ArtworkCache:
@@ -563,7 +563,7 @@ def _retain_preview(path, image):
 # F-027). Decoding now happens on one worker thread; paint draws the cached
 # pixmap when there is one and the placeholder otherwise, and the widgets that
 # asked are repainted when the image lands.
-_decoder: ThreadPoolExecutor | None = None
+_decoder: TrackedExecutor | None = None
 _decode_lock = threading.Lock()
 _inflight: set[str] = set()
 _decoding_paths: set[str] = set()
@@ -691,7 +691,7 @@ def _schedule_decode(key: str, path: str, width: int, height: int, notify) -> No
         if _bridge is None:
             _bridge = _DecodeBridge()
         if _decoder is None:
-            _decoder = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bs-decode")
+            _decoder = TrackedExecutor(max_workers=1, thread_name_prefix="bs-decode")
         bridge = _bridge
     _decoder.submit(_decode_job, key, path, width, height, bridge)
 
@@ -729,7 +729,7 @@ def shutdown_decodes(grace_seconds: float = 0.0) -> int:
         return previews.shutdown(grace_seconds)
     executor.shutdown(wait=False, cancel_futures=True)
     deadline = time.monotonic() + max(0.0, grace_seconds)
-    threads = tuple(getattr(executor, "_threads", ()))
+    threads = executor.threads
     for thread in threads:
         thread.join(max(0.0, deadline - time.monotonic()))
     return sum(thread.is_alive() for thread in threads) + previews.shutdown(max(0, deadline - time.monotonic()))
