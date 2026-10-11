@@ -4785,16 +4785,35 @@ class MainWindow(QMainWindow):
             return
         ids = [item.episode_id for item in items if item.episode_id]
         downloads = self.downloads
-        self._run_task('delete-downloads-preview', lambda: [preview for episode_id in ids
-            if (preview := downloads.cleanup_preview(episode_id)) is not None])
 
-    def _confirm_delete_downloads(self, previews):
+        def work():
+            previews, unavailable = [], 0
+            for episode_id in ids:
+                try:
+                    preview = downloads.cleanup_preview(episode_id)
+                except OSError:
+                    # Its folder cannot be reached right now: leave that file
+                    # alone and keep looking at the others.
+                    unavailable += 1
+                    continue
+                if preview is not None:
+                    previews.append(preview)
+            return previews, unavailable
+
+        self._run_task('delete-downloads-preview', work)
+
+    def _confirm_delete_downloads(self, data):
+        previews, unavailable = data
+        skipped = (f"{unavailable} download{'' if unavailable == 1 else 's'} could not be checked "
+                   "because their folder is not available; nothing is changed for them.") if unavailable else ""
         if not previews:
-            self._notify("Nothing to delete for this selection")
+            self._notify(skipped or "Nothing to delete for this selection", "info")
             return
         dialog = DeleteFilesDialog(
             "Delete download" if len(previews) == 1 else f"Delete {len(previews)} downloads",
-            "The episode stays in your library; only the local file is removed.", previews, self._format_bytes, self,
+            "The episode stays in your library; only the local file is removed."
+            + (f"\n\n{skipped}" if skipped else ""),
+            previews, self._format_bytes, self,
         )
         if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
