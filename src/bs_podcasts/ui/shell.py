@@ -5837,6 +5837,9 @@ class MainWindow(QMainWindow):
             self._playback_command("pause")
         paused = self.downloads.pause_all()
         self._request_reload()
+        if not paused:
+            self._notify("No downloads are running")
+            return
         self._notify(f"Pausing {paused} download{'s' if paused != 1 else ''}")
 
     def _download_progress(self, event):
