@@ -64,6 +64,12 @@ class JobRunner:
         self._slots = BoundedSemaphore(max_pending) if max_pending is not None else None
 
     def submit(self, callable_: Callable, *args, **kwargs):
+        """Run `callable_(*args, **kwargs)` on this pool.
+
+        Keyword arguments belong to the callable. The queue options `keep` and
+        `bulk` belong to CommandQueue.submit, which is why callers pick the
+        call form by pool (see `_run_task` in ui/shell.py).
+        """
         if self._slots is None:
             return self._executor.submit(self._invoke, callable_, args, kwargs)
         if not self._slots.acquire(blocking=False):
