@@ -208,6 +208,10 @@ class PodcastModel(QAbstractListModel):
                     changed.append(row)
         _notify_changed_rows(self, changed)
 
+    def items(self):
+        """The rows now shown, in order. Read only: replace() swaps the list."""
+        return self._items
+
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._items)
 
@@ -284,6 +288,10 @@ class EpisodeModel(QAbstractListModel):
                 self._items[row] = updated
                 changed.append(row)
         _notify_changed_rows(self, changed)
+
+    def items(self):
+        """The rows now shown, in order. Read only: replace() swaps the list."""
+        return self._items
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._items)
