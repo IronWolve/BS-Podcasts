@@ -380,7 +380,7 @@ def check(root=ROOT, require_deny=True, ran=None):
     for name in files:
         path = root / name
         blobs = []
-        if path.is_symlink():
+        if path.is_symlink():  # inventory() refuses symlinks first; this is a second guard that also scans the target
             blobs.append(str(path.readlink()).encode('utf-8', 'surrogateescape'))
             try:
                 target = path.resolve(strict=True)
@@ -425,7 +425,7 @@ def stage(destination, root=ROOT, ran=None):
         raise ValueError('Staging must be outside the source checkout and cannot contain it.')
     check(root, require_deny=True, ran=ran)
     files, _ = inventory(root)
-    tracked = tracking_difference(root, files)
+    tracking_difference(root, files)  # parity once more after the gates; it raises, so there is no flag to keep
     expected = source_digest(root)
     destination.mkdir(parents=True, exist_ok=False)
     for name in files:
@@ -446,9 +446,8 @@ def stage(destination, root=ROOT, ran=None):
         if top.returncode==0 and Path(top.stdout.strip()).resolve()==root:
             commit = subprocess.run(['git','-C',str(root),'rev-parse','HEAD'],capture_output=True,text=True,timeout=5)
             status = subprocess.run(['git','-C',str(root),'status','--porcelain'],capture_output=True,text=True,timeout=5)
-            differs = tracked is not None and tracked != set(files)
             origin.update(commit=commit.stdout.strip() if commit.returncode==0 else None,
-                          dirty=differs or status.returncode!=0 or bool(status.stdout.strip()))
+                          dirty=status.returncode!=0 or bool(status.stdout.strip()))
     except (OSError,subprocess.TimeoutExpired):
         pass  # Build hosts without Git still get content-addressed development artifacts.
     (destination/'.build-origin.json').write_text(json.dumps(origin,indent=2)+'\n')
