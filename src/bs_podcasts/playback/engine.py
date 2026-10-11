@@ -89,7 +89,7 @@ class MpvEngine:
                 # has no scripting layer, so `ytdl` does not exist). Drop the
                 # missing option and retry instead of failing playback.
                 option = self._missing_option(exc)
-                if option in {"config", "access_references", "autoload_files", "tls_verify", "demuxer_lavf_o"}:
+                if option in {"config", "load_unsafe_playlists", "access_references", "autoload_files", "tls_verify", "demuxer_lavf_o"}:
                     raise PlaybackUnavailable("This native player cannot enforce the required security options.") from exc
                 if option is None or option not in defaults:
                     raise
