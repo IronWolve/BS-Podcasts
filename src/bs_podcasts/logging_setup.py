@@ -35,6 +35,14 @@ class _PrivateLog(RotatingFileHandler):
         private_file(Path(self.baseFilename))
         return super()._open()
 
+    def rotate(self, source, dest):
+        try:
+            super().rotate(source, dest)
+        except OSError:
+            # Another process may still hold the live file open, and the system
+            # refuses the rename then: keep appending and rotate on a later record.
+            pass
+
 
 def log_path() -> Path:
     configured = os.environ.get("BS_PODCASTS_LOG_DIR")
