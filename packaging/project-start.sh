@@ -28,24 +28,35 @@ try:
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
     # The running copy listens in the runtime temporary folder, not in the
-    # one this shell passed, so resolve the instance name there.
+    # one this shell passed, so look for its endpoint there.
     caller_tmp = os.environ.get("TMPDIR")
     os.environ["TMPDIR"] = project+"/tmp"
     from PySide6.QtCore import QCoreApplication
     from PySide6.QtNetwork import QLocalSocket
-    import getpass
     sys.path.insert(0, os.path.dirname(runner)+"/app")
     from bs_podcasts.config import APP_ID
     app = QCoreApplication([])
+    def endpoints():
+        # The application names its endpoint (user and library), so the name
+        # is not rebuilt here: the running copy listens in this folder.
+        found = []
+        try:
+            for name in sorted(os.listdir(project+"/tmp")):
+                if name.startswith(APP_ID+"-") and stat.S_ISSOCK(os.lstat(project+"/tmp/"+name).st_mode):
+                    found.append(name)
+        except OSError:
+            pass
+        return found
     def raised():
-        socket = QLocalSocket()
-        socket.connectToServer(APP_ID+"-"+getpass.getuser())
-        if socket.waitForConnected(1000):
-            socket.write(b"raise")
-            socket.waitForBytesWritten(1000)
-            if socket.waitForReadyRead(1500) and socket.readAll().data().startswith(b"ok"):
-                return True
-        socket.abort()
+        for name in endpoints():
+            socket = QLocalSocket()
+            socket.connectToServer(name)
+            if socket.waitForConnected(1000):
+                socket.write(b"raise")
+                socket.waitForBytesWritten(1000)
+                if socket.waitForReadyRead(1500) and socket.readAll().data().startswith(b"ok"):
+                    return True
+            socket.abort()
         return False
     # A copy that is still starting begins listening a moment later; one that
     # is quitting stops listening before its final saves and then frees the

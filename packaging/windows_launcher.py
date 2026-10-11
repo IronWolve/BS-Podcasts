@@ -43,7 +43,11 @@ def _windows_prelaunch():
     handle, existed = create_mutex()
     if not existed:
         return
-    pipe = "\\\\.\\pipe\\" + name  # QLocalServer's pipe path for this name
+    # Only a second launch gets here, and the application is about to be
+    # imported anyway: let it name its own endpoint instead of rebuilding the
+    # name, so a change to that name cannot leave this wait on a missing pipe.
+    from bs_podcasts.app import _instance_name
+    pipe = "\\\\.\\pipe\\" + _instance_name()  # QLocalServer's pipe path for this name
     deadline = time.monotonic() + 6.0
     while time.monotonic() < deadline:
         ctypes.set_last_error(0)
