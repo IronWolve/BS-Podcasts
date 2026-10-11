@@ -1020,6 +1020,7 @@ class DownloadService:
             complete_head = verification.read(512)
         if _looks_like_document(complete_head, final=True) or unsafe_media_payload(complete_head):
             raise _InvalidMedia("Server sent a document or executable instead of audio.")
+        before = self.downloads.get(episode_id)
         os.replace(partial, target)
         sync_directory(target.parent)
         # `done` is the transfer's own byte count and equals the file size.
@@ -1029,7 +1030,16 @@ class DownloadService:
         note_completed_download(target)
         self._emit(episode_id, DownloadState.COMPLETE, done, done,
                    "" if length_verified else "Audio length is unverified; automatic cleanup will keep this file.")
-        return self.downloads.get(episode_id)
+        try:
+            return self.downloads.get(episode_id)
+        except Exception:
+            # The complete row is written and the file is in place. A failed
+            # read-back must not reach the transfer's error path, which would
+            # report an Error for a finished download.
+            _log.warning("Could not read back the finished download of episode %s", episode_id, exc_info=True)
+            return None if before is None else replace(
+                before, state=DownloadState.COMPLETE, target_path=str(target), bytes_done=done,
+                bytes_total=done, error_message="", length_verified=bool(length_verified))
 
     COMPLETE_WRITE_DELAYS = (0.25, 1.0, 2.0)
 
