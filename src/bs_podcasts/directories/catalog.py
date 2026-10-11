@@ -1,5 +1,7 @@
 """Public podcast-directory adapter; no authentication required."""
 
+import logging
+
 from ..net import SessionSlot, describe_network_error
 from threading import Lock
 
@@ -150,6 +152,13 @@ class PublicDirectory:
                 seen.add(candidate.feed_url)
                 merged.append(candidate)
         check.remaining()
+        if errors:
+            # A merge that lost a term is shown, but never stored as the
+            # category's answer: the next view asks again for what is missing.
+            logging.getLogger(__name__).debug(
+                "Directory browse %r is partial and not cached: %s", category, "; ".join(errors)
+            )
+            return merged[:limit]
         with self._cache_guard:
             if revision == self._cache_revision:
                 self._browse_cache[cache_key] = (time.monotonic(), merged)
