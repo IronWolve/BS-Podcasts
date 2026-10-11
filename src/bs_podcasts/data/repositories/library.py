@@ -260,31 +260,43 @@ class LibraryRepository:
             # stored rows keeps the transaction (and the write lock SQLite takes
             # for it) proportional to what actually changed. Only the rows the
             # feed still carries are fetched — a 3,000-episode back catalog
-            # must not be materialized (descriptions included) per refresh.
+            # must not be materialized (descriptions included) per refresh. The
+            # descriptions are compared inside the query against the incoming
+            # text, so only a yes/no per episode comes back.
             initial_import = connection.execute(
                 "SELECT 1 FROM episodes WHERE show_id=? LIMIT 1", (show_id,)
             ).fetchone() is None
-            incoming_ids = [episode.external_id for episode in feed.episodes]
             select = (
-                "SELECT external_id, " + ", ".join(_EPISODE_SYNC_COLUMNS)
-                + " FROM episodes WHERE show_id=? AND external_id IN ({})"
+                "WITH incoming(slot, external_id, description) AS (VALUES {}) SELECT i.slot, e.external_id, "
+                + ", ".join(
+                    "e.description IS i.description AS description_same" if column == "description" else "e." + column
+                    for column in _EPISODE_SYNC_COLUMNS)
+                + " FROM incoming i JOIN episodes e ON e.show_id=? AND e.external_id=i.external_id"
             )
             existing = {}
-            for start in range(0, len(incoming_ids), 500):
-                chunk = incoming_ids[start:start + 500]
+            existing_ids = set()
+            for start in range(0, len(feed.episodes), 100):
+                chunk = feed.episodes[start:start + 100]
+                values = []
+                for slot, episode in enumerate(chunk, start):
+                    values += (slot, episode.external_id, episode.description)
                 for row in connection.execute(
-                    select.format(",".join("?" * len(chunk))), [show_id, *chunk]
+                    select.format(",".join(["(?,?,?)"] * len(chunk))), [*values, show_id]
                 ).fetchall():
-                    existing[row["external_id"]] = tuple(row[column] for column in _EPISODE_SYNC_COLUMNS)
-            imported = sum(episode.external_id not in existing for episode in feed.episodes)
+                    existing_ids.add(row["external_id"])
+                    existing[row["slot"]] = tuple(
+                        bool(row["description_same"]) if column == "description" else row[column]
+                        for column in _EPISODE_SYNC_COLUMNS)
+            imported = sum(episode.external_id not in existing_ids for episode in feed.episodes)
             new_flag = 0 if initial_import else 1
-            for episode in feed.episodes:
+            for slot, episode in enumerate(feed.episodes):
                 incoming = tuple(
+                    True if column == "description" else
                     (None if episode.explicit is None else int(episode.explicit))
                     if column == "explicit" else getattr(episode, column)
                     for column in _EPISODE_SYNC_COLUMNS
                 )
-                if existing.get(episode.external_id) == incoming:
+                if existing.get(slot) == incoming:
                     continue
                 connection.execute(
                     """INSERT INTO episodes(
