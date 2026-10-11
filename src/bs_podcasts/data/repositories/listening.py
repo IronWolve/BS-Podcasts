@@ -117,6 +117,29 @@ class ListeningRepository:
             bookmark_id = cursor.lastrowid
         return self.bookmarks(bookmark_id=bookmark_id)[0]
 
+    def restore_bookmarks(self, bookmarks) -> tuple[int, int]:
+        """Put deleted bookmarks back; returns (restored, skipped).
+
+        Each keeps its saved time, and its id when that id is still free (ids
+        are reused once a row is gone). A bookmark whose episode no longer
+        exists is skipped. One transaction: nothing is half restored.
+        """
+        restored = skipped = 0
+        with self.database.connect() as connection:
+            for bookmark in {item.id: item for item in bookmarks}.values():
+                if connection.execute("SELECT 1 FROM episodes WHERE id=?", (bookmark.episode_id,)).fetchone() is None:
+                    skipped += 1
+                    continue
+                taken = connection.execute("SELECT 1 FROM bookmarks WHERE id=?", (bookmark.id,)).fetchone()
+                connection.execute(
+                    """INSERT INTO bookmarks(id, episode_id, position_seconds, title, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (None if taken else bookmark.id, bookmark.episode_id, max(0.0, bookmark.position_seconds),
+                     bookmark.title, bookmark.created_at),
+                )
+                restored += 1
+        return restored, skipped
+
     def delete_bookmark(self, bookmark_id: int):
         with self.database.connect() as connection:
             connection.execute("DELETE FROM bookmarks WHERE id=?", (bookmark_id,))
