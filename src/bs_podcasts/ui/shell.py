@@ -6243,7 +6243,9 @@ class MainWindow(QMainWindow):
         # Only the sources' real ceilings: the chart API serves at most 200
         # (measured; 250 → HTTP 400) and one catalog query caps at 200.
         # Browse and For You merge several queries, so they carry no app cap
-        # — natural exhaustion (a pull returning nothing new) ends them.
+        # and end when a pull returns nothing new. The directory layer fixes
+        # the size of each query and cannot page, so they stop at that size;
+        # the summary says so when they do.
         if operation in {"chart", "search", "topic"}:
             return 200
         return 100000
@@ -7548,7 +7550,10 @@ class MainWindow(QMainWindow):
         if podcasts:
             if not cache_restore:
                 self.discover_page.banner.clear()
-            ending = "End of available results" if self._discover_exhausted else "Scroll for more"
+            ending = "Scroll for more"
+            if self._discover_exhausted:
+                ending = ("End of the list (the directory limits how many it returns)"
+                          if operation in {"browse", "recommend"} else "End of available results")
             suffix = "  ·  saved while updating" if cache_restore else ""
             self.discover_page.set_discover_summary(f"{len(podcasts)} {description}  ·  {ending}{suffix}")
         else:
