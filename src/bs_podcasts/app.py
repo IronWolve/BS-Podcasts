@@ -1075,6 +1075,7 @@ def main() -> int:
     busy = _join_playback_shutdown(commands, playback, deadline)
     for pool in (jobs, download_jobs, play_download_jobs, refresh_jobs, network_jobs, artwork_jobs):
         busy += pool.join(max(0.0, deadline - time.monotonic()))
+    busy += downloads.join_intents(max(0.0, deadline - time.monotonic()))
     busy += shutdown_exports(max(0.0, deadline - time.monotonic()))
     from .ui.pixmaps import shutdown_decodes
     busy += shutdown_decodes(max(0.0, deadline - time.monotonic()))
