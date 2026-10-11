@@ -880,7 +880,8 @@ class EpisodeDelegate(QStyledItemDelegate):
         wrapped = self._wrapped_snippets.get(key)
         if wrapped is None:
             wrapped = self._wrap_snippet(text, painter.font(), rect.width(), max_lines)
-            if len(text) <= 2048:
+            # _snippet gives up to 130 characters a line, which passes 2048 at 16 lines.
+            if len(text) <= max(2048, max_lines * 130):
                 self._wrapped_snippets[key] = wrapped
                 if len(self._wrapped_snippets) > 512:
                     del self._wrapped_snippets[next(iter(self._wrapped_snippets))]
