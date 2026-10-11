@@ -8,11 +8,11 @@ import stat
 
 def private_file(path: Path):
     """Create/protect an app-owned regular file; never follow a final symlink."""
-    descriptor = _private_descriptor(path)
+    descriptor = private_descriptor(path)
     os.close(descriptor)
 
 
-def _private_descriptor(path: Path, append=False):
+def private_descriptor(path: Path, append=False):
     path = Path(path)
     if path.is_symlink():
         raise OSError("Refusing a symbolic link for an application-owned file.")
@@ -35,7 +35,7 @@ def _private_descriptor(path: Path, append=False):
 def open_private(path: Path, mode='wb'):
     if mode not in {'wb', 'ab'}:
         raise ValueError('Only binary write/append modes are supported.')
-    descriptor = _private_descriptor(path, append=mode == 'ab')
+    descriptor = private_descriptor(path, append=mode == 'ab')
     try:
         if mode == 'wb':
             os.ftruncate(descriptor, 0)
