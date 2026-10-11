@@ -2277,6 +2277,7 @@ class MainWindow(QMainWindow):
         def apply(targets):
             if (self.pages.currentWidget() is not page or scope !=
                     (self._hero_show_id, self._catalog_query, page._filter, page.header.search.text())):
+                self._notify('Clear progress cancelled: the list changed', 'info')
                 return
             if not targets:
                 self._notify('No saved progress to clear in this list. The loaded episode is left unchanged.', 'info')
