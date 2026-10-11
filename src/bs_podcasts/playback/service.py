@@ -797,8 +797,11 @@ class PlaybackService:
                 self.load_episode(episode_id, start_position=seconds, autoplay=True, cancelled=cancelled)
 
     def current_identity(self):
-        with self._lock:
-            return (self.snapshot.episode_id, self.snapshot.source, self._load_generation)
+        # No lock on purpose: the window thread asks, and the lock can be held
+        # by a command that is waiting on storage. The snapshot is replaced
+        # whole, and seek_current compares the identity again under the lock.
+        snapshot = self.snapshot
+        return (snapshot.episode_id, snapshot.source, self._load_generation)
 
     def update_artwork(self, episode_id, path):
         with self._lock:
@@ -1125,19 +1128,27 @@ class PlaybackService:
                 finished_snapshot = self.snapshot
                 self._flush_listening()
                 def finish():
-                    with self._lock:
-                        if self._dead:
-                            return
-                        try:
-                            self._flush_persistence()
-                            if generation == self._load_generation:
-                                self._finish_and_advance(advance=intent == self.intent_revision)
-                            elif finished_snapshot.episode_id != self.snapshot.episode_id:
-                                # A later user load wins, but an already ended
-                                # outgoing episode still needs its completion.
-                                self._complete_episode(finished_snapshot)
-                        except Exception as exc:
-                            logger.exception("Could not save episode completion")
+                    # Waits on storage run without the service lock, which the
+                    # window thread and the native event thread also need.
+                    if self._dead:
+                        return
+                    try:
+                        self._flush_persistence()
+                        with self._lock:
+                            if self._dead:
+                                return
+                            current = generation == self._load_generation
+                            advance = intent == self.intent_revision
+                            outgoing = not current and finished_snapshot.episode_id != self.snapshot.episode_id
+                        if current:
+                            self._finish_and_advance(advance=advance, intent=intent)
+                        elif outgoing:
+                            # A later user load wins, but an already ended
+                            # outgoing episode still needs its completion.
+                            self._complete_episode(finished_snapshot)
+                    except Exception as exc:
+                        logger.exception("Could not save episode completion")
+                        with self._lock:
                             if generation == self._load_generation:
                                 self._cancel_load_watchdog()
                             reason = str(exc) if isinstance(exc, PlaybackUnavailable) else "Check library storage and retry."
@@ -1414,31 +1425,45 @@ class PlaybackService:
                                             message=str(exc), buffering=None)
             self._emit()
 
-    def _finish_and_advance(self, *, advance=True):
-        episode_id = self.snapshot.episode_id
-        if episode_id is None:
-            self.snapshot = replace(
-                self.snapshot, state=PlaybackState.IDLE, buffering=None,
-                position=self.snapshot.duration or self.snapshot.position,
-            )
-            self._emit()
-            return
-        if self.snapshot.message == self.SEEK_UNSUPPORTED:
-            self.snapshot = replace(self.snapshot, message="")
-        self._complete_episode(self.snapshot)
+    def _finish_and_advance(self, *, advance=True, intent=None):
+        """Save the ended episode's completion, then start the next one or go idle.
+
+        The library reads and writes run without the service lock; it is held
+        only to change the snapshot. `intent` is the play intent seen at the end
+        of the file: a command that arrived since stops the advance."""
+        with self._lock:
+            episode_id = self.snapshot.episode_id
+            if episode_id is None:
+                self.snapshot = replace(
+                    self.snapshot, state=PlaybackState.IDLE, buffering=None,
+                    position=self.snapshot.duration or self.snapshot.position,
+                )
+                self._emit()
+                return
+            if self.snapshot.message == self.SEEK_UNSUPPORTED:
+                self.snapshot = replace(self.snapshot, message="")
+            ended, generation = self.snapshot, self._load_generation
+        self._complete_episode(ended)
         queue = [episode for episode in self.repository.list_queue()
                  if episode.show_id not in self._retiring_shows]
-        show = self.repository.get_show(self.snapshot.show_id) if self.snapshot.show_id else None
-        if self.snapshot.sleep_at_end:
-            # The sleep timer was 'end of this episode': finish it, do not advance.
-            self.snapshot = replace(self.snapshot, sleep_at_end=False)
-            queue = []
-        if advance and queue and (show is None or show.auto_continue):
-            try:
-                self.load_episode(queue[0].id, autoplay=True)
+        show = self.repository.get_show(ended.show_id) if ended.show_id else None
+        with self._lock:
+            if self._dead or generation != self._load_generation:
+                return  # a later load or the shutdown took over; the completion is saved
+            if self.snapshot.sleep_at_end:
+                # The sleep timer was 'end of this episode': finish it, do not advance.
+                self.snapshot = replace(self.snapshot, sleep_at_end=False)
+                queue = []
+            if not (advance and queue and (show is None or show.auto_continue)
+                    and (intent is None or intent == self.intent_revision)):
+                self.snapshot = replace(self.snapshot, state=PlaybackState.IDLE)
+                self._set_current_playback(episode_id, PlaybackState.IDLE.value)
+                self._emit()
                 return
-            except Exception as exc:
-                from ..privacy import redact
+        try:
+            self.load_episode(queue[0].id, autoplay=True)
+        except Exception as exc:
+            with self._lock:
                 self._cancel_load_watchdog()
                 self._load_autoplay = False
                 self._resolving = False
@@ -1446,41 +1471,50 @@ class PlaybackService:
                                         message="Could not play the next episode: " + redact(exc))
                 self._set_current_playback(self.snapshot.episode_id, PlaybackState.ERROR.value)
                 self._emit()
-                return
-        self.snapshot = replace(self.snapshot, state=PlaybackState.IDLE)
-        self._set_current_playback(episode_id, PlaybackState.IDLE.value)
-        self._emit()
+
+    def _library_ready(self):
+        """Refuse at once while library maintenance holds the database.
+
+        Reads wait for maintenance with no timeout, so a command that would
+        read the library must say so here instead of waiting for it."""
+        database = getattr(self.repository, "database", None)
+        if database is not None and database.maintenance_active:
+            raise PlaybackUnavailable("Library maintenance is running; try again when it finishes.")
 
     def _complete_episode(self, snapshot):
+        """Mark an ended episode played and take it off the queue.
+
+        The waits on storage run without the service lock; it is held only to
+        change the snapshot and to queue the saves."""
         episode_id = snapshot.episode_id
         if episode_id is None or snapshot.show_id in self._retiring_shows:
             return
-        # Runs under the service lock. Waiting here for maintenance to free
-        # the database would hold every native event and transport command.
-        if self.repository.database.maintenance_active:
-            raise PlaybackUnavailable("Library maintenance is running; play the episode again when it finishes.")
+        self._library_ready()
         episode = self.repository.get_episode(episode_id)
         if episode is None or episode.show_id != snapshot.show_id:
             return  # A late outgoing EOF cannot save into an unsubscribed show.
         end = snapshot.duration or snapshot.position
-        if self.snapshot.episode_id == episode_id:
-            self.snapshot = replace(self.snapshot, position=end, buffering=None)
+        with self._lock:
+            if self.snapshot.episode_id == episode_id:
+                self.snapshot = replace(self.snapshot, position=end, buffering=None)
+            if end:
+                self._persistence.submit(('duration', episode_id),
+                    lambda value: self.repository.set_observed_duration(episode_id, value), end)
+                stamp = self._write_stamp()
+                self._persistence.submit(
+                    ('position', episode_id),
+                    lambda value: self._require_saved(self.repository.update_position(
+                        episode_id, value[0], stamp=value[1], finish=True)),
+                    (end, stamp),
+                )
         if end:
-            self._persistence.submit(('duration', episode_id),
-                lambda value: self.repository.set_observed_duration(episode_id, value), end)
-            stamp = self._write_stamp()
-            self._persistence.submit(
-                ('position', episode_id),
-                lambda value: self._require_saved(self.repository.update_position(
-                    episode_id, value[0], stamp=value[1], finish=True)),
-                (end, stamp),
-            )
             self._flush_persistence()
         self.repository.mark_played(episode_id, True)
         if self.listening and snapshot.show_id:
             self.listening.increment_completed(snapshot.show_id)
         self.repository.dequeue(episode_id)
-        self._publish_completed(episode_id)
+        with self._lock:
+            self._publish_completed(episode_id)
 
     def _publish_completed(self, episode_id: int):
         # _emit replaces before the listener call. Listeners must keep that
