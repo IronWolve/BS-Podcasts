@@ -119,6 +119,10 @@ class PlaybackService:
         self._desired_position = 0.0
         self._engine_loaded = False
         self._deferred_episode_id = None
+        # The episode that is current but whose file has not loaded yet in
+        # this run (restored, still opening, or failed to open). Saving its
+        # position would mark it played and not new without any listening.
+        self._unstarted_id = None
         self._retiring_shows = set()
         self._dead = False
         self._last_metric_time = None
@@ -303,6 +307,8 @@ class PlaybackService:
             # A load that was refused above leaves the restored episode waiting,
             # so the next Play tries again and shows the reason again.
             self._deferred_episode_id = None
+            if not keep:
+                self._unstarted_id = episode.id
             self._begin_load(start, autoplay, keep_target=keep)
             if not self._volume_applied:
                 try:
@@ -1038,6 +1044,8 @@ class PlaybackService:
                             self._engine_generation, source_kind, self._load_autoplay,
                             max(0.0, time.monotonic() - getattr(self, "_load_started_at", time.monotonic())))
                 self._engine_loaded = True
+                if self.snapshot.episode_id == self._unstarted_id:
+                    self._unstarted_id = None
                 self._cancel_load_watchdog()
                 self._metric_seek_target = None  # the load applied any pending seek
                 self._reset_metrics(self.snapshot.position)
@@ -1494,7 +1502,8 @@ class PlaybackService:
 
     def _persist_position(self, force: bool = False, deferred: list | None = None):
         """Keep the latest stamped position per episode on the bounded writer."""
-        if self.snapshot.episode_id is None or self._start_target is not None:
+        if (self.snapshot.episode_id is None or self.snapshot.episode_id == self._unstarted_id
+                or self._start_target is not None):
             return
         if force or abs(self.snapshot.position - self._last_saved_position) >= 5.0:
             episode_id, position = self.snapshot.episode_id, self.snapshot.position
@@ -1666,6 +1675,7 @@ class PlaybackService:
             silence_saved=self.listening.silence_saved() if self.listening else 0.0,
             artwork_path=episode.artwork_path,
         )
+        self._unstarted_id = episode.id
 
     def _guard(self):
         if self._dead:
