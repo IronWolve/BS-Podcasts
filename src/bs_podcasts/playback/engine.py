@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from ..privacy import redact
 
+logger = logging.getLogger("bs_podcasts")
 
 mpv = None
 
@@ -583,8 +584,11 @@ class LazyMpvEngine:
         the first press of Play only pays for opening the stream."""
         try:
             self._real()
-        except Exception:
-            pass  # first explicit Play reports the failure; no automatic handoff
+        except Exception as exc:
+            # The first explicit Play reports the failure; no automatic handoff.
+            if not self._shut_down:
+                cause = exc.__cause__ or exc
+                logger.warning("Playback engine warm-up failed: %s: %s", type(cause).__name__, redact(cause))
 
     def _real(self):
         with self._construct_lock:
@@ -599,7 +603,8 @@ class LazyMpvEngine:
                         mpv = mpv_module
                     engine = MpvEngine(**self._options)
                 except Exception as exc:
-                    raise PlaybackUnavailable("Internal playback is unavailable. Retry, or explicitly open the episode in an external player.") from exc
+                    detail = redact(exc) or type(exc).__name__
+                    raise PlaybackUnavailable(f"Internal playback is unavailable ({detail}). Retry, or explicitly open the episode in an external player.") from exc
                 engine.set_event_handler(self._handler)
                 self._engine = engine
         return self._engine
