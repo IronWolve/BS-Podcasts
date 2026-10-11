@@ -516,6 +516,10 @@ class LibraryRepository:
                 previews.append(DeletionPreview(0, path, size))
         return previews
 
+    def remember_orphans(self, paths):
+        """Record files that stay on disk so a later sweep or review can find them."""
+        self._remember_orphans(paths)
+
     def _remember_orphans(self, paths):
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
