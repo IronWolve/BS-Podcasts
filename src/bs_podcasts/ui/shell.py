@@ -1842,7 +1842,7 @@ class MainWindow(QMainWindow):
             limit = 500
         self._catalog_query, self._catalog_limit = query, limit
         self._hero_show_id, self._preview_episodes_url = 0, ''
-        self.episode_page._catalog_query = query
+        self.episode_page.set_catalog_query(query)
         self.episode_page.hero.hide()
         self.episode_page.header.set_title('Search results')
         self.episode_page.header.search.blockSignals(True)
@@ -1877,7 +1877,7 @@ class MainWindow(QMainWindow):
         self._run_read(work, apply, 'catalog-search')
 
     def _display_library_search(self):
-        self.episode_page._catalog_query = self._catalog_query
+        self.episode_page.set_catalog_query(self._catalog_query)
         self.episode_page.header.set_title('Search results')
         self.episode_page.hero.hide()
         if not self._catalog_timer.isActive():
@@ -1897,7 +1897,7 @@ class MainWindow(QMainWindow):
             self.episode_page.header.search.clear()
             self.episode_page.header.search.blockSignals(False)
         self._catalog_query = ''
-        self.episode_page._catalog_query = ''
+        self.episode_page.set_catalog_query('')
         self._catalog_timer.stop()
         self._read_tokens['catalog-search'] = self._read_tokens.get('catalog-search', 0) + 1
         self._read_tokens['catalog-search-more'] = self._read_tokens.get('catalog-search-more', 0) + 1
