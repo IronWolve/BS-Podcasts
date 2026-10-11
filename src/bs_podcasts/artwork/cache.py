@@ -46,7 +46,10 @@ def _looks_textual(head: bytes) -> bool:
     What must be stopped early is what an SSRF probe of an internal service
     actually returns — an HTML admin page or a JSON body.
     """
-    sniff = head.lstrip()[:512]
+    sniff = head.lstrip()
+    if sniff.startswith(b"\xef\xbb\xbf"):  # a UTF-8 byte order mark precedes the text
+        sniff = sniff[3:].lstrip()
+    sniff = sniff[:512]
     lowered = sniff.lower()
     if lowered.startswith((b"<!doctype html", b"<html", b"<head", b"<body")):
         return True
