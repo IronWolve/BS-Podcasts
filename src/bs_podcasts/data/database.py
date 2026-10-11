@@ -25,6 +25,10 @@ _BACKUP_LEDGER = ".created-backups"
 _BACKUP_NAME = re.compile(r"library-\d{8}-\d{6}-\d{6}\.db")
 _backup_lock = threading.Lock()
 
+# Optimize waits this long for running queries to finish, then gives up. A
+# waiting exclusive request holds back every new query, so the wait must end.
+_MAINTENANCE_WAIT_SECONDS = 10.0
+
 
 class _Connection(sqlite3.Connection):
     """Weak-referenceable handle, still used by only one query thread."""
@@ -481,7 +485,27 @@ class Database:
                 connection.close()
 
     def optimize(self):
-        with self._lock.exclusive():
+        """Refresh the planner statistics, then rewrite the file compactly.
+
+        The exclusive lock stays held through VACUUM, on purpose. VACUUM
+        rewrites the whole file in one write transaction. It cannot run
+        inside a transaction. In WAL mode it does not need other connections
+        closed and readers on them are not blocked by the database engine,
+        but every other writer waits until it commits and fails with
+        "database is locked" once its busy timeout is spent. connect() cannot
+        tell a reader from a writer, so writers are kept in line here, and
+        while the rewrite runs every connect() waits: the stall lasts as long
+        as the rewrite and grows with the file. Writing the copy to a sibling
+        file (VACUUM INTO) would not shorten it safely, because the copy then
+        has to replace the library and any write made meanwhile would be lost
+        unless writers were kept out for the whole copy anyway.
+
+        Waiting for running queries to finish is bounded, since a pending
+        exclusive request holds back every new connect(): Optimize raises
+        TimeoutError rather than hold the application still behind one long
+        query, and can simply be run again.
+        """
+        with self._lock.exclusive(timeout=_MAINTENANCE_WAIT_SECONDS):
             connection = self._new_connection()
             try:
                 connection.execute("ANALYZE")
