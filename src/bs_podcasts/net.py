@@ -179,6 +179,9 @@ class SessionSlot:
 
     def __init__(self, **session_kwargs):
         self._kwargs = session_kwargs
+        # Two workers meeting an empty slot at once would each build a session
+        # (and its connection pool); the loser would never be closed.
+        self._create_lock = threading.Lock()
 
     def __set_name__(self, owner, name):
         self._attr = "_" + name
@@ -188,8 +191,11 @@ class SessionSlot:
             return self
         current = getattr(instance, self._attr, None)
         if current is None:
-            current = make_session(**self._kwargs)
-            setattr(instance, self._attr, current)
+            with self._create_lock:
+                current = getattr(instance, self._attr, None)
+                if current is None:
+                    current = make_session(**self._kwargs)
+                    setattr(instance, self._attr, current)
         return current
 
     def __set__(self, instance, value):
