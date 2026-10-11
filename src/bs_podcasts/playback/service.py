@@ -140,6 +140,7 @@ class PlaybackService:
             saved_volume = 100.0
         self.snapshot = replace(self.snapshot, volume=max(0.0, min(100.0, saved_volume)))
         self._unsaved_silence = 0.0
+        self._silence_balance = 0.0
         self._unsaved_listening = 0.0
         # Silence is measured over windows of a second or more, and ticks
         # before a seek lands count as neither listening nor silence.
@@ -1686,15 +1687,20 @@ class PlaybackService:
         # Count the open window up to the last tick measured while playing,
         # never the tick that ended it (a seek, a pause, a stall).
         window, self._silence_window = self._silence_window, None
-        if window is None or self._last_metric_time is None or self.snapshot.trim_level == "off":
-            return
-        window_time, window_position = window
-        if self._last_metric_time > window_time:
-            self._add_silence((self._last_metric_position - window_position)
-                              - (self._last_metric_time - window_time) * self.snapshot.speed)
+        if window is not None and self._last_metric_time is not None and self.snapshot.trim_level != "off":
+            window_time, window_position = window
+            if self._last_metric_time > window_time:
+                self._add_silence((self._last_metric_position - window_position)
+                                  - (self._last_metric_time - window_time) * self.snapshot.speed)
+        self._silence_balance = 0.0  # the chain of windows ends here
 
     def _add_silence(self, skipped: float):
-        self._unsaved_silence += max(0.0, skipped)
+        # Windows share their end ticks, so delivery jitter cancels across
+        # them: a window that measured less than none is held against the
+        # next ones, not dropped, which kept only the positive half.
+        owed = self._silence_balance + skipped
+        self._silence_balance = min(0.0, owed)
+        self._unsaved_silence += max(0.0, owed)
         if self._unsaved_silence >= 1.0 and self.listening:
             delta, listening = self._unsaved_silence, self.listening
             self._persistence.submit('silence', listening.add_silence_saved, delta, additive=True)
@@ -1731,9 +1737,10 @@ class PlaybackService:
             return
         window_time, window_position = self._silence_window
         skipped = (position - window_position) - (now - window_time) * self.snapshot.speed
-        # Tick delivery jitter is milliseconds and cancels over a second,
-        # instead of each positive wobble counting as skipped silence. A
-        # trimmed pause jumps a quarter second or more and counts at once.
+        # Tick delivery jitter is milliseconds and cancels across windows
+        # (see _add_silence), instead of each positive wobble counting as
+        # skipped silence. A trimmed pause jumps a quarter second or more
+        # and counts at once.
         if now - window_time >= 1.0 or skipped >= 0.25:
             self._silence_window = (now, position)
             self._add_silence(skipped)
