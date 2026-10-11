@@ -111,6 +111,7 @@ class PlaybackService:
         self._recovery_key = None
         self._recovery_times = []
         self._load_generation = 0
+        self._load_started_at = time.monotonic()
         self._resolve_cancel = Event()
         self.intent_revision = 0
         self._last_write_stamp = 0.0
@@ -1099,7 +1100,7 @@ class PlaybackService:
             elif event.kind == "file_loaded":
                 logger.info("Playback source loaded: generation=%s source=%s autoplay=%s seconds=%.3f",
                             self._engine_generation, source_kind, self._load_autoplay,
-                            max(0.0, time.monotonic() - getattr(self, "_load_started_at", time.monotonic())))
+                            max(0.0, time.monotonic() - self._load_started_at))
                 self._engine_loaded = True
                 if self.snapshot.episode_id == self._unstarted_id:
                     self._unstarted_id = None
