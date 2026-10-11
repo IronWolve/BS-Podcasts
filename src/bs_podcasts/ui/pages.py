@@ -1601,7 +1601,7 @@ class SummaryCard(QPushButton):
         self.label.setText(label)
         self.setAccessibleName(accessible)
 
-    def text(self):  # compatibility with tooling that reads "count\nlabel"
+    def summary_text(self):
         return f"{self.number.text()}\n{self.label.text()}"
 
 
