@@ -7,6 +7,7 @@ import logging
 import time
 from enum import StrEnum
 from typing import Any, Callable
+from ..netlimits import NetworkDeadline
 
 
 _log = logging.getLogger('bs_podcasts')
@@ -93,11 +94,16 @@ class JobRunner:
             if value is None:
                 return JobResult(JobStatus.EMPTY)
             return JobResult(JobStatus.OK, value=value)
-        except TimeoutError as exc:
+        except (TimeoutError, NetworkDeadline) as exc:
             return JobResult(JobStatus.TIMEOUT, message=str(exc) or "Operation timed out.")
-        except Exception as exc:
+        except KeyboardInterrupt:
+            raise
+        except BaseException as exc:
             # The result carries the message and the exception; this is the one
             # place the traceback of a failing background callable can be kept.
+            # Every other BaseException (SystemExit, a closed generator) also
+            # becomes a result: a raised future would leave the caller's
+            # completion callback without an answer.
             _log.exception('Background job %s failed', getattr(callable_, '__qualname__', type(callable_).__name__))
             return JobResult(JobStatus.ERROR, message=str(exc) or exc.__class__.__name__, error=exc)
 
