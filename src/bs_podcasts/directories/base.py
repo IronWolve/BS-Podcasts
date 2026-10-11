@@ -9,6 +9,24 @@ class DirectoryError(RuntimeError):
     pass
 
 
+class CandidateList(list):
+    """Directory candidates that say whether the answer is complete.
+
+    `partial` is True when a request or the deadline dropped results, so the
+    list may be shorter than the directory's answer and must not be kept as
+    that answer. A slice keeps the flag."""
+
+    partial = False
+
+    def __init__(self, items=(), partial=False):
+        super().__init__(items)
+        self.partial = partial
+
+    def __getitem__(self, index):
+        found = super().__getitem__(index)
+        return CandidateList(found, self.partial) if isinstance(index, slice) else found
+
+
 class DirectoryProvider(Protocol):
     name: str
 

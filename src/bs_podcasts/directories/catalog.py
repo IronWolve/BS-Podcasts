@@ -9,7 +9,7 @@ from threading import Lock
 
 from ..domain import DirectoryCandidate
 from ..netlimits import Deadline, NetworkDeadline, current_cancel, is_foreground, request_scope
-from .base import DirectoryError
+from .base import CandidateList, DirectoryError
 
 
 # Expansion-term requests in flight at once; the shared header gate admits 12
@@ -142,7 +142,7 @@ class PublicDirectory:
         if not result_sets:
             raise DirectoryError("; ".join(errors) or "Directory category unavailable")
 
-        merged = []
+        merged = CandidateList()
         seen = set()
         longest = max(len(results) for results in result_sets)
         for index in range(longest):
@@ -157,6 +157,8 @@ class PublicDirectory:
         if errors:
             # A merge that lost a term is shown, but never stored as the
             # category's answer: the next view asks again for what is missing.
+            # The flag tells the caller not to keep it either.
+            merged.partial = True
             logging.getLogger(__name__).debug(
                 "Directory browse %r is partial and not cached: %s", category, "; ".join(errors)
             )
@@ -276,13 +278,13 @@ class PublicDirectory:
                 break
 
         if not categories:
-            return [
-                candidate
-                for candidate in self.browse("", limit + len(excluded))
-                if key(candidate.feed_url) not in excluded
-            ][:limit]
+            found = self.browse("", limit + len(excluded))
+            return CandidateList(
+                [candidate for candidate in found if key(candidate.feed_url) not in excluded][:limit],
+                getattr(found, "partial", False),
+            )
 
-        merged = []
+        merged = CandidateList()
         seen = set(excluded)
         per_category = max(
             10, (limit + len(categories) - 1) // len(categories) + len(excluded)
@@ -295,7 +297,9 @@ class PublicDirectory:
                 cancel = current_cancel()
                 if not merged or (cancel is not None and cancel.is_set()):
                     raise
+                merged.partial = True
                 break
+            merged.partial = merged.partial or getattr(found, "partial", False)
             for candidate in found:
                 feed_key = key(candidate.feed_url)
                 if feed_key in seen:
