@@ -2290,7 +2290,7 @@ class MainWindow(QMainWindow):
         if self.library is None or self._preview_episodes_url:
             return
         page = self.episode_page
-        ids = [item.episode_id for item in page.model._items if item.episode_id > 0]
+        ids = [item.episode_id for item in page.model.items() if item.episode_id > 0]
         if not ids:
             return
         scope = (self._hero_show_id, self._catalog_query, page._filter, page.header.search.text())
@@ -4685,10 +4685,10 @@ class MainWindow(QMainWindow):
             return [update(current) for current in items] if holds(items) else items
         for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.bookmark_page, self.history_page):
             page._all_items = updated(page._all_items)
-            if holds(page.model._items):
+            if holds(page.model.items()):
                 page.model.update_artwork_batch(changes)
         queue_model = self.context.queue_view.model()
-        if queue_model is not None and holds(queue_model._items):
+        if queue_model is not None and holds(queue_model.items()):
             queue_model.update_artwork_batch(changes)
         self._all_episode_items = updated(self._all_episode_items)
         self._catalog_search_items = updated(getattr(self, "_catalog_search_items", []))
