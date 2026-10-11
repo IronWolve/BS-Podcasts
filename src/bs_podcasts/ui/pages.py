@@ -155,7 +155,7 @@ class _ScrollInputGuard(QObject):
 
     def eventFilter(self, watched, event):
         if self._stop_scroll and (event.type() == QEvent.Type.KeyPress or
-                                 event.type() == QEvent.Type.MouseButtonPress and watched is self._bar):
+                                 (event.type() == QEvent.Type.MouseButtonPress and watched is self._bar)):
             self._stop_scroll(False)
         if self._scroll_started and event.type() in {QEvent.Type.Wheel, QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate}:
             self._scroll_started()
