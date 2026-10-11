@@ -339,6 +339,7 @@ class MainWindow(QMainWindow):
         self._discover_newest_generation = 0
         self._discover_newest_futures = {}
         self._discover_newest_updates = {}
+        self._discover_newest_cards = {}
         self._discover_newest_total = 0
         self._discover_newest_done = 0
         self._discover_newest_summary = ""
@@ -7165,7 +7166,7 @@ class MainWindow(QMainWindow):
                 while len(self._newest_dates) > self.NEWEST_DATE_ENTRIES:
                     self._newest_dates.popitem(last=False)
             if newest_scan:
-                card = next((item for item in self.discover_page._all_items if item.feed_url == identifier), None)
+                card = self._discover_newest_cards.get(identifier)
                 if card is not None:
                     self._discover_newest_updates[identifier] = self._with_preview(card, result.value)
                 if not peek and (self._pending_episodes_url == identifier or self.context.preview_url() == identifier):
@@ -7947,6 +7948,7 @@ class MainWindow(QMainWindow):
             self._stop_discover_newest_workers()
             self._discover_newest_cancel = threading.Event()
             self._discover_newest_summary = self.discover_page.result_summary.text()
+        self._discover_newest_cards = current_items
         self._discover_newest_pending.update(missing)
         queued = set(self._discover_newest_waiting) | self._discover_newest_active
         self._discover_newest_waiting.extend(
@@ -8078,6 +8080,7 @@ class MainWindow(QMainWindow):
                 item = self._with_preview(item, self._previews.get(item.feed_url))
             items.append(item)
         self._discover_newest_updates.clear()
+        self._discover_newest_cards = {}
         newest = self.discover_page.discover_sort_key() == "newest"
         self.discover_page.set_items(items, preserve_scroll=not newest)
         if newest:
