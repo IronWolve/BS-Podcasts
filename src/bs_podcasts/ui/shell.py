@@ -2324,8 +2324,14 @@ class MainWindow(QMainWindow):
             def undo():
                 def restored(n):
                     self._request_reload()
-                    if n != count:
-                        self._notify("Restored unchanged episodes; newer listening changes were kept.")
+                    if n == count:
+                        self._notify(f"Restored {count} episode{'s' if count != 1 else ''}", "success")
+                    elif n:
+                        self._notify(f"Restored {n} of {count} episodes; the other {count - n} changed since, "
+                                     "so newer listening changes were kept.")
+                    else:
+                        subject = "the episode" if count == 1 else f"all {count} episodes"
+                        self._notify(f"Nothing restored; {subject} changed since, so newer listening changes were kept.")
                 self._run_command(lambda: repository.undo_played(changes), restored)
 
             message = label or f"Marked {count} episode{'s' if count != 1 else ''} as {'played' if played else 'unplayed'}"
