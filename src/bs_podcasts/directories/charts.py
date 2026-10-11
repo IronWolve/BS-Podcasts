@@ -211,13 +211,15 @@ class DirectoryCharts:
                 raise DirectoryError(f"Directory script came from an unexpected host: {host}")
             bundle = self.session.get(script_url, timeout=(8, 20))
             bundle.raise_for_status()
-            javascript = bundle.text
+            # Searched as bytes: `.text` guesses the charset over the whole
+            # body when the server names none.
+            javascript = bundle.content
             # The minified variable name changes per deploy (al, rl, …);
             # match the JWT shape itself — it is the only one in the bundle.
-            token = re.search(r'"(eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"', javascript)
+            token = re.search(rb'"(eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"', javascript)
             if not token:
                 raise DirectoryError("Directory web chart token was not present.")
-            self._developer_token = token.group(1)
+            self._developer_token = token.group(1).decode("ascii")
             return self._developer_token
         except requests.RequestException as exc:
             raise DirectoryError(describe_network_error(exc, "the directory")) from exc
