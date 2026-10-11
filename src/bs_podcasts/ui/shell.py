@@ -151,6 +151,17 @@ def _integrity_report(database):
         raise
 
 
+def _fetch_feed_preview(fetcher, feed_url, checkpoint=lambda: None):
+    """Fetch and parse one feed as a preview, on a worker. The details pane and
+    the newest-date scan's fallback both run this, so they cannot drift apart.
+    `checkpoint` runs between the request and the parse (a deadline check)."""
+    from ..feeds.parser import parse_feed
+
+    response = fetcher.fetch(feed_url)
+    checkpoint()
+    return prepare_preview(parse_feed(response.content, base_url=response.final_url))
+
+
 class _JobBridge(QObject):
     completed = Signal(object)
     playback_event = Signal(object)
@@ -8017,7 +8028,6 @@ class MainWindow(QMainWindow):
         def work():
             from ..domain import FeedEpisodeData
             from ..feeds.fetch import FeedFetchError
-            from ..feeds.parser import parse_feed
             from ..netlimits import Deadline, NetworkDeadline, request_scope
 
             deadline = Deadline(60, cancel)
@@ -8038,9 +8048,7 @@ class MainWindow(QMainWindow):
                 if peek is not None:
                     title, published_at = peek
                     return PeekFeed(title="", episodes=(FeedEpisodeData("peek", title, published_at=published_at),))
-                response = fetcher.fetch(feed_url)
-                deadline.remaining()
-                return prepare_preview(parse_feed(response.content, base_url=response.final_url))
+                return _fetch_feed_preview(fetcher, feed_url, deadline.remaining)
 
         future = self.network_jobs.submit(work)
         self._discover_newest_futures[feed_url] = future
@@ -8194,10 +8202,7 @@ class MainWindow(QMainWindow):
         fetcher = self.refresh.fetcher
 
         def work():
-            from ..feeds.parser import parse_feed
-
-            response = fetcher.fetch(feed_url)
-            return prepare_preview(parse_feed(response.content, base_url=response.final_url))
+            return _fetch_feed_preview(fetcher, feed_url)
 
         future = self.network_jobs.submit(work)
         self._pending_jobs.add(future)
