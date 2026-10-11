@@ -9,6 +9,7 @@ from threading import Lock
 
 from ..domain import DirectoryCandidate
 from ..netlimits import Deadline, NetworkDeadline, current_cancel, is_foreground, request_scope
+from ..urlguard import is_web_url
 from .base import CandidateList, DirectoryError, is_unreachable
 
 
@@ -145,6 +146,8 @@ class PublicDirectory:
                 network=bool(errors) and all(is_unreachable(exc) for exc in errors),
             )
 
+        from ..services.library import LibraryService
+        key = LibraryService.normalize_feed_url
         merged = CandidateList()
         seen = set()
         longest = max(len(results) for results in result_sets)
@@ -153,9 +156,12 @@ class PublicDirectory:
                 if index >= len(results):
                     continue
                 candidate = results[index]
-                if candidate.feed_url in seen:
+                # The same key recommend() and the library use: http and https,
+                # a trailing slash or a default port name one feed.
+                feed_key = key(candidate.feed_url)
+                if feed_key in seen:
                     continue
-                seen.add(candidate.feed_url)
+                seen.add(feed_key)
                 merged.append(candidate)
         if errors:
             # A merge that lost a term is shown, but never stored as the
@@ -339,8 +345,9 @@ class PublicDirectory:
             if not isinstance(row, dict):
                 continue
             feed_url = str(row.get("feedUrl") or "").strip()
-            if not feed_url:
+            if not is_web_url(feed_url):
                 continue
+            artwork_url = str(row.get("artworkUrl600") or row.get("artworkUrl100") or "").strip()
             genres_raw = row.get("genres")
             genres = [str(value) for value in genres_raw] if isinstance(genres_raw, list) else []
             top_level_genre = next(
@@ -352,9 +359,7 @@ class PublicDirectory:
                     title=str(row.get("collectionName") or "Untitled podcast").strip(),
                     author=str(row.get("artistName") or "").strip(),
                     feed_url=feed_url,
-                    artwork_url=str(
-                        row.get("artworkUrl600") or row.get("artworkUrl100") or ""
-                    ).strip(),
+                    artwork_url=artwork_url if is_web_url(artwork_url) else "",
                     genre=top_level_genre,
                 )
             )

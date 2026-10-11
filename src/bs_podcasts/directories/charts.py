@@ -9,6 +9,7 @@ from threading import Lock
 from ..net import SessionSlot, describe_network_error
 
 from ..domain import DirectoryCandidate
+from ..urlguard import is_web_url
 from .base import DirectoryError
 from .catalog import CATEGORY_IDS
 
@@ -257,7 +258,7 @@ class DirectoryCharts:
             author = str(attributes.get("artistName") or "").strip()
             artwork = attributes.get("artwork") or {}
             genres = self._genre_list(attributes.get("genreNames"))
-        if not feed_url:
+        if not is_web_url(feed_url):
             return None
         genre = next(
             (str(value) for value in genres if str(value) in CATEGORY_IDS),
@@ -287,7 +288,7 @@ class DirectoryCharts:
             subtitles = item.get("subtitles") or []
             author = str(subtitles[0] if subtitles else "").strip()
             artwork = item.get("icon") or {}
-        if not feed_url:
+        if not is_web_url(feed_url):
             return None
         genres = [str(value) for value in self._genre_list(item.get("genreNames"))]
         genre = next((value for value in genres if value in CATEGORY_IDS), genres[0] if genres else "")
@@ -313,10 +314,12 @@ class DirectoryCharts:
 
     @staticmethod
     def _artwork_url(template: str):
-        return (
+        url = (
             str(template)
             .replace("{w}", "600")
             .replace("{h}", "600")
             .replace("{c}", "bb")
             .replace("{f}", "jpg")
         )
+        # Artwork that is not a web URL is left out; the row itself is kept.
+        return url if is_web_url(url) else ""
