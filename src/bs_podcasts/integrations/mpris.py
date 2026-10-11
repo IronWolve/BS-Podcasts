@@ -78,6 +78,9 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
     def _command(self, name, *args):
         self.host.window._playback_command(name, *args)
 
+    def _capabilities(self):
+        return self.host.playback.engine.capabilities
+
     @Property(str)
     def PlaybackStatus(self):
         playback = self.host.playback
@@ -93,7 +96,7 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
 
     @Rate.setter
     def Rate(self, value):
-        if not self.CanControl or not math.isfinite(value):
+        if not self.CanControl or not self._capabilities().speed or not math.isfinite(value):
             return
         self._command("set_speed", value)
 
@@ -117,7 +120,7 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
 
     @Volume.setter
     def Volume(self, value):
-        if not self.CanControl or not math.isfinite(value):
+        if not self.CanControl or not self._capabilities().volume or not math.isfinite(value):
             return
         self._command("set_volume", float(value) * 100)
 
@@ -127,35 +130,40 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
 
     @Property(float, constant=True)
     def MinimumRate(self):
-        return 0.5
+        # A player that cannot change speed reports 1.0 for both limits.
+        return 0.5 if self._capabilities().speed else 1.0
 
     @Property(float, constant=True)
     def MaximumRate(self):
-        return 3.0
+        return 3.0 if self._capabilities().speed else 1.0
 
+    # The external-player fallback cannot be controlled from here: its pause
+    # does nothing and it takes no speed or volume. Only the internal engine
+    # is offered as controllable, and the properties that depend on control
+    # follow it.
     @Property(bool, constant=True)
     def CanGoNext(self):
-        return True
+        return self._capabilities().internal
 
     @Property(bool, constant=True)
     def CanGoPrevious(self):
-        return True
+        return self._capabilities().internal
 
     @Property(bool, constant=True)
     def CanPlay(self):
-        return True
+        return self._capabilities().internal
 
     @Property(bool, constant=True)
     def CanPause(self):
-        return True
+        return self._capabilities().internal
 
     @Property(bool, constant=True)
     def CanSeek(self):
-        return self.host.playback.engine.capabilities.seek
+        return self._capabilities().seek
 
     @Property(bool, constant=True)
     def CanControl(self):
-        return True
+        return self._capabilities().internal
 
     @Slot()
     def Next(self):
