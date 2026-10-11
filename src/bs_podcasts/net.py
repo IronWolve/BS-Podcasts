@@ -9,37 +9,66 @@ from .urlguard import UnsafeUrl, _blocked_reason, ensure_web_url
 import threading
 
 _request_context = threading.local()
+# Cooldowns are kept per request class: (host, foreground). A pause asked for
+# by a background fetch never refuses a user's Play; playback's own pause
+# still holds back background work on that host.
 _rate_limited_until = {}
 _rate_limit_lock = threading.Lock()
 _RATE_LIMIT_CAP = 6 * 60 * 60
 
 
-def _rate_limit_message(host: str) -> str:
-    return f"Rate limited by {host or 'the server'}. Retry in a moment."
+def _rate_limit_message(host: str, seconds: float = 0.0) -> str:
+    if seconds >= 90:
+        wait = f"Retry in about {int(seconds / 60 + .5)} min."
+    elif seconds >= 1:
+        wait = f"Retry in about {int(seconds + .5)} s."
+    else:
+        wait = "Retry in a moment."
+    return f"Rate limited by {host or 'the server'}. {wait}"
 
 
-def _remember_rate_limit(host: str, seconds: float) -> None:
+def _rate_limit_error(host: str, seconds: float = 0.0):
+    """The refusal for a host that asked for a pause; `retry_after` says how long."""
+    from requests.exceptions import RetryError
+    exc = RetryError(_rate_limit_message(host, seconds))
+    exc.retry_after = seconds
+    return exc
+
+
+def _remember_rate_limit(host: str, seconds: float, foreground: bool = False) -> None:
     if not host or seconds <= 0:
         return
     import time
     seconds = min(float(seconds), _RATE_LIMIT_CAP)
     until = time.monotonic() + seconds
+    key = (host, bool(foreground))
     with _rate_limit_lock:
         now = time.monotonic()
-        expired = [key for key, value in _rate_limited_until.items() if value <= now]
-        for key in expired:
-            del _rate_limited_until[key]
-        if until > _rate_limited_until.get(host, 0.0):
-            _rate_limited_until[host] = until
+        expired = [name for name, value in _rate_limited_until.items() if value <= now]
+        for name in expired:
+            del _rate_limited_until[name]
+        if until > _rate_limited_until.get(key, 0.0):
+            _rate_limited_until[key] = until
 
 
-def _rate_limit_remaining(host: str) -> float:
+def _rate_limit_remaining(host: str, foreground: bool = False) -> float:
+    """Seconds left on a host's cooldown. Playback only waits for its own
+    pauses; background work also honours the ones playback was given."""
     if not host:
         return 0.0
     import time
     with _rate_limit_lock:
-        until = _rate_limited_until.get(host, 0.0)
+        until = _rate_limited_until.get((host, True), 0.0)
+        if not foreground:
+            until = max(until, _rate_limited_until.get((host, False), 0.0))
     return max(0.0, until - time.monotonic())
+
+
+def _refuse_while_rate_limited(url, foreground: bool) -> None:
+    host = _request_host(url)
+    left = _rate_limit_remaining(host, foreground)
+    if left > 0:
+        raise _rate_limit_error(host, left)
 
 
 def _retry_after_seconds(response) -> float | None:
@@ -81,8 +110,9 @@ def _fail_long_retry_after(response, state, request_host: str) -> None:
     response_host = _request_host(getattr(response, "url", "") or "")
     # Short waits also apply to subsequent requests for the same host. Never
     # sleep/drain the error body here; callers can retry after the cooldown.
-    _remember_rate_limit(request_host, seconds)
-    _remember_rate_limit(response_host, seconds)
+    # Only the host that answered is cooled (not the first hop of a redirect
+    # chain that many shows share), and only for this request class.
+    _remember_rate_limit(response_host or request_host, seconds, getattr(state, "foreground", False))
     from .netlimits import NetworkDeadline
     try:
         left = state.remaining()
@@ -92,8 +122,7 @@ def _fail_long_retry_after(response, state, request_host: str) -> None:
         return
     from .netlimits import abort_response
     abort_response(response)
-    from requests.exceptions import RetryError
-    raise RetryError(_rate_limit_message(response_host or request_host))
+    raise _rate_limit_error(response_host or request_host, seconds)
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -208,9 +237,7 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
             budget = float(kwargs.pop("total_timeout", total_timeout))
             state = Deadline(min(budget, 45), kwargs.pop("cancel_event", None), foreground=foreground or is_foreground())
             host = _request_host(url)
-            if _rate_limit_remaining(host) > 0:
-                from requests.exceptions import RetryError
-                raise RetryError(_rate_limit_message(host))
+            _refuse_while_rate_limited(url, state.foreground)
             def work():
                 _request_context.state = state
                 try:
@@ -234,6 +261,9 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
             state = getattr(_request_context, "state", None)
             if state is not None:
                 remaining = state.remaining()
+                # Each redirect hop passes through here; a hop whose host is
+                # cooling down is refused without sending anything to it.
+                _refuse_while_rate_limited(request.url, state.foreground)
                 timeout = kwargs.get("timeout") or (8, 20)
                 kwargs["timeout"] = tuple(min(float(value or remaining), remaining) for value in timeout) if isinstance(timeout, tuple) else min(float(timeout), remaining)
             return super().send(request, **kwargs)

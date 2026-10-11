@@ -16,6 +16,10 @@ MAX_STREAM_BYTES = 32 * 1024**3
 # earns a fresh set of attempts; one that keeps failing gives up.
 RESUME_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0)
 RESUME_PROGRESS = 256 * 1024
+# A host that answers 429 or 5xx with Retry-After is waited out when the pause
+# is this short (an open must still finish inside the player's 25 s load
+# limit); a longer one is reported with its length.
+COOLDOWN_WAIT_CAP = 15.0
 
 logger = logging.getLogger("bs_podcasts")
 
@@ -37,7 +41,10 @@ def _permanent(exc) -> bool:
         return True
     from requests.exceptions import HTTPError, RetryError
     if isinstance(exc, RetryError):
-        return True
+        # A short host pause is waited out; one that outlasts the wait is not
+        # something a reconnect a few seconds later can fix.
+        wait = getattr(exc, 'retry_after', None)
+        return wait is None or wait > COOLDOWN_WAIT_CAP
     if isinstance(exc, HTTPError):
         status = getattr(getattr(exc, "response", None), "status_code", None) or 0
         return status < 500 and status not in {408, 425, 429}
@@ -77,6 +84,21 @@ class HttpStream:
             self._on_error(redact(exc))
             raise ValueError(redact(exc)) from None
 
+    def _get(self, headers, remaining):
+        """Send the request. A host that asked for a short pause (Retry-After)
+        is waited out once, so a reconnect, a seek or a reopen is not refused
+        for a cooldown that ends within seconds; a long one is raised with its
+        length."""
+        from requests.exceptions import RetryError
+        for attempt in range(2):
+            try:
+                return self.session.get(self.url, headers=headers, stream=True, timeout=(8,30),
+                                        cancel_event=self.cancelled, total_timeout=remaining)
+            except RetryError as exc:
+                wait = getattr(exc, 'retry_after', None)
+                if attempt or wait is None or wait > COOLDOWN_WAIT_CAP or self.cancelled.wait(wait):
+                    raise
+
     def _open(self, offset):
         remaining = self._expires - time.monotonic()
         if remaining <= 0:
@@ -86,8 +108,7 @@ class HttpStream:
             headers['Range'] = f'bytes={offset}-'
         if self._validator:
             headers['If-Range'] = self._validator
-        response = self.session.get(self.url, headers=headers, stream=True, timeout=(8,30),
-                                    cancel_event=self.cancelled, total_timeout=remaining)
+        response = self._get(headers, remaining)
         try:
             response.raise_for_status()
             if response.headers.get('Content-Encoding','identity').lower() not in {'','identity'}:
