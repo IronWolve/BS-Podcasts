@@ -270,8 +270,6 @@ class FeedFetcher:
 
     def __init__(self, session=None):
         self.session = session
-        if session is not None:
-            session.max_redirects = 5
         self._recent = OrderedDict()
         self._recent_lock = threading.Lock()
 
