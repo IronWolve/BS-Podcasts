@@ -194,8 +194,9 @@ def build(output, macos=None, plain=False):
     if win_record['version'] != version or win_record['source'] != {'commit': commit, 'dirty': False, 'sha256': fingerprint}:
         raise ValueError('Windows build is stale, dirty or from a different commit.')
     windows_files = verify_files(windows/'BS Podcasts', win_record['artifact']['files'])
-    if win_record['runtime']['native'].get('recipe_sha256') != file_digest(ROOT/'packaging/build-libmpv-lgpl.sh'):
-        raise ValueError('Windows native recipe provenance is missing or stale; rebuild the native library.')
+    if (win_record['runtime']['native'].get('recipe_sha256') != file_digest(ROOT/'packaging/build-libmpv-lgpl.sh')
+            or win_record['runtime']['native'].get('inputs') != json.loads((ROOT/'packaging/native-sources.json').read_text())):
+        raise ValueError('Windows native recipe or source inputs provenance is missing or stale; rebuild the native library.')
     scan_inputs(windows_files, tokens)
 
     linux = ROOT.parent / 'dists/linux'
