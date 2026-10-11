@@ -155,7 +155,8 @@ class HttpStream:
                 previous, self._response = self._response, response
             if previous is not None:
                 abort_response(previous)
-            self._validator = validator
+            # A reply that names no validator leaves the earlier one in place.
+            self._validator = validator or self._validator
             self.size = total if total is not None else self.size
             self.position = offset
             self._part_end = part_end
@@ -368,6 +369,8 @@ class HttpStream:
 
     def close(self):
         self.cancel()
+        with self._lock:
+            self._response = None
         chunks, self._chunks = self._chunks, iter(())
         try:
             close = getattr(chunks, 'close', None)
