@@ -5075,7 +5075,12 @@ class MainWindow(QMainWindow):
             return
         finder = self.listening.next_chapter if direction > 0 else self.listening.previous_chapter
         playback = self.playback
-        identity = playback.current_identity()
+        # The identity the player last reported, as `_seek` uses it: asking the
+        # service here would wait for its lock on the window thread, which a
+        # load or stop holds while it waits for the library.
+        identity = getattr(self, "_playback_identity", None)
+        if identity is None or tuple(identity[:2]) != (snapshot.episode_id, snapshot.source):
+            return
         def work():
             if playback.current_identity() != identity:
                 return ""
