@@ -1594,7 +1594,8 @@ class MainWindow(QMainWindow):
             removed, failed = self._remove_podcasts(library, targets, paths)
             return removed, sum(1 for show in current.values() if show is not None) - len(targets), failed
 
-        self._run_task("remove-shows", work, pool=self.commands, keep=True)
+        # Bulk: Play and Pause stay responsive while the podcasts go.
+        self._run_task("remove-shows", work, pool=self.commands, keep=True, bulk=True)
 
     def _reset_library(self):
         if self.library is None:
@@ -1659,7 +1660,7 @@ class MainWindow(QMainWindow):
             if playback is not None:
                 playback.stop()
             return work()
-        self._run_task("reset-library", stopped_work, pool=self.commands, keep=True)
+        self._run_task("reset-library", stopped_work, pool=self.commands, keep=True, bulk=True)
 
     def _show_about(self):
         library, downloads, playback = self.library, self.downloads, self.playback
@@ -1925,7 +1926,7 @@ class MainWindow(QMainWindow):
             if playback is not None:
                 playback.end_show_retirement(show_id)
             raise RuntimeError(message)
-        self._run_task('unsubscribe', cleanup, show_id, pool=self.commands, keep=True)
+        self._run_task('unsubscribe', cleanup, show_id, pool=self.commands, keep=True, bulk=True)
 
     def _focus_regions(self):
         """Focus targets for F6 cycling: rail, page, pane, player. Tab alone
@@ -2795,10 +2796,11 @@ class MainWindow(QMainWindow):
             return self.history_page
         return None  # Dialog/action/overlay failures belong to feedback, not an unrelated page.
 
-    def _run_read(self, work, apply, key: str, pool=None, *, coalesce=True):
+    def _run_read(self, work, apply, key: str, pool=None, *, coalesce=True, bulk=False):
         """Run `work()` on a worker, then `apply(result)` on the main thread.
         Read-only keys retain one active request and one replaceable latest.
         Mutations must opt out; commands are always retained in queue order.
+        `bulk` puts a long command-pool job on the queue's second worker.
         """
         if self._closed:
             return
@@ -2820,9 +2822,9 @@ class MainWindow(QMainWindow):
                 if future is not None:
                     future.cancel()
                 return
-        self._submit_read(work, apply, key, executor, token, owner)
+        self._submit_read(work, apply, key, executor, token, owner, bulk)
 
-    def _submit_read(self, work, apply, key, executor, token, owner):
+    def _submit_read(self, work, apply, key, executor, token, owner, bulk=False):
         if token is not None:
             self._read_active[key] = (token, None)
 
@@ -2833,7 +2835,8 @@ class MainWindow(QMainWindow):
             return work()
 
         try:
-            future = (executor.submit(current_work, keep=True) if executor is self.commands
+            future = (executor.submit(current_work, keep=True, bulk=True) if executor is self.commands and bulk
+                      else executor.submit(current_work, keep=True) if executor is self.commands
                       else executor.submit(current_work))
         except Exception as exc:
             self._emit_completed(("read", (key, token, apply, owner),
@@ -4961,7 +4964,7 @@ class MainWindow(QMainWindow):
                 self._notify("History cleared", "success")
             # On the command queue: ordered with other edits and finished
             # before Quit, where the read pool would drop it.
-            self._run_read(self.library.clear_history, apply, 'history-clear', pool=self.commands, coalesce=False)
+            self._run_read(self.library.clear_history, apply, 'history-clear', pool=self.commands, coalesce=False, bulk=True)
 
     def _clear_queue(self):
         if self.library is None:
