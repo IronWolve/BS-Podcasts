@@ -38,7 +38,9 @@ analysis.datas = TOC(entry for entry in analysis.datas if not _dropped_payload(e
 pyz = PYZ(analysis.pure)
 exe = EXE(pyz, analysis.scripts, [], exclude_binaries=True, name='BS Podcasts',
           debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
-          console=False, disable_windowed_traceback=True, argv_emulation=False,
+          # Traceback dialog choice, recorded per platform: True suppresses an uncaught traceback in the windowed build;
+    # Windows shows it (False). The owner has not chosen one value for both.
+    console=False, disable_windowed_traceback=True, argv_emulation=False,
           target_arch='arm64', codesign_identity=IDENTITY,
           entitlements_file=str(ROOT/'packaging/macos-entitlements.plist') if IDENTITY else None)
 collect = COLLECT(exe, analysis.binaries, analysis.datas, strip=False, upx=False, name='BS Podcasts')

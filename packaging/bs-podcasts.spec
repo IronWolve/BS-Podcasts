@@ -8,6 +8,7 @@ starts near-instantly, as a single process.
 
 import os
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(os.environ["BS_PODCASTS_SOURCE_STAGE"])
@@ -17,12 +18,16 @@ LIBMPV = Path(os.environ["BS_PODCASTS_LIBMPV_DLL"])
 if not LIBMPV.is_file():
     raise FileNotFoundError(f"Bundled libmpv DLL not found: {LIBMPV}")
 
-match = re.search(r'^version\s*=\s*"([^"]+)"', (ROOT / "pyproject.toml").read_text(encoding="utf-8"), re.M)
-if not match or not re.search(r"\d", match.group(1)):
+try:
+    VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+except (KeyError, TypeError, tomllib.TOMLDecodeError):
+    VERSION = ""
+if not isinstance(VERSION, str) or not re.search(r"\d", VERSION):
     # Never stamp a placeholder version into the executable.
     raise SystemExit("Could not read a version from pyproject.toml; refusing to build.")
-VERSION = match.group(1)
-NUMERIC = tuple((list(map(int, re.findall(r"\d+", VERSION))) + [0, 0, 0, 0])[:4])
+# The release numbers only: a pre-release suffix such as rc1 must not add a number to the version resource.
+RELEASE = re.match(r"\d+(?:\.\d+)*", VERSION)
+NUMERIC = tuple((([int(part) for part in RELEASE.group(0).split(".")] if RELEASE else []) + [0, 0, 0, 0])[:4])
 
 # Identify the process as BS Podcasts (not the Python bootloader) in Task
 # Manager and file properties.
@@ -94,18 +99,21 @@ _UNUSED_BINARIES = (
     "qt6pdf",
     "qt6virtualkeyboard",
     "qtvirtualkeyboardplugin",
-    "imageformats\\qpdf",
+    "imageformats/qpdf",
     "opengl32sw",
 )
 
 def _dropped_payload(name):
+    # Separators are normalised before every test, so a backslash path and a slash path are judged alike.
     normalized = name.replace("\\", "/").lower()
     parts = normalized.split("/")
     if normalized.endswith(".qm") or "translations" in parts:
         return True
     if any(part == "pil" or part.startswith("pil.") or part == "pillow" or part.startswith("pillow.") for part in parts):
         return True
-    return any(marker in name.lower() for marker in _UNUSED_BINARIES)
+    if {"setuptools", "pkg_resources", "_distutils_hack", "distutils"}.intersection(parts):
+        return True
+    return any(marker in normalized for marker in _UNUSED_BINARIES)
 
 analysis.binaries = TOC(entry for entry in analysis.binaries if not _dropped_payload(entry[0]))
 analysis.datas = TOC(entry for entry in analysis.datas if not _dropped_payload(entry[0]))
@@ -125,6 +133,8 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    # Traceback dialog choice, recorded per platform: False here shows an uncaught traceback in the windowed build;
+    # macOS suppresses it (True). The owner has not chosen one value for both.
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
