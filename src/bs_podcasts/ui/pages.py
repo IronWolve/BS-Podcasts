@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 from . import icons
 from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
-from .widgets import fit_combo_width
+from .widgets import fit_combo_width, quiet_signals
 from .widgets import PlainTextLabel, wheel_needs_focus, exec_menu, FlowLayout
 from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, reduced_motion, scaled_px, system_theme, theme_name
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
@@ -1202,20 +1202,19 @@ class PodcastGridPage(BasePage, _ListPageMixin):
     def set_category_topics(self, category: str):
         if self.topic is None:
             return
-        self.topic.blockSignals(True)
-        self.topic.clear()
-        topics = CATEGORY_TOPICS.get(category, ())
-        if topics:
-            self.topic.addItem(f"All {category}")
-            self.topic.addItems(topics)
-            self.topic.setEnabled(True)
-        elif category:
-            self.topic.addItem("No additional topics")
-            self.topic.setEnabled(False)
-        else:
-            self.topic.addItem("Choose a category first")
-            self.topic.setEnabled(False)
-        self.topic.blockSignals(False)
+        with quiet_signals(self.topic):
+            self.topic.clear()
+            topics = CATEGORY_TOPICS.get(category, ())
+            if topics:
+                self.topic.addItem(f"All {category}")
+                self.topic.addItems(topics)
+                self.topic.setEnabled(True)
+            elif category:
+                self.topic.addItem("No additional topics")
+                self.topic.setEnabled(False)
+            else:
+                self.topic.addItem("Choose a category first")
+                self.topic.setEnabled(False)
 
     def _size_discover_controls(self):
         """The Discover toolbar's fixed sizes, set at construction and again
@@ -1445,9 +1444,8 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         once. The separate setters each filter, sort and replace the whole
         model, so changing all three rebuilt a long list up to three times."""
         search = self.header.search
-        search.blockSignals(True)
-        search.setText(query)
-        search.blockSignals(False)
+        with quiet_signals(search):
+            search.setText(query)
         self._filter_timer.stop()
         self._filter = filter_value
         self.chips.select(filter_value)
@@ -2341,19 +2339,15 @@ class SettingsPage(BasePage):
         self.settings_scroll.ensureWidgetVisible(card, 0, 24)
 
     def load_downloads(self, auto: bool, limit: int, delete_played: bool = False, download_first: bool = False):
-        for control in (self.auto_download, self.auto_download_limit, self.delete_played, self.download_first):
-            control.blockSignals(True)
-        self.auto_download.setChecked(auto)
-        self.auto_download_limit.setValue(limit)
-        self.delete_played.setChecked(delete_played)
-        self.download_first.setChecked(download_first)
-        for control in (self.auto_download, self.auto_download_limit, self.delete_played, self.download_first):
-            control.blockSignals(False)
+        with quiet_signals(self.auto_download, self.auto_download_limit, self.delete_played, self.download_first):
+            self.auto_download.setChecked(auto)
+            self.auto_download_limit.setValue(limit)
+            self.delete_played.setChecked(delete_played)
+            self.download_first.setChecked(download_first)
 
     def load_refresh_interval(self, minutes: int):
-        self.refresh_interval.blockSignals(True)
-        self.refresh_interval.setValue(minutes)
-        self.refresh_interval.blockSignals(False)
+        with quiet_signals(self.refresh_interval):
+            self.refresh_interval.setValue(minutes)
 
     def load_desktop_options(self, background_paused: bool, notifications: bool, close_to_tray: bool, update_checks: bool, file_logging: bool = True):
         for control, value in (
@@ -2363,9 +2357,8 @@ class SettingsPage(BasePage):
             (self.update_checks, update_checks),
             (self.file_logging, file_logging),
         ):
-            control.blockSignals(True)
-            control.setChecked(value)
-            control.blockSignals(False)
+            with quiet_signals(control):
+                control.setChecked(value)
         self.set_background_paused(background_paused)
 
     def set_background_paused(self, paused: bool):
@@ -2386,32 +2379,28 @@ class SettingsPage(BasePage):
         self.database_repair.setVisible(repair_available)
 
     def load_density(self, value: str):
-        self.density.blockSignals(True)
-        self.density.setCurrentIndex(max(0, self.density.findData(value)))
-        self.density.blockSignals(False)
+        with quiet_signals(self.density):
+            self.density.setCurrentIndex(max(0, self.density.findData(value)))
 
     def load_search_depth(self, value: str):
         try:
             value = str(max(50, min(200, int(value))))
         except (ValueError, TypeError, OverflowError):
             value = "200"
-        self.search_depth.blockSignals(True)
-        index = self.search_depth.findData(value)
-        if index < 0:
-            self.search_depth.addItem(f"{value} results", value)
+        with quiet_signals(self.search_depth):
             index = self.search_depth.findData(value)
-        self.search_depth.setCurrentIndex(index)
-        self.search_depth.blockSignals(False)
+            if index < 0:
+                self.search_depth.addItem(f"{value} results", value)
+                index = self.search_depth.findData(value)
+            self.search_depth.setCurrentIndex(index)
 
     def load_episode_lines(self, value: int):
-        self.episode_lines.blockSignals(True)
-        self.episode_lines.setValue(max(1, min(20, value)))
-        self.episode_lines.blockSignals(False)
+        with quiet_signals(self.episode_lines):
+            self.episode_lines.setValue(max(1, min(20, value)))
 
     def load_hover_previews(self, enabled: bool):
-        self.hover_previews.blockSignals(True)
-        self.hover_previews.setChecked(enabled)
-        self.hover_previews.blockSignals(False)
+        with quiet_signals(self.hover_previews):
+            self.hover_previews.setChecked(enabled)
 
     def _system_scheme_changed(self, *_scheme):
         self._scheme_timer.start()
@@ -2422,29 +2411,28 @@ class SettingsPage(BasePage):
             self.setting_changed.emit("ui.theme", "system")
 
     def load_theme(self, value: str):
-        self.theme.blockSignals(True)
-        index = max(0, self.theme.findData(value))
-        self.theme.setCurrentIndex(index)
-        self.theme.blockSignals(False)
+        with quiet_signals(self.theme):
+            index = max(0, self.theme.findData(value))
+            self.theme.setCurrentIndex(index)
 
     def load_text_size(self, value: str):
-        self.text_size.blockSignals(True)
-        index = self.text_size.findData(value)
-        self.text_size.setCurrentIndex(index if index >= 0 else self.text_size.findData("comfortable"))
-        self.text_size.blockSignals(False)
+        with quiet_signals(self.text_size):
+            index = self.text_size.findData(value)
+            self.text_size.setCurrentIndex(index if index >= 0 else self.text_size.findData("comfortable"))
 
     def load_font(self, value: str):
-        self.ui_font.blockSignals(True)
-        index = self.ui_font.findData(value)
-        self.ui_font.setCurrentIndex(index if index >= 0 else 0)
-        self.ui_font.blockSignals(False)
+        with quiet_signals(self.ui_font):
+            index = self.ui_font.findData(value)
+            self.ui_font.setCurrentIndex(index if index >= 0 else 0)
 
     def _fit_field(self, field, floor: int):
         """Uniform field width, but never narrower than the widest option —
         an elided dropdown entry ("200 results · dire…") is a bad look. Combos
         use the width rule shared with the podcast-settings dialog."""
-        width = fit_combo_width(field, floor) if isinstance(field, QComboBox) else floor
-        field.setFixedWidth(width)
+        if isinstance(field, QComboBox):
+            fit_combo_width(field, floor, fixed=True)
+        else:
+            field.setFixedWidth(floor)
 
     def apply_metrics(self):
         super().apply_metrics()
@@ -2476,14 +2464,11 @@ class SettingsPage(BasePage):
             path_label.setMinimumWidth(scaled_px(120))
 
     def load_values(self, speed: float, skip_back: int, skip_forward: int, auto_continue: bool):
-        for control in (self.speed, self.skip_back, self.skip_forward, self.auto_continue):
-            control.blockSignals(True)
-        self.speed.setValue(speed)
-        self.skip_back.setValue(skip_back)
-        self.skip_forward.setValue(skip_forward)
-        self.auto_continue.setChecked(auto_continue)
-        for control in (self.speed, self.skip_back, self.skip_forward, self.auto_continue):
-            control.blockSignals(False)
+        with quiet_signals(self.speed, self.skip_back, self.skip_forward, self.auto_continue):
+            self.speed.setValue(speed)
+            self.skip_back.setValue(skip_back)
+            self.skip_forward.setValue(skip_forward)
+            self.auto_continue.setChecked(auto_continue)
 
     def set_shortcuts(self, bindings: dict[str, str]):
         self._shortcut_bindings = dict(bindings)
@@ -2523,10 +2508,9 @@ class SettingsPage(BasePage):
     def show_shortcut_error(self, name: str, message: str, previous: str):
         editor = self._shortcut_editors.get(name)
         if editor is not None:
-            editor.blockSignals(True)
-            # Portable text, as stored and as set_shortcuts parses it.
-            editor.setKeySequence(QKeySequence(previous, QKeySequence.SequenceFormat.PortableText))
-            editor.blockSignals(False)
+            with quiet_signals(editor):
+                # Portable text, as stored and as set_shortcuts parses it.
+                editor.setKeySequence(QKeySequence(previous, QKeySequence.SequenceFormat.PortableText))
         self.shortcut_error.setText(message)
         self.shortcut_error.show()
         QAccessible.updateAccessibility(QAccessibleEvent(self.shortcut_error, QAccessible.Event.Alert))

@@ -2,6 +2,7 @@
 
 from bisect import bisect_right
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import replace
 from functools import lru_cache
 from html import escape as html_escape, unescape as html_unescape
@@ -768,13 +769,30 @@ def combo_chrome_px(combo) -> int:
     return chrome if 0 < chrome < probe_width else scaled_px(66)
 
 
-def fit_combo_width(combo, floor: int = 0) -> int:
+@contextmanager
+def quiet_signals(*widgets):
+    """Block each widget's signals while a block sets its values.
+
+    Each widget gets back the state it had before the block, and that is
+    restored even when the block raises, so a failed update cannot leave a
+    control silently muted.
+    """
+    states = [(widget, widget.blockSignals(True)) for widget in widgets]
+    try:
+        yield
+    finally:
+        for widget, previous in states:
+            widget.blockSignals(previous)
+
+
+def fit_combo_width(combo, floor: int = 0, fixed: bool = False) -> int:
     """Size a combo to its widest option and return the width used.
 
     design.md names the 180 px settings combo by hand as a design violation —
     a fixed width that cages text — so nothing may pin one to a constant its
     own contents can outgrow. Item tooltips carry the full text as the last
-    resort the rule allows.
+    resort the rule allows. `fixed=True` pins the combo to that same width,
+    so a form that wants a uniform field gets the rule from one place.
     """
     metrics = combo.fontMetrics()
     widest = max(
@@ -782,7 +800,10 @@ def fit_combo_width(combo, floor: int = 0) -> int:
         default=0,
     )
     width = max(floor, widest + combo_chrome_px(combo) + scaled_px(8))
-    combo.setMinimumWidth(width)
+    if fixed:
+        combo.setFixedWidth(width)
+    else:
+        combo.setMinimumWidth(width)
     for index in range(combo.count()):
         combo.setItemData(index, combo.itemText(index), Qt.ItemDataRole.ToolTipRole)
     return width
@@ -4483,9 +4504,8 @@ class PlayerBar(QFrame):
                 self._apply_live_status(snapshot)
             position = media_seconds(snapshot.position) or 0.0
             if not self._slider_busy():
-                self.slider.blockSignals(True)
-                self.slider.setValue(min(self.slider.maximum(), int(self.slider.maximum() * position / self._duration)) if self._duration else 0)
-                self.slider.blockSignals(False)
+                with quiet_signals(self.slider):
+                    self.slider.setValue(min(self.slider.maximum(), int(self.slider.maximum() * position / self._duration)) if self._duration else 0)
             self.elapsed.setText(self._time(position))
             self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
             description = f"{self._time(position)} of {self._time(self._duration)}"
@@ -4529,9 +4549,8 @@ class PlayerBar(QFrame):
         position = media_seconds(snapshot.position) or 0.0
         self.slider.set_duration(self._duration, self._time)
         if not self._slider_busy():
-            self.slider.blockSignals(True)
-            self.slider.setValue(min(self.slider.maximum(), int(self.slider.maximum() * position / self._duration)) if self._duration else 0)
-            self.slider.blockSignals(False)
+            with quiet_signals(self.slider):
+                self.slider.setValue(min(self.slider.maximum(), int(self.slider.maximum() * position / self._duration)) if self._duration else 0)
         self.elapsed.setText(self._time(position))
         self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
         self._speed = float(snapshot.speed)
