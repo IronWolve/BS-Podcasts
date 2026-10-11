@@ -202,28 +202,29 @@ class LibraryRepository:
         self, show_id: int, keep_latest: int | None, older_than_days: int | None
     ) -> list[Episode]:
         """Downloaded episodes a feed rule may remove; favorites never qualify."""
+        eligible = (
+            "FROM episodes e JOIN shows s ON s.id=e.show_id "
+            "WHERE e.show_id=? AND e.downloaded_path != '' AND e.favorite=0 "
+            "AND EXISTS (SELECT 1 FROM downloads d WHERE d.episode_id=e.id AND d.state='complete' AND d.length_verified=1)"
+        )
+        newest_first = " ORDER BY e.published_at DESC, e.id DESC"
+        # The rules need only the order and the date, so the full rows, long
+        # descriptions included, are read for the candidates alone.
         with self.database.connect() as connection:
-            rows = connection.execute(
-                """SELECT e.*, s.title AS show_title,
-                   COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path
-                   FROM episodes e JOIN shows s ON s.id=e.show_id
-                   WHERE e.show_id=? AND e.downloaded_path != '' AND e.favorite=0
-                   AND EXISTS (SELECT 1 FROM downloads d WHERE d.episode_id=e.id AND d.state='complete' AND d.length_verified=1)
-                   ORDER BY e.published_at DESC, e.id DESC""",
-                (show_id,),
+            ordered = connection.execute(
+                "SELECT e.id, e.published_at " + eligible + newest_first, (show_id,)
             ).fetchall()
-        episodes = [self._episode(row) for row in rows]
         keep_latest = max(0, int(keep_latest or 0))
         cutoff = time.time() - max(0, int(older_than_days or 0)) * 86400
-        candidates = []
-        for index, episode in enumerate(episodes):
+        wanted = []
+        for index, row in enumerate(ordered):
             outside_count = bool(keep_latest and index >= keep_latest)
             older = False
             if older_than_days:
                 try:
                     from datetime import datetime, timezone
                     parsed = datetime.fromisoformat(
-                        episode.published_at.replace("Z", "+00:00")
+                        row["published_at"].replace("Z", "+00:00")
                     )
                     if parsed.tzinfo is None:
                         # The parser stores dates normalized to UTC and then
@@ -235,7 +236,20 @@ class LibraryRepository:
                 except (TypeError, ValueError):
                     older = False
             if outside_count or older:
-                candidates.append(episode)
+                wanted.append(row["id"])
+        candidates = []
+        with self.database.connect() as connection:
+            for start in range(0, len(wanted), 500):
+                batch = wanted[start:start + 500]
+                # The same conditions again: a row that stopped qualifying
+                # since the first read is dropped, never removed.
+                rows = connection.execute(
+                    "SELECT e.*, s.title AS show_title, "
+                    "COALESCE(NULLIF(e.episode_artwork_path, ''), s.artwork_path) AS artwork_path "
+                    + eligible + " AND e.id IN (" + ",".join("?" for _ in batch) + ")" + newest_first,
+                    (show_id, *batch),
+                ).fetchall()
+                candidates.extend(self._episode(row) for row in rows)
         return candidates
 
     def import_feed(self, show_id: int, feed: FeedData) -> int:
