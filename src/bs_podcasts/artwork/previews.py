@@ -10,7 +10,7 @@ from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PySide6.QtGui import QImage, QImageReader
 
 from ..config import cache_dir
-from ..data.files import atomic_write
+from .cache import write_replace
 
 SIDE = 128
 MAX_FILE_BYTES = 128 * 1024
@@ -77,7 +77,7 @@ def save(path, image, stamp):
             return
         try:
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            atomic_write(target, bytes(data))
+            write_replace(target, bytes(data))
         except OSError:
             return  # A read-only/full cache must not prevent displaying artwork.
         _writes += 1

@@ -6,11 +6,12 @@ from threading import Lock
 from collections import OrderedDict
 import os
 import json
+import tempfile
 import time
 import stat
 
 from ..net import SessionSlot
-from ..data.files import atomic_write, open_private
+from ..data.files import open_private
 from ..urlguard import UnsafeUrl, ensure_fetchable, ensure_web_url
 from ..netlimits import Deadline, current_cancel
 
@@ -52,6 +53,25 @@ def _looks_textual(head: bytes) -> bool:
     if lowered.startswith((b"<svg", b"<?xml")):  # SVG may have an XML prolog
         return False
     return sniff[:1] in (b"{", b"[")
+
+
+def write_replace(path: Path, content: bytes) -> Path:
+    """Replace `path` with `content` through a temporary file and a rename.
+
+    Nothing is forced to disk: this is for cache files that are rebuilt when
+    they are missing or short. After a crash a short marker fails to parse,
+    a short preview fails to decode, and either is treated as absent, as the
+    downloaded cover itself already is."""
+    path = Path(path)
+    descriptor, name = tempfile.mkstemp(prefix=".bs-write-", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path
 
 
 class ArtworkError(RuntimeError):
@@ -307,7 +327,7 @@ class ArtworkCache:
         checked = time.time()
         self._remember_checked(path, stamp, checked)
         try:
-            atomic_write(path.with_suffix('.checked'), json.dumps(
+            write_replace(path.with_suffix('.checked'), json.dumps(
                 {'signature': stamp, 'checked': checked}, separators=(',', ':')
             ).encode('utf-8'))
         except OSError:
