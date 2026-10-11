@@ -16,6 +16,7 @@ from PySide6.QtCore import (
     QPoint,
     QPropertyAnimation,
     QRect,
+    QRectF,
     QSize,
     QTimer,
     Qt,
@@ -446,6 +447,12 @@ class Artwork(QWidget):
             notify=self,
         )
         painter.drawPixmap(0, 0, pixmap)
+        if self.hasFocus():
+            # The stylesheet removes the default outline, so a Tab stop draws its own ring.
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(cached_color(COLORS["accent"]), 2))
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), self._radius, self._radius)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
