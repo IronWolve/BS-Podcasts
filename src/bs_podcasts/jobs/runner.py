@@ -28,6 +28,9 @@ class JobResult:
     # what the message cannot say (for example a directory error's network flag).
     # It takes no part in comparison or repr.
     error: BaseException | None = field(default=None, repr=False, compare=False)
+    # Set when the runner refused the job because its queue was full, so the
+    # request never ran and a caller may try again shortly.
+    busy: bool = field(default=False, compare=False)
 
 
 class TrackedExecutor(ThreadPoolExecutor):
@@ -65,7 +68,7 @@ class JobRunner:
             return self._executor.submit(self._invoke, callable_, args, kwargs)
         if not self._slots.acquire(blocking=False):
             result = Future()
-            result.set_result(JobResult(JobStatus.ERROR, message='Background requests are busy; retry shortly.'))
+            result.set_result(JobResult(JobStatus.ERROR, message='Background requests are busy; retry shortly.', busy=True))
             return result
         try:
             future = self._executor.submit(self._invoke, callable_, args, kwargs)

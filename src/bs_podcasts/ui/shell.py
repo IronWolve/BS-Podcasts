@@ -162,9 +162,6 @@ def _integrity_report(database):
         raise
 
 
-# The job runner's answer when its queue is full; the request never ran.
-_BUSY_ANSWER = "Background requests are busy"
-
 
 def _fetch_feed_preview(fetcher, feed_url, checkpoint=lambda: None):
     """Fetch and parse one feed as a preview, on a worker. The details pane and
@@ -7357,7 +7354,7 @@ class MainWindow(QMainWindow):
         cancelled = cancel is not None and cancel.is_set()
         failed = result.status != JobStatus.OK or (result.value and result.value[3])
         if not cancelled:
-            delay = 1 if result.message == 'Background requests are busy; retry shortly.' else (60 if failed else 300)
+            delay = 1 if result.busy else (60 if failed else 300)
             self._episode_artwork_attempts[identifier] = time.monotonic() + delay
             self._episode_artwork_attempts.move_to_end(identifier)
             while len(self._episode_artwork_attempts) > 2048:
@@ -7408,7 +7405,7 @@ class MainWindow(QMainWindow):
                 self._apply_preview(identifier, result.value, update_grid=not newest_scan)
         elif kind != "preview-scan":
             message = result.message or "unknown error"
-            if message.startswith(_BUSY_ANSWER) and self._retry_busy_preview(identifier):
+            if result.busy and self._retry_busy_preview(identifier):
                 return
             self.context.show_preview_error(identifier, message)
             if self._pending_episodes_url == identifier:
