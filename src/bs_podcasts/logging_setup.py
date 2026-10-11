@@ -58,12 +58,15 @@ def write_crash_file(text: str) -> bool:
     if len(text) > _MAX_CRASH_TEXT_CHARS:
         half = _MAX_CRASH_TEXT_CHARS // 2
         text = text[:half] + "\n... crash report truncated ...\n" + text[-half:]
+    failed = []
     try:
         with _crash_handler_lock:
             path = log_path().parent / "bs-podcasts-crash.log"
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             handler = _PrivateLog(path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
             handler.setFormatter(_PrivateFormatter("%(asctime)s %(levelname)s: %(message)s"))
+            # handle() reports a failed write here, not to the caller.
+            handler.handleError = lambda _record: failed.append(True)
             record = logging.LogRecord(
                 "bs_podcasts.crash", logging.ERROR, "", 0, text, (), None
             )
@@ -72,7 +75,7 @@ def write_crash_file(text: str) -> bool:
                 handler.flush()
             finally:
                 handler.close()
-        return True
+        return not failed
     except OSError:
         return False
 
