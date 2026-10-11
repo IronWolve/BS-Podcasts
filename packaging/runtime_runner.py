@@ -280,6 +280,19 @@ def main():
     parser.add_argument('--stop',action='store_true')
     args,extra=parser.parse_known_args()
     report=Report(plain=args.plain)
+    app_started=[]
+    try:
+        return _launch(args,extra,report,app_started)
+    except RuntimeError as exc:
+        # A refusal by the launcher is one plain line. An error from the
+        # application or its self-check keeps its traceback.
+        if app_started:
+            raise
+        report.line('fail',str(exc))
+        return 1
+
+
+def _launch(args,extra,report,app_started):
     current=record()
     if args.stop:
         if not running(current):
@@ -292,13 +305,17 @@ def main():
             return 0
         if not hasattr(os,'pidfd_open') or not hasattr(signal,'pidfd_send_signal'):
             raise RuntimeError('Safe process signalling requires Linux pidfd support; nothing was stopped.')
-        descriptor=os.pidfd_open(current['pid'])
         try:
-            if not running(current):
-                return 0
-            signal.pidfd_send_signal(descriptor,signal.SIGTERM)
-        finally:
-            os.close(descriptor)
+            descriptor=os.pidfd_open(current['pid'])
+            try:
+                if not running(current):
+                    return 0
+                signal.pidfd_send_signal(descriptor,signal.SIGTERM)
+            finally:
+                os.close(descriptor)
+        except ProcessLookupError:
+            # It exited between the running check and the signal: it is stopped.
+            pass
         signalled=time.monotonic()
         deadline=signalled+5
         while running(current) and time.monotonic()<deadline:
@@ -314,6 +331,7 @@ def main():
     if args.status or args.check:
         live=_describe(args,report)
         if args.check:
+            app_started.append(True)
             from tempfile import TemporaryDirectory
             from bs_podcasts.selfcheck import main as check
             with TemporaryDirectory(prefix='runtime-check-', dir=PROJECT/'tmp') as folder:
@@ -337,6 +355,7 @@ def main():
             for kind in (signal.SIGTERM,signal.SIGINT):
                 signals[kind]=signal.signal(kind,lambda *_:requested.__setitem__(0,True))
             report.line('ok',f'Starting PID {os.getpid()} (local desktop; no public endpoint).')
+            app_started.append(True)
             return _run_gui(extra,requested)
         finally:
             for kind,handler in signals.items():
