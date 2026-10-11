@@ -677,7 +677,13 @@ class LibraryRepository:
             if self._settings_cache is not None:
                 self._settings_cache.pop(retention_key, None)
         if failed_files:
-            self._remember_orphans(failed_files)
+            try:
+                self._remember_orphans(failed_files)
+            except sqlite3.Error as exc:
+                # The show is already gone, so this is not a failed removal.
+                # The caller still gets the files that stayed in failed_files.
+                _log.warning("Could not record %d file(s) kept after unsubscribing (%s): %s",
+                             len(failed_files), exc, ", ".join(Path(path).name for path in failed_files[:3]))
         preview["removed_files"] = removed_files
         preview["failed_files"] = failed_files
         return preview
