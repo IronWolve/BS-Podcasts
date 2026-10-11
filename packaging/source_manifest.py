@@ -301,15 +301,13 @@ def tracking_difference(root, files):
         return None
     ignored = subprocess.run(
         ['git', '-C', str(root), 'ls-files', '--others', '--ignored',
-         '--exclude-standard', '-z', '--', 'src', 'packaging'],
-        capture_output=True, text=True, timeout=5, check=True)
-    source_suffixes = {'.py', '.sh', '.ps1', '.sql', '.spec', '.iss', '.plist',
-                       '.patch', '.lock', '.json', '.desktop'}
-    hidden = sorted(name for name in ignored.stdout.split('\0') if name
-                    and PurePosixPath(name).suffix.lower() in source_suffixes)
+         '--exclude-standard', '-z'],
+        capture_output=True, text=True, timeout=30, check=True)
+    hidden = sorted(name for name in ignored.stdout.split('\0') if name)
     if hidden:
-        raise ValueError('Unlisted ignored source files: ' + ', '.join(hidden)
-                         + '. Approve them in the allowlist/manifest or move them outside the checkout.')
+        shown = ', '.join(hidden[:20]) + (f' and {len(hidden) - 20} more' if len(hidden) > 20 else '')
+        raise ValueError('Unlisted ignored source files: ' + shown + '. Approve them in the allowlist/manifest'
+                         ' or move them outside the checkout (bytecode, caches and build output never belong in it).')
     manifest = set(files)
     if tracked != manifest:
         extra = sorted(tracked - manifest)
