@@ -1,3 +1,3 @@
-from .service import AutomaticCleanupSkipped, DownloadError, DownloadProgress, DownloadService
+from .service import AutomaticCleanupSkipped, DownloadError, DownloadService
 
-__all__ = ["AutomaticCleanupSkipped", "DownloadError", "DownloadProgress", "DownloadService"]
+__all__ = ["AutomaticCleanupSkipped", "DownloadError", "DownloadService"]
