@@ -335,9 +335,11 @@ def icon_button(name: str, tooltip: str, object_name: str = "iconButton", size: 
 
 class EdgeHandle(QPushButton):
     """Slim panel-collapse handle: dimmed until hovered so it never grabs
-    attention, full strength under the pointer."""
+    attention, full strength under the pointer. The resting strength keeps
+    the glyph at 3:1 or better against the canvas, navigation and surface
+    tones in both themes."""
 
-    DIM = 0.35
+    DIM = 0.55
 
     def __init__(self, name: str, tooltip: str, parent=None):
         super().__init__(parent)
@@ -365,7 +367,7 @@ class EdgeHandle(QPushButton):
             self._effect.setOpacity(self.DIM)
         super().leaveEvent(event)
 
-    # Keyboard focus at 35 % opacity was nearly invisible.
+    # Keyboard focus at the resting opacity was nearly invisible.
     def focusInEvent(self, event):
         self._effect.setOpacity(1.0)
         super().focusInEvent(event)
