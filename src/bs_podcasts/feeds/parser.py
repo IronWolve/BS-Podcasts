@@ -99,6 +99,11 @@ def _clamp_title(text: str) -> str:
     return text[:MAX_TITLE_CHARS - 1].rstrip() + "\u2026"
 
 
+def clamp_title(text: str) -> str:
+    """Shorten a title to the supported length, for callers outside this module."""
+    return _clamp_title(text)
+
+
 def _description(text: str) -> str:
     if len(text) <= MAX_DESCRIPTION_CHARS:
         return text
