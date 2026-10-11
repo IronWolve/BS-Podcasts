@@ -2666,9 +2666,10 @@ class MainWindow(QMainWindow):
         sample_accents(())  # Load saved tint metadata on this worker.
         detail_revision = self._episode_scope_revision
         catalog_query, catalog_limit = self._catalog_query, self._catalog_limit
+        episodes_limit = self._episodes_limit
         stored_shows = self.library.shows()
         episode_total = self.library.episode_count()
-        stored_episodes = self.library.episodes(limit=self._episodes_limit)
+        stored_episodes = self.library.episodes(limit=episodes_limit)
         in_progress = self.library.repository.list_in_progress()
         # Saved collections must not disappear behind the recent-episode window.
         merged = {episode.id: episode for episode in stored_episodes}
@@ -2702,6 +2703,7 @@ class MainWindow(QMainWindow):
             "detail_episodes": detail_episodes,
             "stored_shows": stored_shows,
             "episode_total": episode_total,
+            "episodes_limit": episodes_limit,
             "history_total": self.library.history_count(),
             "shows": [self._ui_podcast(show) for show in stored_shows],
             "episodes": episodes,
@@ -3177,6 +3179,10 @@ class MainWindow(QMainWindow):
         shows = data["shows"]
         episodes = data["episodes"]
         self._all_episode_items = episodes
+        # The window is what this reload read: a Load more that applied while
+        # it was in flight is undone with the list, so the next page starts
+        # where the list ends.
+        self._episodes_limit = data.get("episodes_limit", self._episodes_limit)
         in_progress = data["in_progress"]
         queued = data["queued"]
         history = data["history"]
