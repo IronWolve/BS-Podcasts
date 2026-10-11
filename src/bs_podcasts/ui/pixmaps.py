@@ -222,7 +222,7 @@ def _load_disk() -> None:
                 continue
             color = record.get("color")
             mtime = record.get("mtime")
-            if not isinstance(color, str) or not isinstance(mtime, (int, float)) or not color:
+            if not isinstance(color, str) or not isinstance(mtime, (int, float)):
                 continue
             _dominant[path] = color
             _dominant_mtime[path] = float(mtime)
