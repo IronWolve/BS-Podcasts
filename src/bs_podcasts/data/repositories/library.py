@@ -639,13 +639,15 @@ class LibraryRepository:
         return cleared
 
     def remove_show(self, show_id: int, delete_files: bool = True, confirmed_paths=None) -> dict:
-        """Delete a show and its cascaded rows.
+        """Delete a show and its cascaded rows, then the files named.
 
-        Files named by the caller go first. ``confirmed_paths`` is the list
-        already shown to the user; None unlinks nothing. A path this removal
-        itself retired may be included in that list. An absent file counts as
-        removed only when the download root is confirmed. Survivors are
-        recorded as orphans. Orphan retry is not part of this call.
+        The rows go first, so a delete that fails leaves the podcast and all
+        its files in place. ``confirmed_paths`` is the list already shown to
+        the user; None unlinks nothing. A path this removal itself retired may
+        be included in that list. A file that appeared after that list was
+        shown stays and is recorded. An absent file counts as removed only
+        when the download root is confirmed. Survivors are recorded as
+        orphans. Orphan retry is not part of this call.
         """
         preview = self.removal_preview(show_id, inspect_files=delete_files)
         if not preview:
@@ -653,10 +655,27 @@ class LibraryRepository:
         if preview["unchecked"]:
             _log.warning("%d download path(s) could not be checked while unsubscribing and were left in place: %s",
                          len(preview["unchecked"]), ", ".join(preview["unchecked_folders"][:3]))
+        retention_key = f"retention.confirmed.{show_id}"
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM shows WHERE id=?", (show_id,))
+            connection.execute("DELETE FROM settings WHERE key=?", (retention_key,))
+        # That raw DELETE bypasses the settings cache. Show IDs are never
+        # reused (migration 017's entity_sequences), so this only drops the
+        # retired show's entry from the mirror.
+        with self._settings_lock:
+            if self._settings_cache is not None:
+                self._settings_cache.pop(retention_key, None)
         removed_files = []
         failed_files = []
+        confirmed = []
         if delete_files and confirmed_paths is not None:
-            for path in _confirmed_path_list(confirmed_paths):
+            confirmed = _confirmed_path_list(confirmed_paths)
+            listed = set(confirmed)
+            # A download that finished after the list was shown was never
+            # confirmed: it stays, and is recorded like any other kept file.
+            failed_files = [path for path, _size in preview["files"] if path not in listed]
+        try:
+            for path in confirmed:
                 try:
                     Path(path).unlink()
                 except FileNotFoundError:
@@ -673,24 +692,19 @@ class LibraryRepository:
                                  Path(path).name, exc.strerror or type(exc).__name__)
                 else:
                     removed_files.append(path)
-        retention_key = f"retention.confirmed.{show_id}"
-        with self.database.connect() as connection:
-            connection.execute("DELETE FROM shows WHERE id=?", (show_id,))
-            connection.execute("DELETE FROM settings WHERE key=?", (retention_key,))
-        # That raw DELETE bypasses the settings cache. Show IDs are never
-        # reused (migration 017's entity_sequences), so this only drops the
-        # retired show's entry from the mirror.
-        with self._settings_lock:
-            if self._settings_cache is not None:
-                self._settings_cache.pop(retention_key, None)
-        if failed_files:
-            try:
-                self._remember_orphans(failed_files)
-            except sqlite3.Error as exc:
-                # The show is already gone, so this is not a failed removal.
-                # The caller still gets the files that stayed in failed_files.
-                _log.warning("Could not record %d file(s) kept after unsubscribing (%s): %s",
-                             len(failed_files), exc, ", ".join(Path(path).name for path in failed_files[:3]))
+        finally:
+            # The rows that tracked these files are gone, so an interruption
+            # must record every file it did not reach (none, on a full pass).
+            handled = {*removed_files, *failed_files}
+            failed_files.extend(path for path in confirmed if path not in handled)
+            if failed_files:
+                try:
+                    self._remember_orphans(failed_files)
+                except sqlite3.Error as exc:
+                    # The show is already gone, so this is not a failed removal.
+                    # The caller still gets the files that stayed in failed_files.
+                    _log.warning("Could not record %d file(s) kept after unsubscribing (%s): %s",
+                                 len(failed_files), exc, ", ".join(Path(path).name for path in failed_files[:3]))
         preview["removed_files"] = removed_files
         preview["failed_files"] = failed_files
         return preview
