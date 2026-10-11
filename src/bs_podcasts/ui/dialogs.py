@@ -9,7 +9,7 @@ import re
 import threading
 
 from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, QUrl, Qt, Signal, qVersion
-from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QKeySequence, QTextDocument, QTextOption
+from PySide6.QtGui import QAccessible, QAccessibleEvent, QColor, QDesktopServices, QPixmap, QKeySequence, QTextDocument, QTextOption
 
 from ..urlguard import is_web_url
 from ..domain.times import format_media_time
@@ -575,11 +575,15 @@ class AddPodcastDialog(StyledDialog):
         self.set_busy(False)
         self.error.setText(message)
         self.error.show()
+        self.url.setFocus()
+        QAccessible.updateAccessibility(QAccessibleEvent(self.error, QAccessible.Event.Alert))
 
     def set_busy(self, busy: bool):
         self.progress.setVisible(busy)
         self.add.setEnabled(not busy)
-        self.url.setEnabled(not busy)
+        # Read-only, not disabled: a disabled field gives up the keyboard
+        # focus, and Add and Cancel are disabled with it.
+        self.url.setReadOnly(busy)
         self.cancel.setEnabled(not busy)
         self.add.setText("Adding…" if busy else "Add podcast")
 
