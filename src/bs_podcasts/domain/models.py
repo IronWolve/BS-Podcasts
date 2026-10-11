@@ -3,6 +3,10 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
+# Silence-trim levels the app knows. The default is the first one, "off".
+TRIM_LEVELS = ("off", "light", "medium", "strong")
+DEFAULT_TRIM_LEVEL = "off"
+
 
 class Health(StrEnum):
     UNKNOWN = "unknown"
@@ -39,7 +43,7 @@ class Show:
     skip_back: int = 15
     skip_forward: int = 30
     auto_continue: bool = True
-    trim_level: str = "off"
+    trim_level: str = DEFAULT_TRIM_LEVEL
     auto_download_override: bool | None = None
     auto_download_limit: int | None = None
     retention_keep: int | None = None

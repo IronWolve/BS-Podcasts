@@ -13,6 +13,7 @@ from PySide6.QtGui import QAccessible, QAccessibleEvent, QColor, QDesktopService
 
 from ..urlguard import is_web_url
 from ..domain.times import format_media_time
+from ..domain.models import TRIM_LEVELS as TRIM_CHOICES
 
 
 from PySide6.QtWidgets import (
@@ -625,7 +626,7 @@ class AddPodcastDialog(StyledDialog):
 class PodcastSettingsDialog(StyledDialog):
     """Per-podcast playback overrides."""
 
-    TRIM_LEVELS = ("off", "light", "medium", "strong")
+    TRIM_LEVELS = TRIM_CHOICES
 
     def __init__(
         self, title: str, speed: float, skip_back: int, skip_forward: int,

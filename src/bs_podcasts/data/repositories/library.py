@@ -9,6 +9,7 @@ import threading
 import time
 
 from ...domain import Episode, FeedData, Health, Show
+from ...domain.models import DEFAULT_TRIM_LEVEL, TRIM_LEVELS
 from ...domain.times import media_seconds
 from ...privacy import redact
 from ..database import Database
@@ -22,6 +23,17 @@ from ..files import (
 
 
 _log = logging.getLogger("bs_podcasts")
+_UNKNOWN_TRIM_LOGGED: set = set()
+
+
+def _known_trim_level(value) -> str:
+    """The saved silence-trim level, or the default for one this build does not know."""
+    if value in TRIM_LEVELS:
+        return value
+    if value not in _UNKNOWN_TRIM_LOGGED:
+        _UNKNOWN_TRIM_LOGGED.add(value)
+        _log.warning("Unknown silence-trim level %r in the library; using %r", value, DEFAULT_TRIM_LEVEL)
+    return DEFAULT_TRIM_LEVEL
 
 MAX_REFRESH_FAILURES = 3
 MAX_REFRESH_ERROR_BYTES = 2048
@@ -1403,7 +1415,7 @@ class LibraryRepository:
             skip_back=row["skip_back"],
             skip_forward=row["skip_forward"],
             auto_continue=bool(row["auto_continue"]),
-            trim_level=row["trim_level"],
+            trim_level=_known_trim_level(row["trim_level"]),
             auto_download_override=(bool(row["auto_download_override"]) if row["auto_download_override"] is not None else None),
             auto_download_limit=row["auto_download_limit"],
             retention_keep=row["retention_keep"],
