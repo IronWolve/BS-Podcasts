@@ -1301,6 +1301,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self._hide_action_when_empty = False
         self._filter = "All"
         self._sort = "newest"
+        self._catalog_query = ""
         self.reorder = reorder
         self.chips = ChipRow(filters)
         self.sort_button = None
@@ -1418,6 +1419,12 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             self.clear_progress_button.setEnabled(any(
                 item.episode_id > 0 and item.position_seconds > 0 for item in self.model._items))
 
+    def set_catalog_query(self, query: str):
+        """The library search whose results the list holds. While the filter
+        box shows the same text, those results are not filtered again here.
+        Kept the way the box text is compared, trimmed and lower-cased."""
+        self._catalog_query = query.strip().lower()
+
     def set_filter(self, value: str):
         self._filter = value
         self.chips.select(value)
@@ -1476,7 +1483,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             selected = self._selected_keys()
         items = list(self._all_items)
         query = self.header.search.text().strip().lower()
-        if query and query != getattr(self, '_catalog_query', ''):
+        if query and query != self._catalog_query:
             items = [item for item in items if query in item.title.lower() or query in item.show.lower()]
         if self._filter == "New":
             items = [item for item in items if item.is_new]
