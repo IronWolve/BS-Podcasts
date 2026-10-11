@@ -123,8 +123,10 @@ class PlainTextLabel(QLabel):
 
 
 def _set_document_content(editor, text, *, rich=False):
-    """Identical metadata updates must not reset a person's text selection."""
-    key = (rich, text)
+    """Identical metadata updates must not reset a person's text selection.
+    A fingerprint of the text is kept, not the text: the document already
+    holds it, and a long transcript would otherwise be held twice."""
+    key = (rich, len(text), hash(text))
     previous = getattr(editor, '_bs_document_content', None)
     if previous == (key, editor.document().revision()):
         return False
