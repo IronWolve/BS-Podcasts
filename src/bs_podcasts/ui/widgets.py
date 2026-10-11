@@ -3820,6 +3820,7 @@ class PlayerBar(QFrame):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         self.setFixedHeight(scaled_px(88))
+        self._streaming = False
         self._duration = 0.0
         self._capabilities = None
         self._speed = 1.0
@@ -4310,6 +4311,11 @@ class PlayerBar(QFrame):
         self._streaming = streaming
         self._refresh_status()
 
+    def set_streaming(self, streaming: bool):
+        """Whether the loaded track is streamed. Callers use this, not the attribute."""
+        self._streaming = bool(streaming)
+        self._refresh_status()
+
     def _refresh_status(self):
         sleep = getattr(self, "_sleep_remaining", None)
         chapter = getattr(self, "_chapter", "")
@@ -4491,7 +4497,12 @@ class PlayerBar(QFrame):
         self._download_wait = bool(getattr(snapshot, 'download_request', 0))
         # Identifies the loaded track for the seek-drag guard. Source is part
         # of it because a directory preview has no durable episode id.
-        self._track_key = (snapshot.episode_id, snapshot.source)
+        track_key = (snapshot.episode_id, snapshot.source)
+        if track_key != getattr(self, "_track_key", None):
+            # A flag left over from the previous track would mislabel this one
+            # in the status line; the engine reports the new track's streaming.
+            self._streaming = False
+        self._track_key = track_key
         # Directory previews are valid URL-only streams without a durable
         # episode ID. Transport controls should still treat them as a track.
         self._has_episode = bool(snapshot.source)
