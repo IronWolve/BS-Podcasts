@@ -9,16 +9,39 @@ BS_PYTHON="$BS_VENV/bin/python"
 BS_JOBS="${BS_NATIVE_JOBS:-2}"
 [[ "$BS_JOBS" =~ ^[1-4]$ ]] || exit 2
 BS_WORK="$(mktemp -d "$BS_PROJECT/tmp/macos-native.XXXXXX")"
-# Each run's build log is kept in logs/ when the run ends, whether it succeeded or stopped.
-bs_keep_log() {
+# Each run's build log is kept in logs/, and every run ends with a coloured status line and a stats block.
+BS_STARTED="$(date +%s)"
+# Colour is decided here, once: a status line is printed inside $(...), where stdout is no longer the terminal.
+BS_COLOUR=0
+if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != dumb ]]; then BS_COLOUR=1; fi
+bs_paint() {
+    if (( BS_COLOUR )); then printf '\033[%sm%s\033[0m' "$1" "$2"; else printf '%s' "$2"; fi
+}
+bs_stats() {
+    local artifact="$1" size digest
+    read -r size digest < <("$BS_PYTHON" -B -I -c '
+import hashlib, os, sys
+path = sys.argv[1]
+print(os.path.getsize(path), hashlib.sha256(open(path, "rb").read()).hexdigest())
+' "$artifact")
+    printf 'Stats\n  elapsed   %s s\n  artifact  %s\n  size      %s bytes\n  sha256    %s\n' \
+        "$(( $(date +%s) - BS_STARTED ))" "$artifact" "$size" "$digest"
+}
+bs_finish() {
     local status=$?
     if [[ -f "$BS_WORK/build.log" ]]; then
         mkdir -p "$BS_PROJECT/logs"
         cp -- "$BS_WORK/build.log" "$BS_PROJECT/logs/native-macos-$(date -u +%Y%m%dT%H%M%SZ)-status$status.log"
     fi
+    if (( status == 0 )); then
+        printf "%s Native macOS player ready: $BS_CACHE\n" "$(bs_paint 32 OK)"
+        bs_stats "$BS_CACHE/libmpv.2.dylib"
+    else
+        printf "%s Native macOS build stopped with status $status; work folder kept: %s\n" "$(bs_paint 31 FAIL)" "$BS_WORK"
+    fi
     exit "$status"
 }
-trap bs_keep_log EXIT
+trap bs_finish EXIT
 BS_PREFIX="$BS_WORK/prefix"
 BS_SRC="$BS_WORK/src"
 mkdir -p "$BS_PREFIX" "$BS_WORK/tmp"
@@ -123,4 +146,3 @@ if [[ -e "$BS_CACHE" ]]; then
     mv -- "$BS_CACHE" "$BS_PREVIOUS/libmpv-lgpl"
 fi
 mv -- "$BS_WORK/out" "$BS_CACHE"
-printf 'Native macOS player ready: %s\n' "$BS_CACHE"

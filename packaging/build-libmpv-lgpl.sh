@@ -13,16 +13,39 @@ JOBS="${BS_NATIVE_JOBS:-2}"
 [[ "$JOBS" =~ ^[1-4]$ ]] || { printf 'BS_NATIVE_JOBS must be 1 to 4.\n' >&2; exit 1; }
 TRIPLE=x86_64-w64-mingw32
 mkdir -p "$PREFIX" "$SRC" "$ROOT/tmp"
-# Each run's build log is kept in logs/ when the run ends, whether it succeeded or stopped.
-bs_keep_log() {
+# Each run's build log is kept in logs/, and every run ends with a coloured status line and a stats block.
+BS_STARTED="$(date +%s)"
+# Colour is decided here, once: a status line is printed inside $(...), where stdout is no longer the terminal.
+BS_COLOUR=0
+if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != dumb ]]; then BS_COLOUR=1; fi
+bs_paint() {
+    if (( BS_COLOUR )); then printf '\033[%sm%s\033[0m' "$1" "$2"; else printf '%s' "$2"; fi
+}
+bs_stats() {
+    local artifact="$1" size digest
+    read -r size digest < <("$BS_PYTHON" -B -I -c '
+import hashlib, os, sys
+path = sys.argv[1]
+print(os.path.getsize(path), hashlib.sha256(open(path, "rb").read()).hexdigest())
+' "$artifact")
+    printf 'Stats\n  elapsed   %s s\n  artifact  %s\n  size      %s bytes\n  sha256    %s\n' \
+        "$(( $(date +%s) - BS_STARTED ))" "$artifact" "$size" "$digest"
+}
+bs_finish() {
     local status=$?
     if [[ -f "$ROOT/build.log" ]]; then
         mkdir -p "$BS_BUILD_WORKSPACE/logs"
         cp -- "$ROOT/build.log" "$BS_BUILD_WORKSPACE/logs/native-windows-$(date -u +%Y%m%dT%H%M%SZ)-status$status.log"
     fi
+    if (( status == 0 )); then
+        printf "%s Native Windows library prepared: $BS_CACHE/libmpv-2.dll\n" "$(bs_paint 32 OK)"
+        bs_stats "$BS_CACHE/libmpv-2.dll"
+    else
+        printf "%s Native Windows build stopped with status $status; work folder kept: %s\n" "$(bs_paint 31 FAIL)" "$ROOT"
+    fi
     exit "$status"
 }
-trap bs_keep_log EXIT
+trap bs_finish EXIT
 export TMPDIR="$ROOT/tmp" PYTHONDONTWRITEBYTECODE=1
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
 export PKG_CONFIG_PATH=""
@@ -169,7 +192,6 @@ if [[ -e "$BS_CACHE" ]]; then
 fi
 mv -- "$ROOT/out" "$BS_CACHE"
 echo "=== DLL: $(ls -la "$BS_CACHE/libmpv-2.dll" | awk '{print $5}') bytes"
-printf 'Native Windows library prepared: %s/libmpv-2.dll\n' "$BS_CACHE"
 echo "=== imports:"
 ${TRIPLE}-objdump -p "$BS_CACHE/libmpv-2.dll" | grep "DLL Name" | sort
 echo "=== BUILD COMPLETE"
