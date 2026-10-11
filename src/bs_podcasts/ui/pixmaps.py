@@ -176,6 +176,7 @@ _dominant = OrderedDict()
 _dominant_mtime: dict[str, float] = {}
 _dominant_signatures = {}
 _disk_loaded = False
+_disk_load_lock = threading.Lock()
 _disk_lock = threading.Lock()
 _disk_write_lock = threading.Lock()
 _SAMPLE_SIZE = 24
@@ -201,10 +202,16 @@ def _load_disk() -> None:
     global _disk_loaded
     if _disk_loaded:
         return
-    with _disk_lock:
-        if _disk_loaded:
-            return
-        _disk_loaded = True
+    # A second caller waits here until the first has filled the table.
+    with _disk_load_lock:
+        if not _disk_loaded:
+            try:
+                _read_disk()
+            finally:
+                _disk_loaded = True
+
+
+def _read_disk() -> None:
     try:
         with _cache_file().open('rb') as stream:
             raw = stream.read(MAX_ACCENT_FILE + 1)
