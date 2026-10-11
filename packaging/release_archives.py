@@ -144,7 +144,7 @@ def verify_macos(folder, version, origin):
             if 'symlink' in expected:
                 if data.decode()!=expected['symlink']: raise ValueError('Changed macOS link.')
                 resolved=posixpath.normpath(posixpath.join(posixpath.dirname(relative),expected['symlink']))
-                if resolved.startswith('../') or resolved.startswith('/'): raise ValueError('Escaping macOS link.')
+                if resolved=='..' or resolved.startswith('../') or resolved.startswith('/'): raise ValueError('Escaping macOS link.')
             elif len(data)!=expected['bytes'] or hashlib.sha256(data).hexdigest()!=expected['sha256']:
                 raise ValueError('Changed macOS archive member.')
         if actual!=set(records): raise ValueError('Missing macOS artifact files.')
