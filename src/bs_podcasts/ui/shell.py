@@ -4272,9 +4272,11 @@ class MainWindow(QMainWindow):
             if not state_actions and not downloaded:
                 label = f"Download ({status})" if status_pages else "Download"
                 menu.addAction(icons.icon("download", COLORS["text"], 16), label, lambda: self._download_episode(episode.episode_id))
-        elif many and any(is_web_url(item.media_url) and not item.downloaded_path for item in targets):
-            label = f"Download ({status})" if status_pages else "Download"
-            menu.addAction(icons.icon("download", COLORS["text"], 16), label, lambda: self._download_many(targets))
+        elif many:
+            missing = sum(1 for item in targets if is_web_url(item.media_url) and not item.downloaded_path)
+            if missing:
+                label = f"Download {missing} episode{'' if missing == 1 else 's'}"
+                menu.addAction(icons.icon("download", COLORS["text"], 16), label, lambda: self._download_many(targets))
         if page is self.bookmark_page and not many:
             menu.addSeparator()
             menu.addAction(icons.icon("play", COLORS["text"], 16), f"Play from {format_media_time(episode.bookmark_position)}", lambda: self._play_bookmark(episode))
@@ -4307,7 +4309,8 @@ class MainWindow(QMainWindow):
                 else f"Remove download ({status})"
             )
             if many:
-                remove_download_label = f"Remove {len(targets)} downloads ({status})"
+                files = sum(1 for item in targets if item.downloaded_path)
+                remove_download_label = f"Remove {files} download{'' if files == 1 else 's'}"
             menu.addAction(
                 icons.icon("trash", COLORS["text"], 16),
                 remove_download_label,
