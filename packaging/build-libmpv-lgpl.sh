@@ -5,6 +5,27 @@
 set -euo pipefail
 unset PYTHONPATH
 BS_BUILD_WORKSPACE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+# --prune-kept lists the work folders that stopped runs left in tmp, with their sizes, and deletes
+# them only after a typed yes. It is the only way these folders are removed; a build never prunes.
+if [[ "${1:-}" == --prune-kept ]]; then
+    shopt -s nullglob
+    kept=("$BS_BUILD_WORKSPACE"/tmp/lgpl-mpv.*)
+    if (( ${#kept[@]} == 0 )); then
+        printf 'No kept lgpl-mpv work folders in tmp.\n'
+        exit 0
+    fi
+    du -sh -- "${kept[@]}"
+    du -shc -- "${kept[@]}" | tail -n 1 | sed 's/^/total  /'
+    printf 'Delete these %s folder(s)? Type yes to delete: ' "${#kept[@]}"
+    read -r answer || answer=''
+    if [[ "$answer" == yes ]]; then
+        rm -rf -- "${kept[@]}"
+        printf 'Deleted %s kept work folder(s).\n' "${#kept[@]}"
+    else
+        printf 'Nothing deleted.\n'
+    fi
+    exit 0
+fi
 ROOT="$(mktemp -d "$BS_BUILD_WORKSPACE/tmp/lgpl-mpv.XXXXXX")"
 BS_PYTHON="$BS_BUILD_WORKSPACE/dists/linux/.venv/bin/python"
 PREFIX="$ROOT/prefix"
@@ -40,6 +61,11 @@ bs_finish() {
     if (( status == 0 )); then
         printf "%s Native Windows library prepared: $BS_CACHE/libmpv-2.dll\n" "$(bs_paint 32 OK)"
         bs_stats "$BS_CACHE/libmpv-2.dll"
+        # The output and the log are kept outside tmp, so this run's own work folder is no longer needed.
+        if [[ "$ROOT" == "$BS_BUILD_WORKSPACE"/tmp/lgpl-mpv.* ]]; then
+            rm -rf -- "$ROOT"
+            printf 'Work folder removed (output kept in .cache): %s\n' "$ROOT"
+        fi
     else
         printf "%s Native Windows build stopped with status $status; work folder kept: %s\n" "$(bs_paint 31 FAIL)" "$ROOT"
     fi
