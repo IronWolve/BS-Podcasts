@@ -142,16 +142,40 @@ class Database:
             self.close()
             raise
 
-    def _recovery_backup(self) -> Path | None:
-        """Newest non-empty backup next to the library, if any."""
-        candidates = [self.path.with_suffix(self.path.suffix + ".pre-migration.bak")]
+    def _backup_candidates(self) -> list:
+        """Every non-empty library copy the app keeps, newest first.
+
+        That is the upgrade snapshots beside the library (the first one
+        unstamped, every later one stamped, see `_backup_before_migration`)
+        and the copies in backups/. Copies of a damaged library are left out.
+        Recovery and the retired-ID floors both read this one list, so they
+        cannot disagree about which copy is the newest.
+        """
+        unstamped = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
+        stamped = unstamped.name[:-len(".bak")] + "-"
+        found = []
+        try:
+            found.extend(p for p in self.path.parent.iterdir()
+                         if p.name == unstamped.name or (p.name.startswith(stamped) and p.name.endswith(".bak")))
+        except OSError:
+            pass
         backups = self.path.parent / "backups"
         if backups.is_dir():
-            candidates.extend(p for p in backups.glob("library-*.db") if not p.name.startswith("library-damaged-"))
-        usable = [c for c in candidates if c.is_file() and c.stat().st_size > 0]
-        if not usable:
-            return None
-        return max(usable, key=lambda c: c.stat().st_mtime)
+            found.extend(p for p in backups.glob("library-*.db") if not p.name.startswith("library-damaged-"))
+        usable = []
+        for path in found:
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode) and info.st_size > 0:
+                usable.append((info.st_mtime, str(path), path))
+        return [path for _mtime, _name, path in sorted(usable, reverse=True)]
+
+    def _recovery_backup(self) -> Path | None:
+        """Newest non-empty backup next to the library, if any."""
+        candidates = self._backup_candidates()
+        return candidates[0] if candidates else None
 
     def _new_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10.0, check_same_thread=False, factory=_Connection)
@@ -607,20 +631,8 @@ class Database:
 
     def _backup_sequence_floors(self) -> dict:
         """Recover retired-ID high-water marks from a few recent safe snapshots."""
-        directory = self.path.parent / "backups"
-        candidates = [self.path.with_suffix(self.path.suffix + ".pre-migration.bak")]
-        if directory.is_dir():
-            candidates.extend(path for path in directory.glob("library-*.db")
-                              if not path.name.startswith("library-damaged-"))
-        usable = []
-        for path in candidates:
-            try:
-                if path.is_file() and not path.is_symlink():
-                    usable.append((path.stat().st_mtime, path))
-            except OSError:
-                continue
         floors = {}
-        for _stamp, path in sorted(usable, reverse=True)[:3]:
+        for path in self._backup_candidates()[:3]:
             try:
                 with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
                     for kind, value in connection.execute("SELECT kind,value FROM entity_sequences"):
