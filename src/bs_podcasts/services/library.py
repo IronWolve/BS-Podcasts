@@ -170,6 +170,9 @@ class LibraryService:
     def dequeue(self, episode_id: int):
         self.repository.dequeue(episode_id)
 
+    def dequeue_many(self, episode_ids) -> int:
+        return self.repository.dequeue_many(episode_ids)
+
     def reorder_queue(self, episode_ids: list[int]):
         self.repository.reorder_queue(episode_ids)
 

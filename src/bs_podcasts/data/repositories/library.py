@@ -848,13 +848,31 @@ class LibraryRepository:
         return [self._episode(row) for row in rows]
 
     def dequeue(self, episode_id: int):
+        self.dequeue_many([episode_id])
+
+    def dequeue_many(self, episode_ids) -> int:
+        """Remove any number of episodes from the queue in one transaction.
+
+        The rows go in batches of 500 ids and the rows left are renumbered
+        once, writing only the positions that moved. One call per episode
+        committed and renumbered the whole queue each time. Returns how many
+        rows were removed."""
+        ids = list(dict.fromkeys(int(episode_id) for episode_id in episode_ids))
+        if not ids:
+            return 0
+        removed = 0
         with self.database.connect() as connection:
-            connection.execute("DELETE FROM queue WHERE episode_id=?", (episode_id,))
-            rows = connection.execute("SELECT id FROM queue ORDER BY position, id").fetchall()
-            for position, row in enumerate(rows, start=1):
-                connection.execute(
-                    "UPDATE queue SET position=? WHERE id=?", (position, row["id"])
-                )
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                removed += connection.execute(
+                    "DELETE FROM queue WHERE episode_id IN (" + ",".join("?" for _ in batch) + ")", batch
+                ).rowcount
+            rows = connection.execute("SELECT id, position FROM queue ORDER BY position, id").fetchall()
+            connection.executemany(
+                "UPDATE queue SET position=? WHERE id=?",
+                [(position, row["id"]) for position, row in enumerate(rows, start=1) if row["position"] != position],
+            )
+        return removed
 
     def reorder_queue(self, episode_ids: list[int]):
         with self.database.connect() as connection:
