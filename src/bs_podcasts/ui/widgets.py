@@ -2326,9 +2326,6 @@ class ContextPanel(QFrame):
         self.show_link.setIcon(icons.icon("episodes", COLORS["muted"], 16))
         self.show_link.clicked.connect(lambda: self.open_show_requested.emit(self._show_id))
         self.show_link.hide()
-        self.health = PlainTextLabel("")
-        self.health.setObjectName("meta")
-        self.health.setWordWrap(True)
         self.links = QWidget()
         links_layout = FlowLayout(self.links, spacing=SPACE["xs"])
         links_layout.setContentsMargins(0, 0, 0, 0)
@@ -2355,7 +2352,6 @@ class ContextPanel(QFrame):
         selected_layout.addWidget(self.meta)
         selected_layout.addWidget(self.show_link, alignment=Qt.AlignmentFlag.AlignLeft)
         selected_layout.addWidget(self.links)
-        selected_layout.addWidget(self.health)
 
         actions = QVBoxLayout()
         actions.setSpacing(SPACE["sm"])
@@ -2642,7 +2638,6 @@ class ContextPanel(QFrame):
         self.show_link.setText("Open episodes")
         self.show_link.setToolTip("")
         self.show_link.setVisible(bool(podcast.show_id))
-        self.health.setVisible(False)
         self.tabs.setCurrentIndex(0)
         for index in range(1, self.tabs.count()):
             self.tabs.setTabVisible(index, False)
@@ -2752,7 +2747,6 @@ class ContextPanel(QFrame):
         self.meta.setText(f"{episode.published}  ·  {episode.duration}")
         set_button_text_elided(self.show_link, episode.show, scaled_px(230))
         self.show_link.setVisible(bool(episode.show_id))
-        self.health.setVisible(False)
         self.latest_card.setVisible(False)
         self._set_body(episode.description or "No show notes provided for this episode.")
         self._feed_url = ""
@@ -2810,7 +2804,6 @@ class ContextPanel(QFrame):
         self.meta.setText("")
         self.show_link.setToolTip("")
         self.show_link.setVisible(False)
-        self.health.setVisible(False)
         self.latest_card.setVisible(False)
         self._set_body("")
         self.tabs.hide()
