@@ -42,7 +42,7 @@ class DirectoryCharts:
     def _store(self, key, results, revision):
         with self._cache_guard:
             if revision == self._revision:
-                self._cache[key] = (time.time(), results)
+                self._cache[key] = (time.monotonic(), results)
 
     def chart(self, chart_type: str, category: str = ""):
         if chart_type not in CHART_TITLES:
@@ -52,7 +52,7 @@ class DirectoryCharts:
         with self._cache_guard:
             cached = self._cache.get(key)
             revision = self._revision
-        if cached and time.time() - cached[0] < self.cache_seconds:
+        if cached and time.monotonic() - cached[0] < self.cache_seconds:
             return cached[1]
 
         primary = None
