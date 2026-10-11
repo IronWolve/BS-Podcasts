@@ -53,7 +53,7 @@ class DownloadRepository:
     def response_metadata(self, episode_id: int, etag: str, last_modified: str, total: int):
         with self.database.connect() as connection:
             connection.execute("UPDATE downloads SET etag=?, last_modified=?, expected_total=?, "
-                               "updated_at=MAX(updated_at+0.000001, ?) WHERE episode_id=?",
+                               "updated_at=MAX(updated_at+0.000001, ?) WHERE episode_id=? AND state != 'complete'",
                                (etag, last_modified, max(0, total), time.time(), episode_id))
 
     def get(self, episode_id: int) -> DownloadRecord | None:
@@ -87,10 +87,13 @@ class DownloadRepository:
         bytes_total: int,
         error: str = "",
     ):
+        # A finished row is not demoted by a late write from the transfer that
+        # finished it; it may only keep its state and take a message.
         with self.database.connect() as connection:
             connection.execute(
                 """UPDATE downloads SET state=?, bytes_done=?, bytes_total=?,
-                   error_message=?, updated_at=MAX(updated_at+0.000001, ?) WHERE episode_id=?""",
+                   error_message=?, updated_at=MAX(updated_at+0.000001, ?)
+                   WHERE episode_id=? AND (state != 'complete' OR ?='complete')""",
                 (
                     state.value,
                     max(0, int(bytes_done)),
@@ -98,6 +101,7 @@ class DownloadRepository:
                     error,
                     time.time(),
                     episode_id,
+                    state.value,
                 ),
             )
 
