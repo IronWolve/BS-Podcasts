@@ -186,8 +186,8 @@ class _WindowTracer(QObject):
             if elapsed < _TRACER_SECONDS:
                 self._logged += 1
                 logging.getLogger("bs_podcasts").info(
-                    "window shown +%.2fs: %s title=%r flags=%s size=%dx%d visible=%s",
-                    elapsed, type(obj).__name__, obj.windowTitle(),
+                    "window shown +%.2fs: %s flags=%s size=%dx%d visible=%s",
+                    elapsed, type(obj).__name__,
                     hex(int(obj.windowFlags().value)), obj.width(), obj.height(),
                     obj.isVisible(),
                 )
