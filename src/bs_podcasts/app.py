@@ -379,10 +379,16 @@ def _probe_instance_status(name: str, timeout_ms: int = 300, files=()) -> str:
     if not probe.waitForConnected(timeout_ms):
         probe.abort()
         return 'missing'
-    probe.write(_file_request(files) if files else b"raise")
+    # The raise names the library profile, so an instance of another profile
+    # can decline it instead of raising its own window. A bare b"raise" is
+    # still served for launcher scripts and older senders.
+    probe.write(_file_request(files) if files else b"raise " + _profile_key().encode("ascii") + b"\n")
     probe.waitForBytesWritten(300)
     if probe.waitForReadyRead(1500):
         reply = probe.read(32).data()
+        if reply.startswith(b'profile-mismatch'):
+            probe.disconnectFromServer()
+            return 'mismatch'
         accepted = reply.startswith(b'files-queued') if files else reply.startswith(b'ok')
         probe.disconnectFromServer()
         if accepted:
@@ -433,6 +439,12 @@ def _set_instance_callbacks(server, on_raise, on_files):
             if data == b'raise':
                 callbacks['raise_'](); finish(b'ok'); return
             if b'\n' not in data:
+                return
+            if data.startswith(b'raise '):
+                if bytes(data[6:]).strip() == _profile_key().encode('ascii'):
+                    callbacks['raise_'](); finish(b'ok')
+                else:
+                    finish(b'profile-mismatch')
                 return
             try:
                 paths = _read_file_request(bytes(data))
@@ -731,6 +743,13 @@ def main() -> int:
             reply = _probe_instance_status(name, timeout_ms=1500, files=incoming)
             if reply == 'answered':
                 return 0
+            if reply == 'mismatch':
+                dialog = StartupErrorDialog('BS Podcasts is already running',
+                    'This library is open in a running instance, but the instance answering on this '
+                    'computer belongs to a different library profile, so its window was not raised. '
+                    'Find this library\'s window or tray icon, or close the other profile first.')
+                dialog.exec(); dialog.deleteLater()
+                return 1
             if reply == 'rejected':
                 dialog = StartupErrorDialog('Files were not accepted',
                     'The existing instance could not queue this file request (it may be closing, or is an older build). '
