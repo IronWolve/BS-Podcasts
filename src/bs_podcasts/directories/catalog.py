@@ -258,12 +258,7 @@ class PublicDirectory:
         return self.charts.chart(chart_type, category)[:limit]
 
     def invalidate(self):
-        """Drop every directory-layer cache; the explicit Refresh action.
-
-        The browse cache never expired and the chart cache ran a 900 s TTL,
-        so Refresh cleared the UI cache, re-asked this layer, and got the
-        same stale list straight back — an explicit rescan that could not
-        actually rescan."""
+        """Drop every directory-layer cache and bump the revision so in-flight results are not stored."""
         with self._cache_guard:
             self._cache_revision += 1
             self._browse_cache.clear()
