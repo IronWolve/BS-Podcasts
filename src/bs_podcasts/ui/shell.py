@@ -3086,8 +3086,9 @@ class MainWindow(QMainWindow):
                 last = 0.0
             if 0 <= time.time() - last < 24 * 60 * 60:
                 return
+        from ..services.updates import check_for_update
         self.settings_page.set_update_status("Checking…")
-        self._run_task("update-check", lambda: __import__("bs_podcasts.services.updates", fromlist=["check_for_update"]).check_for_update(app_version()), manual)
+        self._run_task("update-check", lambda: check_for_update(app_version()), manual)
 
     def _database_health(self):
         if self.library is None:
