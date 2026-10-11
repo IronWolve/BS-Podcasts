@@ -612,9 +612,37 @@ def _close_busy_database(database, grace_seconds=0.1):
     return outcome.get('closed', False) and not worker.is_alive()
 
 
+def _repair_summary(damaged, lost) -> str:
+    """What a repair did, for the owner: the rows it dropped and the kept original."""
+    if lost:
+        missing = ", ".join(f"{table}: {'all rows' if count is None else f'{count} row' + ('s' if count != 1 else '')}"
+                            for table, count in sorted(lost.items()))
+        outcome = f"Could not recover: {missing}."
+    else:
+        outcome = "No unreadable rows were dropped."
+    return ("The library was rebuilt from the rows that could still be read.\n\n" + outcome
+            + f"\n\nThe damaged original is kept, untouched, at:\n{damaged}")
+
+
+def _recover_library(path) -> str:
+    """Database.recover(), returning the summary of the repair.
+
+    recover() keeps the lost-row report on the instance it builds and then
+    drops that instance, so a subclass copies the report out of repair()."""
+    lost = {}
+
+    class Reporting(Database):
+        def repair(self):
+            damaged = super().repair()
+            lost.update(self.last_repair_lost)
+            return damaged
+
+    return _repair_summary(Reporting.recover(path), lost)
+
+
 def _startup_repair_callback(path, error):
     """Never label I/O, lock, permissions or unsupported formats as damage."""
-    return (lambda: Database.recover(path)) if is_corruption_error(error) else None
+    return (lambda: _recover_library(path)) if is_corruption_error(error) else None
 
 
 def _start_library_services(database):
@@ -709,6 +737,7 @@ def main() -> int:
     _mark("single-instance")
     notice = None
     database = None
+    repair_report = None
     try:
         if Database.migration_pending(root / "library.db"):
             from .ui.dialogs import MigrationNotice
@@ -738,7 +767,8 @@ def main() -> int:
                 database = Database(root / "library.db")
                 repository, library, downloads = _start_library_services(database)
             except (sqlite3.DatabaseError, DatabaseIntegrityError, OSError) as retry_error:
-                failure = StartupErrorDialog("Library still unavailable", str(retry_error))
+                failure = StartupErrorDialog("Library still unavailable",
+                                             str(retry_error) + (f"\n\n{dialog.repair_result}" if dialog.repair_result else ""))
                 failure.exec()
                 failure.deleteLater()
                 dialog.deleteLater()
@@ -750,11 +780,20 @@ def main() -> int:
             lease.close()
             _close_local_server(server)
             return 1
+        repair_report = dialog.repair_result
         dialog.deleteLater()
     _mark("database")
     if notice is not None:
         notice.close()
         notice.deleteLater()
+    if repair_report:
+        # Rows the repair could not read are gone from the library that just
+        # opened; say which, and where the damaged original was kept.
+        from .ui.dialogs import StartupErrorDialog
+
+        report = StartupErrorDialog("Library repaired", repair_report)
+        report.exec()
+        report.deleteLater()
     from .logging_setup import set_file_logging
     set_file_logging(library.setting("diagnostics.file_logging", "1") == "1")
     apply_theme(resolve_theme(library.setting("ui.theme", "system")))

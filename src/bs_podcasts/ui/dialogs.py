@@ -1224,6 +1224,7 @@ class StartupErrorDialog(StyledDialog):
         body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.card_layout.addWidget(body)
         self.repaired = False
+        self.repair_result = None  # what the repair callback returned
         self._repair = repair
         self._repair_busy = False
         self._repair_confirmed = False
@@ -1263,7 +1264,7 @@ class StartupErrorDialog(StyledDialog):
         repair = self._repair
         def work():
             try:
-                repair()
+                outcome['result'] = repair()
                 outcome['ok'] = True
             except Exception as exc:
                 from ..privacy import redact
@@ -1278,6 +1279,7 @@ class StartupErrorDialog(StyledDialog):
             self._repair_busy = False
             if outcome.get('ok'):
                 self.repaired = True
+                self.repair_result = outcome.get('result')
                 self.accept()
             else:
                 self.close_button.setEnabled(True)
