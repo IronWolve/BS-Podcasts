@@ -617,7 +617,7 @@ class DownloadService:
     def discard_preview(self, episode_id: int):
         return self.downloads.discard_preview(episode_id)
 
-    def discard(self, episode_id: int, confirmed_paths=(), expected=None) -> None:
+    def discard(self, episode_id: int, confirmed_paths=(), *, expected) -> None:
         with self._retire_episode(episode_id):
             record = self.downloads.get(episode_id)
             if record is None:
