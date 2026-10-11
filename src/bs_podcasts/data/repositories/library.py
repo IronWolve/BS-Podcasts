@@ -538,10 +538,12 @@ class LibraryRepository:
     def sweep_orphans(self, *, confirmed_paths) -> list[str]:
         """Retry a bounded batch while protecting concurrent live references.
 
-        The write transaction deliberately spans filesystem checks/unlinks: a
-        refresh can reattach a cached artwork path, and must not race deletion.
-        Limiting each pass bounds the amount of filesystem work under SQLite's
-        writer lock without discarding retry records.
+        The batch and the live-reference check are decided in one write
+        transaction that is committed before any file is touched: checking and
+        unlinking can stall on a slow or unplugged drive, and every other
+        writer would wait on SQLite's writer lock for as long. A second short
+        transaction then settles the records. Limiting each pass bounds the
+        filesystem work without discarding retry records.
         """
         confirmed = set(_confirmed_path_list(confirmed_paths))
         cleared = []
@@ -563,8 +565,6 @@ class LibraryRepository:
             pending = [path for path in paths if path in confirmed][:self.MAX_ORPHANS_PER_SWEEP]
             if not pending:
                 return []
-            deferred = [path for path in paths if path not in pending]
-            failed_paths = []
             placeholders = ",".join("?" for _ in pending)
             referenced = {row[0] for row in connection.execute(
                 f"SELECT artwork_path FROM shows WHERE artwork_path IN ({placeholders}) "
@@ -573,32 +573,46 @@ class LibraryRepository:
                 f"UNION SELECT target_path FROM downloads WHERE target_path IN ({placeholders}) "
                 f"UNION SELECT partial_path FROM downloads WHERE partial_path IN ({placeholders})",
                 pending * 5) if row[0]}
-            for path in pending:
-                if not isinstance(path, str):
-                    continue
-                if path in referenced:
-                    cleared.append(path)  # tracking retired; the live file stays
-                    continue
-                kind, _size = inspect_download_file(path, completed=False)
-                candidate = Path(path)
-                if kind == FILE_PRESENT:
-                    try:
-                        candidate.unlink()
-                    except OSError:
-                        failed_paths.append(path)
-                    else:
-                        cleared.append(path)
-                elif kind in {FILE_MISSING, FILE_IRREGULAR}:
-                    cleared.append(path)
-                else:
+        failed_paths = []
+        for path in pending:
+            if not isinstance(path, str):
+                continue
+            if path in referenced:
+                cleared.append(path)  # tracking retired; the live file stays
+                continue
+            kind, _size = inspect_download_file(path, completed=False)
+            candidate = Path(path)
+            if kind == FILE_PRESENT:
+                try:
+                    candidate.unlink()
+                except OSError:
                     failed_paths.append(path)
-            # Failed entries rotate behind untouched ones, so one persistently
-            # locked file cannot starve cleanup of every later record.
-            remaining = deferred + failed_paths
-            if cleared or failed_paths:
-                connection.execute("UPDATE settings SET value=? WHERE key=?",
-                                   (json.dumps(remaining), self.ORPHAN_SETTING))
+                else:
+                    cleared.append(path)
+            elif kind in {FILE_MISSING, FILE_IRREGULAR}:
+                cleared.append(path)
+            else:
+                failed_paths.append(path)
         if cleared or failed_paths:
+            with self.database.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                owner = connection.execute("SELECT value FROM settings WHERE key=?", (self.ORPHAN_OWNER,)).fetchone()
+                row = connection.execute("SELECT value FROM settings WHERE key=?", (self.ORPHAN_SETTING,)).fetchone()
+                if owner is not None and owner[0] == str(self.database.path.resolve()):
+                    try:
+                        stored = json.loads(row[0]) if row else []
+                    except (ValueError, TypeError):
+                        stored = []
+                    if not isinstance(stored, list):
+                        stored = []
+                    # Records added while the files were being handled stay.
+                    # Failed entries rotate behind untouched ones, so one
+                    # persistently locked file cannot starve cleanup of every
+                    # later record.
+                    settled = set(pending)
+                    remaining = [path for path in stored if isinstance(path, str) and path not in settled] + failed_paths
+                    connection.execute("UPDATE settings SET value=? WHERE key=?",
+                                       (json.dumps(remaining), self.ORPHAN_SETTING))
             self.invalidate_settings_cache()
             self.reload_settings()
         return cleared
