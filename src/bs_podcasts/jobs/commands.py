@@ -123,14 +123,16 @@ class CommandQueue:
                 return
             self.closing = True
             self._revision += 1
-            for future, keep in tuple(self._pending.items()):
-                if not keep:
-                    future.cancel()
-            if finalizer is not None:
-                future = self.runner.submit(finalizer)
-                future.add_done_callback(self._finalized)
-            self.runner.shutdown(wait=False, cancel_futures=False)
-            self.bulk_runner.shutdown(wait=False, cancel_futures=False)
+            doomed = [future for future, keep in self._pending.items() if not keep]
+        # Cancelling runs the futures' done-callbacks in this thread, so it
+        # must not hold the queue lock while foreign callbacks execute.
+        for future in doomed:
+            future.cancel()
+        if finalizer is not None:
+            future = self.runner.submit(finalizer)
+            future.add_done_callback(self._finalized)
+        self.runner.shutdown(wait=False, cancel_futures=False)
+        self.bulk_runner.shutdown(wait=False, cancel_futures=False)
 
     @staticmethod
     def _finalized(future):
