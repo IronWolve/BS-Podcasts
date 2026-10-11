@@ -51,7 +51,7 @@ from ..services.library import LibraryService, _bounded_float, _bounded_int
 from ..services.preview_cache import PreviewCache, prepare_preview
 from ..urlguard import is_web_url
 from ..privacy import feed_label
-from ..data.database import DatabaseIntegrityError
+from ..data.database import is_corruption_error
 from . import icons
 from .models import ItemRoles
 
@@ -136,6 +136,19 @@ def shutdown_exports(grace_seconds=0.0):
     if _EXPORT_RUNNER is None:
         return 0
     return _EXPORT_RUNNER.join(max(0.0, grace_seconds))
+
+
+def _integrity_report(database):
+    """The quick check as a worker result: "ok", or {"problem": text} for any
+    damage the check reports or SQLite itself raises while it runs. Other
+    failures (busy, I/O) propagate as errors. The daily check, the Settings
+    check and Repair all classify damage here, so they cannot disagree."""
+    try:
+        return database.check_integrity()
+    except Exception as exc:
+        if is_corruption_error(exc):
+            return {'problem': str(exc)}
+        raise
 
 
 class _JobBridge(QObject):
@@ -1305,15 +1318,7 @@ class MainWindow(QMainWindow):
         if 0 <= time.time() - last_check < 24 * 60 * 60:
             return
         database = self.library.repository.database
-        def work():
-            from ..data.database import is_corruption_error
-            try:
-                return database.check_integrity()
-            except Exception as exc:
-                if is_corruption_error(exc):
-                    return {'problem': str(exc)}
-                raise
-        future = self.jobs.submit(work)
+        future = self.jobs.submit(lambda: _integrity_report(database))
         self._pending_jobs.add(future)
 
         def finished(completed):
@@ -2927,16 +2932,8 @@ class MainWindow(QMainWindow):
         if self.library is None:
             return
         self.settings_page.set_database_status("Checking…")
-        from ..data.database import is_corruption_error
         database = self.library.repository.database
-        def work():
-            try:
-                return database.check_integrity()
-            except Exception as exc:
-                if is_corruption_error(exc):
-                    return {'problem': str(exc)}
-                raise
-        self._run_task("database-health", work)
+        self._run_task("database-health", lambda: _integrity_report(database))
 
     def _database_maintenance(self, operation: str):
         if self.library is None:
@@ -2966,12 +2963,10 @@ class MainWindow(QMainWindow):
         self.settings_page.set_database_status("Checking…")
         def work():
             try:
-                database.check_integrity()
-            except DatabaseIntegrityError:
-                return "damaged", ""
+                report = _integrity_report(database)
             except Exception as exc:
                 return "error", str(exc)
-            return "healthy", ""
+            return ("damaged", "") if isinstance(report, dict) else ("healthy", "")
         self._run_read(work, self._confirm_database_repair, "repair-check")
 
     def _confirm_database_repair(self, result):
