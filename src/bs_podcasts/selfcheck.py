@@ -26,6 +26,15 @@ def _note_dependency_failure(checks, errors, exc):
     errors['dependency loading'] = _exception_text(exc)
 
 
+def _native_root():
+    """The native folder next to the deployment record; the fixed package depth is the fallback."""
+    here = Path(__file__).resolve()
+    for folder in here.parents:
+        if (folder / 'deployment.json').is_file():
+            return folder / 'native'
+    return here.parents[2] / 'native'
+
+
 def _distribution_version():
     try:
         import importlib.metadata as metadata
@@ -166,7 +175,7 @@ def main() -> int:
                 numeric = engine._player.ffmpeg_version.split('-')[0]
                 checks['patched bundled FFmpeg'] = tuple(int(x) for x in numeric.split('.')) >= (9,0,2)
             if sys.platform.startswith('linux'):
-                native_root = Path(__file__).resolve().parents[2]/'native'
+                native_root = _native_root()
                 checks['native library inside deployment'] = Path(mpv.backend._name).resolve().is_relative_to(native_root)
         finally:
             engine.shutdown()
