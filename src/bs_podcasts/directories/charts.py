@@ -23,6 +23,8 @@ CHART_TITLES = {
 
 class DirectoryCharts:
     endpoint = "https://podcasts.apple.com/us/charts"
+    # Largest script the token is searched in; the session's own cap is larger.
+    bundle_limit = 10 * 1024 * 1024
 
     session = SessionSlot()
 
@@ -199,21 +201,28 @@ class DirectoryCharts:
             if script_url.startswith("/"):
                 script_url = "https://podcasts.apple.com" + script_url
             # The script URL is scraped from page content; only the
-            # directory's own hosts, over https, may serve the bundle a
-            # bearer token is about to be read from.
+            # directory's own host, over https, may serve the bundle a
+            # bearer token is about to be read from. The host is matched
+            # whole, so a port or user name in the URL is refused too.
             from urllib.parse import urlsplit
 
             parts = urlsplit(script_url)
             if parts.scheme != "https":
                 raise DirectoryError("Directory script was not served over https.")
-            host = (parts.hostname or "").lower()
-            if not (host == "podcasts.apple.com" or host.endswith(".apple.com") or host.endswith(".mzstatic.com")):
-                raise DirectoryError(f"Directory script came from an unexpected host: {host}")
+            if parts.netloc != "podcasts.apple.com":
+                raise DirectoryError(f"Directory script came from an unexpected host: {parts.hostname}")
             bundle = self.session.get(script_url, timeout=(8, 20))
             bundle.raise_for_status()
+            # Every hop of a redirect chain must be the same host, not only
+            # the address that was asked for.
+            hops = [*getattr(bundle, "history", ()), bundle]
+            if any(urlsplit(str(getattr(hop, "url", script_url)))[:2] != ("https", parts.netloc) for hop in hops):
+                raise DirectoryError("Directory script was redirected to another host.")
             # Searched as bytes: `.text` guesses the charset over the whole
             # body when the server names none.
             javascript = bundle.content
+            if len(javascript) > self.bundle_limit:
+                raise DirectoryError("Directory script was larger than expected.")
             # The minified variable name changes per deploy (al, rl, …);
             # match the JWT shape itself — it is the only one in the bundle.
             token = re.search(rb'"(eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"', javascript)
