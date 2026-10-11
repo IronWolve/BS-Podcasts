@@ -762,7 +762,12 @@ class PlaybackService:
                 self.snapshot = replace(self.snapshot, state=PlaybackState.LOADING)
                 self.seek(seconds, autoplay=True)
             elif same and self._engine_loaded:
+                # A chapter click is a play intent here as well: it moves a
+                # paused episode and starts it, as it does for one not loaded.
+                self._load_autoplay = True
                 self.seek(seconds, autoplay=True)
+                if self.snapshot.state == PlaybackState.PAUSED and not self._resolving:
+                    self.engine.play()
             else:
                 self.load_episode(episode_id, start_position=seconds, autoplay=True, cancelled=cancelled)
 
