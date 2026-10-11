@@ -9,7 +9,16 @@ import re
 import subprocess
 import tarfile
 import tempfile
+import urllib.parse
 import urllib.request
+
+
+class SecureRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,req,fp,code,msg,headers,newurl):
+        # Refuse before connecting; the response check below is only a backstop.
+        if urllib.parse.urlsplit(newurl).scheme.lower()!='https':
+            raise ValueError('Native download redirected away from HTTPS.')
+        return super().redirect_request(req,fp,code,msg,headers,newurl)
 
 
 def digest(path):
@@ -27,7 +36,7 @@ def prepare(source, cache, only=None, macos=False):
         entries=[entry for entry in entries if entry['name']==only]
         if not entries:
             raise ValueError('Unknown native source selection.')
-    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),SecureRedirects())
     for entry in entries:
         archive=cache/entry['archive']
         if archive.is_symlink():
