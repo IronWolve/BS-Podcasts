@@ -617,6 +617,26 @@ def _startup_repair_callback(path, error):
     return (lambda: Database.recover(path)) if is_corruption_error(error) else None
 
 
+def _start_library_services(database):
+    """Build the services whose constructors read or write the library.
+
+    main() runs this inside the open's guarded block: a library can pass the
+    open and still be unreadable here, and it must reach the repair offer
+    instead of ending the launch with a crash file."""
+    repository = LibraryRepository(database)
+    library = LibraryService(repository)
+    downloads = DownloadService(
+        repository,
+        DownloadRepository(database),
+        library.setting("downloads.directory", "") or default_downloads_dir(),
+    )
+    # Nothing resumes by itself, so a row left mid-transfer by the previous
+    # run describes a worker that no longer exists. Park it as paused now, or
+    # the UI offers a Pause that silently does nothing until the app restarts.
+    downloads.reconcile_interrupted()
+    return repository, library, downloads
+
+
 def main() -> int:
     import time as _time
 
@@ -688,6 +708,7 @@ def main() -> int:
         return 0
     _mark("single-instance")
     notice = None
+    database = None
     try:
         if Database.migration_pending(root / "library.db"):
             from .ui.dialogs import MigrationNotice
@@ -697,9 +718,12 @@ def main() -> int:
             app.processEvents()
         database = (_open_pending_database(app, root / 'library.db') if notice is not None
                     else Database(root / 'library.db'))
+        repository, library, downloads = _start_library_services(database)
     except (sqlite3.DatabaseError, DatabaseIntegrityError, OSError) as exc:
         if notice is not None:
             notice.close()
+        if database is not None:
+            database.close()  # opened, but its services could not start; a repair replaces the file
         from .ui.dialogs import StartupErrorDialog
 
         dialog = StartupErrorDialog(
@@ -712,6 +736,7 @@ def main() -> int:
         if dialog.repaired:
             try:
                 database = Database(root / "library.db")
+                repository, library, downloads = _start_library_services(database)
             except (sqlite3.DatabaseError, DatabaseIntegrityError, OSError) as retry_error:
                 failure = StartupErrorDialog("Library still unavailable", str(retry_error))
                 failure.exec()
@@ -730,8 +755,6 @@ def main() -> int:
     if notice is not None:
         notice.close()
         notice.deleteLater()
-    repository = LibraryRepository(database)
-    library = LibraryService(repository)
     from .logging_setup import set_file_logging
     set_file_logging(library.setting("diagnostics.file_logging", "1") == "1")
     apply_theme(resolve_theme(library.setting("ui.theme", "system")))
@@ -766,15 +789,6 @@ def main() -> int:
     playback = PlaybackService(repository, engine, listening=listening_repository)
     commands = CommandQueue()
     playback.set_command_dispatcher(lambda work: commands.submit(work, keep=True))
-    downloads = DownloadService(
-        repository,
-        DownloadRepository(database),
-        library.setting("downloads.directory", "") or default_downloads_dir(),
-    )
-    # Nothing resumes by itself, so a row left mid-transfer by the previous
-    # run describes a worker that no longer exists. Park it as paused now, or
-    # the UI offers a Pause that silently does nothing until the app restarts.
-    downloads.reconcile_interrupted()
     # reconcile_missing() stat()s every completed download; it runs on a
     # worker after the first paint instead (MainWindow), audit F-021.
     _mark("services")
