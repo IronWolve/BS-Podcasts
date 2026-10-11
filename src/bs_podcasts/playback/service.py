@@ -153,6 +153,12 @@ class PlaybackService:
         self._restore_snapshot()
 
     def subscribe(self, listener):
+        """Call `listener(snapshot)` on every change, under the service lock.
+
+        The call runs on the thread that changed the state, while the lock is
+        held. A listener must return promptly and must not wait for another
+        thread that needs the service; a blocked listener stalls every
+        playback call."""
         self._listeners.append(listener)
 
     def set_command_dispatcher(self, dispatch):
