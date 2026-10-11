@@ -1902,6 +1902,26 @@ class SettingsPage(BasePage):
     def __init__(self, parent=None):
         super().__init__("Settings", "", show_search=False, parent=parent)
         self._setting_sections = []
+        self._build_scroll_area()
+        self._build_playback_section()
+        self._build_library_section()
+        self._build_downloads_section()
+        self._build_appearance_section()
+        self._build_desktop_section()
+        self._build_statistics_section()
+        self._build_updates_section()
+        self._build_database_section()
+        self._build_shortcuts_section()
+        self._build_storage_section()
+        self._build_transfer_section()
+        self.settings_content.addStretch(1)
+        self._build_settings_nav()
+        self.speed.valueChanged.connect(lambda value: self.setting_changed.emit("playback.default_speed", str(value)))
+        self.skip_back.valueChanged.connect(lambda value: self.setting_changed.emit("playback.skip_back", str(value)))
+        self.skip_forward.valueChanged.connect(lambda value: self.setting_changed.emit("playback.skip_forward", str(value)))
+        self.auto_continue.toggled.connect(lambda value: self.setting_changed.emit("playback.auto_continue", "1" if value else "0"))
+
+    def _build_scroll_area(self):
         self.settings_scroll = QScrollArea()
         self.settings_scroll.setObjectName("settingsScroll")
         self.settings_scroll.setWidgetResizable(True)
@@ -1915,6 +1935,7 @@ class SettingsPage(BasePage):
         self.settings_scroll.setWidget(settings_content)
         self.root.addWidget(self.settings_scroll, 1)
 
+    def _build_playback_section(self):
         # Playback ----------------------------------------------------------
         card, form = self._card("Playback", "Defaults for newly added podcasts. Existing podcasts keep their own values.")
         self.speed = QDoubleSpinBox()
@@ -1936,6 +1957,7 @@ class SettingsPage(BasePage):
         form.addRow("After an episode", self.auto_continue)
         self.settings_content.addWidget(card)
 
+    def _build_library_section(self):
         # Library ---------------------------------------------------------------
         library_card, library_form = self._card("Library", "Podcasts refresh in the background on this schedule and once at launch when stale.")
         self.refresh_interval = QSpinBox()
@@ -1968,6 +1990,7 @@ class SettingsPage(BasePage):
         self.refresh_interval.valueChanged.connect(lambda value: self.setting_changed.emit("refresh.interval_minutes", str(value)))
         self.background_paused.toggled.connect(lambda value: self.setting_changed.emit("background.paused", "1" if value else "0"))
 
+    def _build_downloads_section(self):
         # Downloads --------------------------------------------------------------
         downloads_card, downloads_form = self._card("Downloads", "New episodes found during a refresh can be downloaded automatically.")
         self.auto_download = QCheckBox("Auto-download new episodes")
@@ -1987,6 +2010,7 @@ class SettingsPage(BasePage):
         self.auto_download.toggled.connect(lambda value: self.setting_changed.emit("downloads.auto", "1" if value else "0"))
         self.auto_download_limit.valueChanged.connect(lambda value: self.setting_changed.emit("downloads.auto_limit", str(value)))
 
+    def _build_appearance_section(self):
         # Appearance ------------------------------------------------------------
         appearance_card, appearance_form = self._card(
             "Appearance",
@@ -2049,6 +2073,7 @@ class SettingsPage(BasePage):
             self.auto_download_limit, self.theme, self.density, self.text_size, self.ui_font, self.episode_lines,
         )
 
+    def _build_desktop_section(self):
         # Desktop --------------------------------------------------------------
         desktop_card, desktop_form = self._card("Desktop", "Small, optional desktop conveniences.")
         self.notifications = QCheckBox("Show native notifications")
@@ -2062,6 +2087,7 @@ class SettingsPage(BasePage):
         self.close_to_tray.toggled.connect(lambda value: self.setting_changed.emit("ui.close_to_tray", "1" if value else "0"))
         self.file_logging.toggled.connect(lambda value: self.setting_changed.emit("diagnostics.file_logging", "1" if value else "0"))
 
+    def _build_statistics_section(self):
         # Listening statistics -------------------------------------------------
         stats_card, stats_form = self._card("Listening statistics", "Stored only in your local library.")
         self.statistics = PlainTextLabel("Not calculated yet")
@@ -2074,6 +2100,7 @@ class SettingsPage(BasePage):
         stats_form.addRow("", stats_refresh)
         self.settings_content.addWidget(stats_card)
 
+    def _build_updates_section(self):
         # Updates --------------------------------------------------------------
         update_card, update_form = self._card("App updates", "Checks the project releases page; updates are never installed automatically.")
         self.update_checks = QCheckBox("Check for updates in the background")
@@ -2089,6 +2116,7 @@ class SettingsPage(BasePage):
         self.settings_content.addWidget(update_card)
         self.update_checks.toggled.connect(lambda value: self.setting_changed.emit("updates.enabled", "1" if value else "0"))
 
+    def _build_database_section(self):
         # Database -------------------------------------------------------------
         database_card, database_form = self._card("Library database", "Maintenance creates a backup first. Repair is offered only if a health check finds a problem.")
         self.database_status = PlainTextLabel("Not checked")
@@ -2114,6 +2142,7 @@ class SettingsPage(BasePage):
         database_form.addRow("", database_actions)
         self.settings_content.addWidget(database_card)
 
+    def _build_shortcuts_section(self):
         # Shortcuts ----------------------------------------------------------
         shortcut_card = QFrame()
         shortcut_card.setObjectName("settingCard")
@@ -2145,6 +2174,7 @@ class SettingsPage(BasePage):
         self._shortcut_editors: dict[str, QKeySequenceEdit] = {}
         self._shortcut_bindings: dict[str, str] = {}
 
+    def _build_storage_section(self):
         # Storage --------------------------------------------------------------
         storage_card, storage_layout = self._card("Files & storage", "")
         storage_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
@@ -2259,6 +2289,7 @@ class SettingsPage(BasePage):
         storage_layout.addRow("", destructive_actions)
         self.settings_content.addWidget(storage_card)
 
+    def _build_transfer_section(self):
         # Transfer ------------------------------------------------------------
         transfer_card, transfer_layout = self._card(
             "Subscriptions & transfer",
@@ -2279,13 +2310,6 @@ class SettingsPage(BasePage):
         transfer_actions.addStretch(1)
         transfer_layout.addRow(transfer_actions)
         self.settings_content.addWidget(transfer_card)
-        self.settings_content.addStretch(1)
-        self._build_settings_nav()
-
-        self.speed.valueChanged.connect(lambda value: self.setting_changed.emit("playback.default_speed", str(value)))
-        self.skip_back.valueChanged.connect(lambda value: self.setting_changed.emit("playback.skip_back", str(value)))
-        self.skip_forward.valueChanged.connect(lambda value: self.setting_changed.emit("playback.skip_forward", str(value)))
-        self.auto_continue.toggled.connect(lambda value: self.setting_changed.emit("playback.auto_continue", "1" if value else "0"))
 
     def _card(self, title: str, hint: str):
         card = QFrame()
