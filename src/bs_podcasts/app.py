@@ -480,6 +480,11 @@ def _window_is_away(window) -> bool:
     return not window.isVisible() or window.isMinimized()
 
 
+def _window_is_quitting(window) -> bool:
+    """True once a Quit is draining or finished: a file request would never be offered."""
+    return bool(window._force_quit or window._quit_drain_started or window._closed and not window._keep_services)
+
+
 class _ShowWatcher(QObject):
     """Calls `callback` on the next loop turn once its window is shown or restored."""
 
@@ -728,8 +733,8 @@ def main() -> int:
                 return 0
             if reply == 'rejected':
                 dialog = StartupErrorDialog('Files were not accepted',
-                    'The existing instance could not queue this file request (or is an older build). '
-                    'No files were imported. Retry after closing its dialog or restarting the updated app.')
+                    'The existing instance could not queue this file request (it may be closing, or is an older build). '
+                    'No files were imported. Retry after it has closed, or after closing its dialog or restarting the updated app.')
                 dialog.exec(); dialog.deleteLater()
                 return 1
             if _time.monotonic() >= lease_wait_until:
@@ -986,7 +991,7 @@ def main() -> int:
         window = state['window']
         if not paths or window is None:
             return
-        if window._force_quit or window._quit_drain_started or window._closed and not window._keep_services:
+        if _window_is_quitting(window):
             app._incoming_file_args = []
             return  # Accepted as queued, never interpreted as permission to import.
         if window._closed or QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
@@ -996,6 +1001,8 @@ def main() -> int:
         raise_existing()
         window._confirm_incoming_file_args(paths)  # Only explicit acceptance performs I/O.
     def queue_files(paths):
+        if state['window'] is not None and _window_is_quitting(state['window']):
+            return False  # The sender gets an error; an accepted request would be dropped silently.
         combined = list(dict.fromkeys([*getattr(app, '_incoming_file_args', []), *paths]))
         if len(combined) > 10:
             return False
