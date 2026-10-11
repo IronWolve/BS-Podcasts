@@ -1275,6 +1275,14 @@ class Toast(QFrame):
     MAX_QUEUE = 3
     NOTICE_MS = 3200
     ACTION_MS = 8000
+    TONE_WORDS = {"success": "Success", "error": "Error", "info": "Info", "loading": "Loading"}
+
+    @classmethod
+    def _spoken(cls, tone: str, message: str) -> str:
+        """The accessible name: the icon and colour say the tone to the eye,
+        so the name says it in words."""
+        word = cls.TONE_WORDS.get(tone)
+        return f"{word}: {message}" if word else message
 
     @staticmethod
     def _motion_ms(normal: int) -> int:
@@ -1338,7 +1346,7 @@ class Toast(QFrame):
         self._sync_undo_shortcut()
         self.adjustSize()
         self.reposition()
-        self.setAccessibleName(message)
+        self.setAccessibleName(self._spoken(tone, message))
         self._effect.setOpacity(0.0)
         self.show()
         # Screen readers never heard toasts: raise an alert event.
@@ -1407,7 +1415,7 @@ class Toast(QFrame):
         if not self.isVisible() or self._closing:
             return False
         self.text.setText(message)
-        self.setAccessibleName(message)
+        self.setAccessibleName(self._spoken(self.property("tone") or "info", message))
         self.adjustSize()
         self.reposition()
         return True
