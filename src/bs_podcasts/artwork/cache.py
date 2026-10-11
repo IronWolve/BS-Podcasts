@@ -38,6 +38,19 @@ ARTWORK_FORMATS = frozenset({"png", "jpeg", "jpg", "gif", "webp", "bmp"})
 MAX_ARTWORK_SIDE = 8192
 MAX_ARTWORK_PIXELS = 4096 * 4096
 
+
+def header_within_limits(reader) -> bool:
+    """The rule for a usable artwork file, judged from a QImageReader's header.
+
+    The format must be on the allow-list and the declared sides and pixel count
+    within the limits. Nothing is decoded here, so a refused file costs no pixels."""
+    if bytes(reader.format()).decode("ascii", "replace").lower() not in ARTWORK_FORMATS:
+        return False
+    size = reader.size()
+    return (0 < size.width() <= MAX_ARTWORK_SIDE and 0 < size.height() <= MAX_ARTWORK_SIDE
+            and size.width() * size.height() <= MAX_ARTWORK_PIXELS)
+
+
 def _looks_textual(head: bytes) -> bool:
     """True for payloads that are plainly a document rather than an image.
 
@@ -143,12 +156,7 @@ class ArtworkCache:
         reader = QImageReader(str(path))
         reader.setDecideFormatFromContent(True)
         # The handler chosen here is the one read() uses.
-        valid = bytes(reader.format()).decode("ascii", "replace").lower() in ARTWORK_FORMATS
-        if valid:
-            # Header dimensions, before any pixel is decoded.
-            size = reader.size()
-            valid = (0 < size.width() <= MAX_ARTWORK_SIDE and 0 < size.height() <= MAX_ARTWORK_SIDE
-                     and size.width() * size.height() <= MAX_ARTWORK_PIXELS)
+        valid = header_within_limits(reader)
         if valid:
             reader.setScaledSize(QSize(64, 64))
             valid = not reader.read().isNull()
