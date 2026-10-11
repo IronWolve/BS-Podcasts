@@ -4,6 +4,7 @@ import argparse
 import codecs
 import importlib.util
 import json
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import os
@@ -15,8 +16,23 @@ from .data.files import atomic_write
 from .privacy import redact
 
 
+_QUOTED_LOCAL_PATH = re.compile(r'''(['"])(?:[A-Za-z]:|~)?[\\/][^'"\r\n]*\1''')
+_LOCAL_PATH = re.compile(r'''(?<![\w:/\\.])(?:[A-Za-z]:|~)?[\\/][^\s'"<>|]*''')
+
+
+def _file_name(path):
+    parts = [part for part in re.split(r'[\\/]', path) if part]
+    return parts[-1] if parts else ''
+
+
+def _shorten_local_paths(text):
+    """Keep only the file name of each local path; folders above it can name the account."""
+    text = _QUOTED_LOCAL_PATH.sub(lambda m: m.group(1) + _file_name(m.group(0)[1:-1]) + m.group(1), text)
+    return _LOCAL_PATH.sub(lambda m: _file_name(m.group(0)), text)
+
+
 def _exception_text(exc):
-    return redact(f'{type(exc).__name__}: {exc}')
+    return redact(_shorten_local_paths(f'{type(exc).__name__}: {exc}'))
 
 
 def _note_dependency_failure(checks, errors, exc):
