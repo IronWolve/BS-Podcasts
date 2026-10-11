@@ -29,8 +29,15 @@ class DatabaseIntegrityError(RuntimeError):
     pass
 
 
+class EmptyLibraryError(DatabaseIntegrityError):
+    """A zero-byte library file. Repair rebuilds rows and an empty file has
+    none, so only a backup can replace it."""
+
+
 def is_corruption_error(error) -> bool:
     """Only SQLite corruption codes or an explicit app format validator."""
+    if isinstance(error, EmptyLibraryError):
+        return False
     if isinstance(error, DatabaseIntegrityError):
         return True
     if not isinstance(error, sqlite3.DatabaseError):
@@ -132,7 +139,7 @@ class Database:
             # Only when no backup exists at all is "start empty" the safe call.
             backup = self._recovery_backup()
             if backup is not None:
-                raise DatabaseIntegrityError(
+                raise EmptyLibraryError(
                     f"The library file is empty (0 bytes): {self.path}\n\n"
                     f"A backup exists: {backup}\n"
                     "To recover, close the app, rename the backup to library.db in the same folder, "
