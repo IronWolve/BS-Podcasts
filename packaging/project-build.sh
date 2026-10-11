@@ -16,8 +16,15 @@ if [[ "${1:-}" == --windows ]]; then
     }
     trap cleanup_windows_stage EXIT
     "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/source_manifest.py" stage --destination "$BS_WINDOWS_STAGE/source"
-    BS_POWERSHELL="$(command -v powershell.exe || true)"
-    BS_POWERSHELL="${BS_POWERSHELL:-/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
+    # The System32 copy comes first; PATH is consulted only when that copy is absent.
+    BS_POWERSHELL=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+    if [[ ! -x "$BS_POWERSHELL" ]]; then
+        BS_POWERSHELL="$(command -v powershell.exe || true)"
+    fi
+    if [[ -z "$BS_POWERSHELL" ]]; then
+        printf 'Windows PowerShell was not found at its System32 path or on PATH.\n' >&2
+        exit 1
+    fi
     "$BS_POWERSHELL" -NoProfile -ExecutionPolicy Bypass -File \
         "$(wslpath -w "$BS_PROJECT/repo/packaging/build-windows.ps1")" \
         -SourceStage "$(wslpath -w "$BS_WINDOWS_STAGE/source")" "$@"
