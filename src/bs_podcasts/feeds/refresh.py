@@ -192,7 +192,8 @@ class RefreshService:
                 # page or an intercepting network than gone. Report it, leave
                 # the count alone. A feed that really became a parked page is
                 # reported every refresh but no longer suspended.
-                return self._failure_report(show_id, str(exc), network=True)
+                message = f"{exc} Not counted against this podcast, which refreshed before; check the network connection."
+                return self._failure_report(show_id, message, network=True)
             return self._failure_report(show_id, str(exc), counted=True)
         except (FeedFetchError, FeedParseError) as exc:
             return self._failure_report(show_id, str(exc), counted=True)
