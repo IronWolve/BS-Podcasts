@@ -60,8 +60,21 @@ def _first(element, *names):
     return None
 
 
-def _text(element, *names) -> str:
-    child = _first(element, *names)
+def _preferred(element, *names):
+    """The child for the earliest of `names` that holds content, so the order
+    of `names` is the order of preference, not the order of the document. When
+    none holds content, the first child with any of the names. Fields that
+    make up an episode's identity keep `_first`: a changed choice there would
+    give stored episodes a new identity."""
+    for name in names:
+        for child in _children(element, name):
+            if len(child) or (child.text or "").strip():
+                return child
+    return _first(element, *names)
+
+
+def _text(element, *names, ordered=False) -> str:
+    child = (_preferred if ordered else _first)(element, *names)
     if child is None:
         return ""
     return "".join(child.itertext()).strip()
@@ -85,7 +98,7 @@ def _markup(element) -> str:
 def _notes(element, *names) -> str:
     """Show notes: the first of `names` as text, or as markup when it holds
     child elements (Atom XHTML content, an unescaped RSS description)."""
-    child = _first(element, *names)
+    child = _preferred(element, *names)
     if child is None:
         return ""
     if len(child):
@@ -364,7 +377,7 @@ def _rss_episode(item) -> FeedEpisodeData | None:
         chapters_url=chapters_url,
         artwork_url=_artwork(item),
         website_url=_rss_link(item),
-        author=_text(item, "author", "creator"),
+        author=_text(item, "author", "creator", ordered=True),
         season_number=_integer(_text(item, "season")),
         episode_number=_integer(_text(item, "episode")),
         episode_type=_text(item, "episodetype").lower(),
@@ -380,8 +393,8 @@ def _parse_rss(root, episodes) -> FeedData:
 
     return FeedData(
         title=_clamp_title(_text(channel, "title") or "Untitled podcast"),
-        author=_text(channel, "author", "managingeditor"),
-        description=_description(_text(channel, "description", "subtitle")),
+        author=_text(channel, "author", "managingeditor", ordered=True),
+        description=_description(_text(channel, "description", "subtitle", ordered=True)),
         website_url=_rss_link(channel),
         artwork_url=_artwork(channel),
         categories=_categories(channel),
@@ -431,7 +444,7 @@ def _atom_episode(entry) -> FeedEpisodeData | None:
         chapters_url=chapters_url,
         artwork_url=_artwork(entry),
         website_url=website_url,
-        author=(_text(author, "name") if author is not None else "") or _text(entry, "creator", "author"),
+        author=(_text(author, "name") if author is not None else "") or _text(entry, "creator", "author", ordered=True),
         season_number=_integer(_text(entry, "season")),
         episode_number=_integer(_text(entry, "episode")),
         episode_type=_text(entry, "episodetype").lower(),
