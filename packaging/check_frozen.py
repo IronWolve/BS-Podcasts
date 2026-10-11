@@ -53,10 +53,8 @@ def denied_constant(constant, views):
 def check(root, private_root):
     root=root.resolve()
     payload = root / ('Contents/Resources' if root.suffix == '.app' else '_internal')
-    # The bundled Inter fonts ship under the OFL, which requires its licence text with each copy.
-    if (not (payload / 'THIRD-PARTY-NOTICES.txt').is_file() or not (payload / 'licenses').is_dir()
-            or not (payload / 'bs_podcasts/assets/fonts/OFL.txt').is_file()):
-        raise ValueError('Bundled notices, their licence text folder or the font licence (OFL.txt) are missing.')
+    if not (payload / 'THIRD-PARTY-NOTICES.txt').is_file() or not (payload / 'licenses').is_dir():
+        raise ValueError('Bundled notices or their supporting text folder are missing.')
     if not private_root:
         raise ValueError('The frozen privacy check needs the project root and its private deny file.')
     tokens=[str(private_root),str(private_root/'repo')]
@@ -94,6 +92,10 @@ def check(root, private_root):
         if 'mutagen' in relative.as_posix().casefold(): raise ValueError('Retired dependency found.')
     executable=root/('Contents/MacOS/BS Podcasts' if root.suffix=='.app' else 'BS Podcasts.exe')
     archive=CArchiveReader(str(executable))
+    # The bundled Inter fonts ship under the OFL, which requires its licence text with each copy. This runs after the
+    # payload rules above so that a bundle refused for another reason is still refused for that reason.
+    if not (payload / 'bs_podcasts/assets/fonts/OFL.txt').is_file():
+        raise ValueError('The font licence (bs_podcasts/assets/fonts/OFL.txt) is missing from the bundle.')
     pyz=archive.open_embedded_archive(next(n for n in archive.toc if n.endswith('.pyz')))
     if any(n=='mutagen' or n.startswith('mutagen.') for n in pyz.toc):
         raise ValueError('Retired module in frozen archive.')
