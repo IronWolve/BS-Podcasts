@@ -616,7 +616,7 @@ class MainWindow(QMainWindow):
         if self.download_page.header.action:
             # Pausing is not destructive: the quiet style, not the red one.
             self.download_page.header.action.setObjectName("quietButton")
-            self.download_page.header.action.clicked.connect(self._cancel_downloads)
+            self.download_page.header.action.clicked.connect(self._pause_all_downloads)
         self.discover_page = PodcastGridPage("Discover", "", discover=True)
         self.bookmark_page = EpisodeListPage(
             "Bookmarks", "", items=(), filters=(), action="", sortable=False,
@@ -3774,7 +3774,7 @@ class MainWindow(QMainWindow):
             clear.setEnabled(bool(self.library and self.playlist_page._all_items))
         elif index == PAGE_DOWNLOADS:
             menu.addSeparator()
-            pause = menu.addAction("Pause active downloads", self._cancel_downloads)
+            pause = menu.addAction("Pause active downloads", self._pause_all_downloads)
             known_ids = tuple(self._download_records_seen)
             pause.setEnabled(bool(self.downloads and any(self.downloads.is_active(episode_id) for episode_id in known_ids)))
             menu.addAction("Delete played downloads…", self._cleanup_played)
@@ -5742,15 +5742,15 @@ class MainWindow(QMainWindow):
             _EXPORT_RUNNER = JobRunner(max_workers=1)
         return _EXPORT_RUNNER
 
-    def _cancel_downloads(self):
+    def _pause_all_downloads(self):
         if self.downloads is None:
             return
         self._play_after_download = 0
         if self.playback is not None and self.playback.snapshot.download_request:
             self._playback_command("pause")
-        cancelled = self.downloads.pause_all()
+        paused = self.downloads.pause_all()
         self._request_reload()
-        self._notify(f"Pausing {cancelled} download{'s' if cancelled != 1 else ''}")
+        self._notify(f"Pausing {paused} download{'s' if paused != 1 else ''}")
 
     def _download_progress(self, event):
         # Progress arrives every 256 KB; coalesce only the changed rows.
