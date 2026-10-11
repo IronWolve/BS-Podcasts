@@ -19,6 +19,7 @@ class CommandQueue:
         self._pending = {}
         self._latest = {}
         self.closing = False
+        self._closing_finalizer = None
 
     def supersede(self):
         with self._lock:
@@ -120,8 +121,15 @@ class CommandQueue:
     def finish(self, finalizer=None):
         with self._lock:
             if self.closing:
+                # The first finish() decides the finalizer. A later call with a
+                # different one cannot run it (the runner is already shut down),
+                # so say so instead of dropping it silently.
+                if finalizer is not None and finalizer != self._closing_finalizer:
+                    logging.getLogger('bs_podcasts').warning(
+                        'Command queue was already finishing; a second playback shutdown was not run')
                 return
             self.closing = True
+            self._closing_finalizer = finalizer
             self._revision += 1
             doomed = [future for future, keep in self._pending.items() if not keep]
         # Cancelling runs the futures' done-callbacks in this thread, so it
