@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
 from ..config import APP_NAME, RELEASES_URL, RELEASES_API_URL, app_version, cache_dir
 from ..logging_setup import log_path
 from ..domain import DownloadState, FeedData, FeedEpisodeData, Health
-from ..domain.times import format_media_time
+from ..domain.times import format_hours_minutes, format_media_time
 from ..directories.base import CandidateList
 from ..directories.persistent import PersistentDirectoryCache
 from ..downloads import AutomaticCleanupSkipped
@@ -62,7 +62,7 @@ from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_a
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, SettingsPage, _KeyboardMenu, _ListPageMixin
 from .shortcuts import ShortcutManager
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
-from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu
+from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu, quiet_signals
 
 
 class _lazy_dialog:
@@ -1108,24 +1108,16 @@ class MainWindow(QMainWindow):
         if (isinstance(controls, (tuple, list)) and len(controls) == 3
                 and isinstance(controls[0], int) and isinstance(controls[1], str) and isinstance(controls[2], str)):
             page = self.discover_page
-            for widget in (page.chart, page.category, page.topic):
-                widget.blockSignals(True)
-            try:
+            with quiet_signals(page.chart, page.category, page.topic):
                 page.chart.setCurrentIndex(max(0, min(page.chart.count() - 1, controls[0])))
                 page.category.setCurrentText(controls[1])
                 page.set_category_topics(controls[1])
                 page.topic.setCurrentText(controls[2])
-            finally:
-                for widget in (page.chart, page.category, page.topic):
-                    widget.blockSignals(False)
             kind = page.chart.currentData()
             self._set_explore_controls(kind == "explore", kind in {"explore", "top_shows", "trending"})
             page.set_discover_summary(state.get("discover_summary", ""))
-            page.blockSignals(True)
-            try:
+            with quiet_signals(page):
                 page.set_discover_sort(state.get("discover_sort", "rank"))
-            finally:
-                page.blockSignals(False)
         self._pending_view_restore = state
         self._restoring_view = True
         try:
@@ -1170,10 +1162,9 @@ class MainWindow(QMainWindow):
             if page is None or not hasattr(page, "_apply_filters"):
                 continue
             search = page.header.search
-            search.blockSignals(True)
-            query = saved.get("query", "")
-            search.setText(query if isinstance(query, str) else "")
-            search.blockSignals(False)
+            with quiet_signals(search):
+                query = saved.get("query", "")
+                search.setText(query if isinstance(query, str) else "")
             restored_sort = saved.get("sort", getattr(page, "_sort", ""))
             if isinstance(restored_sort, str):
                 page._sort = restored_sort
@@ -1864,9 +1855,8 @@ class MainWindow(QMainWindow):
         self.episode_page.set_catalog_query(query)
         self.episode_page.hero.hide()
         self.episode_page.header.set_title('Search results')
-        self.episode_page.header.search.blockSignals(True)
-        self.episode_page.header.search.setText(query)
-        self.episode_page.header.search.blockSignals(False)
+        with quiet_signals(self.episode_page.header.search):
+            self.episode_page.header.search.setText(query)
         self.episode_page.set_filter('All')
         if self.episode_page.header.action:
             self.episode_page.header.action.setToolTip('Refresh these search results')
@@ -1900,9 +1890,8 @@ class MainWindow(QMainWindow):
         self.episode_page.header.set_title('Search results')
         self.episode_page.hero.hide()
         if not self._catalog_timer.isActive():
-            self.episode_page.header.search.blockSignals(True)
-            self.episode_page.header.search.setText(self._catalog_query)
-            self.episode_page.header.search.blockSignals(False)
+            with quiet_signals(self.episode_page.header.search):
+                self.episode_page.header.search.setText(self._catalog_query)
         self.episode_page.set_items(self._catalog_search_items, preserve_scroll=True)
         shown = len(self._catalog_search_items)
         self.episode_page.header.set_subtitle(f'Loaded {shown:,} of {self._catalog_total:,} matching episodes')
@@ -1912,9 +1901,8 @@ class MainWindow(QMainWindow):
 
     def _leave_library_search(self):
         if self._catalog_query:
-            self.episode_page.header.search.blockSignals(True)
-            self.episode_page.header.search.clear()
-            self.episode_page.header.search.blockSignals(False)
+            with quiet_signals(self.episode_page.header.search):
+                self.episode_page.header.search.clear()
         self._catalog_query = ''
         self.episode_page.set_catalog_query('')
         self._catalog_timer.stop()
@@ -3081,9 +3069,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _duration_summary(seconds: float) -> str:
-        minutes = int(max(0, seconds) // 60)
-        hours, minutes = divmod(minutes, 60)
-        return f"{hours} hr {minutes} min" if hours else f"{minutes} min"
+        return format_hours_minutes(seconds)
 
     def _check_for_updates(self, manual: bool = False):
         if self.library is None:
@@ -4006,9 +3992,8 @@ class MainWindow(QMainWindow):
             return
         self._episode_navigation_restore = None
         page = self.episode_page
-        page.header.search.blockSignals(True)
-        page.header.search.setText(saved['query'])
-        page.header.search.blockSignals(False)
+        with quiet_signals(page.header.search):
+            page.header.search.setText(saved['query'])
         page._filter, page._sort = saved['filter'], saved['sort']
         page.chips.select(page._filter)
         page._update_sort_button()
@@ -5596,7 +5581,7 @@ class MainWindow(QMainWindow):
             # A Discover preview has no podcast settings: it uses the global
             # times, not those of the podcast played before it.
             self.player.set_skip_values(*((show.skip_back, show.skip_forward) if show is not None else skips))
-            self.player._streaming = bool(source) and not bool(episode and episode.downloaded_path)
+            self.player.set_streaming(bool(source) and not bool(episode and episode.downloaded_path))
             if episode is not None:
                 if episode.artwork_path != snapshot.artwork_path:
                     self._playback_command("update_artwork", episode_id, episode.artwork_path)
@@ -6332,12 +6317,10 @@ class MainWindow(QMainWindow):
             self.discover_page.banner.clear()
             return
         self._remember_discover_search(query)
-        self.discover_page.chart.blockSignals(True)
-        self.discover_page.chart.setCurrentIndex(0)
-        self.discover_page.chart.blockSignals(False)
-        self.discover_page.category.blockSignals(True)
-        self.discover_page.category.setCurrentIndex(0)
-        self.discover_page.category.blockSignals(False)
+        with quiet_signals(self.discover_page.chart):
+            self.discover_page.chart.setCurrentIndex(0)
+        with quiet_signals(self.discover_page.category):
+            self.discover_page.category.setCurrentIndex(0)
         self.discover_page.set_category_topics("")
         self._set_explore_controls(True)
         self.discover_page.banner.show_state("loading", f"Searching for “{query}”…")
@@ -6511,14 +6494,12 @@ class MainWindow(QMainWindow):
                     self._show_for_you(_label, force)
             self._run_read(self.library.shows, apply, "recommend-shows")
             return
-        self.discover_page.chart.blockSignals(True)
-        self.discover_page.chart.setCurrentIndex(0)
-        self.discover_page.chart.blockSignals(False)
+        with quiet_signals(self.discover_page.chart):
+            self.discover_page.chart.setCurrentIndex(0)
         self._set_explore_controls(True)
         if self.discover_page.category.currentIndex() != 0:
-            self.discover_page.category.blockSignals(True)
-            self.discover_page.category.setCurrentIndex(0)
-            self.discover_page.category.blockSignals(False)
+            with quiet_signals(self.discover_page.category):
+                self.discover_page.category.setCurrentIndex(0)
         self.discover_page.set_category_topics("")
         shows = self._stored_shows
         if shows:
@@ -8763,9 +8744,7 @@ class MainWindow(QMainWindow):
             return "Unknown length"
         if seconds <= 0:
             return "Unknown length"
-        hours, remainder = divmod(seconds, 3600)
-        minutes = remainder // 60
-        return f"{hours} hr {minutes} min" if hours else f"{minutes} min"
+        return format_hours_minutes(seconds)
 
     # ------------------------------------------------------------- context pane
     def _toggle_queue(self):
