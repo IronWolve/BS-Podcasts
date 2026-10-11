@@ -3,7 +3,9 @@
 from hashlib import sha256
 import json
 import math
+import os
 from pathlib import Path
+import stat
 import time
 
 from ..config import cache_dir
@@ -56,7 +58,13 @@ class PersistentDirectoryCache:
             path = self._path(key)
             if path.is_symlink():
                 return None
-            with path.open("rb") as handle:
+            # Open without following a link or waiting on a pipe, then check
+            # the opened file itself: the path may change after the test above.
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            with os.fdopen(os.open(path, flags), "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    return None
                 raw = handle.read(MAX_ENTRY_BYTES + 1)
             if not raw or len(raw) > MAX_ENTRY_BYTES:
                 return None
