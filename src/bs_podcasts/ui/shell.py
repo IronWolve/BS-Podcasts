@@ -1567,7 +1567,7 @@ class MainWindow(QMainWindow):
             self._submit_refresh(show_id, batch=True)
 
     def _summarize_refresh(self, total: int, new_episodes: int, failed: int, offline: int = 0):
-        """Exactly one message per batch, whatever happened inside it."""
+        """At most one in-app message and one desktop notification per batch, whatever happened inside it."""
         parts = [f"Refreshed {total} podcast{'s' if total != 1 else ''}"]
         if new_episodes:
             parts.append(f"{new_episodes} new episode{'s' if new_episodes != 1 else ''}")
@@ -2026,9 +2026,9 @@ class MainWindow(QMainWindow):
         page_target = getattr(page, "view", None)
         if page_target is None and hasattr(page, "header") and page.header.search.isVisible():
             page_target = page.header.search
-        rail_index = max(0, min(self.pages.currentIndex(), len(self.navigation._buttons) - 1))
+        rail_button = self.navigation.button_for(self.pages.currentIndex())
         regions = [
-            (self.navigation, self.navigation._buttons[rail_index][0] if self.navigation._buttons else self.navigation),
+            (self.navigation, self.navigation if rail_button is None else rail_button),
             (page, page_target or page),
             (self.context, getattr(self.context, "primary", self.context)),
             (self.player, self.player.play),
@@ -2099,7 +2099,9 @@ class MainWindow(QMainWindow):
         return [item.episode_id for item in page.selected_items() if isinstance(item, UiEpisode) and item.episode_id]
 
     def _queue_selected(self):
-        self._queue_many([item for item in getattr(self.pages.currentWidget(), "selected_items", list)() if isinstance(item, UiEpisode)])
+        page = self.pages.currentWidget()
+        items = page.selected_items() if hasattr(page, "selected_items") else []
+        self._queue_many([item for item in items if isinstance(item, UiEpisode)])
 
     BULK_CONFIRM_ROWS = 20
 
@@ -2116,9 +2118,15 @@ class MainWindow(QMainWindow):
         return self._exec_dialog(dialog) == QDialog.DialogCode.Accepted
 
     def _queue_many(self, items):
+        self._enqueue_episode_ids([item.episode_id for item in items], "bulk-queue")
+
+    def _queue_ids(self, ids):
+        self._enqueue_episode_ids(ids, "queue-selection")
+
+    def _enqueue_episode_ids(self, ids, run_key: str):
         if self.library is None:
             return
-        ids = [item.episode_id for item in items if item.episode_id]
+        ids = [episode_id for episode_id in ids if episode_id]
         if not ids or not self._confirm_bulk(len(ids), "Add to Up Next"):
             return
         library = self.library
@@ -2129,17 +2137,7 @@ class MainWindow(QMainWindow):
 
         # One transaction on a worker instead of one commit per row on the
         # click thread.
-        self._run_read(lambda: library.enqueue_many(ids), apply, "bulk-queue", pool=self.commands, coalesce=False)
-
-    def _queue_ids(self, ids):
-        if self.library is None:
-            return
-        ids = [episode_id for episode_id in ids if episode_id]
-        if ids and self._confirm_bulk(len(ids), "Add to Up Next"):
-            def apply(added):
-                self._reload_queue()
-                self._notify(f"Added {added} episode{'s' if added != 1 else ''} to Up Next", "success", "Show", self._show_queue)
-            self._run_read(lambda: self.library.enqueue_many(ids), apply, 'queue-selection', pool=self.commands, coalesce=False)
+        self._run_read(lambda: library.enqueue_many(ids), apply, run_key, pool=self.commands, coalesce=False)
 
     def _podcast_settings(self):
         if self.library is None or not self._hero_show_id:

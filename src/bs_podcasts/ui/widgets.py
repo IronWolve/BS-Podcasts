@@ -625,6 +625,12 @@ class NavigationRail(QFrame):
             self._brand_pixmaps[(pixels, ratio)] = pixmap
         self.mark.setPixmap(pixmap)
 
+    def button_for(self, index: int):
+        """The rail button for a page index, clamped into the rail; None before the rail has buttons."""
+        if not self._buttons:
+            return None
+        return self._buttons[max(0, min(index, len(self._buttons) - 1))][0]
+
     # -- drag episodes onto "Up Next" ---------------------------------------
     def _queue_button(self):
         return self._buttons[self.QUEUE_INDEX][0]
