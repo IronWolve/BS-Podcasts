@@ -308,6 +308,8 @@ def _sample(path: str) -> str | None:
     if image.isNull():
         return None
     total = [0, 0, 0]
+    wheel = [0.0, 0.0]
+    weight = 0.0
     count = 0
     for y in range(image.height()):
         for x in range(image.width()):
@@ -317,12 +319,20 @@ def _sample(path: str) -> str | None:
             total[0] += color.red()
             total[1] += color.green()
             total[2] += color.blue()
+            angle = color.hslHueF() * math.tau
+            wheel[0] += color.hslSaturationF() * math.cos(angle)
+            wheel[1] += color.hslSaturationF() * math.sin(angle)
+            weight += color.hslSaturationF()
             count += 1
     if count < 8:
         return ""
+    if math.hypot(*wheel) < 0.5 * weight:
+        return ""  # Opposite hues cancel: no tint, rather than one the cover lacks.
     color = QColor(total[0] // count, total[1] // count, total[2] // count)
+    if color.hslHueF() < 0:
+        return ""
     color = QColor.fromHslF(
-        color.hslHueF() if color.hslHueF() >= 0 else 0.0,
+        color.hslHueF(),
         min(0.85, max(0.45, color.hslSaturationF())),
         0.66,
     )
