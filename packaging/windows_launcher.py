@@ -67,12 +67,32 @@ def _windows_prelaunch():
     # Timed out: the other instance may be dead; the normal guard decides.
 
 
+def _diagnostic_failed(option):
+    """Keep the active traceback in the folder the option names, then exit 1. A windowed bootloader
+    must not show a traceback dialog, so the record goes to a file: beside the output file for a path
+    option, inside the folder itself for --self-check-dir."""
+    import traceback
+    from pathlib import Path
+    argv = sys.argv
+    folder = None
+    if option in argv and argv.index(option) + 1 < len(argv):
+        target = Path(argv[argv.index(option) + 1])
+        folder = target if option == "--self-check-dir" else target.parent
+    if folder is not None:
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "launcher-traceback.txt").write_text(traceback.format_exc(), encoding="utf-8")
+        except OSError:
+            pass  # nowhere else to report it; the exit code still says the run failed
+    raise SystemExit(1)
+
+
 if "--probe-local-audio" in sys.argv:
     try:
         from bs_podcasts.feeds.local_probe import main as probe_main
         raise SystemExit(probe_main())
     except Exception:
-        raise SystemExit(1)
+        _diagnostic_failed("--probe-output")
 
 if "--self-check" in sys.argv:
     # Do not acquire the GUI-instance mutex or import the application for an
@@ -81,7 +101,7 @@ if "--self-check" in sys.argv:
         from bs_podcasts.selfcheck import main as selfcheck_main
         raise SystemExit(selfcheck_main())
     except Exception:
-        raise SystemExit(1)  # A windowed bootloader must not show a traceback dialog.
+        _diagnostic_failed("--self-check-dir")
 
 _windows_prelaunch()
 
