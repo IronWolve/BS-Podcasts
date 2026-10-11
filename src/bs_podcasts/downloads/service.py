@@ -27,7 +27,7 @@ import stat
 import time
 
 from ..net import SessionSlot, describe_network_error
-from ..urlguard import UnsafeUrl, ensure_fetchable, SAFE_MEDIA_SUFFIXES, unsafe_media_payload
+from ..urlguard import UnresolvedHost, UnsafeUrl, ensure_fetchable, SAFE_MEDIA_SUFFIXES, unsafe_media_payload
 
 from ..data.repositories import DownloadRepository, LibraryRepository
 from ..domain import DownloadState, DownloadRecord
@@ -55,6 +55,10 @@ class _TransferStalled(DownloadError):
 
 class _RangeContinuation(DownloadError):
     """A complete range leg; request the next leg without spending a retry."""
+
+
+class _HostUnresolved(DownloadError):
+    """The host name could not be looked up (offline, resolver down); safe to retry."""
 
 
 class _StaleResume(DownloadError):
@@ -436,7 +440,7 @@ class DownloadService:
                         except _RangeContinuation:
                             continue
                     raise DownloadError("Server supplied too many tiny ranges; retry to resume.")
-                except (_TruncatedDownload, _TransferStalled, _StaleResume, requests.RequestException) as exc:
+                except (_TruncatedDownload, _TransferStalled, _HostUnresolved, _StaleResume, requests.RequestException) as exc:
                     last_error = exc
                 record = self.downloads.get(episode_id)
                 if cancellation.is_set() or (record is not None and record.state == DownloadState.PAUSED):
@@ -712,6 +716,9 @@ class DownloadService:
             # feed could point an enclosure straight at loopback or a cloud
             # metadata endpoint and the body landed in a user-openable file.
             ensure_fetchable(episode.media_url, "Episode media URL")
+        except UnresolvedHost as exc:
+            host = urlparse(episode.media_url).hostname or "the server"
+            raise _HostUnresolved(f"Could not resolve {host}. Check the network.") from exc
         except UnsafeUrl as exc:
             raise DownloadError(str(exc)) from exc
         record = self.downloads.get(episode_id)
