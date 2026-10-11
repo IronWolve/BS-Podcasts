@@ -94,7 +94,7 @@ episode_information_text = _lazy_dialog("episode_information_text")
 from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, ItemRoles, Podcast as UiPodcast, plain_snippet, set_item_tooltips
 from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, prepare_previews, install_previews
 from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_accent_token
-from .pages import EpisodeListPage, HomePage, PodcastGridPage, SettingsPage, _KeyboardMenu, _ListPageMixin
+from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, SettingsPage, _KeyboardMenu, _ListPageMixin
 from .shortcuts import ShortcutManager
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
 from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu
@@ -109,6 +109,11 @@ HISTORY_PAGE_SIZE = 200
 # Written out rather than strftime("%b"): month names follow the system
 # locale and mixed into English text ("Okt 03" beside "Today").
 _MONTH_ABBREVIATIONS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _item_key(value):
+    """A saved list-row key as a tuple, or None when it is not one."""
+    return tuple(value) if isinstance(value, (list, tuple)) and all(isinstance(part, (str, int)) for part in value) else None
 
 
 class PeekFeed(FeedData):
@@ -1163,20 +1168,17 @@ class MainWindow(QMainWindow):
                 page._discover_sort = value if isinstance(value, str) else "rank"
             button = getattr(page, "sort_button", None)
             if button is not None and page is not self.podcast_page:
-                from .pages import SORT_OPTIONS
                 button.setText(dict(SORT_OPTIONS).get(page._sort, button.text()))
-            def item_key(value):
-                return tuple(value) if isinstance(value, (list, tuple)) and all(isinstance(part, (str, int)) for part in value) else None
-            current = item_key(saved.get('current'))
+            current = _item_key(saved.get('current'))
             values = saved.get("selected", ())
-            selected = [key for value in values if (key := item_key(value)) is not None] if isinstance(values, (list, tuple)) else []
+            selected = [key for value in values if (key := _item_key(value)) is not None] if isinstance(values, (list, tuple)) else []
             page._apply_filters(restore_key=current, preserve_scroll=True, selected_keys=selected)
             if not selected:
                 page.view.clearSelection()
             page.view.doItemsLayout()
             value = min(2**31 - 1, page.saved_scroll_value(saved))
             page.view.verticalScrollBar().setValue(value)
-            # Run after the list mixin\'s own queued scroll restoration.
+            # Run after the list mixin's own queued scroll restoration.
             self._later(0, lambda p=page, v=value: p.view.verticalScrollBar().setValue(v))
         if self.podcast_page._sort in {"name", "date"}:
             self.podcast_page.set_sort(self.podcast_page._sort)
