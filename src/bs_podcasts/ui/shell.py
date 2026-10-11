@@ -6472,9 +6472,7 @@ class MainWindow(QMainWindow):
         future = self.network_jobs.submit(work)
         self._directory_future = future
         def offline_aware(exc):
-            import requests
-
-            offline = isinstance(exc, requests.exceptions.ConnectionError)
+            offline = getattr(exc, "network", False)
             return JobResult(JobStatus.ERROR, message=str(exc), value="offline" if offline else None)
 
         # The directory path alone tells an outage from other failures.
