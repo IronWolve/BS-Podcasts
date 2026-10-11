@@ -314,10 +314,22 @@ def _incoming_paths(values, *, absolute=False, cwd=None):
     for value in values:
         if not isinstance(value, str) or not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise ValueError('File arguments contain unsupported control characters.')
+        try:
+            value.encode('utf-8')
+        except UnicodeEncodeError:  # bytes that are not UTF-8 reach a POSIX argv as lone surrogates
+            shown = value.encode('utf-8', 'replace').decode('utf-8')
+            raise ValueError(f'The file name "{shown}" is not valid UTF-8 text, so it cannot be opened this way. '
+                             'Rename the file and try again.') from None
+        if value.startswith('-'):
+            raise ValueError('Options are not accepted; give the files to open as local paths.')
+        if '://' in value:
+            raise ValueError('URLs are not accepted; give the files to open as local paths.')
+        if value.startswith(('//', '\\\\')):
+            raise ValueError('Network shares are not accepted; give the files to open as local paths.')
+        # A colon is a legal part of a POSIX file name; on Windows it belongs only to the drive prefix.
         drive = os.name == 'nt' and re.match(r'^[A-Za-z]:[\\/]', value)
-        if (value.startswith(('-', '//', '\\\\')) or '://' in value
-                or (':' in value and not drive) or drive and ':' in value[2:]):
-            raise ValueError('Only local file paths are supported; options, URLs and network shares are refused.')
+        if os.name == 'nt' and (':' in value and not drive or drive and ':' in value[2:]):
+            raise ValueError('A colon is only allowed in a drive letter such as C:\\.')
         if Path(value).suffix.casefold() not in _FILE_SUFFIXES:
             raise ValueError('Only supported audio or OPML/XML files may be opened.')
         if absolute and not os.path.isabs(value):
