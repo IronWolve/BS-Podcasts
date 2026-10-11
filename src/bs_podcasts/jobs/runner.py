@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, Future
 from threading import BoundedSemaphore
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 import time
 from enum import StrEnum
@@ -24,6 +24,10 @@ class JobResult:
     status: JobStatus
     value: Any = None
     message: str = ""
+    # The exception behind an ERROR from a failing callable, so a caller can read
+    # what the message cannot say (for example a directory error's network flag).
+    # It takes no part in comparison or repr.
+    error: BaseException | None = field(default=None, repr=False, compare=False)
 
 
 class JobRunner:
@@ -58,10 +62,10 @@ class JobRunner:
         except TimeoutError as exc:
             return JobResult(JobStatus.TIMEOUT, message=str(exc) or "Operation timed out.")
         except Exception as exc:
-            # The result carries only the message; this is the one place the
-            # traceback of a failing background callable can be kept.
+            # The result carries the message and the exception; this is the one
+            # place the traceback of a failing background callable can be kept.
             _log.exception('Background job %s failed', getattr(callable_, '__qualname__', type(callable_).__name__))
-            return JobResult(JobStatus.ERROR, message=str(exc) or exc.__class__.__name__)
+            return JobResult(JobStatus.ERROR, message=str(exc) or exc.__class__.__name__, error=exc)
 
     def shutdown(self, wait: bool = False, cancel_futures: bool = True):
         self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)
