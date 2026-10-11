@@ -20,20 +20,41 @@ export CXXFLAGS="$CFLAGS"
 command -v meson ninja pkg-config >/dev/null
 printf 'Native work/log directory: %s\n' "$BS_WORK"
 "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --source "$BS_SRC" --cache "$BS_PROJECT/.cache/native-sources" --macos
-patch -d "$BS_SRC/mpv-0.41.0" -p1 -F 0 < "$BS_PROJECT/repo/packaging/mpv-coreaudio-only.patch"
+# The fetched directory for a pinned name, read from native-sources.json, so no
+# version is written into this recipe and a pin change cannot leave a stale path.
+pinned_dir() {
+    "$BS_PYTHON" -B -c '
+import json, sys
+for entry in json.load(open(sys.argv[1])):
+    if entry["name"] == sys.argv[2]:
+        print(entry["name"] + "-" + entry["version"])
+        break
+else:
+    sys.exit("not pinned: " + sys.argv[2])
+' "$BS_PROJECT/repo/packaging/native-sources.json" "$1"
+}
+for name in freetype fribidi harfbuzz libass ffmpeg libplacebo mpv; do
+    fetched="$(pinned_dir "$name")"
+    [[ -d "$BS_SRC/$fetched" ]] || { printf 'Fetched source is missing: %s\n' "$fetched" >&2; exit 1; }
+done
+BS_FFMPEG_DIR="$(pinned_dir ffmpeg)"
+BS_MPV_DIR="$(pinned_dir mpv)"
+patch -d "$BS_SRC/$BS_MPV_DIR" -p1 -F 0 < "$BS_PROJECT/repo/packaging/mpv-coreaudio-only.patch"
 build_static() {
-    local source="$1"; shift
+    local name="$1"; shift
+    local source
+    source="$(pinned_dir "$name")"
     meson setup "$BS_WORK/build-$source" "$BS_SRC/$source" --prefix "$BS_PREFIX" --libdir lib \
         --buildtype release --default-library static --prefer-static --wrap-mode=nodownload -Db_staticpic=true "$@" >> "$BS_WORK/build.log" 2>&1
     ninja -C "$BS_WORK/build-$source" -j "$BS_JOBS" install >> "$BS_WORK/build.log" 2>&1
     printf 'Built %s\n' "$source"
 }
-build_static freetype-2.14.3 -Dharfbuzz=disabled -Dbrotli=disabled -Dpng=disabled -Dbzip2=disabled -Dzlib=internal -Dtests=disabled
-build_static fribidi-1.0.17 -Ddocs=false -Dtests=false
-build_static harfbuzz-14.5.0 -Dfreetype=enabled -Dglib=disabled -Dgobject=disabled -Dcairo=disabled -Dicu=disabled -Dtests=disabled -Ddocs=disabled
-build_static libass-0.17.5 -Dtest=disabled -Dfontconfig=disabled
+build_static freetype -Dharfbuzz=disabled -Dbrotli=disabled -Dpng=disabled -Dbzip2=disabled -Dzlib=internal -Dtests=disabled
+build_static fribidi -Ddocs=false -Dtests=false
+build_static harfbuzz -Dfreetype=enabled -Dglib=disabled -Dgobject=disabled -Dcairo=disabled -Dicu=disabled -Dtests=disabled -Ddocs=disabled
+build_static libass -Dtest=disabled -Dfontconfig=disabled
 (
-    cd "$BS_SRC/ffmpeg-9.0.2"
+    cd "$BS_SRC/$BS_FFMPEG_DIR"
     ./configure --prefix="$BS_PREFIX" --arch=arm64 --enable-pic --disable-shared --enable-static \
         --disable-autodetect --enable-zlib --disable-programs --disable-doc --disable-debug \
         --disable-encoders --disable-muxers --disable-outdevs --disable-indevs \
@@ -42,10 +63,28 @@ build_static libass-0.17.5 -Dtest=disabled -Dfontconfig=disabled
     make -j "$BS_JOBS"
     make install
 ) >> "$BS_WORK/build.log" 2>&1
-printf 'Built FFmpeg 9.0.2\n'
-build_static libplacebo-7.360.1 -Dvulkan=disabled -Dopengl=disabled -Dd3d11=disabled -Ddemos=false \
+printf 'Built FFmpeg %s\n' "$BS_FFMPEG_DIR"
+# The same licence and configure checks the Windows and Linux recipes make: the
+# player is built only from an FFmpeg configured as LGPL, with autodetection off.
+BS_FFMPEG_LOG="$BS_SRC/$BS_FFMPEG_DIR/ffbuild/config.log"
+BS_LICENSE="$(grep -E "^license=" "$BS_FFMPEG_LOG" | head -n 1 || true)"
+BS_CONFIGURE="$(head -n 1 "$BS_FFMPEG_LOG")"
+if [[ "$BS_LICENSE" != "license='LGPL version 2.1 or later'" ]]; then
+    printf 'FFmpeg config.log does not record the expected LGPL configuration.\n' >&2
+    exit 1
+fi
+case "$BS_CONFIGURE" in
+    *--enable-gpl*|*--enable-nonfree*)
+        printf 'FFmpeg configure enables a non-LGPL license option.\n' >&2
+        exit 1 ;;
+    *--disable-autodetect*) ;;
+    *)
+        printf 'FFmpeg config.log does not record --disable-autodetect.\n' >&2
+        exit 1 ;;
+esac
+build_static libplacebo -Dvulkan=disabled -Dopengl=disabled -Dd3d11=disabled -Ddemos=false \
     -Dtests=false -Dshaderc=disabled -Dglslang=disabled -Dlcms=disabled
-meson setup "$BS_WORK/build-mpv" "$BS_SRC/mpv-0.41.0" --prefix "$BS_PREFIX" --libdir lib \
+meson setup "$BS_WORK/build-mpv" "$BS_SRC/$BS_MPV_DIR" --prefix "$BS_PREFIX" --libdir lib \
     --buildtype release --prefer-static --default-library shared --wrap-mode=nodownload --auto-features=disabled \
     --sysconfdir=/bs-native/etc --datadir=/bs-native/share \
     -Dgpl=false -Dlibmpv=true -Dcplayer=false -Dtests=false -Dgl=disabled -Dcoreaudio=enabled \
@@ -58,7 +97,10 @@ install_name_tool -id @rpath/libmpv.2.dylib "$BS_WORK/out/libmpv.2.dylib"
 strip -x "$BS_WORK/out/libmpv.2.dylib"
 codesign --force --sign - "$BS_WORK/out/libmpv.2.dylib"
 "$BS_PYTHON" -B -c 'import ctypes,sys; ctypes.CDLL(sys.argv[1])' "$BS_WORK/out/libmpv.2.dylib"
-if otool -L "$BS_WORK/out/libmpv.2.dylib" | tail -n +2 | grep -Eq '/(opt/homebrew|usr/local|Users)/'; then
+# Allow list: system libraries and frameworks, plus the library's own install
+# name. Any other path (Homebrew, a user folder, a local prefix) fails the build.
+if otool -L "$BS_WORK/out/libmpv.2.dylib" | tail -n +2 \
+    | grep -Ev '^[[:space:]]+(/usr/lib/|/System/Library/|@rpath/libmpv[.]2[.]dylib )' | grep -q .; then
     printf 'Unexpected non-system linkage in native player.\n' >&2; exit 1
 fi
 "$BS_PYTHON" -B "$BS_PROJECT/repo/packaging/native_sources.py" --record "$BS_WORK/out/libmpv.2.dylib"
