@@ -544,6 +544,11 @@ class ArtworkCache:
         except (OSError, requests.RequestException) as exc:
             partial.unlink(missing_ok=True)
             raise ArtworkError(str(exc)) from exc
+        except BaseException:
+            # Anything else (a missing decoder, a bug, a cancellation) must
+            # not leave the half-written file in the cache folder.
+            partial.unlink(missing_ok=True)
+            raise
         finally:
             if response is not None:
                 response.close()
