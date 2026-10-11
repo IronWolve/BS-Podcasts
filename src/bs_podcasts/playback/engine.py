@@ -547,6 +547,9 @@ class LazyMpvEngine:
         self._handler: Callable[[EngineEvent], None] = lambda event: None
         self._construct_lock = Lock()
         self._shut_down = False
+        # Settings chosen before the core exists, one per setting so a newer
+        # value replaces an older one. The first build applies them.
+        self._pending: dict[str, Callable[[MpvEngine], None]] = {}
 
     @property
     def capabilities(self):
@@ -597,6 +600,69 @@ class LazyMpvEngine:
                 cause = exc.__cause__ or exc
                 logger.warning("Playback engine warm-up failed: %s: %s", type(cause).__name__, redact(cause))
 
+    def load(self, source: str, start_position: float = 0.0, autoplay: bool = True):
+        self._real().load(source, start_position, autoplay)
+
+    def prepare_load(self):
+        return self._real().prepare_load()
+
+    def seek_absolute(self, seconds: float):
+        # No core means no file, so there is nothing to seek.
+        engine = self._current()
+        if engine is not None:
+            engine.seek_absolute(seconds)
+
+    def skip(self, seconds: float):
+        engine = self._current()
+        if engine is not None:
+            engine.skip(seconds)
+
+    def set_speed(self, speed: float):
+        self._configure("speed", lambda engine: engine.set_speed(speed))
+
+    def set_volume(self, volume: float):
+        self._configure("volume", lambda engine: engine.set_volume(volume))
+
+    def set_silence_trim(self, level: str):
+        self._configure("silence_trim", lambda engine: engine.set_silence_trim(level))
+
+    def set_ab_repeat(self, start: float, end: float):
+        self._configure("ab_repeat", lambda engine: engine.set_ab_repeat(start, end))
+
+    def clear_ab_repeat(self):
+        self._configure("ab_repeat", lambda engine: engine.clear_ab_repeat())
+
+    def _current(self):
+        """The core, or None while none has been built. Refuses after shutdown."""
+        with self._construct_lock:
+            if self._shut_down:
+                raise PlaybackUnavailable("The internal playback engine has shut down.")
+            return self._engine
+
+    def _configure(self, key: str, apply: Callable[[MpvEngine], None]):
+        """Apply a setting to the core, or remember it until the core is built.
+
+        A volume change from the slider must not start libmpv: the value is
+        kept and applied by _real() when playback first needs the core."""
+        with self._construct_lock:
+            if self._shut_down:
+                raise PlaybackUnavailable("The internal playback engine has shut down.")
+            engine = self._engine
+            if engine is None:
+                self._pending[key] = apply
+                return
+        apply(engine)
+
+    def _apply_pending(self, engine: MpvEngine):
+        # Caller holds _construct_lock, so a setter cannot overtake a remembered value.
+        pending, self._pending = self._pending, {}
+        for apply in pending.values():
+            try:
+                apply(engine)
+            except Exception as exc:
+                # The load that built the core must still run; the setting is logged.
+                logger.warning("Playback setting could not be applied: %s", redact(exc))
+
     def _real(self):
         with self._construct_lock:
             if self._shut_down:
@@ -610,8 +676,5 @@ class LazyMpvEngine:
                     raise PlaybackUnavailable(f"Internal playback is unavailable ({detail}). Retry, or explicitly open the episode in an external player.") from exc
                 engine.set_event_handler(self._handler)
                 self._engine = engine
+                self._apply_pending(engine)
         return self._engine
-
-    def __getattr__(self, name):
-        # Any real playback call (load, seek, volume…) builds the core.
-        return getattr(self._real(), name)
