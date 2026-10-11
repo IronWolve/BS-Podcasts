@@ -1262,6 +1262,9 @@ class StartupErrorDialog(StyledDialog):
         self.card_layout.addLayout(row)
         self._repair_path = str(repair_path or "")
         self.repair_button.setVisible(callable(repair))
+        # The error text is a Tab stop now, so name the button the dialog opens
+        # on: Enter then presses it, as it did when the text could not take focus.
+        (self.repair_button if callable(repair) else close).setFocus()
 
     def _request_repair(self):
         if self._repair_busy or not callable(self._repair):
