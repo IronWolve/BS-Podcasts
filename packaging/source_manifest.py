@@ -33,7 +33,11 @@ def private_path(name, tokens=()):
 def inventory(root=ROOT):
     root = Path(root).resolve()
     payload = json.loads((root / 'source-manifest.json').read_text(encoding='utf-8'))
-    files = payload.get('files') if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or payload.get('format') != 1:
+        raise ValueError('Source manifest must declare format 1.')
+    if not isinstance(payload.get('public_urls'), list):
+        raise ValueError('Source manifest must list public_urls.')
+    files = payload.get('files')
     tokens = denied_tokens(root)
     if not isinstance(files, list):
         raise ValueError('Source manifest must contain unique exact file paths.')
