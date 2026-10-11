@@ -667,6 +667,12 @@ def stylesheet() -> str:
        palette's white viewport (an unnamed one shipped unreadable once). */
     QDialog QScrollArea, QDialog QScrollArea QWidget#qt_scrollarea_viewport {{ background: transparent; border: 0; }}
     QListWidget, QTextEdit, QTextBrowser {{ background: transparent; border: 0; color: {c['text']}; }}
+    /* The rule above removes the border the input focus rule recolours, so the
+       read-only text views (transcript, show notes) get a focus-only ring. The
+       padding gives back the width the border takes, so the text stays put. */
+    QTextEdit:focus, QTextBrowser:focus {{
+        border: 2px solid {c['accent']}; padding: {sp(6) - 2}px {sp(10) - 2}px;
+    }}
     QPlainTextEdit#fileListing {{
         background: transparent; border: 0; padding: 0; color: {c['subtle']}; font-size: {small}px;
         selection-background-color: {c['accent']}; selection-color: {c['on_accent']};
