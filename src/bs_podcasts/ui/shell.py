@@ -4606,7 +4606,9 @@ class MainWindow(QMainWindow):
         pending[(item.episode_id, item.artwork_url)] = item
         if not getattr(self, "_episode_artwork_apply_scheduled", False):
             self._episode_artwork_apply_scheduled = True
-            self._later(16, self._flush_episode_artwork)
+            # A backfill finishes several covers a second; each flush walks
+            # every loaded row, so completions share one pass per window.
+            self._later(250, self._flush_episode_artwork)
 
     def _flush_episode_artwork(self):
         self._episode_artwork_apply_scheduled = False
@@ -4624,18 +4626,24 @@ class MainWindow(QMainWindow):
                 return current
             return replace_item(current, artwork_path=item.artwork_path,
                                 episode_artwork_path=item.episode_artwork_path, accent=item.accent)
+        def holds(items):
+            return any((current.episode_id, current.artwork_url) in changes for current in items)
+        def updated(items):
+            # A list with none of the changed covers is left as it is.
+            return [update(current) for current in items] if holds(items) else items
         for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.bookmark_page, self.history_page):
-            page._all_items = [update(current) for current in page._all_items]
-            page.model.update_artwork_batch(changes)
+            page._all_items = updated(page._all_items)
+            if holds(page.model._items):
+                page.model.update_artwork_batch(changes)
         queue_model = self.context.queue_view.model()
-        if queue_model is not None:
+        if queue_model is not None and holds(queue_model._items):
             queue_model.update_artwork_batch(changes)
-        self._all_episode_items = [update(current) for current in self._all_episode_items]
-        self._catalog_search_items = [update(current) for current in getattr(self, "_catalog_search_items", ())]
-        self._history_items_shown = [update(current) for current in self._history_items_shown]
+        self._all_episode_items = updated(self._all_episode_items)
+        self._catalog_search_items = updated(getattr(self, "_catalog_search_items", []))
+        self._history_items_shown = updated(self._history_items_shown)
         if self._last_library_data is not None:
             for name in ('episodes', 'detail_episodes', 'in_progress', 'queued', 'history'):
-                self._last_library_data[name] = [update(current) for current in self._last_library_data.get(name, ())]
+                self._last_library_data[name] = updated(self._last_library_data.get(name, []))
         with self._convert_lock:
             for episode_id, _url in changes:
                 self._ui_episode_cache.pop(episode_id, None)
