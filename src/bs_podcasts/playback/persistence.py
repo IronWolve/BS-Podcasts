@@ -16,7 +16,9 @@ class PlaybackPersistence:
         self._active = False
         self._closing = False
         self._thread = None
-        self._error = False
+        # Failure kinds already logged in the current streak: a busy wait and
+        # a real failure are reported once each, until a save succeeds.
+        self._logged = set()
 
     def submit(self, key, write, value, *, additive=False, delay=0.0):
         with self._condition:
@@ -50,16 +52,17 @@ class PlaybackPersistence:
             try:
                 write(value)
             except Exception as exc:
-                if not self._error:
+                kind = 'busy' if isinstance(exc, LibraryBusy) else 'failed'
+                if kind not in self._logged:
                     logger = logging.getLogger('bs_podcasts')
-                    if isinstance(exc, LibraryBusy):
+                    if kind == 'busy':
                         # Routine and short: maintenance (optimize, backup) holds the
                         # database for a moment. The save is retried within a second.
                         logger.warning('Playback save waiting: %s', exc)
                     else:
                         logger.exception('Playback save failed; retaining changes for retry')
                 with self._condition:
-                    self._error = True
+                    self._logged.add(kind)
                     newer = self._pending.pop(key, None)
                     if newer is not None:
                         write, next_value, additive, _due = newer
@@ -72,7 +75,7 @@ class PlaybackPersistence:
                     self._condition.wait(1.0)
             else:
                 with self._condition:
-                    self._error = False
+                    self._logged.clear()
                     self._active = False
                     self._condition.notify_all()
 
