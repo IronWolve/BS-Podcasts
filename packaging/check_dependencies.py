@@ -84,7 +84,8 @@ def check(lock):
             failures.append(f'{name}: expected {version}, found {installed}')
     if failures:
         raise RuntimeError('Environment differs from the approved dependency lock; update it explicitly.\n'+'\n'.join(failures))
-    print(f'Approved dependency versions verified: {count}; Python {sys.version.split()[0]}')
+    print(f'Approved dependency versions verified: {count}; Python {sys.version.split()[0]}. '
+          'Package file hashes are enforced when the lock is installed with hash checking required; this check does not compare them.')
 
 
 if __name__=='__main__':
