@@ -1237,7 +1237,7 @@ class StartupErrorDialog(StyledDialog):
         close.setObjectName("primaryButton")
         close.clicked.connect(self.accept)
         row = QHBoxLayout()
-        self.repair_button = QPushButton("Repair from backup…")
+        self.repair_button = QPushButton("Repair library…")
         self.repair_button.setObjectName("quietButton")
         self.repair_button.clicked.connect(self._request_repair)
         row.addWidget(self.repair_button)
@@ -1252,7 +1252,10 @@ class StartupErrorDialog(StyledDialog):
             return
         if not self._repair_confirmed:
             target = f"\nLibrary: {self._repair_path}" if self._repair_path else ""
-            self.repair_status.setText("Restore the library using a backup? The original library is kept as a recovery copy. This may lose changes newer than the backup." + target)
+            self.repair_status.setText(
+                "Rebuild the library from the damaged file? Everything that can still be read is kept; rows that cannot be read "
+                "are dropped. The damaged file is saved untouched in the backups folder beside the library first, and you are "
+                "told afterwards what could not be recovered." + target)
             self.repair_button.setText("Confirm repair")
             self._repair_confirmed = True
             return
@@ -1285,7 +1288,7 @@ class StartupErrorDialog(StyledDialog):
                 self.close_button.setEnabled(True)
                 self.repair_button.setEnabled(True)
                 self._repair_confirmed = False
-                self.repair_button.setText("Repair from backup…")
+                self.repair_button.setText("Repair library…")
                 self.repair_status.setText("Repair failed. " + outcome.get('error', 'The repair worker could not start.'))
         self._repair_poll.timeout.connect(poll)
         try:
