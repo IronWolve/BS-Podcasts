@@ -3,6 +3,7 @@ import argparse
 import ast
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -282,15 +283,25 @@ def contains_denied(raw, tokens, root=ROOT):
 
 
 def git_tracked(root):
+    """The tracked file set. None only when root is not a checkout of its own (Git is not
+    installed, the folder is no repository, or another top level owns it). Any other Git
+    failure or timeout is a ValueError with Git's message, so it cannot switch the gates off."""
+    env = {**os.environ, 'LC_ALL': 'C'}  # stable wording for the "not a repository" test below
     try:
         top = subprocess.run(['git', '-C', str(root), 'rev-parse', '--show-toplevel'],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5, env=env)
+        if top.returncode != 0 and 'not a git repository' not in top.stderr:
+            raise ValueError('Git could not read the checkout: ' + top.stderr.strip())
         if top.returncode != 0 or Path(top.stdout.strip()).resolve() != Path(root).resolve():
             return None
         tracked = subprocess.run(['git', '-C', str(root), 'ls-files', '-z'],
-                                 capture_output=True, text=True, timeout=5, check=True)
-    except (OSError, subprocess.SubprocessError):
+                                 capture_output=True, text=True, timeout=30, check=True, env=env)
+    except FileNotFoundError:
         return None
+    except subprocess.CalledProcessError as exc:
+        raise ValueError('Git could not list the tracked files: ' + (exc.stderr or '').strip()) from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f'Git failed or timed out: {exc}') from exc
     return set(tracked.stdout.split('\0')) - {''}
 
 
