@@ -255,6 +255,7 @@ def create_application(argv=None) -> QApplication:
         _install_stall_monitor(app)
     from .ui.theme import set_system_reduced_motion
     _load_system_motion_preference(set_system_reduced_motion)
+    app._motion_watcher = _watch_system_motion_preference(app, set_system_reduced_motion)
     return app
 
 
@@ -284,6 +285,41 @@ def _load_system_motion_preference(cache):
         _MOTION_PREFERENCE_STARTED = False
         return None
     return worker
+
+
+def _watch_system_motion_preference(app, cache):
+    """Follow a change made in the system settings while the app ran.
+
+    The toolkit has no signal for the animation preference, so it is read
+    again, off Qt like the startup read, each time the app comes back to the
+    front. A failed read keeps the value already cached."""
+    state = {'away': False, 'busy': False}
+
+    def work():
+        try:
+            value = system_reduced_motion()
+            if isinstance(value, bool):
+                cache(value)
+        except Exception:
+            pass
+        finally:
+            state['busy'] = False
+
+    def changed(application_state):
+        if application_state != Qt.ApplicationState.ApplicationActive:
+            state['away'] = True
+            return
+        if not state['away'] or state['busy'] or 'BS_PODCASTS_REDUCE_MOTION' in os.environ:
+            return
+        state['away'] = False
+        state['busy'] = True
+        try:
+            threading.Thread(target=work, name='bs-motion-refresh', daemon=True).start()
+        except RuntimeError:
+            state['busy'] = False
+
+    app.applicationStateChanged.connect(changed)
+    return changed
 
 
 def _instance_name() -> str:
