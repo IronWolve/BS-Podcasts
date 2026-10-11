@@ -949,10 +949,18 @@ class DownloadService:
                     raise _TruncatedDownload("Download ended before the expected size.")
             if authoritative_total and done != total:
                 raise DownloadError("Download size does not match the response.")
-            verified = authoritative_total
-            if not verified and episode.duration_seconds > 0:
-                verified = self._duration_matches(partial, episode.duration_seconds)
-            return self._finish(episode_id, partial, target, done, cancellation, length_verified=verified)
+            finished = self._finish(episode_id, partial, target, done, cancellation, length_verified=authoritative_total)
+            if (not authoritative_total and episode.duration_seconds > 0 and not cancellation.is_set()
+                    and finished is not None and finished.state == DownloadState.COMPLETE):
+                # The duration probe starts a media process and can take
+                # seconds. Run it once the row is complete, so the row does
+                # not sit at Downloading while it runs; a match promotes it.
+                try:
+                    if self.verify_length(episode_id):
+                        finished = self.downloads.get(episode_id) or finished
+                except Exception:
+                    _log.warning("Could not check the length of the download of episode %s", episode_id, exc_info=True)
+            return finished
         except _RangeContinuation:
             if cancellation.is_set():
                 return self._park(episode_id, partial)
