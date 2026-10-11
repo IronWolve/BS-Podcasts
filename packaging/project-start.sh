@@ -47,24 +47,30 @@ except BlockingIOError:
         except OSError:
             pass
         return found
+    def left():
+        return max(0, int((deadline - time.monotonic()) * 1000))
     def raised():
+        # Each wait is capped by the time left, so a silent socket cannot run past the deadline.
         for name in endpoints():
+            if left() == 0:
+                break
             socket = QLocalSocket()
             socket.connectToServer(name)
-            if socket.waitForConnected(1000):
+            if socket.waitForConnected(min(1000, left())):
                 socket.write(b"raise")
-                socket.waitForBytesWritten(1000)
-                if socket.waitForReadyRead(1500) and socket.readAll().data().startswith(b"ok"):
+                socket.waitForBytesWritten(min(1000, left()))
+                if socket.waitForReadyRead(min(1500, left())) and socket.readAll().data().startswith(b"ok"):
                     return True
             socket.abort()
         return False
     # A copy that is still starting begins listening a moment later; one that
     # is quitting stops listening before its final saves and then frees the
     # lock. Ask again every round, so either way this ends as soon as it can.
+    # The deadline is checked before each round, and no sleep runs past it.
     import time
     deadline = time.monotonic() + 5
     while True:
-        if raised():
+        if time.monotonic() < deadline and raised():
             raise SystemExit(0)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -72,7 +78,7 @@ except BlockingIOError:
         except BlockingIOError:
             if time.monotonic() >= deadline:
                 raise SystemExit("BS Podcasts is still running or closing, or the deployment is busy; use --status or retry.")
-        time.sleep(0.2)
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
     if caller_tmp is None:
         del os.environ["TMPDIR"]
     else:
