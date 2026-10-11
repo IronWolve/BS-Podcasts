@@ -181,6 +181,14 @@ class PlaybackService:
     # The reconnect notice rides along until the file has loaded again.
     REOPEN_KEEPS = ("sleep_deadline", "sleep_expired_count", "sleep_at_end", "ab_start", "ab_end", "message")
 
+    @staticmethod
+    def _best_effort(what: str, work):
+        """Run a step whose failure must not stop its caller, and log the failure."""
+        try:
+            work()
+        except Exception as exc:
+            logger.warning("Playback %s failed: %s", what, redact(exc))
+
     def _arm_load_watchdog(self, episode_id: int | None, source: str):
         self._cancel_load_watchdog()
         # The token — not episode/source equality — identifies the load:
@@ -221,10 +229,7 @@ class PlaybackService:
                            self.snapshot.position)
             # If the stream opens after all, it must arrive paused — never as
             # surprise audio under an error banner.
-            try:
-                self.engine.pause()
-            except Exception:
-                pass
+            self._best_effort("engine pause", lambda: self.engine.pause())
             self._emit()
 
     def load_episode(self, episode_id: int, autoplay: bool = True, *, cancelled=None, start_position=None,
@@ -607,14 +612,8 @@ class PlaybackService:
             logger.info("Playback stop requested: state=%s position=%.1fs",
                         self.snapshot.state.value, self.snapshot.position)
             episode_id = self.snapshot.episode_id
-            try:
-                self.engine.pause()
-            except Exception:
-                pass
-            try:
-                self._persist_position(force=True)
-            except Exception:
-                pass
+            self._best_effort("engine pause", lambda: self.engine.pause())
+            self._best_effort("final position save", lambda: self._persist_position(force=True))
             self._start_target = None
             self._flush_listening()
             # Removal callers rely on Stop finishing writes for the outgoing
@@ -624,10 +623,7 @@ class PlaybackService:
             # reloads from the saved position.
             unload = getattr(self.engine, "unload", None)
             if unload is not None:
-                try:
-                    unload()
-                except Exception:
-                    pass
+                self._best_effort("engine unload", unload)
             self._engine_loaded = False
             self._close_silence_window()
             self.snapshot = PlaybackSnapshot(speed=self.snapshot.speed, volume=self.snapshot.volume)
@@ -1206,10 +1202,7 @@ class PlaybackService:
         self._resolving = False
         self._engine_loaded = False
         self._load_autoplay = False
-        try:
-            self.engine.pause()
-        except Exception:
-            pass
+        self._best_effort("engine pause", lambda: self.engine.pause())
         self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR, message=str(error), buffering=None)
         self._emit()
 
