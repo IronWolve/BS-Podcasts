@@ -9,6 +9,11 @@ from .engine import LibraryBusy
 
 class PlaybackPersistence:
     MAX_PENDING = 32
+    # A write that fails this many times in a row is dropped, so one value
+    # the store can never accept does not stay pending, absorb later values
+    # and hold up flush for good. A wait for library maintenance is not a
+    # failed write and is not counted.
+    MAX_ATTEMPTS = 6
 
     def __init__(self):
         self._condition = Condition()
@@ -21,6 +26,7 @@ class PlaybackPersistence:
         # reported once each, until that key saves again.
         self._retry_at = {}
         self._logged = {}
+        self._failures = {}
 
     def submit(self, key, write, value, *, additive=False, delay=0.0):
         with self._condition:
@@ -82,21 +88,38 @@ class PlaybackPersistence:
                         logger.warning('Playback save waiting: %s', exc)
                     else:
                         logger.exception('Playback save failed; retaining changes for retry')
+                failures = self._failures.get(key, 0) + (1 if kind == 'failed' else 0)
+                give_up = failures >= self.MAX_ATTEMPTS
+                if give_up:
+                    logging.getLogger('bs_podcasts').error(
+                        'Playback save abandoned after %d failed attempts; its changes were dropped: %r',
+                        failures, exc)
                 with self._condition:
-                    logged.add(kind)
-                    due = 0.0
                     newer = self._pending.pop(key, None)
-                    if newer is not None:
-                        write, next_value, additive, due = newer
-                        value = value + next_value if additive else next_value
-                    self._pending[key] = (write, value, additive, due)
-                    # Only this key backs off; the writer moves on to the others.
-                    # Closing still retries, but never spins on a failed disk.
-                    self._retry_at[key] = time.monotonic() + 1.0
+                    if give_up:
+                        # Only the failing record goes. A value queued while it
+                        # was being written stays, on its own, and tries afresh.
+                        self._failures.pop(key, None)
+                        self._logged.pop(key, None)
+                        self._retry_at.pop(key, None)
+                        if newer is not None:
+                            self._pending[key] = newer
+                    else:
+                        self._failures[key] = failures
+                        logged.add(kind)
+                        due = 0.0
+                        if newer is not None:
+                            write, next_value, additive, due = newer
+                            value = value + next_value if additive else next_value
+                        self._pending[key] = (write, value, additive, due)
+                        # Only this key backs off; the writer moves on to the others.
+                        # Closing still retries, but never spins on a failed disk.
+                        self._retry_at[key] = time.monotonic() + 1.0
                     self._active = False
                     self._condition.notify_all()
             else:
                 with self._condition:
+                    self._failures.pop(key, None)
                     self._logged.pop(key, None)
                     self._retry_at.pop(key, None)
                     self._active = False
