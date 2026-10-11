@@ -7,10 +7,12 @@ def _windows_prelaunch():
     """Close the double-click race before any heavy import runs.
 
     The first instance holds a named mutex for its whole lifetime. A second
-    launch sees the mutex and waits (briefly) for the first instance's
-    single-instance pipe to come up, so the Qt-level probe in app.main()
-    reliably finds it and raises the existing window instead of racing it
-    while the first instance is still starting.
+    launch sees the mutex and waits for the first instance's single-instance
+    pipe to come up, so the Qt-level probe in app.main() usually finds it and
+    raises the existing window instead of racing it while the first instance
+    is still starting. The wait is best effort (six seconds at most); a slow
+    first start can end it early. LibraryLease is the guard that keeps a second
+    instance from opening the library, whichever way this wait ends.
 
     An instance that is quitting closes its pipe first and exits a moment
     later, so a missing pipe is not worth waiting out: the loop also looks
