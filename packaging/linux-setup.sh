@@ -2,6 +2,10 @@
 set -euo pipefail
 BS_PROJECT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 BS_RUNTIME="$BS_PROJECT/dists/linux"
+if [[ ! -f "$BS_RUNTIME/native/native-build.json" ]]; then
+    printf 'dists/linux/native/native-build.json was not found next to this script.\nRun setup.sh from the top of the Linux release folder; it does not run from the source tree.\n' >&2
+    exit 1
+fi
 BS_PYTHON="${BS_PODCASTS_PYTHON:-python3.14}"
 if ! "$BS_PYTHON" -c 'import sys; raise SystemExit(sys.version_info[:3] < (3, 14, 7))'; then
     printf 'Python 3.14.7+ is required. Set BS_PODCASTS_PYTHON to its executable.\n' >&2
