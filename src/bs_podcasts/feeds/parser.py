@@ -1,6 +1,7 @@
 """Bounded RSS/Atom parsing with deliberately small output contracts."""
 
 from collections import deque
+from dataclasses import replace
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
 from html import escape
@@ -507,6 +508,12 @@ _METADATA = {
 class _EpisodeSlot(NamedTuple):
     external_id: str
     position: int
+    content_id: str = ""
+
+
+def _content_id(title: str, published: str, media_url: str) -> str:
+    """Identity from what an item holds, for items that share a GUID."""
+    return _external_id(_clamp_title(title), published, media_url, "")
 
 
 def _episode_slot(element, local: str, position: int):
@@ -520,7 +527,9 @@ def _episode_slot(element, local: str, position: int):
         media_url, _mime, _length = _atom_link(element, "enclosure")
         published = _date(_text(element, "published", "updated"))
         explicit = _text(element, "id", "guid")
-    return _EpisodeSlot(_external_id(title, published, media_url, explicit), position) if media_url else None
+    if not media_url:
+        return None
+    return _EpisodeSlot(_external_id(title, published, media_url, explicit), position, _content_id(title, published, media_url))
 
 
 def _remember_episode(head, tail, seen, episode):
@@ -529,9 +538,18 @@ def _remember_episode(head, tail, seen, episode):
     # Fixed-size digests prevent a large publisher GUID being retained for
     # every scanned item, including records outside the kept window.
     identity = sha256(episode.external_id.encode("utf-8")).digest()
+    slot = isinstance(episode, _EpisodeSlot)
+    content_id = episode.content_id if slot else _content_id(episode.title, episode.published_at, episode.media_url)
+    content = sha256(content_id.encode("utf-8")).digest()
     if identity in seen:
-        return
-    seen.add(identity)
+        # An earlier item already took this GUID. The same item listed again
+        # is dropped; a different one (other title, date or enclosure) keeps
+        # its own place under an identity taken from its content.
+        if content in seen:
+            return
+        identity = content
+        episode = _EpisodeSlot(content_id, episode.position, content_id) if slot else replace(episode, external_id=content_id)
+    seen.update((identity, content))
     if len(head) < MAX_SCANNED_EPISODES // 2:
         head.append(episode)
     else:
@@ -606,6 +624,9 @@ def _stream_feed(content: bytes, base_url: str, *, slots_only=False, positions=N
                 elif positions is None or item_position in positions:
                     read = _rss_episode if local == "item" else _atom_episode
                     episode = read(current)
+                    if positions is not None and episode is not None:
+                        # The first pass settled which items took a content identity.
+                        episode = replace(episode, external_id=positions[item_position])
                 else:
                     episode = None
                 _remember_episode(head, tail, seen, episode)
@@ -693,7 +714,7 @@ def parse_feed(content: bytes, base_url: str = "") -> FeedData:
             _root, slots = _stream_feed(content, base_url, slots_only=True)
             skipped_video = _SKIPPED.take()
             del _root
-            root, episodes = _stream_feed(content, base_url, positions={slot.position for slot in slots})
+            root, episodes = _stream_feed(content, base_url, positions={slot.position: slot.external_id for slot in slots})
             _skipped_local.items = [None] * skipped_video
         else:
             root, episodes = _stream_feed(content, base_url)
