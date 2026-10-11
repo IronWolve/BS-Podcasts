@@ -109,6 +109,9 @@ class ArtworkCache:
         # condition that wakes a fetch waiting for it.
         self._removing = None
         self._removed = Condition(self._locks_guard)
+        # One sweep at a time: the reservation above holds one digest, so two
+        # overlapping sweeps would release each other's reservation.
+        self._sweep_lock = Lock()
         self._validated = OrderedDict()
         self._retry_after = OrderedDict()
         self._recent = OrderedDict()
@@ -220,6 +223,11 @@ class ArtworkCache:
         return found
 
     def prune(self, keep: set[str], max_bytes: int | None = None) -> tuple[int, int]:
+        """Delete cached files not in `keep`; see _prune. Sweeps run one at a time."""
+        with self._sweep_lock:
+            return self._prune(keep, max_bytes)
+
+    def _prune(self, keep: set[str], max_bytes: int | None = None) -> tuple[int, int]:
         """Delete cached files not in `keep`, oldest first, until under `max_bytes`.
 
         With max_bytes=None every unreferenced file goes. Returns (count, bytes).
