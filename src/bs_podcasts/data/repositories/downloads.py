@@ -11,6 +11,7 @@ from ..files import (
     FILE_MISSING,
     FILE_PRESENT,
     FILE_UNAVAILABLE,
+    FILE_UNCONFIRMED,
     inspect_download_file,
 )
 
@@ -167,6 +168,13 @@ class DownloadRepository:
         completed = record.state == DownloadState.COMPLETE
         path = Path(record.target_path if completed else record.partial_path)
         kind, size = inspect_download_file(path, completed=completed)
+        if not completed and kind in {FILE_MISSING, FILE_UNCONFIRMED} and record.target_path:
+            # A row that never reached complete can still have the finished
+            # file at its target (the rename happened, the write did not).
+            # Delete refuses a file the preview did not list.
+            target_kind, target_size = inspect_download_file(record.target_path)
+            if target_kind == FILE_PRESENT:
+                return DeletionPreview(episode_id, record.target_path, target_size)
         if kind == FILE_PRESENT:
             return DeletionPreview(episode_id, str(path), size)
         if kind == FILE_MISSING:
