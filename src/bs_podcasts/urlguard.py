@@ -257,11 +257,17 @@ def unsafe_media_payload(head: bytes) -> bool:
 
 def ensure_external_media_file(value: str) -> str:
     """Validate a local target before handing it to the OS's file association."""
-    from pathlib import Path
+    from pathlib import Path, PurePosixPath
+    from urllib.parse import unquote
     from urllib.request import url2pathname
 
     text = ensure_media_source(value, allow_file_url=True)
     if is_web_url(text):
+        # The same suffix rule as a local file: a feed-supplied address must
+        # not name a script or executable type to the system opener.
+        suffix = PurePosixPath(unquote(urlsplit(text).path)).suffix.lower()
+        if suffix and suffix not in SAFE_MEDIA_SUFFIXES:
+            raise UnsafeUrl("This file type cannot be opened through the external player.")
         return text
     parts = urlsplit(text)
     path = Path(url2pathname(parts.path) if parts.scheme.lower() == "file" else text).expanduser()
