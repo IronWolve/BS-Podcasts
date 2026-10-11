@@ -1097,7 +1097,14 @@ def main() -> int:
     app.aboutToQuit.connect(lambda: _close_local_server(server))
     app.aboutToQuit.connect(lambda: shutdown_exports(0.2))
     app.aboutToQuit.connect(lambda: state["window"]._save_layout() if state["window"] is not None else None)
-    # window.mpris is None until desktop integration ran.
+    # window.tray and window.mpris are None until desktop integration ran.
+    # Hiding the tray here removes the icon before the drain, and before a
+    # forced exit that skips the toolkit's own cleanup.
+    app.aboutToQuit.connect(
+        lambda: state["window"].tray.shutdown()
+        if state["window"] is not None and getattr(state["window"], "tray", None) is not None
+        else None
+    )
     app.aboutToQuit.connect(
         lambda: state["window"].mpris.shutdown()
         if state["window"] is not None and getattr(state["window"], "mpris", None) is not None
