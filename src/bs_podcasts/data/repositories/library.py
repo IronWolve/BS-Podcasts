@@ -83,6 +83,9 @@ class LibraryRepository:
         auto_continue: bool | None = None,
         website_url: str = "",
     ) -> Show:
+        settings = (playback_speed, skip_back, skip_forward, auto_continue)
+        if any(value is not None for value in settings) and any(value is None for value in settings):
+            raise ValueError("playback_speed, skip_back, skip_forward and auto_continue go together.")
         now = time.time()
         with self.database.connect() as connection:
             connection.execute(
