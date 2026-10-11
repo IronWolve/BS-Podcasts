@@ -3,6 +3,10 @@
 from ..data.repositories import ListeningRepository
 import logging
 
+# A feed that offered chapters or a transcript and sent back nothing is asked
+# again after this long, not on every open.
+EMPTY_RETRY_SECONDS = 24 * 60 * 60
+
 
 class ListeningService:
     def __init__(self, repository: ListeningRepository):
@@ -16,7 +20,9 @@ class ListeningService:
         from ..feeds.listening_fetch import ListeningFetchError, fetch_chapters, fetch_transcript
 
         result = {"chapters": False, "transcript": False, "error": ""}
-        if episode.chapters_url and not self.repository.chapters(episode.id):
+        if (episode.chapters_url and not self.repository.chapters(episode.id)
+                and not self.repository.attempted_recently(episode.id, "chapters", episode.chapters_url,
+                                                           EMPTY_RETRY_SECONDS)):
             try:
                 chapters = fetch_chapters(episode.chapters_url, session)
                 if chapters:
@@ -24,11 +30,15 @@ class ListeningService:
                         episode.id, [(c.start_seconds, c.end_seconds, c.title, c.artwork_url) for c in chapters],
                         source_url=episode.chapters_url,
                     )
+                else:
+                    self.repository.record_attempt(episode.id, "chapters", episode.chapters_url)
             except Exception as exc:
                 if not isinstance(exc, (ListeningFetchError, OSError)):
                     logging.getLogger(__name__).exception('Unexpected chapters failure for episode %s', episode.id)
                 result["error"] = f"Chapters: {exc}"
-        if episode.transcript_url and not self.repository.transcript(episode.id):
+        if (episode.transcript_url and not self.repository.transcript(episode.id)
+                and not self.repository.attempted_recently(episode.id, "transcript", episode.transcript_url,
+                                                           EMPTY_RETRY_SECONDS)):
             try:
                 segments = fetch_transcript(episode.transcript_url, episode.transcript_type, session)
                 if segments:
@@ -37,6 +47,7 @@ class ListeningService:
                         source_url=episode.transcript_url, source_type=episode.transcript_type,
                     )
                 else:
+                    self.repository.record_attempt(episode.id, "transcript", episode.transcript_url)
                     raise ListeningFetchError("The transcript file had no readable text.")
             except Exception as exc:
                 if not isinstance(exc, (ListeningFetchError, OSError)):

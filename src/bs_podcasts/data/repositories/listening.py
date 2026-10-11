@@ -40,6 +40,24 @@ class ListeningRepository:
 
         return True
 
+    def record_attempt(self, episode_id: int, kind: str, source_url: str):
+        """Remember that `kind` ('chapters' or 'transcript') came back empty from `source_url`."""
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO listening_attempts(episode_id, kind, source_url, attempted_at) "
+                "VALUES (?, ?, ?, ?)",
+                (episode_id, kind, source_url, time.time()),
+            )
+
+    def attempted_recently(self, episode_id: int, kind: str, source_url: str, max_age: float) -> bool:
+        """True when the same source was tried, empty, within `max_age` seconds."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT source_url, attempted_at FROM listening_attempts WHERE episode_id=? AND kind=?",
+                (episode_id, kind),
+            ).fetchone()
+        return bool(row) and row[0] == source_url and time.time() - row[1] < max_age
+
     def chapters(self, episode_id: int) -> list[Chapter]:
         with self.database.connect() as connection:
             rows = connection.execute(
