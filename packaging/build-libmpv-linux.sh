@@ -15,7 +15,7 @@ import hashlib, json, os, pathlib, shlex, subprocess, sys
 root = pathlib.Path(sys.argv[1])
 files = ["build-libmpv-linux.sh", "native_sources.py", "native-sources.json"]
 identity = {name: hashlib.sha256((root/name).read_bytes()).hexdigest() for name in files}
-identity["environment"] = {name: os.environ.get(name, "") for name in ("CC", "CXX", "LDFLAGS", "CPPFLAGS", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "PATH")}
+identity["environment"] = {name: os.environ.get(name, "") for name in ("CC", "CXX", "LDFLAGS", "CPPFLAGS", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "PATH", "PKG_CONFIG_LIBDIR")}
 identity["tools"] = {name: subprocess.check_output(shlex.split(command)+["--version"]).decode(errors="replace") for name, command in (("cc",os.environ.get("CC","cc")),("cxx",os.environ.get("CXX","c++")),("meson","meson"),("ninja","ninja"),("pkg-config","pkg-config"))}
 print(hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest())
 ' "$BS_PROJECT/repo/packaging")"
@@ -34,8 +34,16 @@ BS_JOBS="${BS_NATIVE_JOBS:-2}"
 pkg-config --exists alsa libpulse || { printf 'ALSA and PulseAudio development headers are required. No packages were installed.\n' >&2; exit 1; }
 mkdir -p "$BS_PREFIX" "$BS_SRC" "$BS_NATIVE_ROOT/tmp"
 export TMPDIR="$BS_NATIVE_ROOT/tmp" PYTHONDONTWRITEBYTECODE=1
+# pkg-config sees only the prefix and the two system packages this build enables, so a
+# host .pc file for any other library cannot change the build. Their files are linked
+# into this run's folder; a dependency they gain later fails the configure step loudly.
+BS_SYSTEM_PC="$BS_NATIVE_ROOT/system-pkgconfig"
+mkdir -p "$BS_SYSTEM_PC"
+for name in alsa libpulse; do
+    ln -sfn "$(pkg-config --variable=pcfiledir "$name")/$name.pc" "$BS_SYSTEM_PC/$name.pc"
+done
 export PKG_CONFIG_PATH="$BS_PREFIX/lib/pkgconfig"
-unset PKG_CONFIG_LIBDIR
+export PKG_CONFIG_LIBDIR="$BS_PREFIX/lib/pkgconfig:$BS_SYSTEM_PC"
 export CFLAGS="-O2 -fPIC -ffile-prefix-map=$BS_NATIVE_ROOT=/bs-native -fdebug-prefix-map=$BS_NATIVE_ROOT=/bs-native"
 export CXXFLAGS="$CFLAGS"
 printf 'Native work/log directory: %s\n' "$BS_NATIVE_ROOT"
