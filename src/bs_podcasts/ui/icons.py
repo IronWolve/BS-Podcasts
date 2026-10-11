@@ -167,6 +167,9 @@ def paint(painter: QPainter, name: str, color: str, rect, scale: float = 1.0):
 # glyphs used by indicators are written once per process to a cache folder.
 
 _PLACEHOLDER = re.compile(r"\{icon:([a-z-]+):([^:}]+):(\d+)\}")
+# The file name keeps only letters and digits of the colour, and the colour is
+# written into the SVG text, so only a plain hex colour is accepted.
+_HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}")
 _file_dir: Path | None = None
 _verified_files = {}
 
@@ -206,6 +209,8 @@ def _glyph_file_valid(target: Path, size: int) -> bool:
 
 
 def icon_file(name: str, color: str, size: int) -> str:
+    if not _HEX_COLOR.fullmatch(color):
+        raise ValueError(f"Stylesheet glyph colour must be #RRGGBB, not {color!r}")
     safe_color = re.sub(r"[^0-9A-Za-z]", "", color)
     # The glyph's own path data is part of the name. Keying on name/colour/size
     # alone meant `target.exists()` was checked but never freshness, so a user
