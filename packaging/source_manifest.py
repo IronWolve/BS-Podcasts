@@ -443,13 +443,21 @@ def stage(destination, root=ROOT, ran=None):
         origin.update(commit=previous.get('commit'), dirty=previous.get('dirty',True))
     try:
         top = subprocess.run(['git','-C',str(root),'rev-parse','--show-toplevel'],capture_output=True,text=True,timeout=5)
-        if top.returncode==0 and Path(top.stdout.strip()).resolve()==root:
-            commit = subprocess.run(['git','-C',str(root),'rev-parse','HEAD'],capture_output=True,text=True,timeout=5)
-            status = subprocess.run(['git','-C',str(root),'status','--porcelain'],capture_output=True,text=True,timeout=5)
-            origin.update(commit=commit.stdout.strip() if commit.returncode==0 else None,
-                          dirty=status.returncode!=0 or bool(status.stdout.strip()))
+        checkout = top.returncode==0 and Path(top.stdout.strip()).resolve()==root
     except (OSError,subprocess.TimeoutExpired):
-        pass  # Build hosts without Git still get content-addressed development artifacts.
+        checkout = False  # Build hosts without Git still get content-addressed development artifacts.
+    if checkout:
+        # Separate calls: a slow status keeps the commit already read and leaves the record dirty.
+        try:
+            commit = subprocess.run(['git','-C',str(root),'rev-parse','HEAD'],capture_output=True,text=True,timeout=5)
+            origin['commit'] = commit.stdout.strip() if commit.returncode==0 else None
+        except (OSError,subprocess.TimeoutExpired):
+            pass
+        try:
+            status = subprocess.run(['git','-C',str(root),'--no-optional-locks','status','--porcelain'],capture_output=True,text=True,timeout=5)
+            origin['dirty'] = status.returncode!=0 or bool(status.stdout.strip())
+        except (OSError,subprocess.TimeoutExpired):
+            pass
     (destination/'.build-origin.json').write_text(json.dumps(origin,indent=2)+'\n')
     return destination
 
