@@ -562,6 +562,12 @@ class LibraryRepository:
         confirmed = set(_confirmed_path_list(confirmed_paths))
         cleared = []
         with self.database.connect() as connection:
+            # Ownership is read first, without the write lock: a profile this
+            # database does not own has nothing to sweep and must not queue
+            # behind other writers. The check is repeated inside the transaction.
+            owner = connection.execute("SELECT value FROM settings WHERE key=?", (self.ORPHAN_OWNER,)).fetchone()
+            if owner is None or owner[0] != str(self.database.path.resolve()):
+                return []
             connection.execute("BEGIN IMMEDIATE")
             owner = connection.execute("SELECT value FROM settings WHERE key=?", (self.ORPHAN_OWNER,)).fetchone()
             if owner is None or owner[0] != str(self.database.path.resolve()):
