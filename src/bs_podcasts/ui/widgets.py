@@ -4372,6 +4372,7 @@ class PlayerBar(QFrame):
             snapshot.artwork_path, snapshot.message, snapshot.buffering, snapshot.duration,
             getattr(snapshot, "sleep_at_end", False),
             getattr(snapshot, "download_request", 0),
+            getattr(snapshot, "show_id", 0),
         )
         if chrome_key == getattr(self, "_chrome_key", None):
             position = media_seconds(snapshot.position) or 0.0
