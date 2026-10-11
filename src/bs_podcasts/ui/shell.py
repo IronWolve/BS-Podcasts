@@ -2722,17 +2722,16 @@ class MainWindow(QMainWindow):
     def _retinted(data: dict) -> dict:
         """Copy of a library payload with every item's accent re-read from the
         (now primed) tint cache. Mirrors the fallbacks _ui_episode and
-        _ui_podcast use, so a still-missing sample yields the same colour."""
-        def episode_accent(item):
-            return dominant_color(item.artwork_path, ACCENTS[item.show_id % len(ACCENTS)], compute=False)
+        _ui_podcast use, so a still-missing sample yields the same colour.
+        Only an item whose accent changed is copied."""
+        def retint(item):
+            color = dominant_color(item.artwork_path, ACCENTS[item.show_id % len(ACCENTS)], compute=False)
+            return replace_item(item, accent=color) if color != item.accent else item
 
         patched = dict(data)
         for key in ("episodes", "in_progress", "queued", "history"):
-            patched[key] = [replace_item(item, accent=episode_accent(item)) for item in data.get(key, ())]
-        patched["shows"] = [
-            replace_item(show, accent=dominant_color(show.artwork_path, ACCENTS[show.show_id % len(ACCENTS)], compute=False))
-            for show in data.get("shows", ())
-        ]
+            patched[key] = [retint(item) for item in data.get(key, ())]
+        patched["shows"] = [retint(show) for show in data.get("shows", ())]
         return patched
 
     def _history_items(self, episodes, active):
@@ -7225,9 +7224,15 @@ class MainWindow(QMainWindow):
             with self._convert_lock:
                 self._ui_episode_cache.clear()  # later conversions pick up the tints
                 self._convert_revision += 1
+            tinted = {}
             def tint(item):
-                color = dominant_color(item.artwork_path, item.accent, compute=False)
-                return replace_item(item, accent=color) if color != item.accent else item
+                # A page and its model hold the same row objects: copy each once.
+                done = tinted.get(id(item))
+                if done is None:
+                    color = dominant_color(item.artwork_path, item.accent, compute=False)
+                    result = replace_item(item, accent=color) if color != item.accent else item
+                    done = tinted[id(item)] = (item, result)  # holding item keeps its id from being reused
+                return done[1]
             # Recolor current rows only; older payloads cannot replay queue or
             # selection state after a newer user action.
             for page in (self.home_page, self.podcast_page, self.discover_page, self.episode_page,
