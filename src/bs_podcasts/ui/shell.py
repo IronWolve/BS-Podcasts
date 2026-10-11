@@ -4112,6 +4112,9 @@ class MainWindow(QMainWindow):
             source = None
             if item.show_id and self.library is not None:
                 source = self._stored_show(item.show_id)
+                if source is not None:
+                    # The row's "Podcast feed" stand-in is display text, not an author.
+                    item = replace_item(item, author=source.author or "")
             elif item.feed_url:
                 source = self._previews.get(item.feed_url)
             self._exec_dialog(PodcastInfoDialog(item, source, self))
@@ -4120,7 +4123,8 @@ class MainWindow(QMainWindow):
         if self._hero_show_id and self.library is not None:
             show = self._stored_show(self._hero_show_id)
             if show is not None:
-                self._exec_dialog(PodcastInfoDialog(self._ui_podcast(show), show, self))
+                card = replace_item(self._ui_podcast(show), author=show.author or "")
+                self._exec_dialog(PodcastInfoDialog(card, show, self))
             return
         feed_url = self._preview_episodes_url
         if not feed_url:
