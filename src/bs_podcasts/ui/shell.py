@@ -174,7 +174,19 @@ def _fetch_feed_preview(fetcher, feed_url, checkpoint=lambda: None):
 
     response = fetcher.fetch(feed_url, reuse_recent=True)
     checkpoint()
-    return prepare_preview(parse_feed(response.content, base_url=response.final_url))
+    feed = prepare_preview(parse_feed(response.content, base_url=response.final_url))
+    _latest_episode(feed)
+    return feed
+
+
+def _latest_episode(feed):
+    """The feed's newest episode, found once and kept on the feed. A Discover
+    apply merges it into every card whose feed is cached, and a cached feed
+    can hold thousands of episodes."""
+    if not hasattr(feed, "_preview_latest"):
+        latest = max(feed.episodes, key=lambda episode: episode.published_at or "") if feed.episodes else None
+        object.__setattr__(feed, "_preview_latest", latest)
+    return feed._preview_latest
 
 
 def _track_job(window, future, kind, identifier, classify=None, drop_cancelled=False):
@@ -8556,7 +8568,7 @@ class MainWindow(QMainWindow):
         """Merge fetched feed freshness into an unsubscribed directory card."""
         if feed is None or item.show_id:
             return item
-        latest = max(feed.episodes, key=lambda episode: episode.published_at or "") if feed.episodes else None
+        latest = _latest_episode(feed)
         return replace_item(
             item,
             latest_episode_title=latest.title if latest else "",
