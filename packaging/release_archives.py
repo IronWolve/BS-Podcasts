@@ -32,7 +32,10 @@ def verify_files(root, records):
         raise ValueError('Artifact files differ from the build manifest.')
     if any('symlink' in record for record in actual):
         raise ValueError('This release format expects regular files, not links.')
-    return {name: (root / name).read_bytes() for name in sorted(expected)}
+    files = {name: (root / name).read_bytes() for name in sorted(expected)}
+    if any(hashlib.sha256(data).hexdigest() != expected[name]['sha256'] for name, data in files.items()):
+        raise ValueError('Artifact file changed while it was being read.')
+    return files
 
 
 def scan_inputs(files, tokens):
@@ -200,7 +203,8 @@ def build(output, macos=None, plain=False):
     scan_inputs(windows_files, tokens)
 
     linux = ROOT.parent / 'dists/linux'
-    linux_record = json.loads((linux/'deployment.json').read_text())
+    deployment = (linux/'deployment.json').read_bytes()
+    linux_record = json.loads(deployment)
     deployed = [*runtime.values(), 'native/libmpv.so.2', 'native/native-build.json']
     expected = {relative: file_digest(linux/relative) for relative in deployed}
     if linux_record['version'] != version or linux_record['source_sha256'] != fingerprint or linux_record['files'] != expected:
@@ -211,7 +215,9 @@ def build(output, macos=None, plain=False):
         raise ValueError('Linux native library does not match the pinned source inputs.')
     player, ffmpeg = bundled_player_versions(linux_record['native'])
     linux_files = {'dists/linux/'+name: (linux/name).read_bytes() for name in deployed}
-    linux_files['dists/linux/deployment.json'] = (linux/'deployment.json').read_bytes()
+    if any(hashlib.sha256(linux_files['dists/linux/'+name]).hexdigest() != expected[name] for name in deployed):
+        raise ValueError('Linux runtime file changed while it was being read.')
+    linux_files['dists/linux/deployment.json'] = deployment
     linux_files['setup.sh'] = (ROOT/'packaging/linux-setup.sh').read_bytes()
     for name in ('start', 'stop'):
         linux_files[name+'.sh'] = ('#!/usr/bin/env bash\nset -euo pipefail\n'
