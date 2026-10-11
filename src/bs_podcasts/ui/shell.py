@@ -6713,9 +6713,7 @@ class MainWindow(QMainWindow):
         if self._hero_show_id != show_id or self._preview_episodes_url or self._catalog_query:
             return
         page = self.episode_page
-        page.header.search.clear()
-        page.set_filter('All')
-        page._set_sort('newest', 'Newest first')
+        page.set_view('', 'All', 'newest')
         row = page.model.row_for_episode(episode_id)
         if row >= 0:
             page.view.setCurrentIndex(page.model.index(row, 0))

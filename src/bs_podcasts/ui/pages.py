@@ -1418,6 +1418,21 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self._filter = value
         self._apply_filters()
 
+    def set_view(self, query: str = "", filter_value: str = "All", sort_key: str = "newest"):
+        """Set the search text, the filter and the sort together, then filter
+        once. The separate setters each filter, sort and replace the whole
+        model, so changing all three rebuilt a long list up to three times."""
+        search = self.header.search
+        search.blockSignals(True)
+        search.setText(query)
+        search.blockSignals(False)
+        self._filter_timer.stop()
+        self._filter = filter_value
+        self.chips.select(filter_value)
+        if sort_key in dict(SORT_OPTIONS):
+            self._sort = sort_key
+        self._apply_filters()
+
     def _show_sort_menu(self):
         menu = self._create_sort_menu()
         exec_menu(menu, self.sort_button.mapToGlobal(self.sort_button.rect().bottomLeft()))
