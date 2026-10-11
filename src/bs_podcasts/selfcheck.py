@@ -15,36 +15,15 @@ from .data import Database
 from .data.files import atomic_write
 from .privacy import redact
 
-# Checks recorded inside the dependency try. A later exception must not hide one of these behind the generic flag.
-_DEPENDENCY_CHECKS = (
-    'PySide6 available',
-    'requests available',
-    'urllib3 patched',
-    'native library loaded',
-    'bundled branding/fonts',
-    'bundled shell/tray icons',
-    'native core initialized',
-    'patched bundled FFmpeg',
-    'native library inside deployment',
-    'package inside bundle',
-    'native library inside bundle',
-)
-
 
 def _exception_text(exc):
     return redact(f'{type(exc).__name__}: {exc}')
 
 
 def _note_dependency_failure(checks, errors, exc):
-    """Keep a check that already recorded false; otherwise record the generic flag."""
-    detail = _exception_text(exc)
-    specific = [name for name in checks if checks[name] is False and name not in errors
-                and (name in _DEPENDENCY_CHECKS or name.startswith('feed encoding '))]
-    if specific:
-        errors[specific[-1]] = detail
-        return
+    """Record the exception under the generic flag; a check already false keeps its own result."""
     checks['dependency loading'] = False
-    errors['dependency loading'] = detail
+    errors['dependency loading'] = _exception_text(exc)
 
 
 def _distribution_version():
