@@ -7275,6 +7275,16 @@ class MainWindow(QMainWindow):
                 if not self._discover_newest_pending and self._discover_newest_total:
                     self._finish_discover_newest_scan()
         return
+    def _retain_after_download(self, episode_id):
+        """Check the retention limits of a podcast whose download just
+        finished, for paths that do not show the "Downloaded" notice."""
+        library = self.library
+        if library is None:
+            return
+        self._run_read(
+            lambda: (library.episode(episode_id),),
+            lambda rows: rows[0] is not None and self._apply_retention(rows[0].show_id, keep=(episode_id,), background=True),
+            f"retention-after-download-{episode_id}")
     def _on_download(self, kind, identifier, result):
         if isinstance(identifier, tuple):
             identifier, ticket = identifier
@@ -7294,6 +7304,7 @@ class MainWindow(QMainWindow):
             if complete:
                 self._play_after_download = 0
                 self._playback_command('complete_download', identifier, request)
+                self._retain_after_download(identifier)
                 return
             if result.status not in {JobStatus.OK, JobStatus.EMPTY}:
                 self._play_after_download = 0
@@ -7312,6 +7323,7 @@ class MainWindow(QMainWindow):
             self._play_after_download = 0
             if self._play_after_download_intent == getattr(self.playback, 'intent_revision', 0):
                 self._play_episode(identifier)
+                self._retain_after_download(identifier)
                 return
         if complete:
             def apply(episode):
