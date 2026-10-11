@@ -284,11 +284,19 @@ def load_fonts() -> list[str]:
     _resolved_families.clear()
     from ..assets import font_paths
 
+    paths = font_paths()
     families = []
-    for path in font_paths():
+    registered = 0
+    for path in paths:
         font_id = QFontDatabase.addApplicationFont(str(path))
         if font_id >= 0:
+            registered += 1
             families.extend(QFontDatabase.applicationFontFamilies(font_id))
+        else:
+            # The file name only: the folder above it names the install location.
+            logging.getLogger("bs_podcasts").warning(
+                "Bundled font %s could not be registered; text may use installed fonts instead.", path.name)
+    logging.getLogger("bs_podcasts").info("Registered %d of %d bundled font files", registered, len(paths))
     return families
 
 
