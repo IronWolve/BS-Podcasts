@@ -8343,6 +8343,7 @@ class MainWindow(QMainWindow):
             latest_sort_key=show.latest_episode_published_at,
             website_url=show.website_url,
             last_refresh_text=MainWindow._relative_time(show.last_refresh),
+            unreachable=MainWindow._is_unreachable(show),
         )
 
     @staticmethod
