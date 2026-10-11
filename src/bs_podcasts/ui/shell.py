@@ -1086,7 +1086,7 @@ class MainWindow(QMainWindow):
             # Operation and value; a chart or topic value becomes a list in JSON.
             "discover_request": [self._discover_operation, self._discover_value],
             "_previews": OrderedDict(self._previews),
-            "_discover_items": list(self.discover_page._all_items),
+            "_discover_items": list(self.discover_page.all_items),
             "_discover_cache": dict(self._discover_cache),
             "_discover_request": (self._discover_operation, self._discover_value,
                                   self._discover_limit, self._discover_exhausted),
@@ -1242,7 +1242,7 @@ class MainWindow(QMainWindow):
         # with no results (they are not saved): load the saved view's own
         # request. An unknown request must not run as an empty search.
         resume = self.directory is not None and self.jobs is not None and (
-            (on_discover and not self.discover_page._all_items)
+            (on_discover and not self.discover_page.all_items)
             or (state.get("discover_loading") and self._discover_visited))
         if resume and self._discover_operation:
             self._start_directory_request(self._discover_operation, self._discover_value)
@@ -1403,7 +1403,7 @@ class MainWindow(QMainWindow):
 
     def _live_artwork_paths(self):
         paths = {item.artwork_path for page in (self.podcast_page, self.discover_page, self.episode_page)
-                 for item in page._all_items if item.artwork_path}
+                 for item in page.all_items if item.artwork_path}
         if self.playback is not None and self.playback.snapshot.artwork_path:
             paths.add(self.playback.snapshot.artwork_path)
         return paths
@@ -3799,7 +3799,7 @@ class MainWindow(QMainWindow):
         # Seed the new show with the directory card's already-cached artwork:
         # until the first refresh fetches its own, every library-side render
         # of this podcast would flash the initials placeholder ("a letter").
-        card = next((item for item in self.discover_page._all_items if item.feed_url == feed_url), None)
+        card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
         artwork_path = card.artwork_path if card is not None and card.artwork_path else ""
 
         def work():
@@ -3826,7 +3826,7 @@ class MainWindow(QMainWindow):
             elif self.pages.currentWidget() is self.discover_page:
                 # Stay in place; flip the card to Saved and offer a way over.
                 self.discover_page.set_items(
-                    [self._merge_subscription(item, show) for item in self.discover_page._all_items], preserve_scroll=True
+                    [self._merge_subscription(item, show) for item in self.discover_page.all_items], preserve_scroll=True
                 )
                 self._notify(f"Subscribed to {show.title or 'podcast'} — fetching episodes…", "success", "Open", lambda: self._open_show_id(show.id))
             else:
@@ -3883,7 +3883,7 @@ class MainWindow(QMainWindow):
         elif index == PAGE_QUEUE:
             menu.addSeparator()
             clear = menu.addAction("Clear Up Next…", self._clear_queue)
-            clear.setEnabled(bool(self.library and self.playlist_page._all_items))
+            clear.setEnabled(bool(self.library and self.playlist_page.all_items))
         elif index == PAGE_DOWNLOADS:
             menu.addSeparator()
             pause = menu.addAction("Pause active downloads", self._pause_all_downloads)
@@ -3969,7 +3969,7 @@ class MainWindow(QMainWindow):
         self._pending_episodes_url = ""
         if not show_id or self.library is None:
             return
-        cached = next((item for item in self.podcast_page._all_items if item.show_id == show_id), None)
+        cached = next((item for item in self.podcast_page.all_items if item.show_id == show_id), None)
         if cached is not None:
             self._open_podcast(cached, select_episode_id)
             return
@@ -4214,7 +4214,7 @@ class MainWindow(QMainWindow):
         if not feed_url:
             return
         feed = self._previews.get(feed_url)
-        card = next((item for item in self.discover_page._all_items if item.feed_url == feed_url), None)
+        card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
         if card is None and feed is not None:
             card = UiPodcast(
                 feed.title or "Podcast", feed.author, len(feed.episodes), 0,
@@ -4620,7 +4620,7 @@ class MainWindow(QMainWindow):
                 if not episode_id and self._preview_episodes_url == feed_url:
                     self.episode_page.set_items([
                         replace_item(row, artwork_path=path, accent=accent or row.accent)
-                        if row.media_url == item.media_url else row for row in self.episode_page._all_items
+                        if row.media_url == item.media_url else row for row in self.episode_page.all_items
                     ], preserve_scroll=True)
                     self._playback_command("update_preview_artwork", item.media_url, path)
             else:
@@ -4775,7 +4775,7 @@ class MainWindow(QMainWindow):
             # A list with none of the changed covers is left as it is.
             return [update(current) for current in items] if holds(items) else items
         for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.bookmark_page, self.history_page):
-            page._all_items = updated(page._all_items)
+            page.replace_all_items(updated(page.all_items))
             if holds(page.model.items()):
                 page.model.update_artwork_batch(changes)
         queue_model = self.context.queue_view.model()
@@ -5633,7 +5633,7 @@ class MainWindow(QMainWindow):
         active = self._playing_state == "playing"
         self.context.set_playing(self._playing_episode_id, active, self._playing_state == "loading")
         if self.episode_page.hero.isVisible() and self._hero_show_id and self.library is not None:
-            latest = max(self.episode_page._all_items, key=lambda item: (item.published_at, item.episode_id), default=None)
+            latest = max(self.episode_page.all_items, key=lambda item: (item.published_at, item.episode_id), default=None)
             playing_latest = latest is not None and latest.episode_id == self._playing_episode_id and self._playing_state in {"playing", "paused", "loading"}
             self.episode_page.hero.set_playing(playing_latest, active)
         for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.history_page, self.bookmark_page):
@@ -5976,7 +5976,7 @@ class MainWindow(QMainWindow):
             return changed
 
         for page in (self.episode_page, self.playlist_page, self.history_page):
-            changes = deltas(page._all_items)
+            changes = deltas(page.all_items)
             if changes:
                 page.update_items(changes)
         for model in (self.home_page.model, self.context.queue_view.model()):
@@ -6002,7 +6002,7 @@ class MainWindow(QMainWindow):
         if not pending:
             return
         updates = {}
-        items = {item.episode_id: item for item in self.download_page._all_items}
+        items = {item.episode_id: item for item in self.download_page.all_items}
         missing = False
         with self._samples_lock:
             samples = dict(self._download_samples)
@@ -6392,7 +6392,7 @@ class MainWindow(QMainWindow):
     def _start_directory_request(self, operation: str, value, force: bool = False):
         key = (operation, repr(value))
         retained_limit = self._discover_limit if (
-            force and self._discover_displayed_key == key and self.discover_page._all_items
+            force and self._discover_displayed_key == key and self.discover_page.all_items
         ) else 0
         self._directory_cancel.set()
         self._directory_cancel = threading.Event()
@@ -6661,7 +6661,7 @@ class MainWindow(QMainWindow):
             if generation == self._directory_generation
         }
         waiting = []
-        for item in self.discover_page._all_items:
+        for item in self.discover_page.all_items:
             if item.artwork_url and item.artwork_url not in seen:
                 seen.add(item.artwork_url)
                 waiting.append((item.feed_url, item.artwork_url))
@@ -6717,11 +6717,11 @@ class MainWindow(QMainWindow):
                         self.episode_page.hero.art.set_artwork(path, initials(self.episode_page.hero.title.text()), item.accent)
                         self.episode_page.set_items([
                             replace_item(episode, artwork_path=path, accent=item.accent)
-                            for episode in self.episode_page._all_items
+                            for episode in self.episode_page.all_items
                         ], preserve_scroll=True)
                         playing = getattr(self.playback, 'snapshot', None)
                         if playing is not None and not playing.episode_id and any(
-                                episode.media_url == playing.source for episode in self.episode_page._all_items):
+                                episode.media_url == playing.source for episode in self.episode_page.all_items):
                             self._playback_command('update_preview_artwork', playing.source, path)
             for key, (stamp, limit, candidates) in list(self._discover_cache.items()):
                 changed_rows = [index for index, (candidate, old_path) in enumerate(candidates)
@@ -7316,7 +7316,7 @@ class MainWindow(QMainWindow):
             # selection state after a newer user action.
             for page in (self.home_page, self.podcast_page, self.discover_page, self.episode_page,
                          self.playlist_page, self.history_page, self.download_page, self.bookmark_page):
-                page._all_items = [tint(item) for item in page._all_items]
+                page.replace_all_items([tint(item) for item in page.all_items])
                 page.model.replace([tint(item) for item in page.model.items()])
                 page._context_item = page.view.currentIndex().data(ItemRoles.ITEM)
             model = self.context.queue_view.model()
@@ -7674,7 +7674,7 @@ class MainWindow(QMainWindow):
             return
         cache_key = (request[0], repr(request[1]))
         if (cache_restore and self._discover_displayed_key == cache_key
-                and self.discover_page._all_items):
+                and self.discover_page.all_items):
             # Disk snapshots seed empty views, never replace a populated view
             # during pagination or refresh (the snapshot has a smaller cap).
             return
@@ -7684,7 +7684,7 @@ class MainWindow(QMainWindow):
         operation, value, requested_limit = request
         if result.status != JobStatus.OK:
             self._discover_retry_request = request
-            self.discover_page.set_load_more_state(bool(self.discover_page._all_items), loading=False)
+            self.discover_page.set_load_more_state(bool(self.discover_page.all_items), loading=False)
             if result.value == "offline":
                 self.discover_page.banner.show_state(
                     "offline", "You appear to be offline. Check the connection and retry.", retry=True
@@ -8192,7 +8192,7 @@ class MainWindow(QMainWindow):
             return
         current_items = {
             item.feed_url: item
-            for item in self.discover_page._all_items
+            for item in self.discover_page.all_items
             if item.feed_url and not item.show_id
         }
         current_urls = set(current_items)
@@ -8340,7 +8340,7 @@ class MainWindow(QMainWindow):
             self.discover_page.set_discover_summary(self._discover_newest_summary)
         self._discover_newest_summary = ""
         items = []
-        for item in self.discover_page._all_items:
+        for item in self.discover_page.all_items:
             update = self._discover_newest_updates.get(item.feed_url)
             if update is not None:
                 item = replace_item(item, latest_episode_title=update.latest_episode_title,
@@ -8379,7 +8379,7 @@ class MainWindow(QMainWindow):
         if feed is None:
             self._pending_episodes_url = feed_url
             self._preview_episodes_url = feed_url
-            card = next((item for item in self.discover_page._all_items if item.feed_url == feed_url), None)
+            card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
             title = card.title if card else "Podcast"
             author = card.author if card else ""
             self.episode_page.header.set_title(title)
@@ -8408,7 +8408,7 @@ class MainWindow(QMainWindow):
         if self.episode_page.header.action:
             self.episode_page.header.action.setToolTip("Refresh this feed preview")
         episodes = sorted(feed.episodes, key=lambda episode: episode.published_at or "", reverse=True)
-        card = next((item for item in self.discover_page._all_items if item.feed_url == feed_url), None)
+        card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
         podcast_artwork = card.artwork_path if card else ""
         podcast_accent = card.accent if card else ACCENTS[3]
         items = [
@@ -8512,7 +8512,7 @@ class MainWindow(QMainWindow):
         # Merge before re-selecting the card; cached preview callbacks then become
         # no-ops. Artwork can arrive even when a feed has no episodes/dates.
         if update_grid:
-            old_items = self.discover_page._all_items
+            old_items = self.discover_page.all_items
             items = [self._with_preview(item, feed) if item.feed_url == feed_url else item for item in old_items]
             if items != old_items:
                 self.discover_page.set_items(items, preserve_scroll=True)
@@ -8523,7 +8523,7 @@ class MainWindow(QMainWindow):
         recent = [(episode.title, self._display_full_date(episode.published_at)) for episode in episodes[:5]]
         current = self.context.current_item()
         card = current if getattr(current, "feed_url", "") == feed_url else next(
-            (item for item in self.discover_page._all_items if item.feed_url == feed_url), None)
+            (item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
         matched = None
         if card is not None and card.is_episode:
             wanted = card.title.strip().lower()

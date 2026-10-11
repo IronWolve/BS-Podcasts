@@ -206,6 +206,15 @@ class _ListPageMixin:
     ``context_changed`` and ``menu_requested``.
     """
 
+    @property
+    def all_items(self):
+        """The full item list this page holds, as last set. Not a copy."""
+        return self._all_items
+
+    def replace_all_items(self, items):
+        """Swap in a new full item list; the rows on screen are not touched here."""
+        self._all_items = items
+
     def _init_list(self, view: QListView, model, empty: EmptyState):
         self.view = view
         self.model = model
