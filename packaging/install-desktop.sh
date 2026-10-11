@@ -8,6 +8,22 @@ DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 APPS="$DATA/applications"
 ICONS="$DATA/icons/hicolor"
 LAUNCHER_DIR="$DATA/bs-podcasts"
+# One state line through the shared Reporter (colour on a terminal, the same labels as the other tools).
+# Without the project Python the line is printed plainly, so --status still works on a partial checkout.
+report() {
+  local state="$1" text="$2" python="$WORKSPACE/dists/linux/.venv/bin/python"
+  if [[ -x "$python" ]]; then
+    "$python" -B -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from report import Reporter; Reporter().line(sys.argv[2], sys.argv[3])' "$HERE" "$state" "$text"
+  else
+    if [[ "$state" == ok ]]; then printf 'OK   %s\n' "$text"; else printf 'FAIL %s\n' "$text"; fi
+  fi
+}
+# Label and value pairs under a Stats heading, through the same Reporter; nothing is printed without the project Python.
+report_stats() {
+  local python="$WORKSPACE/dists/linux/.venv/bin/python"
+  [[ -x "$python" ]] || return 0
+  "$python" -B -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from report import Reporter; a = sys.argv[2:]; Reporter().stats(list(zip(a[::2], a[1::2])))' "$HERE" "$@"
+}
 if [[ "${1:-}" == "--status" ]]; then
   # Read-only: report whether the installed entry still reaches a project.
   failed=0
@@ -18,16 +34,17 @@ if [[ "${1:-}" == "--status" ]]; then
       [[ "$line" == Exec=* ]] && { target="${line#Exec=}"; break; }
     done < "$entry"
     target="${target#\"}"; target="${target%\"}"
-    echo "OK   Desktop entry: $entry"
+    report ok "Desktop entry: $entry"
   else
-    echo "FAIL Desktop entry: not installed"; failed=1
+    report fail "Desktop entry: not installed"; failed=1
   fi
-  if [[ -n "$target" && -x "$target" ]]; then echo "OK   Exec target: $target"
-  else echo "FAIL Exec target: ${target:-none} does not exist"; failed=1; fi
+  if [[ -n "$target" && -x "$target" ]]; then report ok "Exec target: $target"
+  else report fail "Exec target: ${target:-none} does not exist"; failed=1; fi
   recorded=""
   { IFS= read -r recorded < "$LAUNCHER_DIR/project-root"; } 2>/dev/null || true
-  if [[ -n "$recorded" && -x "$recorded/dists/linux/start.sh" ]]; then echo "OK   Project: $recorded"
-  else echo "FAIL Project: ${recorded:-none recorded} has no launcher; run packaging/install-desktop.sh from the project folder again"; failed=1; fi
+  if [[ -n "$recorded" && -x "$recorded/dists/linux/start.sh" ]]; then report ok "Project: $recorded"
+  else report fail "Project: ${recorded:-none recorded} has no launcher; run packaging/install-desktop.sh from the project folder again"; failed=1; fi
+  report_stats checks 3 failed "$failed"
   exit "$failed"
 fi
 test -f "$WORKSPACE/dists/linux/runner.py" || { echo 'Build the Linux deployment first.' >&2; exit 1; }
@@ -99,4 +116,5 @@ chmod 644 "$temporary"
 mv -- "$temporary" "$APPS/bs-podcasts.desktop"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS" || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q "$ICONS" || true
-echo "Installed launcher to $APPS/bs-podcasts.desktop (opens $WORKSPACE; run this again if that folder moves or is renamed)"
+report ok "Installed launcher to $APPS/bs-podcasts.desktop (opens $WORKSPACE; run this again if that folder moves or is renamed)"
+report_stats icons "5 sizes, 32 to 512 px" "desktop entry" "$APPS/bs-podcasts.desktop" launcher "$LAUNCHER_DIR/launch.sh"
