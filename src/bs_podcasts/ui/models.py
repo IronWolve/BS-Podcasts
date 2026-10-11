@@ -1,6 +1,6 @@
 """UI item dataclasses and model-backed collection views with painted delegates."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import html
 import re
 
@@ -169,6 +169,22 @@ def _notify_changed_rows(model, rows):
     model.dataChanged.emit(model.index(first, 0), model.index(last, 0))
 
 
+def _replace_items(model, items, key):
+    """Swap in new rows, updating in place when the rows are the same ones."""
+    items = list(items)
+    if not model._items and not items:
+        return
+    if model._items and _same_rows(model._items, items, key):
+        # Same rows, possibly new data: update in place so selection and scroll survive.
+        changed = [row for row, (old, new) in enumerate(zip(model._items, items)) if old != new]
+        model._items = items
+        _notify_changed_rows(model, changed)
+        return
+    model.beginResetModel()
+    model._items = items
+    model.endResetModel()
+
+
 class PodcastModel(QAbstractListModel):
     def __init__(self, items=(), parent=None):
         super().__init__(parent)
@@ -179,21 +195,9 @@ class PodcastModel(QAbstractListModel):
         return (item.show_id, item.feed_url, item.title)
 
     def replace(self, items):
-        items = list(items)
-        if not self._items and not items:
-            return
-        if self._items and _same_rows(self._items, items, self._key):
-            # Same rows, possibly new data: update in place so selection and scroll survive.
-            changed = [row for row, (old, new) in enumerate(zip(self._items, items)) if old != new]
-            self._items = items
-            _notify_changed_rows(self, changed)
-            return
-        self.beginResetModel()
-        self._items = items
-        self.endResetModel()
+        _replace_items(self, items, self._key)
 
     def update_artwork(self, artwork_url, path, accent):
-        from dataclasses import replace
         changed = []
         for row, item in enumerate(self._items):
             if item.artwork_url == artwork_url:
@@ -257,17 +261,7 @@ class EpisodeModel(QAbstractListModel):
         return (0, 0, getattr(item, "media_url", "") or getattr(item, "external_id", "") or item.title)
 
     def replace(self, items):
-        items = list(items)
-        if not self._items and not items:
-            return
-        if self._items and _same_rows(self._items, items, self._key):
-            changed = [row for row, (old, new) in enumerate(zip(self._items, items)) if old != new]
-            self._items = items
-            _notify_changed_rows(self, changed)
-            return
-        self.beginResetModel()
-        self._items = items
-        self.endResetModel()
+        _replace_items(self, items, self._key)
 
     def update_items(self, updates):
         for row, item in enumerate(self._items):
@@ -277,7 +271,6 @@ class EpisodeModel(QAbstractListModel):
                 self.dataChanged.emit(self.index(row, 0), self.index(row, 0))
 
     def update_artwork_batch(self, changes):
-        from dataclasses import replace
         changed = []
         for row, item in enumerate(self._items):
             candidate = changes.get((item.episode_id, item.artwork_url))
