@@ -2640,6 +2640,7 @@ class ContextPanel(QFrame):
         self._episode_id = 0
         self._show_id = podcast.show_id
         self.show_link.setText("Open episodes")
+        self.show_link.setToolTip("")
         self.show_link.setVisible(bool(podcast.show_id))
         self.health.setVisible(False)
         self.tabs.setCurrentIndex(0)
@@ -2807,6 +2808,7 @@ class ContextPanel(QFrame):
         self.art.hide()
         self.title.setText("Select a podcast or episode")
         self.meta.setText("")
+        self.show_link.setToolTip("")
         self.show_link.setVisible(False)
         self.health.setVisible(False)
         self.latest_card.setVisible(False)
