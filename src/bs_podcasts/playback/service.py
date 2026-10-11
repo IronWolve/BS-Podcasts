@@ -1029,7 +1029,7 @@ class PlaybackService:
 
     def _engine_event(self, event: EngineEvent):
         try:
-            self._engine_event_locked(event, [])
+            self._engine_event_locked(event)
         except Exception:
             logger.exception('Could not accept playback state changes')
             with self._lock:
@@ -1037,7 +1037,7 @@ class PlaybackService:
                     self.snapshot = replace(self.snapshot, message='Playback changes could not be saved; check library storage.')
                     self._emit()
 
-    def _engine_event_locked(self, event: EngineEvent, deferred: list):
+    def _engine_event_locked(self, event: EngineEvent):
         with self._lock:
             if self._dead or self._resolving:
                 return
@@ -1066,10 +1066,10 @@ class PlaybackService:
                              self._engine_generation, source_kind, self.snapshot.position, detail)
             if event.kind == "position":
                 position = max(0.0, float(event.value))
-                self._measure_silence(position, deferred)
+                self._measure_silence(position)
                 self.snapshot = replace(self.snapshot, position=position)
                 self._confirm_start(position)
-                self._persist_position(deferred=deferred)
+                self._persist_position()
             elif event.kind == "duration":
                 duration = max(0.0, float(event.value))
                 self.snapshot = replace(self.snapshot, duration=duration)
@@ -1090,13 +1090,13 @@ class PlaybackService:
                     return
                 state = PlaybackState.PAUSED if event.value else PlaybackState.PLAYING
                 if event.value:
-                    self._flush_listening(deferred)
+                    self._flush_listening()
                 if state != self.snapshot.state:
                     self._reset_metrics(self.snapshot.position)
                 self.snapshot = replace(self.snapshot, state=state)
                 if self.snapshot.episode_id is not None:
                     episode_id = self.snapshot.episode_id
-                    self._set_current_playback(episode_id, state.value, deferred)
+                    self._set_current_playback(episode_id, state.value)
             elif event.kind == "file_loaded":
                 logger.info("Playback source loaded: generation=%s source=%s autoplay=%s seconds=%.3f",
                             self._engine_generation, source_kind, self._load_autoplay,
@@ -1213,14 +1213,14 @@ class PlaybackService:
             elif event.kind == "stopped":
                 self._engine_loaded = False
                 self._cancel_load_watchdog()
-                self._persist_position(force=True, deferred=deferred)
+                self._persist_position(force=True)
                 self.snapshot = replace(
                     self.snapshot, state=PlaybackState.ERROR,
                     message="Playback stopped unexpectedly. Check the connection and retry.",
                     buffering=None,
                 )
                 if self.snapshot.episode_id is not None:
-                    self._set_current_playback(self.snapshot.episode_id, PlaybackState.ERROR.value, deferred)
+                    self._set_current_playback(self.snapshot.episode_id, PlaybackState.ERROR.value)
             elif event.kind == "shutdown":
                 self._engine_loaded = False
                 self._cancel_load_watchdog()
@@ -1600,7 +1600,7 @@ class PlaybackService:
             floor = self.repository.write_stamp_floor(episode_id)
         self._last_write_stamp = max(self._last_write_stamp, floor)
 
-    def _set_current_playback(self, episode_id, state, deferred=None):
+    def _set_current_playback(self, episode_id, state):
         stamp = self._write_stamp()
         self._persistence.submit('state', lambda value: self._require_saved(self.repository.set_current_playback(
             value[0], value[1], stamp=value[2])), (episode_id, state, stamp))
@@ -1612,7 +1612,7 @@ class PlaybackService:
         if result is None:
             logger.info('Playback save skipped: the item is gone or a newer save already stands')
 
-    def _persist_position(self, force: bool = False, deferred: list | None = None):
+    def _persist_position(self, force: bool = False):
         """Keep the latest stamped position per episode on the bounded writer."""
         if (self.snapshot.episode_id is None or self.snapshot.episode_id == self._unstarted_id
                 or self._start_target is not None):
@@ -1687,7 +1687,7 @@ class PlaybackService:
             saved = self.snapshot.silence_saved + delta
             self.snapshot = replace(self.snapshot, silence_saved=saved)
 
-    def _measure_silence(self, position: float, deferred: list | None = None):
+    def _measure_silence(self, position: float):
         now = time.monotonic()
         target = self._metric_seek_target
         if target is not None:
@@ -1708,7 +1708,7 @@ class PlaybackService:
         if self.snapshot.show_id:
             self._unsaved_listening += elapsed
             if self._unsaved_listening >= 30:
-                self._flush_listening(deferred)
+                self._flush_listening()
         if self.snapshot.trim_level == "off":
             return
         if self._silence_window is None:
@@ -1723,7 +1723,7 @@ class PlaybackService:
             self._silence_window = (now, position)
             self._add_silence(skipped)
 
-    def _flush_listening(self, deferred: list | None = None):
+    def _flush_listening(self):
         if self._unsaved_listening > 0 and self.listening and self.snapshot.show_id:
             show_id, seconds, listening = self.snapshot.show_id, self._unsaved_listening, self.listening
             self._persistence.submit(('listening', show_id), lambda value: listening.add_listening(show_id, value),
