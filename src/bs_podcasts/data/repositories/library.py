@@ -3,6 +3,7 @@
 from pathlib import Path
 import json
 import logging
+import sqlite3
 import threading
 import time
 
@@ -40,6 +41,15 @@ def _confirmed_path_list(confirmed_paths) -> list[str]:
         seen.add(text)
         ordered.append(text)
     return ordered
+
+
+def _fold_text(value):
+    """Case-insensitive form for text the database's LIKE cannot fold.
+
+    LIKE folds ASCII letters only, so "Élan" never matched a search for "élan".
+    """
+    return value.casefold() if isinstance(value, str) else value
+
 
 # Feed-synced episode columns: drives the change-detection SELECT and both
 # comparison tuples in import_feed so the three can never drift apart.
@@ -1139,34 +1149,69 @@ class LibraryRepository:
         escaped = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         return f"%{escaped}%"
 
+    @staticmethod
+    def _case_variants(text):
+        """Spellings of a short ``text`` that differ only in the case of its
+        non-ASCII letters; LIKE already folds the ASCII ones."""
+        variants = {""}
+        for char in text:
+            options = {char} if char.isascii() else {
+                char, char.lower(), char.upper(), char.title(), char.casefold()}
+            variants = {prefix + option for prefix in variants for option in options}
+        return sorted(variants)
+
+    @classmethod
+    def _match_terms(cls, connection, columns, text):
+        """SQL and parameters matching ``text`` inside any of ``columns``.
+
+        LIKE folds ASCII case only, so a non-ASCII search must also match a
+        capital accented letter typed in lowercase, and the reverse. ASCII and
+        short text stays on LIKE, trying each case spelling of its non-ASCII
+        letters, so the scan never calls back into Python per stored
+        description. Longer non-ASCII text compares case-folded values (the
+        index has already narrowed those rows).
+        """
+        if text.isascii() or len(text) < 3:
+            patterns = tuple(cls._search_pattern(variant) for variant in cls._case_variants(text))
+            return ("(" + " OR ".join(column + " LIKE ? ESCAPE '\\'" for column in columns for _ in patterns) + ")",
+                    patterns * len(columns))
+        try:
+            connection.create_function("fold_text", 1, _fold_text, deterministic=True)
+        except sqlite3.OperationalError:
+            pass  # already registered on this handle while a statement was open
+        return ("(" + " OR ".join(f"instr(fold_text({column}), ?) > 0" for column in columns) + ")",
+                (_fold_text(text),) * len(columns))
+
     @classmethod
     def _episode_search_predicate(cls, connection, query):
-        # Trigram MATCH only narrows candidates; literal LIKE remains the
-        # final authority. Non-ASCII/short strings retain the old path to
-        # avoid tokenizer/SQLite case-fold differences changing results.
+        # Trigram MATCH only narrows candidates (it folds case for any
+        # script); the title/description comparison remains the final
+        # authority. Strings under three characters have no trigram to look up.
         text = query.strip()
-        pattern = cls._search_pattern(text)
-        indexed = bool(len(text) >= 3 and text.isascii() and "\0" not in text and
+        indexed = bool(len(text) >= 3 and "\0" not in text and
                        connection.execute("SELECT 1 FROM sqlite_master WHERE name='episode_search' AND type='table'").fetchone())
         candidate = "e.id IN (SELECT rowid FROM episode_search WHERE episode_search MATCH ?) AND " if indexed else ""
         parameters = ()
         if indexed:
             count = min(8, len(text) - 2)
             positions = [index * (len(text) - 3) // max(1, count - 1) for index in range(count)]
-            trigrams = dict.fromkeys(text[position:position + 3].lower() for position in positions)
+            # Raw slices: the tokenizer folds case itself, and lower() can
+            # lengthen a letter, turning one trigram into a phrase that the
+            # detail-less index rejects.
+            trigrams = dict.fromkeys(text[position:position + 3] for position in positions)
             terms = ' AND '.join('"' + gram.replace('"', '""') + '"' for gram in trigrams)
             parameters = (terms,)
-        return (candidate + "(e.title LIKE ? ESCAPE '\\' OR e.description LIKE ? ESCAPE '\\' OR s.title LIKE ? ESCAPE '\\')",
-                parameters + (pattern,pattern,pattern))
+        match, match_parameters = cls._match_terms(connection, ("e.title", "e.description", "s.title"), text)
+        return candidate + match, parameters + match_parameters
 
     def search(self, query: str, limit: int = 100) -> tuple[list[Show], list[Episode]]:
-        pattern = self._search_pattern(query)
         with self.database.connect() as connection:
+            show_match, show_parameters = self._match_terms(connection, ("s.title", "s.author"), query.strip())
             show_rows = connection.execute(
                 self._show_select()
-                + " WHERE (s.title LIKE ? ESCAPE '\\' OR s.author LIKE ? ESCAPE '\\')"
+                + " WHERE " + show_match
                 + " GROUP BY s.id ORDER BY s.title COLLATE NOCASE LIMIT ?",
-                (pattern, pattern, limit),
+                show_parameters + (limit,),
             ).fetchall()
             predicate, parameters = self._episode_search_predicate(connection, query)
             episode_rows = connection.execute(

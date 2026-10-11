@@ -81,13 +81,21 @@ class ListeningRepository:
     def transcript(self, episode_id: int, query: str = "") -> list[TranscriptSegment]:
         sql = "SELECT * FROM transcript_segments WHERE episode_id=?"
         params: list[object] = [episode_id]
+        folded = ""
         if query.strip():
-            sql += " AND text LIKE ? ESCAPE '\\'"
-            escaped = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            params.append(f"%{escaped}%")
+            if query.strip().isascii():
+                sql += " AND text LIKE ? ESCAPE '\\'"
+                escaped = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                params.append(f"%{escaped}%")
+            else:
+                # LIKE folds ASCII case only; match this one episode's lines
+                # case-insensitively here instead.
+                folded = query.strip().casefold()
         sql += " ORDER BY segment_index"
         with self.database.connect() as connection:
             rows = connection.execute(sql, params).fetchall()
+        if folded:
+            rows = [row for row in rows if folded in row["text"].casefold()]
         return [
             TranscriptSegment(
                 row["id"],
