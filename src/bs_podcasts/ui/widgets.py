@@ -21,7 +21,20 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QAccessible, QAccessibleEvent, QColor, QFont, QIcon, QLinearGradient, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtGui import (
+    QAccessible,
+    QAccessibleEvent,
+    QColor,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QLinearGradient,
+    QPainter,
+    QPen,
+    QPixmap,
+    QShortcut,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -1168,6 +1181,10 @@ class Toast(QFrame):
         self.action.clicked.connect(self._action)
         self.dismiss_button = icon_button("close", "Dismiss", size=14)
         self.dismiss_button.clicked.connect(self._user_close)
+        # The toast never takes focus itself; while the pointer rests on it or
+        # keyboard focus is on one of its buttons, the dismiss timer waits.
+        self.action.installEventFilter(self)
+        self.dismiss_button.installEventFilter(self)
         layout.addWidget(self.icon)
         layout.addWidget(self.text_scroll, 1)
         layout.addWidget(self.action)
@@ -1180,6 +1197,15 @@ class Toast(QFrame):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.dismiss)
+        self._duration_ms = 0
+        self._pointer_over = False
+        self._focus_inside = False
+        # Visible only while the toast is, so it cannot steal the key from
+        # anything else; text fields keep their own Undo.
+        self._undo_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Undo), self)
+        self._undo_shortcut.setAutoRepeat(False)
+        self._undo_shortcut.activated.connect(self._action)
+        self._undo_shortcut.setEnabled(False)
         self._queue = []
         self._callback = None
         self._on_close = None
@@ -1197,11 +1223,17 @@ class Toast(QFrame):
         self.layout().setSpacing(SPACE["md"])
 
     MAX_QUEUE = 3
+    NOTICE_MS = 3200
+    ACTION_MS = 8000
 
-    def show_message(self, message: str, tone: str = "info", action: str = "", callback=None, duration_ms: int = 3200, on_close=None, owner=None):
+    def show_message(self, message: str, tone: str = "info", action: str = "", callback=None, duration_ms: int | None = None, on_close=None, owner=None):
         """duration_ms=0 keeps the toast up until dismissed; on_close runs
         only when the person clicks the X, never on programmatic dismissal
-        — a sticky progress toast uses it as its cancel affordance."""
+        — a sticky progress toast uses it as its cancel affordance. A toast
+        with an action (Undo is usually the only way back) stays longer than
+        a plain notice unless a duration is given."""
+        if duration_ms is None:
+            duration_ms = self.ACTION_MS if action else self.NOTICE_MS
         showing = self.isVisible() and not self._closing
         if showing and self._sticky and duration_ms > 0:
             self._sticky_entry = (self.text.text(), self.property('tone') or 'loading', self.action.text(), self._callback, 0, self._on_close, self._owner)
@@ -1220,10 +1252,8 @@ class Toast(QFrame):
                     self._callback = callback
                     self.action.setText(action)
                     self.action.setVisible(bool(action))
-                    if duration_ms > 0:
-                        self._timer.start(duration_ms)
-                    else:
-                        self._timer.stop()
+                    self._sync_undo_shortcut()
+                    self._arm_timer(duration_ms)
             if duplicate:
                 return
             self._queue.append(entry)
@@ -1248,6 +1278,9 @@ class Toast(QFrame):
         self._owner = owner
         self._sticky = duration_ms == 0
         self._closing = False
+        self._pointer_over = False
+        self._focus_inside = False
+        self._sync_undo_shortcut()
         self.adjustSize()
         self.reposition()
         self.setAccessibleName(message)
@@ -1262,10 +1295,48 @@ class Toast(QFrame):
         self._animation.setStartValue(0.0)
         self._animation.setEndValue(1.0)
         self._animation.start()
-        if duration_ms > 0:
+        self._arm_timer(duration_ms)
+
+    def _arm_timer(self, duration_ms: int):
+        self._duration_ms = duration_ms
+        if duration_ms > 0 and not (self._pointer_over or self._focus_inside):
             self._timer.start(duration_ms)
         else:
             self._timer.stop()
+
+    def _set_held(self, pointer=None, focus=None):
+        """Pointer over the toast or focus on its buttons pauses the dismiss
+        timer; once both let go the full time starts again."""
+        was_held = self._pointer_over or self._focus_inside
+        if pointer is not None:
+            self._pointer_over = pointer
+        if focus is not None:
+            self._focus_inside = focus
+        held = self._pointer_over or self._focus_inside
+        if held:
+            self._timer.stop()
+        elif was_held and self._duration_ms > 0 and self.isVisible() and not self._closing:
+            self._timer.start(self._duration_ms)
+
+    def _sync_undo_shortcut(self):
+        """Ctrl+Z (the platform's Undo key) runs an offered Undo while it shows."""
+        undo = bool(self._callback) and self.action.text().startswith("Undo") and not self._closing
+        self._undo_shortcut.setEnabled(undo)
+        key = self._undo_shortcut.key().toString(QKeySequence.SequenceFormat.NativeText)
+        self.action.setToolTip(f"{self.action.text()}  ·  {key}" if undo else "")
+
+    def enterEvent(self, event):
+        self._set_held(pointer=True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._set_held(pointer=False)
+        super().leaveEvent(event)
+
+    def eventFilter(self, watched, event):
+        if watched in (self.action, self.dismiss_button) and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            self._set_held(focus=event.type() == QEvent.Type.FocusIn)
+        return super().eventFilter(watched, event)
 
     def update_message(self, message: str, owner=None):
         """Refresh a visible toast's text in place (progress ticks)."""
@@ -1340,6 +1411,7 @@ class Toast(QFrame):
         self._on_close = None
         self._callback = None
         self.action.setEnabled(False)
+        self._undo_shortcut.setEnabled(False)
         self._timer.stop()
         if not self.isVisible() or self._closing:
             return
