@@ -9,7 +9,7 @@ import logging
 from ..data.repositories import LibraryRepository
 from ..domain import FeedData
 from ..privacy import feed_label
-from ..urlguard import ensure_web_url
+from ..urlguard import UnsafeUrl, ensure_web_url
 
 
 class SubscriptionImport(list):
@@ -96,7 +96,7 @@ class LibraryService:
         with self._subscription_lock:
             return self._add_subscription(feed_url, title)
 
-    def _add_subscription(self, feed_url: str, title: str, known=None):
+    def _add_subscription(self, feed_url: str, title: str, known=None, website_url: str = ""):
         feed_url = ensure_web_url(feed_url, 'Feed URL')
         parsed = urlparse(feed_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -110,9 +110,16 @@ class LibraryService:
         auto_continue = self.setting("playback.auto_continue", "1") == "1"
         from ..feeds.parser import _clamp_title
         fallback = _clamp_title(title.strip() or feed_label(feed_url))
+        try:
+            # A website link from an imported file is kept only as a web address,
+            # the same rule the link follows when it is opened.
+            website_url = ensure_web_url(website_url, "Website URL") if website_url else ""
+        except UnsafeUrl:
+            website_url = ""
         return self.repository.add_show(
             feed_url,
             fallback,
+            website_url=website_url,
             playback_speed=speed,
             skip_back=skip_back,
             skip_forward=skip_forward,
@@ -201,7 +208,7 @@ class LibraryService:
                         known[self.normalize_feed_url(url)] = show
             for entry in entries:
                 try:
-                    show = self._add_subscription(entry.feed_url, entry.title, known)
+                    show = self._add_subscription(entry.feed_url, entry.title, known, entry.website_url)
                 except ValueError:
                     added.skipped += 1
                     continue

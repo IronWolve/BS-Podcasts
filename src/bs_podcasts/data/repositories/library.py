@@ -81,13 +81,14 @@ class LibraryRepository:
         skip_back: int | None = None,
         skip_forward: int | None = None,
         auto_continue: bool | None = None,
+        website_url: str = "",
     ) -> Show:
         now = time.time()
         with self.database.connect() as connection:
             connection.execute(
-                "INSERT OR IGNORE INTO shows(id, feed_url, title, source, added_at) "
-                "VALUES ((SELECT value+1 FROM entity_sequences WHERE kind=\'show\'), ?, ?, ?, ?)",
-                (feed_url, title, source, now),
+                "INSERT OR IGNORE INTO shows(id, feed_url, title, source, added_at, website_url) "
+                "VALUES ((SELECT value+1 FROM entity_sequences WHERE kind=\'show\'), ?, ?, ?, ?, ?)",
+                (feed_url, title, source, now, website_url),
             )
             inserted = connection.execute("SELECT changes()").fetchone()[0]
             row = connection.execute(
