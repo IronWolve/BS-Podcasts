@@ -909,7 +909,7 @@ def main() -> int:
             return
         pending["rebuild"] = False
         view_state = old._capture_view_state() if old is not None else None
-        apply_app_stylesheet(app)
+        quit_on_close = app.quitOnLastWindowClosed()
         if old is not None:
             old._keep_services = True  # the services outlive this window
             if getattr(old, "tray", None) is not None:
@@ -921,9 +921,32 @@ def main() -> int:
                     old.mpris.shutdown()
                 except Exception:
                     pass
+            # No window exists until replace_window runs; closing the last
+            # one must not quit the application in between.
+            app.setQuitOnLastWindowClosed(False)
             old.close()
             old.deleteLater()
-        build_window(view_state)
+
+        def replace_window():
+            # One loop turn after the old window was closed and scheduled for
+            # deletion. The style sheet must only meet the new window: applied
+            # while the old one still existed, it restyled every widget in it
+            # first, which was most of the time a rebuild took.
+            try:
+                if old is not None:
+                    try:
+                        QCoreApplication.sendPostedEvents(old, QEvent.Type.DeferredDelete)
+                    except RuntimeError:
+                        pass  # the loop already deleted it
+                apply_app_stylesheet(app)
+                build_window(view_state)
+            except Exception:
+                app.quit()  # no window is left to show
+                raise
+            finally:
+                app.setQuitOnLastWindowClosed(quit_on_close)
+
+        QTimer.singleShot(0, replace_window)
 
     build_window()
     _contrast_watcher = _watch_accessibility_contrast(
