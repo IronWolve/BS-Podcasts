@@ -192,6 +192,11 @@ def _track_job(window, future, kind, identifier, classify=None, drop_cancelled=F
             result = completed.result()
         except Exception as exc:
             result = classify(exc) if classify is not None else JobResult(JobStatus.ERROR, message=str(exc))
+        else:
+            # The job runner answers a failing callable with an error result
+            # that holds the exception, not by raising it.
+            if classify is not None and result.status == JobStatus.ERROR and result.error is not None:
+                result = classify(result.error)
         window._emit_completed((kind, identifier, result))
 
     future.add_done_callback(finished)
@@ -6473,7 +6478,7 @@ class MainWindow(QMainWindow):
         self._directory_future = future
         def offline_aware(exc):
             offline = getattr(exc, "network", False)
-            return JobResult(JobStatus.ERROR, message=str(exc), value="offline" if offline else None)
+            return JobResult(JobStatus.ERROR, message=str(exc) or exc.__class__.__name__, value="offline" if offline else None)
 
         # The directory path alone tells an outage from other failures.
         _track_job(self, future, "directory", (generation, request, True), classify=offline_aware)
