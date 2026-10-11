@@ -52,8 +52,8 @@ class PersistentDirectoryCache:
         key = self._key(operation, value)
         if key is None:
             return None
-        path = self._path(key)
         try:
+            path = self._path(key)
             if path.is_symlink():
                 return None
             with path.open("rb") as handle:
