@@ -40,6 +40,7 @@ class TrayController:
         self._message_callback = None
         self._connected = False
         self._revision = 0
+        self._toggle_action = "play"
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         tray = QSystemTrayIcon(_tray_icon(), window)
@@ -97,7 +98,7 @@ class TrayController:
             return
         self._revision = revision
         if not snapshot.source:
-            texts = ("Nothing playing", APP_NAME, "Play / Pause")
+            texts = ("Nothing playing", APP_NAME, "Play / Pause", "play")
         else:
             title = snapshot.title if len(snapshot.title) <= 60 else snapshot.title[:57] + "…"
             state = str(snapshot.state)
@@ -111,6 +112,7 @@ class TrayController:
                 f"{'▶' if state == 'playing' else '⏸'}  {title}",
                 f"{APP_NAME}\n{detail}",
                 "Pause" if state == "playing" else "Play",
+                "pause" if state == "playing" else "play",
             )
         # Ten position ticks a second reached here; a tray tooltip update is
         # a shell round-trip on Windows, so only apply changed text.
@@ -120,13 +122,14 @@ class TrayController:
         self.now_playing.setText(texts[0])
         self.tray.setToolTip(texts[1])
         self.toggle.setText(texts[2])
+        self._toggle_action = texts[3]
         self.toggle.setEnabled(bool(snapshot.source))
 
     def _toggle_playback(self):
         # Submit the action the menu displays, not a deferred toggle whose
-        # meaning may reverse while a stream is still opening.
-        action = "pause" if self.toggle.text() == "Pause" else "play"
-        self.window._playback_command(action)
+        # meaning may reverse while a stream is still opening. It is kept
+        # beside the label so changing the label text cannot change it.
+        self.window._playback_command(self._toggle_action)
 
     def _show_window(self):
         self.window.setWindowState(self.window.windowState() & ~Qt.WindowState.WindowMinimized)
