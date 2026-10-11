@@ -4,8 +4,11 @@ import logging
 from typing import Protocol
 
 from ..domain import DirectoryCandidate
+from ..net import describe_network_error
+from ..privacy import redact
 
 _log = logging.getLogger(__name__)
+UNEXPECTED_ANSWER = "The directory returned an unexpected page. Check the connection or try again later."
 
 
 class DirectoryError(RuntimeError):
@@ -41,6 +44,20 @@ def _all_failed(errors) -> DirectoryError:
         "; ".join(f"{name}: {exc}" for name, exc in errors),
         network=all(is_unreachable(exc) for _name, exc in errors),
     )
+
+
+def failure_text(exc, what: str) -> str:
+    """The banner text for a failed directory request.
+
+    A failed request is named by describe_network_error. An answer that did
+    not parse (a JSON or HTML parser message, a missing key) becomes one fixed
+    sentence, and its detail goes to the log instead of the banner."""
+    import requests
+
+    if isinstance(exc, requests.RequestException) and not isinstance(exc, requests.exceptions.JSONDecodeError):
+        return describe_network_error(exc, what)
+    _log.warning("Directory answer did not parse: %s", redact(str(exc)))
+    return UNEXPECTED_ANSWER
 
 
 class CandidateList(list):

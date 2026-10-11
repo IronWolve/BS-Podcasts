@@ -10,7 +10,7 @@ from ..net import SessionSlot, describe_network_error
 
 from ..domain import DirectoryCandidate
 from ..urlguard import is_web_url
-from .base import DirectoryError
+from .base import DirectoryError, failure_text
 from .catalog import CATEGORY_IDS
 
 
@@ -95,7 +95,7 @@ class DirectoryCharts:
             if not isinstance(shelves, list):
                 raise DirectoryError("Directory chart shelves are not a list.")
         except (requests.RequestException, ValueError, KeyError, IndexError, TypeError, RecursionError) as exc:
-            detail = describe_network_error(exc, "the directory")
+            detail = failure_text(exc, "the directory")
             if primary is not None:
                 detail = f"{detail} (the full chart also failed: {primary})"
             raise DirectoryError(detail) from exc
@@ -175,7 +175,7 @@ class DirectoryCharts:
             # failure leaves it valid and would repeat two large downloads.
             if getattr(getattr(exc, "response", None), "status_code", None) in (401, 403):
                 self._developer_token = ""
-            raise DirectoryError(describe_network_error(exc, "the directory")) from exc
+            raise DirectoryError(failure_text(exc, "the directory")) from exc
         return [
             candidate
             for rank, item in enumerate(data, start=1)

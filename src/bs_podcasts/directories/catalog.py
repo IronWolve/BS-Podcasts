@@ -10,7 +10,7 @@ from threading import Lock
 from ..domain import DirectoryCandidate
 from ..netlimits import Deadline, NetworkDeadline, current_cancel, is_foreground, request_scope
 from ..urlguard import is_web_url
-from .base import CandidateList, DirectoryError, is_unreachable
+from .base import CandidateList, DirectoryError, failure_text, is_unreachable
 
 
 # Expansion-term requests in flight at once; the shared header gate admits 12
@@ -328,7 +328,7 @@ class PublicDirectory:
         except RecursionError as exc:
             raise DirectoryError("Directory returned a response that is too deeply nested.") from exc
         except ValueError as exc:
-            raise DirectoryError(describe_network_error(exc, "the directory")) from exc
+            raise DirectoryError(failure_text(exc, "the directory")) from exc
         if not isinstance(payload, dict):
             raise DirectoryError("Directory returned an unexpected response.")
 
