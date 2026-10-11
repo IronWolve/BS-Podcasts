@@ -8240,6 +8240,11 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _display_duration(seconds: int) -> str:
+        # An observed length is stored as a real number; whole minutes only.
+        try:
+            seconds = int(seconds)
+        except (TypeError, ValueError, OverflowError):
+            return "Unknown length"
         if seconds <= 0:
             return "Unknown length"
         hours, remainder = divmod(seconds, 3600)
