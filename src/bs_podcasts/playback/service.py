@@ -1255,12 +1255,22 @@ class PlaybackService:
     def _dispatch(self, work):
         """Run follow-up work from a native event on the ordered command queue."""
         if self._command_dispatcher is not None:
-            self._command_dispatcher(work)
-            return
-        from ..jobs.commands import CommandQueue
-        if self._event_commands is None:
-            self._event_commands = CommandQueue()
-        self._event_commands.submit(work, keep=True)
+            queued = self._command_dispatcher(work)
+        else:
+            from ..jobs.commands import CommandQueue
+            if self._event_commands is None:
+                self._event_commands = CommandQueue()
+            queued = self._event_commands.submit(work, keep=True)
+        # A closing queue hands back a finished error result and never runs the
+        # work (for an ended episode, its completion); do not drop that silently.
+        try:
+            from ..jobs.runner import JobStatus
+            if queued is not None and queued.done() and not queued.cancelled():
+                result = queued.result()
+                if result.status == JobStatus.ERROR:
+                    logger.warning("Playback follow-up work was not accepted: %s", redact(result.message))
+        except Exception:
+            pass  # only a log line; never let it disturb the native event
 
     def _begin_load(self, position: float, autoplay: bool, keep_target: bool = False):
         self._load_started_at = time.monotonic()
