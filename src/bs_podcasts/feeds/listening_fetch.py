@@ -5,7 +5,7 @@ from html import unescape
 import json
 import re
 
-from ..net import USER_AGENT, describe_network_error, make_session
+from ..net import USER_AGENT, describe_network_error
 from ..markup import TranscriptHTML, markup_text
 from ..urlguard import UnsafeUrl, ensure_fetchable
 from ..domain.times import media_seconds, media_interval
@@ -34,7 +34,7 @@ class SegmentData:
     end_seconds: float | None = None
 
 
-def _get(url: str, session=None) -> tuple[bytes, str]:
+def _get(url: str, session) -> tuple[bytes, str]:
     try:
         # Chapter/transcript URLs are feed-supplied; screen the first hop the
         # same way redirects and artwork already are.
@@ -43,11 +43,8 @@ def _get(url: str, session=None) -> tuple[bytes, str]:
         raise ListeningFetchError(str(exc)) from exc
     import requests
 
-    # A session this call creates is closed here; a caller's session is left open.
-    owned = session is None
-    client = make_session() if owned else session
     try:
-        with client.get(url, timeout=TIMEOUT, stream=True, headers={"User-Agent": USER_AGENT}) as response:
+        with session.get(url, timeout=TIMEOUT, stream=True, headers={"User-Agent": USER_AGENT}) as response:
             response.raise_for_status()
             content = bytearray()
             for chunk in response.iter_content(64 * 1024):
@@ -58,12 +55,9 @@ def _get(url: str, session=None) -> tuple[bytes, str]:
     except requests.RequestException as exc:
         # Same sentence-a-person-can-act-on rule as feeds and downloads.
         raise ListeningFetchError(describe_network_error(exc, "the chapters/transcript file")) from exc
-    finally:
-        if owned:
-            client.close()
 
 
-def fetch_chapters(url: str, session=None) -> list[ChapterData]:
+def fetch_chapters(url: str, session) -> list[ChapterData]:
     content, _content_type = _get(url, session)
     return parse_chapters(content)
 
@@ -92,7 +86,7 @@ def parse_chapters(content: bytes) -> list[ChapterData]:
     return chapters
 
 
-def fetch_transcript(url: str, declared_type: str = "", session=None) -> list[SegmentData]:
+def fetch_transcript(url: str, declared_type: str, session) -> list[SegmentData]:
     content, content_type = _get(url, session)
     return parse_transcript(content, declared_type or content_type, url)
 
