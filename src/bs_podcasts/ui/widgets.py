@@ -3532,7 +3532,12 @@ class SearchOverlay(QFrame):
         self.field.setFocus()
         self.field.selectAll()
         if not self.results.count():
-            self.set_results([], [], self.field.text().strip())
+            query = self.field.text().strip()
+            self.set_results([], [], query)
+            # Hiding stopped a pending debounce, so retained text has no
+            # library results until the query runs again.
+            if query:
+                self._timer.start()
 
     def hideEvent(self, event):
         self._timer.stop()
