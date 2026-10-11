@@ -8,6 +8,23 @@ from ...domain.times import media_seconds, media_interval
 from ..database import Database
 
 
+def _chapter_from_row(row) -> Chapter:
+    start_seconds, end_seconds = media_interval(row["start_seconds"], row["end_seconds"])
+    return Chapter(
+        id=row["id"], episode_id=row["episode_id"], index=row["chapter_index"],
+        start_seconds=start_seconds, end_seconds=end_seconds,
+        title=row["title"], artwork_url=row["artwork_url"],
+    )
+
+
+def _segment_from_row(row) -> TranscriptSegment:
+    start_seconds, end_seconds = media_interval(row["start_seconds"], row["end_seconds"])
+    return TranscriptSegment(
+        id=row["id"], episode_id=row["episode_id"], index=row["segment_index"],
+        text=row["text"], start_seconds=start_seconds, end_seconds=end_seconds,
+    )
+
+
 class ListeningRepository:
     def __init__(self, database: Database):
         self.database = database
@@ -65,14 +82,7 @@ class ListeningRepository:
                 (episode_id,),
             ).fetchall()
         return [
-            Chapter(
-                row["id"],
-                row["episode_id"],
-                row["chapter_index"],
-                *media_interval(row["start_seconds"], row["end_seconds"]),
-                row["title"],
-                row["artwork_url"],
-            )
+            _chapter_from_row(row)
             for row in rows if media_seconds(row["start_seconds"]) is not None
         ]
 
@@ -115,16 +125,7 @@ class ListeningRepository:
             rows = connection.execute(sql, params).fetchall()
         if folded:
             rows = [row for row in rows if folded in row["text"].casefold()]
-        return [
-            TranscriptSegment(
-                row["id"],
-                row["episode_id"],
-                row["segment_index"],
-                row["text"],
-                *media_interval(row["start_seconds"], row["end_seconds"]),
-            )
-            for row in rows
-        ]
+        return [_segment_from_row(row) for row in rows]
 
     def add_bookmark(self, episode_id: int, position: float, title: str = "") -> Bookmark:
         with self.database.connect() as connection:
@@ -190,13 +191,13 @@ class ListeningRepository:
             rows = connection.execute(sql, params).fetchall()
         return [
             Bookmark(
-                row["id"],
-                row["episode_id"],
-                row["position_seconds"],
-                row["title"],
-                row["created_at"],
-                row["episode_title"],
-                row["show_title"],
+                id=row["id"],
+                episode_id=row["episode_id"],
+                position_seconds=row["position_seconds"],
+                title=row["title"],
+                created_at=row["created_at"],
+                episode_title=row["episode_title"],
+                show_title=row["show_title"],
             )
             for row in rows
         ]
