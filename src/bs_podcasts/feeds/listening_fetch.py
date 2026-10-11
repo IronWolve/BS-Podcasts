@@ -100,6 +100,8 @@ def fetch_transcript(url: str, declared_type: str = "", session=None) -> list[Se
 _TIMESTAMP = re.compile(r"(?<!\d)(?:(\d{1,6}):)?(\d{1,2}):(\d{2})[.,](\d{1,3})(?!\d)")
 _TIMING_LINE = re.compile(r"^\s*(?:\d{1,6}:)?\d{1,2}:\d{2}[.,]\d{1,3}\s+-->\s+(?:\d{1,6}:)?\d{1,2}:\d{2}[.,]\d{1,3}(?:\s.*)?$", re.M)
 _TAGS = re.compile(r"<[^<>]+>")
+# A WebVTT NOTE or STYLE block: the keyword, then whitespace or the line end.
+_NOTE_OR_STYLE_BLOCK = re.compile(r"(?:NOTE|STYLE)(?:\s|$)")
 _SKIP_HTML = {"script", "style"}
 
 
@@ -220,6 +222,9 @@ def _parse_json_transcript(text: str) -> list[SegmentData]:
 def _parse_cues(text: str) -> list[SegmentData]:
     segments = []
     for block in re.split(r"\n\s*\n", text.strip()):
+        # A NOTE or STYLE block is not a cue, whatever lines it holds.
+        if _NOTE_OR_STYLE_BLOCK.match(block.lstrip()):
+            continue
         # A timing line starts a cue; the lines after it are its words. Lines
         # before the first timing line are a cue identifier or header, and a
         # block with no blank line between cues holds more than one cue.
@@ -227,7 +232,7 @@ def _parse_cues(text: str) -> list[SegmentData]:
         for line in (line.strip() for line in block.split("\n")):
             if _TIMING_LINE.fullmatch(line):
                 cues.append((line, []))
-            elif cues and line and not line.isdigit() and not line.startswith(("WEBVTT", "NOTE", "STYLE")):
+            elif cues and line and not line.isdigit():
                 cues[-1][1].append(line)
         for timing, body_lines in cues:
             start_text, _arrow, end_text = timing.partition("-->")
