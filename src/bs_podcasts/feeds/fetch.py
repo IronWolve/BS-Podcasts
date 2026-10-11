@@ -1,9 +1,12 @@
 """Bounded direct-feed HTTP fetcher."""
 
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from html.parser import HTMLParser
 from http import HTTPStatus
 import re
+import threading
+import time
 from urllib.parse import urljoin, urlsplit
 
 from ..net import USER_AGENT, SessionSlot, describe_network_error
@@ -14,6 +17,13 @@ MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 # How much of a feed the newest-date peek reads before it asks whether the
 # start already settles the answer. A longer feed that does is not read on.
 PEEK_HEAD_BYTES = 256 * 1024
+# Feeds the newest-date peek read in full are kept briefly, so the card the
+# user opens next is not downloaded a second time. Few, small and short-lived:
+# at most this many feeds, this many bytes together (one feed may take half),
+# and this many seconds.
+RECENT_FEEDS = 8
+RECENT_BYTES = 16 * 1024 * 1024
+RECENT_SECONDS = 600
 
 
 class FeedFetchError(RuntimeError):
@@ -252,15 +262,53 @@ class FeedFetcher:
         self.session = session
         if session is not None:
             session.max_redirects = 5
+        self._recent = OrderedDict()
+        self._recent_lock = threading.Lock()
 
-    def fetch(self, url: str, etag: str = "", last_modified: str = "", validator_url: str = "") -> FeedResponse:
+    def fetch(
+        self,
+        url: str,
+        etag: str = "",
+        last_modified: str = "",
+        validator_url: str = "",
+        reuse_recent: bool = False,
+    ) -> FeedResponse:
         """Fetch a feed, or the feed an HTML page at `url` advertises.
 
         `etag` and `last_modified` came from `validator_url` (default `url`)
         and only count there: a 304 answered by another resource, such as
         the page of a page-URL subscription, is fetched again without them.
+
+        `reuse_recent` answers, once, with the body peek_latest read in full
+        for `url` in the last few minutes, instead of asking the server again.
+        It is for showing a feed the user is only looking at; a refresh must
+        never pass it, and it is ignored when validators are given.
         """
+        if self._recent:
+            with self._recent_lock:
+                self._drop_stale_feeds(time.monotonic())
+                kept = self._recent.pop(url.strip(), None) if reuse_recent and not (etag or last_modified) else None
+            if kept is not None:
+                return kept[1]
         return self._fetch(url, etag, last_modified, allow_discovery=True, validator_url=validator_url or url)
+
+    def _drop_stale_feeds(self, now: float):
+        """Forget feeds kept longer than RECENT_SECONDS. The caller holds the lock."""
+        for url in [url for url, (when, _feed) in self._recent.items() if now - when > RECENT_SECONDS]:
+            del self._recent[url]
+
+    def _keep_recent(self, url: str, feed: FeedResponse):
+        if len(feed.content) > RECENT_BYTES // 2:
+            return
+        now = time.monotonic()
+        with self._recent_lock:
+            self._drop_stale_feeds(now)
+            self._recent.pop(url, None)
+            self._recent[url] = (now, feed)
+            total = sum(len(kept.content) for _when, kept in self._recent.values())
+            while len(self._recent) > RECENT_FEEDS or total > RECENT_BYTES:
+                _url, (_when, dropped) = self._recent.popitem(last=False)
+                total -= len(dropped.content)
 
     def peek_latest(self, url: str) -> tuple[str, str] | None:
         """(title, published_at) of the newest dated item, in one request.
@@ -279,7 +327,8 @@ class FeedFetcher:
         once, up to the feed size cap; a caller falls back to the full fetch
         only when nothing was read. Only the newest date is read from it (see
         parser.newest_item), and once the first PEEK_HEAD_BYTES of a longer
-        feed list its episodes newest first the rest is not downloaded.
+        feed list its episodes newest first the rest is not downloaded. A feed
+        read in full is kept for a few minutes for fetch(reuse_recent=True).
         """
         try:
             url = ensure_fetchable(url, "Feed URL")
@@ -313,13 +362,22 @@ class FeedFetcher:
             raise _fetch_error(exc) from exc
         finally:
             response.close()
+        content = bytes(body)
         try:
-            latest = newest_item(bytes(body))
+            latest = newest_item(content)
         except FeedParseError:
             # The same bytes fail again, unless this is a page that the full
             # fetch can follow to the feed it advertises.
             lead = _body_lead(body, getattr(response, "encoding", None))
             return NOTHING_DATED if _looks_like_feed(lead) else None
+        headers = getattr(response, "headers", None) or {}
+        self._keep_recent(url, FeedResponse(
+            content=content,
+            final_url=response.url,
+            etag=headers.get("ETag", ""),
+            last_modified=headers.get("Last-Modified", ""),
+            canonical_url=_permanent_canonical(response),
+        ))
         return latest or NOTHING_DATED
 
     def _fetch(
