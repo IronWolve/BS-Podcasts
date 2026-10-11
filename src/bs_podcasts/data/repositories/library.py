@@ -883,6 +883,9 @@ class LibraryRepository:
 
     def reorder_queue(self, episode_ids: list[int]):
         with self.database.connect() as connection:
+            # The order is read inside the write, so a removal or an add that
+            # commits meanwhile cannot leave a duplicate or a gap.
+            connection.execute("BEGIN IMMEDIATE")
             existing = [
                 row["episode_id"]
                 for row in connection.execute("SELECT episode_id FROM queue ORDER BY position").fetchall()
