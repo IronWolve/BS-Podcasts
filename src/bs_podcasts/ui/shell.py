@@ -7062,8 +7062,12 @@ class MainWindow(QMainWindow):
         elif result.status == JobStatus.OK and isinstance(result.value, dict) and 'problem' in result.value:
             message = str(result.value['problem'])
             logging.getLogger("bs_podcasts").error("Library integrity check failed: %s", message)
+            # The same status the Settings check gives, so Repair is there to use.
+            self.settings_page.set_database_status(
+                f"Problem found: {message}. Repair is now available.", repair_available=True)
             self._notify(
-                "Library integrity check failed — inspect the data folder before making changes.",
+                "Library integrity check failed — repair is available in Settings; "
+                "inspect the data folder before making other changes.",
                 "error",
                 "Open folder",
                 self._open_data_folder,
