@@ -855,9 +855,7 @@ class MainWindow(QMainWindow):
             page = int(self.library.setting("ui.page", "0"))
         except ValueError:
             page = 0
-        self.navigation.select(page if 0 <= page < self.page_count and page != PAGE_SETTINGS else 0)
-        self._back_stack.clear()
-        self._update_navigation_controls()
+        page = page if 0 <= page < self.page_count and page != PAGE_SETTINGS else 0
         raw = self.library.setting("ui.view_state", "")
         state = self._incoming_view_state
         if raw:
@@ -868,6 +866,14 @@ class MainWindow(QMainWindow):
                         state = {key: value for key, value in state.items() if not key.startswith('_')}
                 except (ValueError, TypeError, RecursionError):
                     state = None
+        if page == PAGE_DISCOVER and isinstance(state, dict) and state.get("page") == PAGE_DISCOVER:
+            # The saved Discover view loads its own results when it is
+            # restored (_finish_view_restore). The first-visit For You load
+            # would start first and later replace the saved chart and category.
+            self._discover_visited = True
+        self.navigation.select(page)
+        self._back_stack.clear()
+        self._update_navigation_controls()
         if isinstance(state, dict):
             self._reload_callbacks.append(lambda: self._restore_view_state(state))
 
@@ -943,6 +949,8 @@ class MainWindow(QMainWindow):
             "discover_controls": (self.discover_page.chart.currentIndex(), self.discover_page.category.currentText(), self.discover_page.topic.currentText()),
             "discover_summary": self.discover_page.result_summary.text(),
             "discover_loading": self._discover_loading,
+            # Operation and value; a chart or topic value becomes a list in JSON.
+            "discover_request": [self._discover_operation, self._discover_value],
             "_previews": OrderedDict(self._previews),
             "_discover_items": list(self.discover_page._all_items),
             "_discover_cache": dict(self._discover_cache),
@@ -989,6 +997,10 @@ class MainWindow(QMainWindow):
             (self._discover_operation, self._discover_value,
              self._discover_limit, self._discover_exhausted) = state["_discover_request"]
             self._discover_displayed_key = (self._discover_operation, repr(self._discover_value))
+        else:
+            request = self._saved_directory_request(state.get("discover_request"))
+            if request is not None:
+                self._discover_operation, self._discover_value = request
         controls = state.get("discover_controls")
         if (isinstance(controls, (tuple, list)) and len(controls) == 3
                 and isinstance(controls[0], int) and isinstance(controls[1], str) and isinstance(controls[2], str)):
@@ -1099,10 +1111,34 @@ class MainWindow(QMainWindow):
         elif state.get("search_open"):
             self._open_search()
             self.search_overlay.field.setText(state.get("search_query", ""))
-        if state.get("discover_loading") and self.directory is not None:
+        on_discover = self.pages.currentIndex() == PAGE_DISCOVER
+        # A request cut short by the last quit, or a restored Discover page
+        # with no results (they are not saved): load the saved view's own
+        # request. An unknown request must not run as an empty search.
+        resume = self.directory is not None and self.jobs is not None and (
+            (on_discover and not self.discover_page._all_items)
+            or (state.get("discover_loading") and self._discover_visited))
+        if resume and self._discover_operation:
             self._start_directory_request(self._discover_operation, self._discover_value)
+        elif resume and on_discover:
+            self._show_for_you()
         else:
             self._queue_directory_artwork()
+
+    @staticmethod
+    def _saved_directory_request(saved):
+        """The (operation, value) a saved view state names, or None. Only a
+        request `_directory_request` understands is taken back from disk."""
+        if not isinstance(saved, (list, tuple)) or len(saved) != 2 or not isinstance(saved[0], str):
+            return None
+        operation, value = saved
+        if operation in {"chart", "topic"}:
+            if isinstance(value, (list, tuple)) and len(value) == 2 and all(isinstance(part, str) for part in value):
+                return operation, tuple(value)
+            return None
+        if operation in {"recommend", "browse", "search"} and isinstance(value, str):
+            return operation, value
+        return None
 
     def _validated_navigation_history(self, entries):
         if not isinstance(entries, (list, tuple)):
