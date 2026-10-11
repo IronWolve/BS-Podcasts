@@ -46,7 +46,7 @@ from ..domain import DownloadState, FeedData, FeedEpisodeData, Health
 from ..domain.times import format_media_time
 from ..directories.base import CandidateList
 from ..directories.persistent import PersistentDirectoryCache
-from ..downloads import DownloadError, AutomaticCleanupSkipped
+from ..downloads import AutomaticCleanupSkipped
 from ..jobs import JobResult, JobRunner, JobStatus
 from ..jobs.commands import CommandQueue
 from ..services.library import LibraryService, _bounded_float, _bounded_int
