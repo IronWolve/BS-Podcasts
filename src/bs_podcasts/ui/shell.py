@@ -4669,7 +4669,8 @@ class MainWindow(QMainWindow):
         download without confirmation violated the destructive-storage rule.
         Bulk cleanup stays behind the confirming dialog, and `confirm` puts
         a bulk mark's files behind it too."""
-        if self.downloads is None:
+        if self.downloads is None or (episode_ids is None and not confirm):
+            # No ids means every played download: only the dialog may ask.
             return
         downloads = self.downloads
         wanted = None if episode_ids is None else set(episode_ids)
