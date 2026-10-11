@@ -94,7 +94,9 @@ class ItemRoles:
     ITEM = Qt.ItemDataRole.UserRole + 1
 
 
-_TAG = re.compile(r"</?[A-Za-z][A-Za-z0-9:-]*(?:\s+[A-Za-z_:][\w:.-]*\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s<>]+))*\s*/?>|<!--.*?-->|<![A-Za-z][^<>]*>|<\?.*?\?>", re.S)
+# An unclosed comment or instruction runs to the end of the text, so each
+# opener is scanned once instead of once per later opener.
+_TAG = re.compile(r"</?[A-Za-z][A-Za-z0-9:-]*(?:\s+[A-Za-z_:][\w:.-]*\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s<>]+))*\s*/?>|<!--.*?(?:-->|\Z)|<![A-Za-z][^<>]*>|<\?.*?(?:\?>|\Z)", re.S)
 _WS = re.compile(r"\s+")
 _LONG_TOKEN = re.compile(r"\S{32,}")
 
