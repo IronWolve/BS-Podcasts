@@ -142,10 +142,12 @@ def _present_episode_art(view, identity, pixmap):
         return pixmap
     frozen = _scroll_episode_art.get(view)
     if frozen is not None:
+        # Only rows that were on screen when the hold began stay put; a row
+        # that scrolls in must show its cover as soon as it has decoded.
         held = frozen.get(identity)
         if held is not None:
             pixmap = held
-        _remember_episode_frame(frozen, identity, pixmap)
+            _remember_episode_frame(frozen, identity, pixmap)
     recent = _painted_episode_art.setdefault(view, OrderedDict())
     _remember_episode_frame(recent, identity, pixmap)
     return pixmap
