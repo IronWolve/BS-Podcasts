@@ -14,6 +14,15 @@ logger = logging.getLogger("bs_podcasts")
 mpv = None
 
 
+def _load_mpv():
+    """Import the native binding on first use; loading it dlopens the library."""
+    global mpv
+    if mpv is None:
+        import mpv as mpv_module
+
+        mpv = mpv_module
+
+
 class PlaybackUnavailable(RuntimeError):
     pass
 
@@ -43,11 +52,7 @@ class MpvEngine:
     capabilities = EngineCapabilities()
 
     def __init__(self, **options):
-        global mpv
-        if mpv is None:
-            import mpv as mpv_module
-
-            mpv = mpv_module
+        _load_mpv()
         defaults = {
             "config": False,
             "load_scripts": False,
@@ -531,8 +536,8 @@ class LazyMpvEngine:
 
     def __init__(self, **options):
         # Nothing is imported here: loading libmpv (a dlopen of the whole
-        # library) cost 59 ms on the main thread before the first paint
-        #. The import happens in _real(), i.e. in the deferred
+        # library) cost 59 ms on the main thread before the first paint.
+        # The import happens in _real(), i.e. in the deferred
         # warm-up or on the first real playback call, and a machine without
         # libmpv reports an error there; an external player is an explicit action.
         self._options = options
@@ -596,11 +601,7 @@ class LazyMpvEngine:
                 raise PlaybackUnavailable("The internal playback engine has shut down.")
             if self._engine is None:
                 try:
-                    global mpv
-                    if mpv is None:
-                        import mpv as mpv_module
-
-                        mpv = mpv_module
+                    _load_mpv()
                     engine = MpvEngine(**self._options)
                 except Exception as exc:
                     detail = redact(exc) or type(exc).__name__
