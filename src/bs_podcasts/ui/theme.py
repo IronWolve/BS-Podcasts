@@ -513,10 +513,10 @@ def stylesheet() -> str:
         border: 0; width: {sp(26)}px; subcontrol-origin: padding; subcontrol-position: center right;
     }}
     QComboBox::down-arrow {{
-        image: url({{icon:chevron-down:{c['muted']}:14}});
-        width: 14px; height: 14px;
+        image: url({{icon:chevron-down:{c['muted']}:{sp(14)}}});
+        width: {sp(14)}px; height: {sp(14)}px;
     }}
-    QComboBox::down-arrow:disabled {{ image: url({{icon:chevron-down:{c['disabled']}:14}}); }}
+    QComboBox::down-arrow:disabled {{ image: url({{icon:chevron-down:{c['disabled']}:{sp(14)}}}); }}
     QComboBox QAbstractItemView {{
         background: {c['surface_raised']}; color: {c['text']};
         border: 1px solid {c['border']}; border-radius: {r['sm']}px;
@@ -527,16 +527,16 @@ def stylesheet() -> str:
     QComboBox QAbstractItemView::item {{ padding: {sp(6)}px {sp(8)}px; border-radius: 6px; min-height: {sp(22)}px; }}
     QSpinBox::up-button, QDoubleSpinBox::up-button,
     QSpinBox::down-button, QDoubleSpinBox::down-button {{
-        background: transparent; border: 0; width: 22px;
+        background: transparent; border: 0; width: {sp(22)}px;
         subcontrol-origin: border;
     }}
     QSpinBox::up-button, QDoubleSpinBox::up-button {{ subcontrol-position: top right; }}
     QSpinBox::down-button, QDoubleSpinBox::down-button {{ subcontrol-position: bottom right; }}
     QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
-        image: url({{icon:chevron-up:{c['muted']}:12}}); width: 12px; height: 12px;
+        image: url({{icon:chevron-up:{c['muted']}:{sp(12)}}}); width: {sp(12)}px; height: {sp(12)}px;
     }}
     QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
-        image: url({{icon:chevron-down:{c['muted']}:12}}); width: 12px; height: 12px;
+        image: url({{icon:chevron-down:{c['muted']}:{sp(12)}}}); width: {sp(12)}px; height: {sp(12)}px;
     }}
     QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
     QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
@@ -639,7 +639,7 @@ def stylesheet() -> str:
 
     QPushButton#chip {{
         background: transparent; color: {c['muted']};
-        border: 1px solid {c['border']}; border-radius: 14px;
+        border: 1px solid {c['border']}; border-radius: {sp(14)}px;
         padding: {sp(4)}px {sp(12)}px; font-weight: 500;
     }}
     QPushButton#chip:hover {{ color: {c['text']}; background: {c['surface_raised']}; }}
@@ -663,8 +663,8 @@ def stylesheet() -> str:
     QScrollBar::handle:vertical:hover {{ background: {c['subtle']}; }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
     QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-    QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px 4px; }}
-    QScrollBar::handle:horizontal {{ background: {c['border']}; border-radius: 3px; min-width: 34px; }}
+    QScrollBar:horizontal {{ background: transparent; height: {sp(10)}px; margin: 2px 4px; }}
+    QScrollBar::handle:horizontal {{ background: {c['border']}; border-radius: 3px; min-width: {sp(34)}px; }}
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
     QScrollArea#settingsScroll, QScrollArea#settingsScroll QWidget#qt_scrollarea_viewport,
     QWidget#settingsContent {{ background: {c['canvas']}; border: 0; }}
