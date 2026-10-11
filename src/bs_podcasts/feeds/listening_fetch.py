@@ -43,7 +43,9 @@ def _get(url: str, session=None) -> tuple[bytes, str]:
         raise ListeningFetchError(str(exc)) from exc
     import requests
 
-    client = session or make_session()
+    # A session this call creates is closed here; a caller's session is left open.
+    owned = session is None
+    client = make_session() if owned else session
     try:
         with client.get(url, timeout=TIMEOUT, stream=True, headers={"User-Agent": USER_AGENT}) as response:
             response.raise_for_status()
@@ -56,6 +58,9 @@ def _get(url: str, session=None) -> tuple[bytes, str]:
     except requests.RequestException as exc:
         # Same sentence-a-person-can-act-on rule as feeds and downloads.
         raise ListeningFetchError(describe_network_error(exc, "the chapters/transcript file")) from exc
+    finally:
+        if owned:
+            client.close()
 
 
 def fetch_chapters(url: str, session=None) -> list[ChapterData]:
