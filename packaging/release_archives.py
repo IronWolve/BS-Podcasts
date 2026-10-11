@@ -237,6 +237,12 @@ def build(output, macos=None, plain=False):
     scan_inputs(linux_files, tokens)
     dependencies=third_party_files()
     mac_record,mac_archive=verify_macos(macos,version,{'commit':commit,'dirty':False,'sha256':fingerprint}) if macos else (None,None)
+    manifests = {'Windows.manifest.json': json.dumps(win_record, indent=2)+'\n'}
+    if mac_record:
+        manifests['macOS.manifest.json'] = json.dumps(mac_record, indent=2)+'\n'
+    # Upstream archives are compressed and locked by digest: scan their names, not their bytes.
+    scan_inputs({**{name: b'' if name.startswith('archives/') else data for name, data in dependencies.items()},
+                 **{name: text.encode() for name, text in manifests.items()}}, tokens)
     output.parent.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='.release-', dir=output.parent))
     zip_files(work/f'BS-Podcasts-{version}-Source.zip', source_files, f'BS-Podcasts-{version}-Source', source_executable)
@@ -245,10 +251,10 @@ def build(output, macos=None, plain=False):
     linux_name = f'BS-Podcasts-{version}-Linux-{platform.machine()}'
     tar_files(work/(linux_name+'.tar.gz'), linux_files, linux_name,
               ('start.sh', 'stop.sh', 'setup.sh', 'dists/linux/start.sh', 'dists/linux/stop.sh'))
-    (work/'Windows.manifest.json').write_text(json.dumps(win_record, indent=2)+'\n')
+    for name, text in manifests.items():
+        (work/name).write_text(text)
     if mac_record:
         shutil.copy2(mac_archive,work/mac_archive.name)
-        (work/'macOS.manifest.json').write_text(json.dumps(mac_record,indent=2)+'\n')
     report = {'version': version, 'source': {'commit': commit, 'sha256': fingerprint},
               'windows_signed': False, 'linux_runtime_dependencies': 'Python >=3.14.7 and compatible ALSA/PulseAudio/desktop libraries; run setup.sh',
               'linux_architecture':platform.machine(), 'linux_native':linux_record['native'],
@@ -259,7 +265,9 @@ def build(output, macos=None, plain=False):
                       macos_signing=mac_record['runtime']['signing'], macos_notarized=mac_record['runtime']['notarized'])
     for path in sorted(work.iterdir()):
         report['archives'][path.name] = {'bytes': path.stat().st_size, 'sha256': file_digest(path)}
-    (work/'release.json').write_text(json.dumps(report, indent=2)+'\n')
+    release_text = json.dumps(report, indent=2)+'\n'
+    scan_inputs({'release.json': release_text.encode()}, tokens)
+    (work/'release.json').write_text(release_text)
     sums = ''.join(file_digest(path)+'  '+path.name+'\n' for path in sorted(work.iterdir()))
     (work/'SHA256SUMS').write_text(sums)
     if git('status', '--porcelain') or git('rev-parse', 'HEAD') != commit or source_digest() != fingerprint:
