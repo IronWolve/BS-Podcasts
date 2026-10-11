@@ -908,6 +908,11 @@ class EpisodeDelegate(QStyledItemDelegate):
         # part of the cache key so a settings change doesn't serve stale
         # short snippets.
         limit = max(240, self.SNIPPET_LINES * 130)
+        # A row is frozen, so its snippet for one limit never changes: keep it
+        # on the row and later paints skip the description digest below.
+        memo = getattr(item, "_snippet_memo", None)
+        if memo is not None and memo[0] == limit:
+            return memo[1]
         from hashlib import blake2b
         bounded = item.description[:16384]
         identity = item.episode_id or item.media_url or item.external_id or item.title
@@ -918,4 +923,5 @@ class EpisodeDelegate(QStyledItemDelegate):
             self._snippets[key] = cached
             if len(self._snippets) > 5000:
                 del self._snippets[next(iter(self._snippets))]
+        object.__setattr__(item, "_snippet_memo", (limit, cached))
         return cached
