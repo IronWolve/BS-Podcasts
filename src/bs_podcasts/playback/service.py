@@ -1236,7 +1236,7 @@ class PlaybackService:
                 if self._engine_loaded:
                     # The source had opened: this is a stream lost mid-play,
                     # not an open failure, so the redirect rescue does not fit.
-                    if self._start_stream_recovery(str(event.value or "")):
+                    if self._start_stream_recovery(redact(str(event.value or ""))[:320]):
                         self._emit()
                         return
                 elif self._start_redirect_rescue():
@@ -1251,8 +1251,13 @@ class PlaybackService:
                     self._emit()
                     return
                 self._engine_loaded = False
+                # The player bar and the toast show this text, so a web source's
+                # is redacted and limited the way the log line above is.
+                message = str(event.value)
+                if source_kind == "network":
+                    message = redact(message)[:320]
                 self.snapshot = replace(
-                    self.snapshot, state=PlaybackState.ERROR, message=str(event.value), buffering=None
+                    self.snapshot, state=PlaybackState.ERROR, message=message, buffering=None
                 )
             self._emit()
 
