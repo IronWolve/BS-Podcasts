@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Build a project-local LGPL player with pinned, current FFmpeg; no system installs.
+# The native receipt records the hash of this file. Any edit, even to a comment or
+# an option that changes nothing, makes the receipt stale and the Linux deploy
+# refuses it: rebuild the player after editing. Never edit the receipt to match.
 set -euo pipefail
 BS_PROJECT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 BS_PYTHON="$BS_PROJECT/dists/linux/.venv/bin/python"
