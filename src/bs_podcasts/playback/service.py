@@ -594,13 +594,17 @@ class PlaybackService:
 
     def stop(self):
         """Unload the current episode: pause, persist position, go idle."""
+        # Refuse before retiring the resolver/native session. Removal callers
+        # require durable writes, and a refusal must leave a recoverable
+        # playing/loading session rather than a dead spinner. The saves are
+        # queued under the lock and awaited without it, so a stalled save does
+        # not hold up native events or other commands.
         with self._lock:
-            # Refuse before retiring the resolver/native session. Removal
-            # callers require durable writes, and a refusal must leave a
-            # recoverable playing/loading session rather than a dead spinner.
             self._persist_position(force=True)
             self._flush_listening()
-            self._flush_persistence()
+        self._flush_persistence()
+        with self._lock:
+            # Nothing below waits on storage, so the stop is applied whole.
             self._resolve_cancel.set()
             self.intent_revision += 1
             self._deferred_episode_id = None
@@ -617,9 +621,6 @@ class PlaybackService:
             self._best_effort("final position save", lambda: self._persist_position(force=True))
             self._start_target = None
             self._flush_listening()
-            # Removal callers rely on Stop finishing writes for the outgoing
-            # show before its rows (including listening statistics) are deleted.
-            self._flush_persistence()
             # Release the file and its cache inside the engine; a later Play
             # reloads from the saved position.
             unload = getattr(self.engine, "unload", None)
@@ -631,7 +632,11 @@ class PlaybackService:
             if episode_id is not None:
                 self._set_current_playback(None, PlaybackState.IDLE.value)
             self._emit()
-            self._flush_persistence()
+        # Removal callers rely on Stop finishing writes for the outgoing show
+        # before its rows (including listening statistics) are deleted. The
+        # session is already stopped; a timeout only says the writes are not
+        # durable yet.
+        self._flush_persistence()
 
     def open_external(self, episode_id: int):
         """Explicit user action only: validate a library episode and hand it off.
