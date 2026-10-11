@@ -3164,7 +3164,7 @@ class MainWindow(QMainWindow):
             logging.getLogger("bs_podcasts").exception("Updating %s failed", what)
             banner = getattr(page, "banner", None)
             if banner is not None:
-                self._show_page_error(page, f"Couldn't show {what}: {exc or type(exc).__name__}")
+                self._show_page_error(page, f"Couldn't show {what}: {str(exc) or type(exc).__name__}")
 
     def _reload_library(self, data=None):
         if self.library is None:
