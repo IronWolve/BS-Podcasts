@@ -33,7 +33,7 @@ import unicodedata
 from ..net import SessionSlot, describe_network_error
 from ..urlguard import UnresolvedHost, UnsafeUrl, ensure_fetchable, SAFE_MEDIA_SUFFIXES, unsafe_media_payload
 
-from ..data.repositories import DownloadRepository, LibraryRepository
+from ..data.repositories import DeletionPreview, DownloadRepository, LibraryRepository
 from ..domain import DownloadState, DownloadRecord
 from ..domain.media import BINARY_AUDIO_TYPES
 
@@ -1136,6 +1136,23 @@ class DownloadService:
 
     def cleanup_preview(self, episode_id: int, *, record=None):
         return self.downloads.cleanup_preview(episode_id, record=record)
+
+    def cleanup_previews(self, episode_id: int, *, record=None) -> list:
+        """Every file a delete of this download removes, as a list of previews.
+
+        A row that is not complete can have both its partial file and a
+        finished file at its target. The delete refuses a file it was not
+        shown, so the target is listed beside the partial."""
+        record = self.downloads.get(episode_id) if record is None else record
+        preview = self.downloads.cleanup_preview(episode_id, record=record)
+        if preview is None:
+            return []
+        previews = [preview]
+        if record.state != DownloadState.COMPLETE and record.target_path and preview.path != record.target_path:
+            kind, size = inspect_download_file(record.target_path)
+            if kind == FILE_PRESENT:
+                previews.append(DeletionPreview(episode_id, record.target_path, size))
+        return previews
 
     def retention_candidates(self, show, keep=()) -> list:
         """Downloads a podcast's retention rule may remove right now.

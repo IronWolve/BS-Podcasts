@@ -2949,8 +2949,10 @@ class MainWindow(QMainWindow):
         if self.downloads is None or not previews:
             return
         downloads = self.downloads
-        episode_ids = [preview.episode_id for preview in previews]
-        confirmed_paths = {preview.episode_id: {preview.path} for preview in previews}
+        episode_ids = list(dict.fromkeys(preview.episode_id for preview in previews))
+        confirmed_paths = {}
+        for preview in previews:
+            confirmed_paths.setdefault(preview.episode_id, set()).add(preview.path)
         playback = self.playback
 
         def work():
@@ -4867,14 +4869,13 @@ class MainWindow(QMainWindow):
             records = downloads.records_by_ids(ids)
             for episode_id in ids:
                 try:
-                    preview = downloads.cleanup_preview(episode_id, record=records.get(episode_id))
+                    found = downloads.cleanup_previews(episode_id, record=records.get(episode_id))
                 except OSError:
                     # Its folder cannot be reached right now: leave that file
                     # alone and keep looking at the others.
                     unavailable += 1
                     continue
-                if preview is not None:
-                    previews.append(preview)
+                previews.extend(found)
             return previews, unavailable
 
         self._run_task('delete-downloads-preview', work)
@@ -4886,8 +4887,9 @@ class MainWindow(QMainWindow):
         if not previews:
             self._notify(skipped or "Nothing to delete for this selection", "info")
             return
+        episodes = len({preview.episode_id for preview in previews})
         dialog = DeleteFilesDialog(
-            "Delete download" if len(previews) == 1 else f"Delete {len(previews)} downloads",
+            "Delete download" if episodes == 1 else f"Delete {episodes} downloads",
             "The episode stays in your library; only the local file is removed."
             + (f"\n\n{skipped}" if skipped else ""),
             previews, self._format_bytes, self,
