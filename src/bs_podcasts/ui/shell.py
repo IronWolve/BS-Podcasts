@@ -51,7 +51,7 @@ from ..directories.persistent import PersistentDirectoryCache
 from ..downloads import AutomaticCleanupSkipped
 from ..jobs import JobResult, JobRunner, JobStatus
 from ..jobs.commands import CommandQueue
-from ..services.library import LibraryService, _bounded_float, _bounded_int
+from ..services.library import LibraryService, bounded_float, bounded_int
 from ..services.preview_cache import FeedResultCache, prepare_preview
 from ..urlguard import is_web_url
 from ..privacy import feed_label, redact
@@ -60,7 +60,7 @@ from . import icons
 from .models import Episode as UiEpisode, EpisodeDelegate, EpisodeModel, ItemRoles, Podcast as UiPodcast, plain_snippet, set_item_tooltips
 from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, prepare_previews, install_previews
 from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_accent_token
-from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, SettingsPage, _KeyboardMenu, _ListPageMixin
+from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, SettingsPage, KeyboardMenu, _ListPageMixin
 from .shortcuts import ShortcutManager
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
 from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu, quiet_signals
@@ -571,7 +571,7 @@ class MainWindow(QMainWindow):
         self.queue_model = EpisodeModel(())
         self.context.attach_queue_model(self.queue_model, EpisodeDelegate(self.context.queue_view, compact=True, reorder=True))
         self.context.queue_view.viewport().installEventFilter(self)
-        self._queue_menu_filter = _KeyboardMenu(self.context.queue_view, self._queue_keyboard_menu)
+        self._queue_menu_filter = KeyboardMenu(self.context.queue_view, self._queue_keyboard_menu)
         self.splitter.addWidget(self.pages)
         self.splitter.addWidget(self.context)
         # Both collapse handles live inside the centre area, hugging its
@@ -2498,10 +2498,10 @@ class MainWindow(QMainWindow):
         """A numeric setting within the range Settings offers; a value from
         another build or a hand-edited database falls back to the default
         instead of stopping the window from opening."""
-        return _bounded_int(self.library.setting(key, str(default)), default, low, high)
+        return bounded_int(self.library.setting(key, str(default)), default, low, high)
 
     def _float_setting(self, key: str, default: float, low: float, high: float) -> float:
-        return _bounded_float(self.library.setting(key, str(default)), default, low, high)
+        return bounded_float(self.library.setting(key, str(default)), default, low, high)
 
     def _refresh_interval(self) -> int:
         return self._int_setting("refresh.interval_minutes", 60, 0, 24 * 60)

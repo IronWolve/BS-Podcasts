@@ -21,7 +21,7 @@ class SubscriptionImport(list):
         self.errors = []
 
 
-def _bounded_float(raw, fallback: float, low: float, high: float) -> float:
+def bounded_float(raw, fallback: float, low: float, high: float) -> float:
     try:
         value = float(str(raw).strip())
     except (TypeError, ValueError, OverflowError):
@@ -31,7 +31,7 @@ def _bounded_float(raw, fallback: float, low: float, high: float) -> float:
     return value
 
 
-def _bounded_int(raw, fallback: int, low: int, high: int) -> int:
+def bounded_int(raw, fallback: int, low: int, high: int) -> int:
     try:
         value = int(str(raw).strip())
     except (TypeError, ValueError, OverflowError):
@@ -95,9 +95,9 @@ class LibraryService:
         existing = self.find_subscription(feed_url) if known is None else known.get(self.normalize_feed_url(feed_url))
         if existing is not None:
             raise ValueError(f"Already subscribed as “{existing.title}”.")
-        speed = _bounded_float(self.setting("playback.default_speed", "1.0"), 1.0, 0.5, 3.0)
-        skip_back = _bounded_int(self.setting("playback.skip_back", "15"), 15, 5, 120)
-        skip_forward = _bounded_int(self.setting("playback.skip_forward", "30"), 30, 5, 300)
+        speed = bounded_float(self.setting("playback.default_speed", "1.0"), 1.0, 0.5, 3.0)
+        skip_back = bounded_int(self.setting("playback.skip_back", "15"), 15, 5, 120)
+        skip_forward = bounded_int(self.setting("playback.skip_forward", "30"), 30, 5, 300)
         auto_continue = self.setting("playback.auto_continue", "1") == "1"
         from ..feeds.parser import clamp_title
         fallback = clamp_title(title.strip() or feed_label(feed_url))

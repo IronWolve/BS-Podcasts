@@ -181,7 +181,7 @@ def _selected_rows(selection_model) -> set[int]:
     return {row for span in selection_model.selection() for row in range(span.top(), span.bottom() + 1)}
 
 
-class _KeyboardMenu(QObject):
+class KeyboardMenu(QObject):
     """A keyboard context-menu request (the Menu key) goes to the view
     itself, never to the viewport the mouse path watches, so rows and cards
     had no menu without a mouse."""
@@ -231,7 +231,7 @@ class _ListPageMixin:
         self.view.activated.connect(self._activated_once)
         self.view.doubleClicked.connect(self._activated_once)
         self.view.viewport().installEventFilter(self)
-        self._keyboard_menu_filter = _KeyboardMenu(self.view, self._keyboard_menu)
+        self._keyboard_menu_filter = KeyboardMenu(self.view, self._keyboard_menu)
         self._tooltip_target = None
         if isinstance(model, EpisodeModel):
             self._episode_scroll_pixels = False
