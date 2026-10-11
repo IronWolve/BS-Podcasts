@@ -100,8 +100,9 @@ codesign --force --sign - "$BS_WORK/out/libmpv.2.dylib"
 "$BS_PYTHON" -B -I -c 'import ctypes,sys; ctypes.CDLL(sys.argv[1])' "$BS_WORK/out/libmpv.2.dylib"
 # Allow list: system libraries and frameworks, plus the library's own install
 # name. Any other path (Homebrew, a user folder, a local prefix) fails the build.
-if otool -L "$BS_WORK/out/libmpv.2.dylib" | tail -n +2 \
-    | grep -Ev '^[[:space:]]+(/usr/lib/|/System/Library/|@rpath/libmpv[.]2[.]dylib )' | grep -q .; then
+BS_LINKS="$(otool -L "$BS_WORK/out/libmpv.2.dylib")"
+BS_UNEXPECTED_LINKS="$(tail -n +2 <<< "$BS_LINKS" | grep -Ev '^[[:space:]]+(/usr/lib/|/System/Library/|@rpath/libmpv[.]2[.]dylib )' || true)"
+if [[ -n "$BS_UNEXPECTED_LINKS" ]]; then
     printf 'Unexpected non-system linkage in native player.\n' >&2; exit 1
 fi
 "$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --record "$BS_WORK/out/libmpv.2.dylib"

@@ -125,7 +125,8 @@ mkdir -p "$BS_NATIVE_ROOT/out"
 cp -L "$BS_NATIVE_ROOT/build-mpv/libmpv.so.2" "$BS_NATIVE_ROOT/out/libmpv.so.2"
 strip --strip-unneeded "$BS_NATIVE_ROOT/out/libmpv.so.2"
 "$BS_PYTHON" -B -I -c 'import ctypes,sys; ctypes.CDLL(sys.argv[1])' "$BS_NATIVE_ROOT/out/libmpv.so.2"
-if readelf -d "$BS_NATIVE_ROOT/out/libmpv.so.2" | grep -Eq 'NEEDED.*lib(avcodec|avformat|avutil|avfilter|swscale|swresample)'; then
+BS_NEEDED="$(readelf -d "$BS_NATIVE_ROOT/out/libmpv.so.2")"
+if grep -Eq 'NEEDED.*lib(avcodec|avformat|avutil|avfilter|swscale|swresample)' <<< "$BS_NEEDED"; then
     printf 'The native player unexpectedly depends on system FFmpeg.\n' >&2
     exit 1
 fi
