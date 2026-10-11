@@ -2332,7 +2332,16 @@ class ContextPanel(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
         layout.setSpacing(SPACE["md"])
+        layout.addLayout(self._build_mode_header())
 
+        self.stack = QStackedWidget()
+        layout.addWidget(self.stack, 1)
+        self._build_selected_page()
+        self._build_queue_page()
+        self.set_queue(())
+        self.show_empty()
+
+    def _build_mode_header(self):
         top = QHBoxLayout()
         top.setSpacing(SPACE["xs"])
         self.mode_group = QButtonGroup(self)
@@ -2359,11 +2368,9 @@ class ContextPanel(QFrame):
         self.info_button.setEnabled(False)
         self.info_button.clicked.connect(self._information_clicked)
         top.addWidget(self.info_button)
-        layout.addLayout(top)
+        return top
 
-        self.stack = QStackedWidget()
-        layout.addWidget(self.stack, 1)
-
+    def _build_selected_page(self):
         # --- Selected item page -------------------------------------------
         selected = QWidget()
         selected_layout = QVBoxLayout(selected)
@@ -2374,6 +2381,24 @@ class ContextPanel(QFrame):
         selected_layout.setContentsMargins(0, 0, SPACE["sm"], SPACE["sm"])
         self._selected_layout = selected_layout
         selected_layout.setSpacing(SPACE["md"])
+        self._build_selected_summary(selected_layout)
+        self._build_selected_actions(selected_layout)
+        self._build_latest_card(selected_layout)
+        self._build_detail_tabs(selected_layout)
+        selected_layout.addStretch(0)
+        self.selected_scroll = QScrollArea()
+        self.selected_scroll.setObjectName("contextScroll")
+        self.selected_scroll.setWidgetResizable(True)
+        self.selected_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.selected_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.selected_scroll.setWidget(selected)
+        self.selected_scroll.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.selected_scroll.customContextMenuRequested.connect(self._show_information_menu)
+        self.body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.body.document().documentLayout().documentSizeChanged.connect(self._grow_body)
+        self.stack.addWidget(self.selected_scroll)
+
+    def _build_selected_summary(self, selected_layout):
         self.art = Artwork(240, 16)
         self.art.setAccessibleName("Artwork")
         self.art.set_bounds(120, 240)
@@ -2421,6 +2446,7 @@ class ContextPanel(QFrame):
         selected_layout.addWidget(self.show_link, alignment=Qt.AlignmentFlag.AlignLeft)
         selected_layout.addWidget(self.links)
 
+    def _build_selected_actions(self, selected_layout):
         actions = QVBoxLayout()
         actions.setSpacing(SPACE["sm"])
         self.primary = QPushButton("Play")
@@ -2455,6 +2481,7 @@ class ContextPanel(QFrame):
         actions.addLayout(secondary_row)
         selected_layout.addLayout(actions)
 
+    def _build_latest_card(self, selected_layout):
         self.latest_card = QFrame()
         self.latest_card.setObjectName("latestCard")
         latest_layout = QVBoxLayout(self.latest_card)
@@ -2470,6 +2497,7 @@ class ContextPanel(QFrame):
         latest_layout.addWidget(self.latest_episode)
         selected_layout.addWidget(self.latest_card)
 
+    def _build_detail_tabs(self, selected_layout):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("contextTabs")
         self.tabs.setDocumentMode(True)
@@ -2524,19 +2552,8 @@ class ContextPanel(QFrame):
         self._tab_counts = {}
         self.tabs.currentChanged.connect(lambda _index: self._tint_tab_icons())
         selected_layout.addWidget(self.tabs, 1)
-        selected_layout.addStretch(0)
-        self.selected_scroll = QScrollArea()
-        self.selected_scroll.setObjectName("contextScroll")
-        self.selected_scroll.setWidgetResizable(True)
-        self.selected_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.selected_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.selected_scroll.setWidget(selected)
-        self.selected_scroll.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.selected_scroll.customContextMenuRequested.connect(self._show_information_menu)
-        self.body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.body.document().documentLayout().documentSizeChanged.connect(self._grow_body)
-        self.stack.addWidget(self.selected_scroll)
 
+    def _build_queue_page(self):
         # --- Up Next page --------------------------------------------------
         queue_page = QWidget()
         queue_layout = QVBoxLayout(queue_page)
@@ -2564,8 +2581,6 @@ class ContextPanel(QFrame):
         self.queue_empty = EmptyState("Nothing queued", "Add episodes to Up Next and they play in this order.", glyph="queue")
         queue_layout.addWidget(self.queue_empty, 1)
         self.stack.addWidget(queue_page)
-        self.set_queue(())
-        self.show_empty()
 
     # -- queue -------------------------------------------------------------
     def attach_queue_model(self, model, delegate):
@@ -3200,7 +3215,11 @@ class NowPlayingView(_ReturnsFocus, QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE["xxl"], SPACE["xl"], SPACE["xxl"], SPACE["xl"])
         layout.setSpacing(SPACE["xxl"])
+        self._build_left_column(layout)
+        self._build_right_column(layout)
+        self.hide()
 
+    def _build_left_column(self, layout):
         left = QVBoxLayout()
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(SPACE["md"])
@@ -3249,6 +3268,7 @@ class NowPlayingView(_ReturnsFocus, QFrame):
         self.left_wrap.setMaximumWidth(scaled_px(460))
         layout.addWidget(self.left_wrap, 0)
 
+    def _build_right_column(self, layout):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("nowPlayingTabWidget")
         self.tabs.setDocumentMode(True)
@@ -3304,7 +3324,6 @@ class NowPlayingView(_ReturnsFocus, QFrame):
         right.setContentsMargins(0, SPACE["xl"] + 4, 0, 0)
         right.addWidget(panel, 1)
         layout.addLayout(right, 1)
-        self.hide()
 
     def apply_metrics(self):
         self.layout().setContentsMargins(SPACE["xxl"], SPACE["xl"], SPACE["xxl"], SPACE["xl"])
@@ -3884,7 +3903,14 @@ class PlayerBar(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE["lg"], SPACE["sm"], SPACE["lg"], SPACE["sm"])
         layout.setSpacing(SPACE["md"])
+        self._build_now_zone(layout)
+        self._build_transport_zone(layout)
+        self._build_tools_zone(layout)
+        self._balance_zones()
+        self.set_enabled(False)
+        self._refresh_chrome()
 
+    def _build_now_zone(self, layout):
         left = QWidget()
         left_row = QHBoxLayout(left)
         left_row.setContentsMargins(0, 0, 0, 0)
@@ -3931,6 +3957,7 @@ class PlayerBar(QFrame):
         left_row.addWidget(now_wrap, 1)
         layout.addWidget(left)
 
+    def _build_transport_zone(self, layout):
         transport = QVBoxLayout()
         # No implicit margins: wrapping this layout in a widget gave it Qt's
         # default 9 px frame, which stole the room the play circle needs and
@@ -4010,6 +4037,7 @@ class PlayerBar(QFrame):
         layout.addWidget(center, 1)
         self.set_skip_values(15, 30)
 
+    def _build_tools_zone(self, layout):
         tools = QHBoxLayout()
         tools.setSpacing(SPACE["xs"])
         self.speed = QPushButton("1×")
@@ -4082,9 +4110,6 @@ class PlayerBar(QFrame):
         self._volume_metrics()
         self._sync_volume_controls()
         layout.addWidget(tools_wrap)
-        self._balance_zones()
-        self.set_enabled(False)
-        self._refresh_chrome()
 
     # -- configuration -----------------------------------------------------
     @staticmethod
