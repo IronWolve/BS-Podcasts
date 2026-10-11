@@ -192,8 +192,9 @@ class PersistentDirectoryCache:
         except OSError:
             return
         size, count = sum(item[1] for item in entries), len(entries)
-        for _stamp, cost, path in sorted(entries):
-            if count <= MAX_CACHE_FILES and size <= MAX_CACHE_BYTES:
+        expired = time.time_ns() - MAX_CACHE_AGE * 1_000_000_000
+        for stamp, cost, path in sorted(entries):
+            if stamp >= expired and count <= MAX_CACHE_FILES and size <= MAX_CACHE_BYTES:
                 break
             try:
                 path.unlink()
@@ -201,3 +202,18 @@ class PersistentDirectoryCache:
                 continue
             count -= 1
             size -= cost
+
+    def clear(self):
+        """Remove every stored snapshot; the stored key holds the typed search text."""
+        removed = 0
+        try:
+            paths = list(self.directory.glob("discover-*.json"))
+        except OSError:
+            return removed
+        for path in paths:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+        return removed
