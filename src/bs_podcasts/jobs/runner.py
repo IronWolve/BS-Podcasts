@@ -3,9 +3,13 @@
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, Future
 from threading import BoundedSemaphore
 from dataclasses import dataclass
+import logging
 import time
 from enum import StrEnum
 from typing import Any, Callable
+
+
+_log = logging.getLogger('bs_podcasts')
 
 
 class JobStatus(StrEnum):
@@ -54,6 +58,9 @@ class JobRunner:
         except TimeoutError as exc:
             return JobResult(JobStatus.TIMEOUT, message=str(exc) or "Operation timed out.")
         except Exception as exc:
+            # The result carries only the message; this is the one place the
+            # traceback of a failing background callable can be kept.
+            _log.exception('Background job %s failed', getattr(callable_, '__qualname__', type(callable_).__name__))
             return JobResult(JobStatus.ERROR, message=str(exc) or exc.__class__.__name__)
 
     def shutdown(self, wait: bool = False, cancel_futures: bool = True):
