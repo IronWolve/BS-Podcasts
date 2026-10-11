@@ -1093,6 +1093,13 @@ class PlaybackService:
                              self._engine_generation, source_kind, self.snapshot.position, detail)
             if event.kind == "position":
                 position = max(0.0, float(event.value))
+                target = self._metric_seek_target
+                if (target is not None and abs(position - target) > 1.0
+                        and time.monotonic() < self._metric_seek_deadline):
+                    # A seek has not landed yet, so this tick is still the old
+                    # position. It must not replace the target the snapshot
+                    # holds, nor be saved as the resume point.
+                    return
                 self._measure_silence(position)
                 self.snapshot = replace(self.snapshot, position=position)
                 self._confirm_start(position)
