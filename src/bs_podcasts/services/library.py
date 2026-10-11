@@ -75,10 +75,17 @@ class LibraryService:
 
     @staticmethod
     def normalize_feed_url(url: str) -> str:
-        """Key used to spot the same feed behind http/https, www, trailing slashes."""
+        """Key used to spot the same feed behind http/https, www, trailing slashes,
+        the scheme's default port and a trailing dot on the host."""
         parsed = urlparse(url.strip())
         credentials, separator, host = parsed.netloc.rpartition("@")
-        host = host.lower()
+        host, colon, port = host.lower().rpartition(":")
+        if not colon or "]" in port:
+            # No port (or the last colon sits inside a bracketed IPv6 address).
+            host, port = host + colon + port, ""
+        host = host.removesuffix(".")
+        if port and port != {"http": "80", "https": "443"}.get(parsed.scheme):
+            host = f"{host}:{port}"
         if host.startswith("www."):
             host = host[4:]
         path = parsed.path.rstrip("/") or "/"
