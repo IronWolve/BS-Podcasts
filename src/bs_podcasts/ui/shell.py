@@ -5766,7 +5766,13 @@ class MainWindow(QMainWindow):
                         raise Cancelled
                     output.flush()
                     os.fsync(output.fileno())
-                shutil.copystat(source, temporary)
+                try:
+                    shutil.copystat(source, temporary)
+                except OSError as exc:
+                    # Mode and times are optional: a drive that refuses them
+                    # still gets the finished copy.
+                    logging.getLogger("bs_podcasts").warning(
+                        "Exported %s without its original timestamps: %s", source.name, exc)
                 while True:
                     if _QUITTING.is_set():
                         raise Cancelled
