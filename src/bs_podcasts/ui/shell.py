@@ -6391,8 +6391,9 @@ class MainWindow(QMainWindow):
             # The UI cache is only the outer layer: browse results never
             # expired and charts held a 900 s TTL underneath, so an explicit
             # Refresh re-fetched the same stale list from the directory
-            # layer. Refresh means refresh.
-            if hasattr(self.directory, "invalidate"):
+            # layer. Refresh means refresh. A search reads neither of those
+            # caches, so it must not empty them for the next category or chart.
+            if operation != "search" and hasattr(self.directory, "invalidate"):
                 self.directory.invalidate()
         cached = self._discover_cache.get(key)
         if cached is not None and time.monotonic() - cached[0] < self.DISCOVER_CACHE_SECONDS:
