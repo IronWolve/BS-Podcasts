@@ -8,6 +8,7 @@ from html import escape as html_escape, unescape as html_unescape
 from html.parser import HTMLParser
 import re
 from typing import NamedTuple
+import time
 import weakref
 
 from PySide6.QtCore import (
@@ -2267,7 +2268,6 @@ class SleepPopover(Popover):
         if deadline is None:
             self.remaining.setText("No timer running")
             return
-        import time
         seconds = max(0, int(deadline - time.time()))
         minutes, remainder = divmod(seconds, 60)
         self.remaining.setText(f"{minutes}:{remainder:02d} remaining")
@@ -2580,7 +2580,6 @@ class ContextPanel(QFrame):
     def _queue_activated(self, index):
         item = index.data(Qt.ItemDataRole.UserRole + 1)
         if item is not None and item.episode_id:
-            import time
             now = time.monotonic()
             last_id, last_time = getattr(self, "_last_queue_activation", (None, 0))
             if last_id == item.episode_id and now - last_time < 0.25:
@@ -4042,6 +4041,7 @@ class PlayerBar(QFrame):
         volume_row.addWidget(self.volume_slider, 1)
         volume_row.addWidget(self.volume_value)
         tools_column.addLayout(volume_row)
+        self._volume_row = volume_row
         self.tools_wrap = tools_wrap
         self._volume_metrics()
         self._sync_volume_controls()
@@ -4449,7 +4449,6 @@ class PlayerBar(QFrame):
                                  getattr(self, "_streaming", False))
 
     def set_snapshot(self, snapshot):
-        import time
         self._engine_volume = float(snapshot.volume)
         pending = getattr(self, '_volume_target', None)
         if pending is not None and (abs(pending - self._engine_volume) < .5 or
@@ -4605,7 +4604,6 @@ class PlayerBar(QFrame):
             if steps == 0:
                 return True
             self._volume_wheel -= steps * 120
-            import time
             pending = getattr(self, '_volume_target', None)
             base = pending if pending is not None and time.monotonic() < self._volume_target_until else getattr(self, '_engine_volume', self._volume)
             self._request_volume(float(max(0, min(100, int(base) + steps * 5))))
@@ -4613,7 +4611,6 @@ class PlayerBar(QFrame):
         return super().eventFilter(watched, event)
 
     def _request_volume(self, value):
-        import time
         self._volume_target = self._volume = float(max(0, min(100, value)))
         self._volume_target_until = time.monotonic() + 2
         self._sync_volume_controls()
@@ -4624,7 +4621,7 @@ class PlayerBar(QFrame):
         self.volume_slider.setFixedHeight(max(scaled_px(22), self.volume_value.fontMetrics().height()))
         self.volume_value.setFixedWidth(self.volume_value.fontMetrics().horizontalAdvance('100%') + scaled_px(4))
         self.tools_wrap.layout().setSpacing(SPACE['xs'])
-        self.tools_wrap.layout().itemAt(1).layout().setSpacing(SPACE['sm'])
+        self._volume_row.setSpacing(SPACE['sm'])
 
     def _sync_volume_controls(self):
         value = self.volume_slider.value() if self.volume_slider.isSliderDown() else int(round(self._volume))
