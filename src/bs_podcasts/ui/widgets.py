@@ -475,6 +475,8 @@ class NavigationRail(QFrame):
 
         brand = QHBoxLayout()
         brand.setSpacing(SPACE["sm"])
+        self._brand_source = None
+        self._brand_pixmaps = {}
         self.mark = PlainTextLabel()
         self.mark.setObjectName("brandIcon")
         self.mark.setAccessibleName("About BS Podcasts")
@@ -589,10 +591,15 @@ class NavigationRail(QFrame):
         side = self.mark.width() if self.mark.width() > 0 else scaled_px(40)
         ratio = self.devicePixelRatioF() or 1.0
         pixels = max(1, int(round(side * ratio)))
-        pixmap = QPixmap(str(icon_path(512))).scaled(
-            pixels, pixels, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
-        )
-        pixmap.setDevicePixelRatio(ratio)
+        pixmap = self._brand_pixmaps.get((pixels, ratio))
+        if pixmap is None:
+            if self._brand_source is None:
+                self._brand_source = QPixmap(str(icon_path(512)))
+            pixmap = self._brand_source.scaled(
+                pixels, pixels, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
+            )
+            pixmap.setDevicePixelRatio(ratio)
+            self._brand_pixmaps[(pixels, ratio)] = pixmap
         self.mark.setPixmap(pixmap)
 
     # -- drag episodes onto "Up Next" ---------------------------------------
