@@ -473,8 +473,9 @@ def stage(destination, root=ROOT, ran=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=['check','stage','hash','list'])
+    parser.add_argument('operation', choices=['check','stage','hash','list','leftovers'])
     parser.add_argument('--destination', type=Path)
+    parser.add_argument('--list', type=Path, help='leftovers: the approved names, NUL-separated, from list')
     parser.add_argument('--allow-missing-deny', action='store_true',
                         help='check without the private deny file (reported as skipped)')
     parser.add_argument('--plain', action='store_true', help='no colour')
@@ -497,6 +498,14 @@ if __name__ == '__main__':
         # private files beside it, so the deny file is read only when present.
         check(require_deny=False)
         sys.stdout.buffer.write(('\0'.join(inventory()[0])+'\0').encode())
+    elif args.operation == 'leftovers':
+        # Reads a NUL-separated listing of a remote copy from stdin (paths may start with "./") and writes,
+        # NUL-separated and sorted, the names the approved list (--list) does not contain. Removes nothing.
+        if args.list is None:
+            parser.error('leftovers requires --list')
+        approved = {name for name in args.list.read_bytes().decode('utf-8').split('\0') if name}
+        found = [name.removeprefix('./') for name in sys.stdin.buffer.read().decode('utf-8').split('\0') if name]
+        sys.stdout.buffer.write(''.join(name+'\0' for name in sorted(set(found)) if name not in approved).encode())
     elif args.destination is None:
         parser.error('stage requires --destination')
     else:

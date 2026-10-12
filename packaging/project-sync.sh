@@ -60,5 +60,18 @@ ssh "${BS_REMOTE[0]}" "mkdir -p -- ${BS_REMOTE[2]}"
 # Both GNU tar and macOS bsdtar support this manifest-only archive stream.
 tar -C "$BS_SNAPSHOT/source" --null -T "$BS_LIST" -cf - | \
     ssh "${BS_REMOTE[0]}" "tar -C ${BS_REMOTE[2]} -xf -"
+# Files an earlier sync left in the Mac copy that the approved manifest no longer lists are reported, never
+# removed: the list is named and the owner decides whether to delete them on the Mac.
+BS_LEFTOVERS="$(ssh -n "${BS_REMOTE[0]}" "cd -- ${BS_REMOTE[2]} && find . -type f -not -path './.git/*' -print0" | \
+    "$BS_PYTHON" -B "$BS_SNAPSHOT/source/packaging/source_manifest.py" leftovers --list "$BS_LIST" | tr '\0' '\n')"
+BS_LEFT_COUNT=0
+if [[ -n "$BS_LEFTOVERS" ]]; then BS_LEFT_COUNT="$(printf '%s\n' "$BS_LEFTOVERS" | wc -l | tr -d ' ')"; fi
+if (( BS_LEFT_COUNT )); then
+    BS_LEFT_SHOWN="$(printf '%s\n' "$BS_LEFTOVERS" | head -n 20 | paste -sd ' ' -)"
+    if (( BS_LEFT_COUNT > 20 )); then BS_LEFT_SHOWN="$BS_LEFT_SHOWN ..."; fi
+    bs_report warn "$BS_LEFT_COUNT file(s) on ${BS_REMOTE[0]} are not in the approved manifest and were not removed: $BS_LEFT_SHOWN"
+else
+    bs_report ok "No files outside the approved manifest on ${BS_REMOTE[0]}."
+fi
 bs_report ok "Source synced to ${BS_REMOTE[0]}:${BS_REMOTE[1]}/repo. No remote build or service was started." \
     "$BS_SNAPSHOT/source" "$BS_LIST"
