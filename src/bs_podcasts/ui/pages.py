@@ -206,6 +206,60 @@ class _ListPageMixin:
     ``context_changed`` and ``menu_requested``.
     """
 
+    # Public seams for the window: the page keeps its state private and the window reads and sets it here.
+    def current_key(self):
+        return self._current_key()
+
+    def selected_keys(self):
+        return self._selected_keys()
+
+    def apply_filters(self, *args, **kwargs):
+        return self._apply_filters(*args, **kwargs)
+
+    def filter_name(self):
+        """The active chip, or None on a page that has no filter."""
+        return getattr(self, "_filter", None)
+
+    def sort_key(self) -> str:
+        return getattr(self, "_sort", "")
+
+    @staticmethod
+    def item_key(item):
+        return _ListPageMixin._key(item)
+
+    def restore_sort(self, key: str):
+        self._sort = key
+
+    def restore_filter(self, value: str):
+        self._filter = value
+
+    def restore_discover_sort(self, value: str):
+        self._discover_sort = value
+
+    def row_aligned_scroll(self) -> bool:
+        return self._row_aligned_scroll
+
+    def scroll_restore_revision(self) -> int:
+        return getattr(self, "_scroll_restore_revision", 0)
+
+    def set_context_item(self, item):
+        self._context_item = item
+
+    def artwork_timer(self):
+        return self._episode_artwork_timer
+
+    def mark_inline_action(self):
+        self._last_inline_action = time.monotonic()
+
+    def refresh_empty(self, query: str = ""):
+        self._update_empty(query)
+
+    def set_hide_action_when_empty(self, hide: bool):
+        self._hide_action_when_empty = hide
+
+    def refresh_sort_button(self):
+        self._update_sort_button()
+
     @property
     def all_items(self):
         """The full item list this page holds, as last set. Not a copy."""

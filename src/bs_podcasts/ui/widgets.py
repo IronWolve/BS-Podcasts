@@ -3465,6 +3465,10 @@ class SearchOverlay(_ReturnsFocus, QFrame):
     """Global search: podcasts, episodes and the directory, in one box (Ctrl+K)."""
 
     query_changed = Signal(str)
+
+    def debounce_pending(self) -> bool:
+        """True while a typed query waits out its debounce and has not yet been searched."""
+        return self._timer.isActive()
     podcast_chosen = Signal(object)
     episode_chosen = Signal(object)
     directory_chosen = Signal(str)

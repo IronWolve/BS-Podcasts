@@ -708,10 +708,10 @@ class MainWindow(QMainWindow):
             "History", "", items=(), filters=(), action="Clear history", sortable=False,
             empty=("Nothing played yet", "Episodes you play show up here, most recent first.", ""), glyph="history",
         )
-        self.playlist_page._hide_action_when_empty = True
-        self.history_page._hide_action_when_empty = True
-        self.playlist_page._update_empty()
-        self.history_page._update_empty()
+        self.playlist_page.set_hide_action_when_empty(True)
+        self.history_page.set_hide_action_when_empty(True)
+        self.playlist_page.refresh_empty()
+        self.history_page.refresh_empty()
         self.settings_page = SettingsPage()
         pages = (
             self.home_page, self.podcast_page, self.episode_page, self.playlist_page, self.download_page,
@@ -1090,9 +1090,9 @@ class MainWindow(QMainWindow):
             if not isinstance(page, _ListPageMixin):
                 continue  # not a list page: nothing of it to restore
             views[str(index)] = {
-                "current": page._current_key(), "selected": page._selected_keys(),
+                "current": page.current_key(), "selected": page.selected_keys(),
                 "scroll": page.scroll_position(),
-                "scroll_units": "items" if page._row_aligned_scroll else "pixels",
+                "scroll_units": "items" if page.row_aligned_scroll() else "pixels",
                 "query": page.header.search.text(),
                 "filter": page.chips.current() if hasattr(page, "chips") else "All",
                 "sort": getattr(page, "_sort", ""),
@@ -1227,23 +1227,23 @@ class MainWindow(QMainWindow):
                 search.setText(query if isinstance(query, str) else "")
             restored_sort = saved.get("sort", getattr(page, "_sort", ""))
             if isinstance(restored_sort, str):
-                page._sort = restored_sort
-            if hasattr(page, "_filter"):
+                page.restore_sort(restored_sort)
+            if page.filter_name() is not None:
                 value = saved.get("filter", "All")
-                page._filter = value if isinstance(value, str) else "All"
+                page.restore_filter(value if isinstance(value, str) else "All")
             if hasattr(page, "chips"):
                 value = saved.get("filter", "All")
                 page.chips.select(value if isinstance(value, str) else "All")
             if page is self.discover_page:
                 value = state.get("discover_sort", "rank")
-                page._discover_sort = value if isinstance(value, str) else "rank"
+                page.restore_discover_sort(value if isinstance(value, str) else "rank")
             button = getattr(page, "sort_button", None)
             if button is not None and page is not self.podcast_page:
-                button.setText(dict(SORT_OPTIONS).get(page._sort, button.text()))
+                button.setText(dict(SORT_OPTIONS).get(page.sort_key(), button.text()))
             current = _item_key(saved.get('current'))
             values = saved.get("selected", ())
             selected = [key for value in values if (key := _item_key(value)) is not None] if isinstance(values, (list, tuple)) else []
-            page._apply_filters(restore_key=current, preserve_scroll=True, selected_keys=selected)
+            page.apply_filters(restore_key=current, preserve_scroll=True, selected_keys=selected)
             if not selected:
                 page.view.clearSelection()
             page.view.doItemsLayout()
@@ -1251,8 +1251,8 @@ class MainWindow(QMainWindow):
             page.view.verticalScrollBar().setValue(value)
             # Run after the list mixin's own queued scroll restoration.
             self._later(0, lambda p=page, v=value: p.view.verticalScrollBar().setValue(v))
-        if self.podcast_page._sort in {"name", "date"}:
-            self.podcast_page.set_sort(self.podcast_page._sort)
+        if self.podcast_page.sort_key() in {"name", "date"}:
+            self.podcast_page.set_sort(self.podcast_page.sort_key())
         self._back_stack = self._validated_navigation_history(state.get('back'))
         self._forward_stack = self._validated_navigation_history(state.get('forward'))
         self._update_navigation_controls()
@@ -1658,7 +1658,7 @@ class MainWindow(QMainWindow):
     def _show_problem_podcasts(self):
         self.navigation.select(PAGE_PODCASTS)
         self.podcast_page.chips.select("Problems")
-        self.podcast_page._apply_filters()
+        self.podcast_page.apply_filters()
 
     def _remove_unreachable(self):
         if self.library is None:
@@ -2375,13 +2375,13 @@ class MainWindow(QMainWindow):
         ids = [item.episode_id for item in page.model.items() if item.episode_id > 0]
         if not ids:
             return
-        scope = (self._hero_show_id, self._catalog_query, page._filter, page.header.search.text())
+        scope = (self._hero_show_id, self._catalog_query, page.filter_name(), page.header.search.text())
         repository = self.library.repository
         active = self.playback.snapshot.episode_id if self.playback is not None else None
 
         def apply(targets):
             if (self.pages.currentWidget() is not page or scope !=
-                    (self._hero_show_id, self._catalog_query, page._filter, page.header.search.text())):
+                    (self._hero_show_id, self._catalog_query, page.filter_name(), page.header.search.text())):
                 self._notify('Clear progress cancelled: the list changed', 'info')
                 return
             if not targets:
@@ -2942,7 +2942,7 @@ class MainWindow(QMainWindow):
             or (self.commands is not None and self.commands.pending())
             or self._reload_timer.isActive()
             or self._download_reload_timer.isActive()
-            or self.search_overlay._timer.isActive()
+            or self.search_overlay.debounce_pending()
             or self._catalog_timer.isActive()
             or self._bookmark_timer.isActive()
         )
@@ -4036,14 +4036,14 @@ class MainWindow(QMainWindow):
         page = self.episode_page
         return {'episode_view': True, 'show_id': self._hero_show_id,
                 'catalog_query': self._catalog_query, 'catalog_limit': self._catalog_limit,
-                'query': page.header.search.text(), 'filter': page._filter, 'sort': page._sort,
-                'scroll': page.scroll_position(), 'scroll_units': 'items', 'current': page._current_key(),
-                'selected_count': len(page._selected_keys())}
+                'query': page.header.search.text(), 'filter': page.filter_name(), 'sort': page.sort_key(),
+                'scroll': page.scroll_position(), 'scroll_units': 'items', 'current': page.current_key(),
+                'selected_count': len(page.selected_keys())}
 
     def _open_episode_podcast(self, show_id):
         if not show_id or self.library is None:
             return
-        self.episode_page._last_inline_action = time.monotonic()
+        self.episode_page.mark_inline_action()
         self._episode_navigation_restore = None
         if self.pages.currentWidget() is self.episode_page:
             if self._hero_show_id == show_id:
@@ -4061,15 +4061,16 @@ class MainWindow(QMainWindow):
         page = self.episode_page
         with quiet_signals(page.header.search):
             page.header.search.setText(saved['query'])
-        page._filter, page._sort = saved['filter'], saved['sort']
-        page.chips.select(page._filter)
-        page._update_sort_button()
+        page.restore_filter(saved['filter'])
+        page.restore_sort(saved['sort'])
+        page.chips.select(saved['filter'])
+        page.refresh_sort_button()
         current = tuple(saved['current']) if saved['current'] else None
-        page._apply_filters(restore_key=current, preserve_scroll=True, selected_keys=[current] if current else None)
-        revision = page._scroll_restore_revision
+        page.apply_filters(restore_key=current, preserve_scroll=True, selected_keys=[current] if current else None)
+        revision = page.scroll_restore_revision()
         value = min(2**31 - 1, page.saved_scroll_value(saved))
         self._later(0, lambda: page.view.verticalScrollBar().setValue(value)
-                    if revision == page._scroll_restore_revision else None)
+                    if revision == page.scroll_restore_revision() else None)
 
     def _open_podcast(self, podcast, select_episode_id: int = 0):
         if self._catalog_query and self.pages.currentIndex() == PAGE_EPISODES and not self._history_navigation:
@@ -4707,7 +4708,7 @@ class MainWindow(QMainWindow):
                      for item in items if item.artwork_url and not item.episode_artwork_path]
             retry = [deadline for deadline in retry if deadline > now]
             if retry and hasattr(page, '_episode_artwork_timer'):
-                page._episode_artwork_timer.start(max(1000, int((min(retry) - now) * 1000)))
+                page.artwork_timer().start(max(1000, int((min(retry) - now) * 1000)))
             return
         repository = self.library.repository
         def apply(records):
@@ -7166,7 +7167,7 @@ class MainWindow(QMainWindow):
         else:
             self._refresh_storage_settings()
             self.podcast_page.chips.select("All")
-            self._request_reload(lambda: self.podcast_page._apply_filters())
+            self._request_reload(lambda: self.podcast_page.apply_filters())
             message = f"Removed {removed} unreachable podcast{plural(removed)}"
             if kept:
                 message += f" · kept {kept} that recovered"
@@ -7369,7 +7370,7 @@ class MainWindow(QMainWindow):
                          self.playlist_page, self.history_page, self.download_page, self.bookmark_page):
                 page.replace_all_items([tint(item) for item in page.all_items])
                 page.model.replace([tint(item) for item in page.model.items()])
-                page._context_item = page.view.currentIndex().data(ItemRoles.ITEM)
+                page.set_context_item(page.view.currentIndex().data(ItemRoles.ITEM))
             model = self.context.queue_view.model()
             if model is not None:
                 model.replace([tint(item) for item in model.items()])
@@ -7427,7 +7428,7 @@ class MainWindow(QMainWindow):
         self._pump_episode_artwork()
         page = self.pages.currentWidget()
         if hasattr(page, '_episode_artwork_timer'):
-            page._episode_artwork_timer.start(60)
+            page.artwork_timer().start(60)
         return
     def _on_preview(self, kind, identifier, result):
         if kind == "preview-scan":
@@ -7974,7 +7975,7 @@ class MainWindow(QMainWindow):
             self.episode_page.header.action.setToolTip("Refresh all podcasts")
         if self.episode_page.banner.state == "empty":
             self.episode_page.banner.clear()
-        if filter_value != self.episode_page._filter:  # set_filter re-filters the old rows
+        if filter_value != self.episode_page.filter_name():  # set_filter re-filters the old rows
             self.episode_page.set_filter(filter_value)
         self.episode_page.set_items(episodes)
 
@@ -8169,7 +8170,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_context_item(self, previous, item):
         current = self.context.current_item()
-        if current is None or previous is None or self.discover_page._key(current) != self.discover_page._key(previous):
+        if current is None or previous is None or self.discover_page.item_key(current) != self.discover_page.item_key(previous):
             return
         if item is None:
             self.context.show_empty()
