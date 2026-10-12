@@ -48,6 +48,7 @@ from ..domain.times import format_hours_minutes, format_media_time
 from ..directories.base import CandidateList
 from ..directories.catalog import CACHE_SECONDS as DIRECTORY_CACHE_SECONDS
 from ..directories.persistent import PersistentDirectoryCache
+from ..feeds import parser as feed_parser
 from ..downloads import AutomaticCleanupSkipped
 from ..jobs import JobResult, JobRunner, JobStatus
 from ..jobs.commands import CommandQueue
@@ -195,6 +196,12 @@ def _integrity_report(database):
             return {'problem': str(exc)}
         raise
 
+
+
+def feed_limit_message() -> str:
+    """Banner text for a feed the parser cut at its episode cap; the cap is read from the parser at call time."""
+    return (f"This large feed was limited to {feed_parser.MAX_EPISODES:,} episodes. "
+            "Subscribe to save progress, queue and download.")
 
 
 def _fetch_feed_preview(fetcher, feed_url, checkpoint=lambda: None):
@@ -8479,7 +8486,7 @@ class MainWindow(QMainWindow):
         self.episode_page.set_load_more_state(False)
         self.episode_page.banner.show_state(
             "partial" if getattr(feed, "truncated", False) else "empty",
-            "This large feed was limited to 5,000 episodes. Subscribe to save progress, queue and download."
+            feed_limit_message()
             if getattr(feed, "truncated", False) else "Stream any episode now, or subscribe to save progress, queue and download.")
         if navigate:
             self._episode_navigation_prepared = True
