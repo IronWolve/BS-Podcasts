@@ -4479,6 +4479,10 @@ class PlayerBar(QFrame):
         else:
             text = ""
         avail = self._now_text_width()
+        shown = (text, avail, self.next_label.font().key())
+        if shown == getattr(self, "_status_shown", None):
+            return  # the position tick calls this ten times a second; the text rarely changes
+        self._status_shown = shown
         elided = self.next_label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, avail)
         if self.next_label.text() != elided:
             self.next_label.setText(elided)

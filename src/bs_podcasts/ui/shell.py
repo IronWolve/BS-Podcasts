@@ -1,5 +1,6 @@
 """Wide responsive application shell."""
 
+from bisect import bisect_right
 from contextlib import contextmanager
 from dataclasses import dataclass, replace as replace_item
 from collections import OrderedDict
@@ -1465,7 +1466,9 @@ class MainWindow(QMainWindow):
     def _prune_artwork_cache(self):
         """Keep the cache under 400 MB in the background; only unreferenced files go."""
         prune_watchers()
-        if self.refresh is None or getattr(self.refresh, "artwork", None) is None or self.jobs is None or self._closed or self._cache_pruning:
+        with _JOBS_LOCK:
+            pruning = self._cache_pruning  # cleared under this lock by the worker's completion
+        if self.refresh is None or getattr(self.refresh, "artwork", None) is None or self.jobs is None or self._closed or pruning:
             return
         cache = self.refresh.artwork
         if not hasattr(cache, "prune"):
@@ -5683,6 +5686,15 @@ class MainWindow(QMainWindow):
             return f"Silence trim: {level}"
         self._run_command(work, self._notify)
 
+    def _chapter_at(self, episode_id, position):
+        """The title of the chapter that `position` falls in, or '' before the first one or without chapters."""
+        cached = self._chapters_cache.get(episode_id)
+        if not cached:
+            return ""
+        chapters, starts = cached
+        index = bisect_right(starts, position) - 1
+        return (chapters[index].title or "") if index >= 0 else ""
+
     def _playback_changed(self, snapshot):
         # Emissions from the engine thread arrive through a queued connection
         # while UI-driven ones are delivered directly, so an older snapshot
@@ -5766,10 +5778,7 @@ class MainWindow(QMainWindow):
                 self._handled_completion = marker
                 if self.library is not None:
                     self._delete_played_quietly([int(completed)], if_enabled=True)
-        chapter = ""
-        for entry in self._chapters_cache.get(episode_id, ()):
-            if entry.start_seconds <= float(snapshot.position):
-                chapter = entry.title or ""
+        chapter = self._chapter_at(episode_id, float(snapshot.position))
         remaining = (snapshot.sleep_deadline - time.time()) if snapshot.sleep_deadline else None
         self.player.set_status(chapter, remaining)
         if self.now_playing.isVisible():
@@ -5817,7 +5826,9 @@ class MainWindow(QMainWindow):
                     self._load_listening_details(episode_id)
                     if self._last_mode in {"wide", "medium"} and not self._context_user_closed:
                         self._reveal_context()
-            self._chapters_cache = {episode_id: chapters}
+            # The chapters and their start times, in order: the position tick finds the current chapter by
+            # bisection instead of walking the list ten times a second.
+            self._chapters_cache = {episode_id: (tuple(chapters), [float(c.start_seconds) for c in chapters])}
             duration = float(getattr(getattr(self.playback, "snapshot", snapshot), "duration", 0)) or 0
             self.player.set_chapter_markers([c.start_seconds / duration for c in chapters if duration and 0 < c.start_seconds < duration])
             self.player.set_next(self._next_title(queued, episode_id))

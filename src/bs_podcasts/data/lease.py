@@ -14,7 +14,11 @@ class LibraryLease:
         path = Path(str(database_path) + ".use-lock")
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         descriptor = private_descriptor(path)
-        self._handle = os.fdopen(descriptor, "r+b", buffering=0)
+        try:
+            self._handle = os.fdopen(descriptor, "r+b", buffering=0)
+        except BaseException:
+            os.close(descriptor)  # fdopen did not take ownership
+            raise
         try:
             if os.name == "nt":
                 import msvcrt

@@ -1151,25 +1151,30 @@ class LibraryRepository:
             else:
                 ids = list(dict.fromkeys(int(i) for i in episode_ids))
             changes = []
-            for episode_id in ids:
-                before = connection.execute(
+            # Three statements per 500 rows, not three per row: the rows that
+            # change are read, updated and re-read as batches, in the given order.
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                marks = ",".join("?" * len(batch))
+                before_rows = {row["id"]: row for row in connection.execute(
                     "SELECT id, show_id, external_id, played, is_new, position_seconds, last_played "
-                    "FROM episodes WHERE id=?", (episode_id,)).fetchone()
-                if before is None or int(before["played"]) == played_flag:
+                    f"FROM episodes WHERE id IN ({marks}) AND played!=?", (*batch, played_flag))}
+                targets = [episode_id for episode_id in batch if episode_id in before_rows]
+                if not targets:
                     continue
+                marks = ",".join("?" * len(targets))
                 if played:
                     connection.execute(
-                        "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=1, is_new=0 WHERE id=?",
-                        (episode_id,))
+                        "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=1, is_new=0 "
+                        f"WHERE id IN ({marks})", targets)
                 else:
                     connection.execute(
                         "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=0, is_new=0, position_seconds=CASE "
                         "WHEN COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds)>0 AND position_seconds>=COALESCE(NULLIF(observed_duration_seconds,0),duration_seconds)-2 "
-                        "THEN 0 ELSE position_seconds END WHERE id=?", (episode_id,))
-                after = connection.execute(
-                    "SELECT played, is_new, position_seconds, last_played FROM episodes WHERE id=?",
-                    (episode_id,)).fetchone()
-                changes.append((tuple(before), tuple(after)))
+                        f"THEN 0 ELSE position_seconds END WHERE id IN ({marks})", targets)
+                after_rows = {row["id"]: row for row in connection.execute(
+                    f"SELECT id, played, is_new, position_seconds, last_played FROM episodes WHERE id IN ({marks})", targets)}
+                changes.extend((tuple(before_rows[episode_id]), tuple(after_rows[episode_id])[1:]) for episode_id in targets)
         return changes
 
     def undo_played(self, changes) -> int:
