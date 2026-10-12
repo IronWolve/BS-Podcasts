@@ -27,6 +27,7 @@ def connect_checked(host, port, timeout=None, source_address=None, socket_option
     for family, kind, protocol, canonname, address in answers:
         remaining = deadline.remaining() if deadline is not None else None
         stream = socket.socket(family, kind, protocol)
+        watch_request_socket(stream)
         try:
             for option in socket_options or ():
                 stream.setsockopt(*option)
@@ -81,7 +82,23 @@ def guarded_adapter(deadline_provider=None, **kwargs):
         pass
 
     class CheckedHTTPS(CheckedConnection, HTTPSConnection):
-        pass
+        # Duplicate of the plain socket that the TLS wrap detaches. Shutting it
+        # down from the cancelling thread aborts a stalled handshake.
+        _handshake_handle = None
+
+        def _new_conn(self):
+            sock = super()._new_conn()
+            self._handshake_handle = sock.dup()
+            watch_request_socket(self._handshake_handle)
+            return sock
+
+        def connect(self):
+            try:
+                super().connect()
+            finally:
+                handle, self._handshake_handle = self._handshake_handle, None
+                if handle is not None:
+                    handle.close()
 
     class HTTPPool(HTTPConnectionPool):
         ConnectionCls = CheckedHTTP

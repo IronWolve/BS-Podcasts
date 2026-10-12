@@ -132,33 +132,17 @@ class _SocketBag:
 
 
 _socket_bags = threading.local()
-_socket_init_lock = threading.Lock()
-_socket_init_installed = False
 
 
 def watch_request_socket(sock):
-    """Include a pooled connection in the current header cancellation scope."""
+    """Include a socket in the current header cancellation scope.
+
+    Only the connection code registers sockets: the plain socket before it
+    connects, a duplicate of it through the TLS handshake (wrapping detaches
+    the plain socket object), and a pooled connection before its status line."""
     bag = getattr(_socket_bags, 'bag', None)
     if sock is not None and bag is not None:
         bag.add(sock)
-
-
-def _install_socket_watch():
-    """Record sockets created on a worker that has a bag. getaddrinfo has none."""
-    global _socket_init_installed
-    with _socket_init_lock:
-        if _socket_init_installed:
-            return
-        original = socket.socket.__init__
-
-        def watched(self, *args, **kwargs):
-            original(self, *args, **kwargs)
-            bag = getattr(_socket_bags, "bag", None)
-            if bag is not None:
-                bag.add(self)
-
-        socket.socket.__init__ = watched
-        _socket_init_installed = True
 
 
 def bounded_call(work, deadline, gate=None, dispose=None):
@@ -180,7 +164,6 @@ def bounded_call(work, deadline, gate=None, dispose=None):
         value = None
         try:
             try:
-                _install_socket_watch()
                 _socket_bags.bag = sockets
                 deadline.remaining()
                 value = work()
