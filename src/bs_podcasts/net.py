@@ -255,8 +255,11 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
                     _request_context.state = None
             try:
                 response = bounded_call(work, state, dispose=abort_response)
-                state.expires = state.started + budget
+                # A Retry-After is judged against the header window, before the
+                # body gets the longer budget: with a 24 h playback budget it
+                # would always look short and come back as a plain HTTP 429.
                 _fail_long_retry_after(response, state, host)
+                state.expires = state.started + budget
                 if not streaming and response.ok:
                     response.content
                 return response
