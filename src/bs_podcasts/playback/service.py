@@ -1116,8 +1116,7 @@ class PlaybackService:
                 self.snapshot = replace(self.snapshot, duration=duration)
                 episode_id = self.snapshot.episode_id
                 if episode_id is not None:
-                    self._persistence.submit(('duration', episode_id),
-                        lambda value: self.repository.set_observed_duration(episode_id, value), duration)
+                    self._submit_progress(episode_id, duration=duration)
             elif event.kind == "paused":
                 # mpv can deliver a late pause notification after stop() has
                 # detached the episode (notably while removing a podcast).
@@ -1642,15 +1641,8 @@ class PlaybackService:
             if self.snapshot.episode_id == episode_id:
                 self.snapshot = replace(self.snapshot, position=end, buffering=None)
             if end:
-                self._persistence.submit(('duration', episode_id),
-                    lambda value: self.repository.set_observed_duration(episode_id, value), end)
                 stamp = self._write_stamp()
-                self._persistence.submit(
-                    ('position', episode_id),
-                    lambda value: self._require_saved(self.repository.update_position(
-                        episode_id, value[0], stamp=value[1], finish=True)),
-                    (end, stamp),
-                )
+                self._submit_progress(episode_id, duration=end, position=(end, stamp, True))
         if end:
             self._flush_persistence()
         self.repository.mark_played(episode_id, True)
@@ -1693,6 +1685,32 @@ class PlaybackService:
         if result is None:
             logger.info('Playback save skipped: the item is gone or a newer save already stands')
 
+    def _submit_progress(self, episode_id, *, position=None, duration=None):
+        """Queue an episode's position and/or duration as one save.
+
+        Both live under one key per episode, so a stall holds one pending
+        record for each episode instead of two. A newer position replaces the
+        pending one; a duration already queued is kept, and a duration is
+        never dropped to make room for another key."""
+        progress = {}
+        if duration is not None:
+            progress['duration'] = duration
+        if position is not None:
+            progress['position'] = position  # (seconds, stamp, finish)
+        self._persistence.submit(('progress', episode_id),
+                                 lambda value: self._write_progress(episode_id, value), progress,
+                                 merge=lambda pending, new: {**pending, **new})
+
+    def _write_progress(self, episode_id, progress):
+        # The duration is written before the position, so a refused position
+        # write leaves the duration already stored.
+        duration = progress.get('duration')
+        if duration is not None:
+            self.repository.set_observed_duration(episode_id, duration)
+        if 'position' in progress:
+            seconds, stamp, finish = progress['position']
+            self._require_saved(self.repository.update_position(episode_id, seconds, stamp=stamp, finish=finish))
+
     def _persist_position(self, force: bool = False):
         """Keep the latest stamped position per episode on the bounded writer."""
         if (self.snapshot.episode_id is None or self.snapshot.episode_id == self._unstarted_id
@@ -1701,8 +1719,7 @@ class PlaybackService:
         if force or abs(self.snapshot.position - self._last_saved_position) >= 5.0:
             episode_id, position = self.snapshot.episode_id, self.snapshot.position
             stamp = self._write_stamp()
-            self._persistence.submit(('position', episode_id), lambda value:
-                self._require_saved(self.repository.update_position(episode_id, value[0], stamp=value[1])), (position, stamp))
+            self._submit_progress(episode_id, position=(position, stamp, False))
             self._last_saved_position = position
 
     def _confirm_start(self, position: float):

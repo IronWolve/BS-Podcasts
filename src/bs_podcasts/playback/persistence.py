@@ -2,6 +2,7 @@
 from collections import OrderedDict
 from threading import Condition, Thread
 import logging
+import operator
 import time
 
 from .engine import LibraryBusy
@@ -28,16 +29,23 @@ class PlaybackPersistence:
         self._logged = {}
         self._failures = {}
 
-    def submit(self, key, write, value, *, additive=False, delay=0.0):
+    def submit(self, key, write, value, *, additive=False, merge=None, delay=0.0):
+        """Queue `write(value)` under `key`.
+
+        A value queued while the key is still pending is combined with the
+        pending one: `additive` adds the two, `merge(pending, new)` returns
+        the combined value, and with neither the newest value replaces it."""
+        if additive:
+            merge = operator.add
         with self._condition:
             if self._closing:
                 raise RuntimeError('Playback persistence is closing.')
             previous = self._pending.get(key)
-            if previous is not None and additive:
-                value += previous[1]
             if previous is None and len(self._pending) + int(self._active) >= self.MAX_PENDING:
-                raise RuntimeError('Playback changes could not be queued; library storage is busy.')
-            self._pending[key] = (write, value, additive, time.monotonic() + delay)
+                raise LibraryBusy('Playback changes could not be queued; library storage is busy.')
+            if previous is not None and merge is not None:
+                value = merge(previous[1], value)
+            self._pending[key] = (write, value, merge, time.monotonic() + delay)
             if self._thread is None:
                 self._thread = Thread(target=self._run, name='playback-save', daemon=True)
                 self._thread.start()
@@ -51,7 +59,7 @@ class PlaybackPersistence:
         but never the retry delay, so a failing disk is not spun on."""
         now = time.monotonic()
         soonest = None
-        for key, (_write, _value, _additive, due) in self._pending.items():
+        for key, (_write, _value, _merge, due) in self._pending.items():
             ready = self._retry_at.get(key, 0.0)
             if not self._closing:
                 ready = max(ready, due)
@@ -73,7 +81,7 @@ class PlaybackPersistence:
                     if key is not None:
                         break
                     self._condition.wait(wait)
-                write, value, additive, _due = self._pending.pop(key)
+                write, value, merge, _due = self._pending.pop(key)
                 self._active = True
             try:
                 write(value)
@@ -109,9 +117,9 @@ class PlaybackPersistence:
                         logged.add(kind)
                         due = 0.0
                         if newer is not None:
-                            write, next_value, additive, due = newer
-                            value = value + next_value if additive else next_value
-                        self._pending[key] = (write, value, additive, due)
+                            write, next_value, merge, due = newer
+                            value = merge(value, next_value) if merge is not None else next_value
+                        self._pending[key] = (write, value, merge, due)
                         # Only this key backs off; the writer moves on to the others.
                         # Closing still retries, but never spins on a failed disk.
                         self._retry_at[key] = time.monotonic() + 1.0
@@ -131,8 +139,8 @@ class PlaybackPersistence:
             # Explicit transition/shutdown flushes do not wait for debounce or
             # for a retry delay; a key that fails again backs off once more.
             self._retry_at.clear()
-            for key, (write, value, additive, due) in tuple(self._pending.items()):
-                self._pending[key] = (write, value, additive, 0.0)
+            for key, (write, value, merge, _due) in tuple(self._pending.items()):
+                self._pending[key] = (write, value, merge, 0.0)
             self._condition.notify_all()
             while self._active or self._pending:
                 remaining = deadline - time.monotonic()
