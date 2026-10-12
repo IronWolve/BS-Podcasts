@@ -18,7 +18,7 @@ from ..data.files import (
     sync_directory,
 )
 from collections import deque
-from threading import Condition, Event, Lock, Thread
+from threading import Condition, Event, Lock, Thread, local as thread_local
 from urllib.parse import urlparse
 import os
 from hashlib import sha256
@@ -55,6 +55,18 @@ class _TruncatedDownload(DownloadError):
 
 class _TransferStalled(DownloadError):
     """The watchdog ended a connection that stopped delivering data; safe to retry."""
+
+
+class _SharingBusy(Exception):
+    """A Windows sharing violation met inside an automatic cleanup transaction.
+
+    Raised instead of sleeping there. The caller leaves the transaction, waits
+    outside it, and runs the guard and the unlinks again. `freed` carries the
+    bytes the cut-short attempt had already removed."""
+
+    def __init__(self):
+        super().__init__("a download file is held open by another process")
+        self.freed = 0
 
 
 class _RangeContinuation(DownloadError):
@@ -218,6 +230,8 @@ class DownloadService:
         self.downloads = downloads
         self.directory = Path(directory)
         self.session = session
+        # Per thread: the settle deadlines of the automatic cleanup running on it.
+        self._settling = thread_local()
         self._cancellations: dict[int, Event] = {}
         self._queued: dict[int, Event] = {}
         self._started: dict[int, float] = {}
@@ -1242,10 +1256,26 @@ class DownloadService:
         record = self.downloads.get(episode_id)
         if record is None:
             return 0
-        # Cancellation/persistence unwind is finished before the writer lock:
-        # a download worker must not wait on this transaction while we join it.
-        with self._automatic_cleanup_guard(record, automatic, played_only):
+        if not automatic:
+            # Cancellation/persistence unwind is finished before the writer lock:
+            # a download worker must not wait on this transaction while we join it.
             return self._delete_confirmed_record(record, confirmed_paths)
+        # The check and the unlinks share one write transaction, so a favorite
+        # cannot overtake them. A Windows sharing violation is waited out with
+        # that transaction closed, so other writers are not held for the wait;
+        # every retry runs the whole guard again on the row as it now stands.
+        freed = 0
+        self._settling.deadlines = {}
+        try:
+            while True:
+                try:
+                    with self._automatic_cleanup_guard(record, automatic, played_only):
+                        return freed + self._delete_confirmed_record(record, confirmed_paths)
+                except _SharingBusy as busy:
+                    freed += busy.freed
+                time.sleep(self.UNLINK_RETRY_SECONDS)
+        finally:
+            self._settling.deadlines = None
 
     @contextmanager
     def _automatic_cleanup_guard(self, record, automatic, played_only=False):
@@ -1262,8 +1292,13 @@ class DownloadService:
                     or (row["id"],row["created_at"],row["updated_at"],row["target_path"],row["partial_path"]) !=
                        (record.id,record.created_at,record.updated_at,record.target_path,record.partial_path)):
                 raise AutomaticCleanupSkipped("This download changed or is now protected from automatic cleanup; it was kept.")
-            # This one-episode transaction spans unlink and row retirement, so
-            # a concurrent favorite/verification write cannot overtake deletion.
+            # This one-episode transaction spans the check, the unlinks and row
+            # retirement, so a concurrent favorite/verification write cannot
+            # overtake deletion. Commit ordering: the nested remove() call's
+            # connect() commits this shared transaction when it exits, so
+            # remove() must stay the last write in the body. A commit placed
+            # before an unlink would end the protection without any sign.
+            # Only a sharing-violation wait leaves this transaction (_SharingBusy).
             yield
 
     def _delete_confirmed_record(self, record, confirmed_paths):
@@ -1307,6 +1342,9 @@ class DownloadService:
                         raise OSError("The download path is not a regular file.")
                     else:
                         raise OSError("The download folder is unavailable.")
+                except _SharingBusy as busy:
+                    busy.freed = freed
+                    raise
                 except OSError as exc:
                     # Keep every failure: the partial's error used to
                     # overwrite the target's, hiding the message that named
@@ -1326,6 +1364,7 @@ class DownloadService:
         return freed
 
     UNLINK_SETTLE_SECONDS = 1.0
+    UNLINK_RETRY_SECONDS = 0.1
 
     def _unlink_settled(self, path: Path):
         """Unlink, waiting out a brief Windows sharing violation.
@@ -1334,16 +1373,30 @@ class DownloadService:
         episode just stopped can stay open for a moment after stop()
         returns. POSIX unlinks open files and its permission errors are not
         transient, so those raise at once.
+
+        Inside an automatic cleanup the library write transaction is open, so
+        this never sleeps: it raises _SharingBusy and _delete_retired waits
+        after the transaction closes. The settle window is still counted per
+        file from its first attempt.
         """
-        deadline = time.monotonic() + self.UNLINK_SETTLE_SECONDS
-        while True:
-            try:
-                path.unlink()
-                return
-            except PermissionError as exc:
-                if getattr(exc, "winerror", None) is None or time.monotonic() >= deadline:
-                    raise
-            time.sleep(0.1)
+        deadlines = getattr(self._settling, "deadlines", None)
+        if deadlines is None:
+            deadline = time.monotonic() + self.UNLINK_SETTLE_SECONDS
+            while True:
+                try:
+                    path.unlink()
+                    return
+                except PermissionError as exc:
+                    if getattr(exc, "winerror", None) is None or time.monotonic() >= deadline:
+                        raise
+                time.sleep(self.UNLINK_RETRY_SECONDS)
+        deadline = deadlines.setdefault(str(path), time.monotonic() + self.UNLINK_SETTLE_SECONDS)
+        try:
+            path.unlink()
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) is None or time.monotonic() >= deadline:
+                raise
+            raise _SharingBusy() from None
 
     def _target(self, episode_id: int, url: str) -> Path:
         try:
