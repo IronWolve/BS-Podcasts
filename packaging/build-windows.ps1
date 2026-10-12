@@ -6,6 +6,7 @@ param(
     [switch]$Clean,
     [switch]$Installer,
     [switch]$PruneOldDeployments,
+    [switch]$PruneKeptBuildRoots,
     [switch]$Plain
 )
 
@@ -204,14 +205,42 @@ $buildRoot = Join-Path $workspace ("tmp\windows-build-" + [guid]::NewGuid().ToSt
 $stageRoot = Join-Path $buildRoot "source"
 $sourceDir = Join-Path $buildRoot "dist\BS Podcasts"
 $sourceExe = Join-Path $sourceDir "BS Podcasts.exe"
+if ($PruneKeptBuildRoots) {
+    # Lists the work folders that failed runs kept in tmp, with sizes, and deletes them only after a typed YES.
+    # A normal run never prunes: it removes its own work folder after success and keeps it after a failure.
+    $kept = @(Get-ChildItem -LiteralPath (Join-Path $workspace "tmp") -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -cmatch '^windows-build-[0-9a-f]{32}$' -and -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) })
+    if ($kept.Count -eq 0) {
+        Write-State ok "No kept Windows build work folders in tmp."
+        exit 0
+    }
+    $totalBytes = [long]0
+    foreach ($folder in $kept) {
+        $bytes = [long]((Get-ChildItem -LiteralPath $folder.FullName -Recurse -File -Force | Measure-Object -Property Length -Sum).Sum)
+        $totalBytes += $bytes
+        Write-Output ("  {0}  {1:N0} bytes" -f $folder.FullName, $bytes)
+    }
+    $answer = Read-Host ("Delete these {0} folder(s)? Type YES to delete" -f $kept.Count)
+    if ($answer -ceq "YES") {
+        foreach ($folder in $kept) { Remove-Item -LiteralPath $folder.FullName -Recurse -Force }
+        Write-State ok ("Deleted {0} kept work folder(s)." -f $kept.Count)
+    } else {
+        Write-State info "Nothing deleted."
+    }
+    $rows = [ordered]@{ "folders listed" = [string]$kept.Count; "size" = ("{0:N0} bytes" -f $totalBytes) }
+    Write-Stats -Rows $rows
+    exit 0
+}
 if (-not $Destination) { $Destination = Join-Path $workspace "dists\windows" }
 # The build publishes its manifest and installer beside the app, so it stays inside
 # this workspace's dists folder. The owner's Windows app copy receives the runtime
 # files alone through the separate app-only delivery step, never through this recipe.
 $Destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)
 $distsRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace "dists")).TrimEnd('\') + '\'
-if (-not ([System.IO.Path]::GetFullPath($Destination).TrimEnd('\') + '\').StartsWith($distsRoot, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "-Destination must be inside $distsRoot; copy the app anywhere else with the app-only delivery step."
+$destinationRoot = [System.IO.Path]::GetFullPath($Destination).TrimEnd('\') + '\'
+# The dists folder itself holds other releases, so only a subfolder of it is a publish target.
+if (-not $destinationRoot.StartsWith($distsRoot, [StringComparison]::OrdinalIgnoreCase) -or $destinationRoot -eq $distsRoot) {
+    throw "-Destination must be a subfolder of $distsRoot, not the folder itself; copy the app anywhere else with the app-only delivery step."
 }
 if (-not $CheckRoot) {
     $privateBuild = Join-Path $workspace ".config\build.json"
