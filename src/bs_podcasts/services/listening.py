@@ -12,7 +12,7 @@ class ListeningService:
     def __init__(self, repository: ListeningRepository):
         self.repository = repository
 
-    def ensure_details(self, episode, session=None) -> dict:
+    def ensure_details(self, episode, session) -> dict:
         """Fetch chapters/transcript for an episode once, if the feed offers them.
 
         Runs on a worker thread; returns which parts changed and any error text.
