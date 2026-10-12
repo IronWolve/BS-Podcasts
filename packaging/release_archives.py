@@ -16,7 +16,7 @@ import tomllib
 import zipfile
 
 from source_manifest import (
-    ROOT, check, deny_file, file_digest, inventory, source_digest, privacy_scan_bytes, read_deny_file,
+    ROOT, archive_map, check, deny_file, file_digest, inventory, source_digest, privacy_scan_bytes, read_deny_file,
     reject_commit_trailers,
 )
 from build_manifest import artifact_inventory
@@ -80,6 +80,42 @@ def tar_files(path, files, prefix, executable=()):
                 raise ValueError('Linux archive integrity check failed.')
 
 
+def normalized_name(name):
+    """The PEP 503 spelling of a distribution name."""
+    return re.sub(r'[-_.]+','-',name).lower()
+
+
+# One Qt source archive ships the Python bindings too, so these bundle names are listed under pyside-setup.
+INVENTORY_ALIASES={'pyside6':'pyside-setup','pyside6-addons':'pyside-setup','pyside6-essentials':'pyside-setup',
+                   'shiboken6':'pyside-setup'}
+
+
+def windows_lock_pins():
+    """(name, version, sha256) for each hash the Windows lock pins, read from the checkout."""
+    pins=set(); current=None
+    for line in (ROOT/'packaging/requirements-windows.lock').read_text(encoding='utf-8').splitlines():
+        text=line.strip().rstrip('\\').strip()
+        if not text or text.startswith('#'): continue
+        if '==' in text and not text.startswith('--'):
+            name,rest=text.split('==',1)
+            current=(normalized_name(name.strip()),rest.split()[0])
+        elif '--hash=sha256:' in text and current:
+            pins.add((*current,text.split('--hash=sha256:',1)[1].split()[0]))
+    return pins
+
+
+def wheel_entry_pinned(entry):
+    """A build-time wheel has no archive to carry; its inventory hash must be the one the Windows lock pins."""
+    return (normalized_name(entry['name']),entry['version'],entry['wheel_sha256']) in windows_lock_pins()
+
+
+def unlisted_bundle_packages(packages):
+    """Names of the bundle's distributions that the third-party source inventory does not name."""
+    listed={normalized_name(entry['name']) for entry in json.loads((ROOT/'packaging/third-party-sources.json').read_text())}
+    return sorted(item['name'] for item in packages
+                  if INVENTORY_ALIASES.get(normalized_name(item['name']),normalized_name(item['name'])) not in listed)
+
+
 def third_party_files():
     files={}
     for lock,cache in (('native-sources.json','native-sources'),
@@ -88,6 +124,10 @@ def third_party_files():
         lock_path=ROOT/'packaging'/lock
         files['packaging/'+lock]=lock_path.read_bytes()
         for entry in json.loads(lock_path.read_text()):
+            if 'wheel_sha256' in entry:
+                if not wheel_entry_pinned(entry):
+                    raise ValueError('Wheel inventory entry differs from the Windows lock: '+entry['name'])
+                continue
             name=entry['archive']
             if Path(name).name!=name or '\\' in name: raise ValueError('Unsafe source archive name.')
             path=ROOT.parent/'.cache'/cache/name
@@ -165,9 +205,57 @@ def bundled_player_versions(native):
     return player, ffmpeg
 
 
+# Licence gate. A licence the notices name must be bundled, and a bundled text must be named. Component -> the file its
+# notice must reference, and where the authoritative text comes from if it ever needs re-copying. Matched as a substring
+# of the notices; an entry that is renamed or removed fails, and so does one whose file is not bundled.
+LICENCE_EXPECTED = {
+    "libass": ("ISC-libass.txt", "COPYING in the libass source tree"),
+    "urllib3": ("MIT-urllib3.txt", "LICENSE.txt in the urllib3 sdist"),
+    "charset-normalizer": ("MIT-charset-normalizer.txt", "LICENSE in the charset-normalizer sdist"),
+    "HarfBuzz": ("MIT-HarfBuzz.txt", "COPYING in the harfbuzz source tree"),
+    "FreeType": ("FTL.txt", "docs/FTL.TXT in the freetype source tree"),
+    "idna": ("BSD-3-Clause-idna.txt", "LICENSE.md in the idna sdist"),
+    "Python Software Foundation License": ("PSF.txt", "LICENSE in the CPython distribution"),
+    "Additional bundled/transitive software": ("Qt-6.11.2-third-party.txt", "pinned Qt and PySide source license inventories"),
+    "Pillow 12.3.0": ("Python-bundled-third-party.txt", "exact Windows and macOS wheel license texts"),
+    "MinGW/GCC runtime exception": ("Native-bundled-third-party.txt", "native source and toolchain copyright files"),
+    "Third-Party-Sources": ("LIBRARY-REPLACEMENT.txt", "source delivery and library replacement instructions"),
+}
+
+
+def licence_heading_pattern(name):
+    """A heading line for a dependency: its name at the start of a line, optionally after a "Qt / " style list of names,
+    and then the end of the line or the licence after " - ", " (" or " / ". The notices use all three forms."""
+    return r"^(?:[^\s/]+ / )*" + re.escape(name) + r"(?:[ \t]*$| \(| \u2014 | / )"
+
+
+def licence_problems(root):
+    """Every licence problem in the tree at root, one line each; an empty list means the gate passes. Redistribution
+    of MIT, BSD and ISC components requires their text and copyright notice, so a missing text is a compliance gap."""
+    notices = root / 'packaging/THIRD-PARTY-NOTICES.txt'
+    if not notices.is_file():
+        return [f'missing {notices}']
+    text = notices.read_text()
+    present = {path.name for path in (root / 'packaging/licenses').glob('*.txt')}
+    referenced = set(re.findall(r'licenses/([A-Za-z0-9._-]+\.txt)', text))
+    found = [f'notices reference licenses/{name}, which is not bundled' for name in sorted(referenced - present)]
+    found += [f'licenses/{name} is bundled but no notice names it' for name in sorted(present - referenced)]
+    for dependency in tomllib.loads((root / 'pyproject.toml').read_text())['project']['dependencies']:
+        name = re.match(r'[A-Za-z0-9._-]+', dependency).group(0)
+        if not re.search(licence_heading_pattern(name), text, re.IGNORECASE | re.MULTILINE):
+            found.append(f'declared dependency {name} has no notice entry')
+    for component, (filename, _source) in LICENCE_EXPECTED.items():
+        if component not in text or filename not in present or filename not in text:
+            found.append(f'component {component} has no notice and bundled text {filename}')
+    return found
+
+
 def build(output, macos=None, plain=False):
     console = Reporter(plain=plain)
     check(require_deny=True)
+    problems = licence_problems(ROOT)
+    if problems:
+        raise ValueError('Licence gate refused the release: ' + '; '.join(problems))
     reject_commit_trailers()
     names, runtime = inventory()
     def git(*args):
@@ -196,6 +284,9 @@ def build(output, macos=None, plain=False):
     win_record = json.loads((windows/'BS-Podcasts-Windows.manifest.json').read_text())
     if win_record['version'] != version or win_record['source'] != {'commit': commit, 'dirty': False, 'sha256': fingerprint}:
         raise ValueError('Windows build is stale, dirty or from a different commit.')
+    unlisted = unlisted_bundle_packages(win_record['runtime']['packages'])
+    if unlisted:
+        raise ValueError('Windows bundle lists distributions the source inventory does not name: ' + ', '.join(unlisted))
     windows_files = verify_files(windows/'BS Podcasts', win_record['artifact']['files'])
     if (win_record['runtime']['native'].get('recipe_sha256') != file_digest(ROOT/'packaging/build-libmpv-lgpl.sh')
             or win_record['runtime']['native'].get('inputs') != json.loads((ROOT/'packaging/native-sources.json').read_text())):
@@ -213,12 +304,16 @@ def build(output, macos=None, plain=False):
             or linux_record['native']['inputs_sha256'] != file_digest(ROOT/'packaging/native-sources.json')
             or linux_record['native']['recipe_sha256'] != file_digest(ROOT/'packaging/build-libmpv-linux.sh')):
         raise ValueError('Linux native library does not match the pinned source inputs.')
+    # Archive-only files come from the single in-memory read of the checkout; the Linux record must name their digests.
+    archive = {name: source_files[source] for source, name in archive_map().items()}
+    if linux_record.get('archive_sha256') != {name: hashlib.sha256(data).hexdigest() for name, data in archive.items()}:
+        raise ValueError('Linux build does not record the current archive-only files; rebuild the Linux deployment.')
     player, ffmpeg = bundled_player_versions(linux_record['native'])
     linux_files = {'dists/linux/'+name: (linux/name).read_bytes() for name in deployed}
     if any(hashlib.sha256(linux_files['dists/linux/'+name]).hexdigest() != expected[name] for name in deployed):
         raise ValueError('Linux runtime file changed while it was being read.')
     linux_files['dists/linux/deployment.json'] = deployment
-    linux_files['setup.sh'] = (ROOT/'packaging/linux-setup.sh').read_bytes()
+    linux_files.update(archive)
     for name in ('start', 'stop'):
         linux_files[name+'.sh'] = ('#!/usr/bin/env bash\nset -euo pipefail\n'
             'BS_PROJECT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"\n'

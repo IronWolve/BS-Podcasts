@@ -77,6 +77,22 @@ def inventory(root=ROOT):
     return files, runtime
 
 
+def archive_map(root=ROOT):
+    """Archive-only inputs as {source path: name in the Linux release archive}. The runtime never deploys them."""
+    root = Path(root).resolve()
+    files, runtime = inventory(root)
+    archive = json.loads((root / 'source-manifest.json').read_text(encoding='utf-8')).get('archive')
+    if not isinstance(archive, dict) or not archive:
+        raise ValueError('Source manifest must map its archive-only files.')
+    if not set(archive).issubset(files) or set(archive) & set(runtime):
+        raise ValueError('Archive-only inputs must be approved source files that the runtime does not deploy.')
+    names = list(archive.values())
+    if any(not isinstance(name, str) or PurePosixPath(name).name != name or name in ('', '.', '..') for name in names) \
+            or len(set(names)) != len(names):
+        raise ValueError('Archive-only names must be unique plain file names.')
+    return dict(archive)
+
+
 def package_version(path):
     """The package's literal __version__, read as text so the checkout is never imported."""
     tree = ast.parse(path.read_text(encoding='utf-8'), filename=str(path))

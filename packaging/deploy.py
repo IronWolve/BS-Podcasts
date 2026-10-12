@@ -9,7 +9,7 @@ import shutil
 import tempfile
 import fcntl
 # The version gate lives with the source check; deploy keeps its names for callers.
-from source_manifest import ROOT, check, checked_version, inventory, package_version, source_digest, file_digest, stage  # noqa: F401
+from source_manifest import ROOT, archive_map, check, checked_version, inventory, package_version, source_digest, file_digest, stage  # noqa: F401
 from runtime_state import runtime_lock, retire_stale
 from report import Reporter, size_text
 from build_manifest import require_keys
@@ -120,6 +120,7 @@ def _deploy_staged(workspace, destination, temporary, prune, report):
               'source_sha256':source_digest(snapshot),
               'source':receipt_source(snapshot),
               'files':{relative:file_digest(temporary/relative) for relative in deployed},
+              'archive_sha256':{name:file_digest(snapshot/source) for source,name in archive_map(snapshot).items()},
               'native':receipt}
     (temporary/'deployment.json').write_text(json.dumps(record,indent=2)+'\n')
     # The publish list comes from the manifest's top-level runtime destinations plus the two built entries.
