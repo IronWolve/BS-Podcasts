@@ -74,11 +74,34 @@ def _preferred(element, *names):
     return _first(element, *names)
 
 
-def _text(element, *names, ordered=False) -> str:
+def _text(element, *names, ordered=False, limit=None) -> str:
     child = (_preferred if ordered else _first)(element, *names)
     if child is None:
         return ""
-    return "".join(child.itertext()).strip()
+    if limit is None:
+        return "".join(child.itertext()).strip()
+    return _bounded_text(child, limit)
+
+
+def _bounded_text(element, limit: int) -> str:
+    """The stripped text of `element`, joined only as far as `limit` needs.
+
+    Callers that clamp to `limit` get the same answer as from the whole text:
+    the join stops once the stripped prefix is longer than `limit`, and the
+    clamp reads no further than that. The doubling check keeps the strip work
+    linear when the text is mostly whitespace.
+    """
+    parts = []
+    size = checked = 0
+    for piece in element.itertext():
+        parts.append(piece)
+        size += len(piece)
+        if size > limit and size >= 2 * checked:
+            checked = size
+            text = "".join(parts).strip()
+            if len(text) > limit:
+                return text
+    return "".join(parts).strip()
 
 
 def _markup(element) -> str:
@@ -390,9 +413,9 @@ def _parse_rss(root, episodes, skipped_video) -> FeedData:
         raise FeedParseError("RSS feed has no channel.")
 
     return FeedData(
-        title=_clamp_title(_text(channel, "title") or "Untitled podcast"),
+        title=_clamp_title(_text(channel, "title", limit=MAX_TITLE_CHARS) or "Untitled podcast"),
         author=_text(channel, "author", "managingeditor", ordered=True),
-        description=_description(_text(channel, "description", "subtitle", ordered=True)),
+        description=_description(_text(channel, "description", "subtitle", ordered=True, limit=MAX_DESCRIPTION_CHARS)),
         website_url=_rss_link(channel),
         artwork_url=_artwork(channel),
         categories=_categories(channel),
@@ -455,9 +478,9 @@ def _parse_atom(root, episodes, skipped_video) -> FeedData:
     website_url, _mime, _size = _atom_link(root, "alternate")
     author = _first(root, "author")
     return FeedData(
-        title=_clamp_title(_text(root, "title") or "Untitled podcast"),
+        title=_clamp_title(_text(root, "title", limit=MAX_TITLE_CHARS) or "Untitled podcast"),
         author=_text(author, "name") if author is not None else "",
-        description=_description(_text(root, "subtitle")),
+        description=_description(_text(root, "subtitle", limit=MAX_DESCRIPTION_CHARS)),
         website_url=website_url,
         artwork_url=_text(root, "logo", "icon"),
         categories=_categories(root),
@@ -602,7 +625,7 @@ class _NewestItem:
         if not media_url or not published:
             return False
         if self.best is None or published > self.best[1]:
-            self.best = (_clamp_title(_text(element, "title") or "Untitled episode"), published)
+            self.best = (_clamp_title(_text(element, "title", limit=MAX_TITLE_CHARS) or "Untitled episode"), published)
         self.unordered = self.unordered or (self.seen > 0 and published > self.last)
         self.last = published
         self.seen += 1
