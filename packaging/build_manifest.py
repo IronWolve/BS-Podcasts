@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 import tomllib
@@ -75,6 +76,23 @@ def artifact_inventory(path):
     return entries
 
 
+# Distributions that no frozen bundle carries: Pillow and setuptools are excluded by both specs, and the rest are
+# build tools that the application never imports (THIRD-PARTY-NOTICES names them). The manifest records what remains.
+BUILD_ONLY = frozenset({'altgraph', 'pefile', 'pillow', 'pip', 'pyinstaller', 'pyinstaller-hooks-contrib',
+                        'pywin32-ctypes', 'setuptools'})
+
+
+def normalized_name(name):
+    """The PEP 503 spelling of a distribution name, so PySide6_Addons and pyside6-addons compare equal."""
+    return re.sub(r'[-_.]+', '-', name).lower()
+
+
+def runtime_packages(distributions):
+    """The bundle's distributions, from (name, version, license) records of the build interpreter."""
+    kept = [item for item in distributions if normalized_name(item['name']) not in BUILD_ONLY]
+    return sorted(kept, key=lambda item: item['name'].casefold())
+
+
 def create_manifest(artifact, archive=None, require_clean=False):
     status, commit = None, None
     origin_path = ROOT / '.build-origin.json'
@@ -89,10 +107,10 @@ def create_manifest(artifact, archive=None, require_clean=False):
         raise ValueError("A release manifest requires a clean Git checkout.")
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     files = artifact_inventory(artifact)
-    packages = sorted(({
+    packages = runtime_packages({
         "name": distribution.metadata.get("Name", ""), "version": distribution.version,
         "license": distribution.metadata.get("License-Expression") or distribution.metadata.get("License") or "",
-    } for distribution in importlib.metadata.distributions()), key=lambda item: item["name"].casefold())
+    } for distribution in importlib.metadata.distributions())
     result = {
         "format": 1, "created_at": datetime.now(timezone.utc).isoformat(), "version": project["version"],
         "source": {"commit": commit, "dirty": status != "", "sha256": source_inventory()},
