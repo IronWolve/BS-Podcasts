@@ -250,10 +250,13 @@ class PlaybackService:
             self._load_autoplay = False
             # A download wait keeps its ticket: the download still runs, and a
             # completion that arrives later makes the episode ready, paused.
-            message = (f"Still downloading after {int(self.DOWNLOAD_WAIT_TIMEOUT // 60)} minutes. "
-                       "The download keeps running; choose Retry to keep waiting for it."
-                       if self.snapshot.download_request else
-                       "Couldn’t open the stream (timed out). Check the connection or download the episode.")
+            if self.snapshot.download_request:
+                message = (f"Still downloading after {int(self.DOWNLOAD_WAIT_TIMEOUT // 60)} minutes. "
+                           "The download keeps running; choose Retry to keep waiting for it.")
+            elif is_web_url(self.snapshot.source):
+                message = "Couldn’t open the stream (timed out). Check the connection or download the episode."
+            else:
+                message = "Couldn’t open the file (timed out). It may be incomplete; download the episode again."
             self.snapshot = replace(
                 self.snapshot, state=PlaybackState.ERROR, message=message, buffering=None,
             )
@@ -1225,9 +1228,13 @@ class PlaybackService:
                     # intact when known duration clearly says it ended early.
                     self._engine_loaded = False
                     self._cancel_load_watchdog()
-                    message = ("The stream ended before the episode finished. Retry or download it."
-                               if duration > 0 else
-                               "The stream ended, but its length is unknown, so it may be cut short. Retry or download it.")
+                    if source_kind == "local":
+                        # A local file cannot be retried into a longer one; only a fresh copy helps.
+                        message = "The file ends before the episode does. It may be incomplete; download it again."
+                    elif duration > 0:
+                        message = "The stream ended before the episode finished. Retry or download it."
+                    else:
+                        message = "The stream ended, but its length is unknown, so it may be cut short. Retry or download it."
                     self.snapshot = replace(self.snapshot, state=PlaybackState.ERROR,
                                             message=message, buffering=None)
                     self._persist_position(force=True)
@@ -1286,7 +1293,8 @@ class PlaybackService:
                 self._persist_position(force=True)
                 self.snapshot = replace(
                     self.snapshot, state=PlaybackState.ERROR,
-                    message="Playback stopped unexpectedly. Check the connection and retry.",
+                    message=("Playback stopped unexpectedly. Check the connection and retry." if source_kind == "network"
+                             else "Playback stopped unexpectedly. Try Play to resume."),
                     buffering=None,
                 )
                 if self.snapshot.episode_id is not None:
