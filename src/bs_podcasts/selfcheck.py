@@ -180,6 +180,27 @@ def _storage_checks(root, checks, errors):
                 errors['library database closes'] = _exception_text(exc)
 
 
+def _application_modules(checks, errors):
+    """Import the entry the launcher imports, then load every name a package defers to first use. A frozen
+    build finds submodules by reading imports, so a module loaded by name at run time is absent from it
+    unless it is listed; this is the check that notices before a built copy fails at startup."""
+    name = 'application modules load'
+    try:
+        import importlib
+        importlib.import_module('bs_podcasts.app')
+        loaded = 0
+        for module in list(sys.modules.values()):
+            lazy = getattr(module, '_LAZY', None)
+            if isinstance(lazy, dict) and str(getattr(module, '__name__', '')).startswith('bs_podcasts'):
+                for attribute in lazy:
+                    getattr(module, attribute)
+                    loaded += 1
+        checks[name] = loaded > 0
+    except Exception as exc:
+        checks[name] = False
+        errors[name] = _exception_text(exc)
+
+
 def main() -> int:
     started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -240,6 +261,7 @@ def main() -> int:
             checks['native library inside bundle'] = Path(mpv.backend._name).resolve().is_relative_to(bundle)
     except Exception as exc:
         _note_dependency_failure(checks, errors, exc)
+    _application_modules(checks, errors)
     # Counting the font files does not prove Qt accepts them; a rejected Inter
     # file would silently fall back to another family with different metrics.
     try:

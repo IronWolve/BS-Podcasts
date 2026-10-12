@@ -16,7 +16,8 @@ LIBMPV = Path(os.environ["BS_PODCASTS_LIBMPV_DLL"])
 # Excludes, payload filter, version and traceback choice are shared with the macOS spec.
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / "packaging"))
-from pyinstaller_payload import DISABLE_WINDOWED_TRACEBACK, EXCLUDES, dropped_payload, numeric_version, read_version  # noqa: E402
+from pyinstaller_payload import (  # noqa: E402
+    DISABLE_WINDOWED_TRACEBACK, EXCLUDES, app_modules, dropped_payload, numeric_version, read_version)
 
 if not LIBMPV.is_file():
     raise FileNotFoundError(f"Bundled libmpv DLL not found: {LIBMPV}")
@@ -60,7 +61,7 @@ analysis = Analysis(
     pathex=[str(SOURCE)],
     binaries=[(str(LIBMPV), ".")],
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=app_modules(SOURCE),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(ROOT / "packaging" / "runtime_windows.py")],

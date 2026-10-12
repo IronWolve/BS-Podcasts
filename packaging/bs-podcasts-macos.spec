@@ -8,7 +8,7 @@ SOURCE = ROOT / 'src'
 # Excludes, payload filter, version and traceback choice are shared with the Windows spec.
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / 'packaging'))
-from pyinstaller_payload import DISABLE_WINDOWED_TRACEBACK, EXCLUDES, dropped_payload, read_version  # noqa: E402
+from pyinstaller_payload import DISABLE_WINDOWED_TRACEBACK, EXCLUDES, app_modules, dropped_payload, read_version  # noqa: E402
 
 VERSION = read_version(ROOT)
 IDENTITY = os.environ.get('BS_PODCASTS_SIGN_IDENTITY') or None
@@ -19,7 +19,7 @@ analysis = Analysis(
            (str(SOURCE/'bs_podcasts/data/migrations'), 'bs_podcasts/data/migrations'),
            (str(ROOT/'packaging/licenses'), 'licenses'),
            (str(ROOT/'packaging/THIRD-PARTY-NOTICES.txt'), '.')],
-    hiddenimports=[], hookspath=[], hooksconfig={},
+    hiddenimports=app_modules(SOURCE), hookspath=[], hooksconfig={},
     runtime_hooks=[str(ROOT/'packaging/runtime_macos.py')],
     excludes=list(EXCLUDES),
     noarchive=False, optimize=1,

@@ -4,6 +4,7 @@ from pathlib import Path, PureWindowsPath
 from types import CodeType
 from PyInstaller.archive.readers import CArchiveReader
 from report import Reporter
+from pyinstaller_payload import missing_app_modules
 from source_manifest import privacy_scan_bytes, read_deny_file
 
 _ENCODINGS=('utf-8','utf-16-le','utf-16-be')
@@ -113,6 +114,11 @@ def check(root, private_root):
     for name in pyz.toc:
         if name=='bs_podcasts' or name.startswith('bs_podcasts.'):
             count+=1; code_check(pyz.extract(name))
+    # A package that loads a submodule by name at run time hides it from the build's import analysis, and the
+    # app then fails at startup in the built copy only. Every source module must be in the archive.
+    absent = missing_app_modules(pyz.toc, Path(__file__).resolve().parents[1] / 'src')
+    if absent:
+        raise ValueError('Application modules missing from the frozen archive: ' + ', '.join(absent))
     console = Reporter()
     console.ok('Frozen privacy check passed')
     console.stats([('files', str(len(paths))), ('app modules', str(count))])

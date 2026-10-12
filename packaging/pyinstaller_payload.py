@@ -38,6 +38,24 @@ def dropped_payload(name):
     return any(marker in normalized for marker in UNUSED_BINARIES)
 
 
+def app_modules(source):
+    """Every module of the bs_podcasts package under a source folder, as dotted names. The build finds modules
+    by reading imports, and the packages load some submodules by name at run time (feeds and playback defer
+    theirs to first use), which that analysis cannot see. Listing them here puts every module in the bundle."""
+    base = Path(source) / "bs_podcasts"
+    names = []
+    for path in sorted(base.rglob("*.py")):
+        parts = path.relative_to(base.parent).with_suffix("").parts
+        names.append(".".join(parts[:-1] if parts[-1] == "__init__" else parts))
+    return names
+
+
+def missing_app_modules(frozen_names, source):
+    """The package modules under a source folder that a frozen archive's module table does not hold."""
+    present = set(frozen_names)
+    return [name for name in app_modules(source) if name not in present]
+
+
 def read_version(root):
     """The project version from pyproject.toml. A missing or placeholder version stops the build."""
     try:
