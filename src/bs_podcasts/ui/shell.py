@@ -1083,13 +1083,11 @@ class MainWindow(QMainWindow):
         elif not self.commands.closing:
             revisions = repository.stage_settings(values)
             self._settings_desired.update({key: (revisions[key], value) for key, value in values.items()})
+            # Through _track_job: a save that is cancelled or that raises
+            # arrives as an error result, so the window always hears back
+            # and can offer the retry.
             future = self.commands.submit(lambda: repository.persist_settings(values, revisions), keep=True)
-            def finished(done):
-                result = done.result()
-                if result.status == JobStatus.ERROR:
-                    logging.getLogger('bs_podcasts').warning('Settings changes were not saved: %s', result.message)
-                self._emit_completed(('settings-save', (values, revisions), result))
-            future.add_done_callback(finished)
+            _track_job(self, future, 'settings-save', (values, revisions))
 
     def _on_settings_save(self, kind, identifier, result):
         values, revisions = identifier
@@ -1098,7 +1096,9 @@ class MainWindow(QMainWindow):
         if result.status in {JobStatus.OK, JobStatus.EMPTY}:
             for key in current:
                 self._settings_desired.pop(key, None)
-        elif current:
+            return
+        logging.getLogger('bs_podcasts').warning('Settings changes were not saved: %s', result.message)
+        if current:
             self._notify('Changes applied for this session were not saved; retry to keep them.', 'error', 'Retry', lambda: self._persist_ui_settings(current))
 
     def _capture_view_state(self) -> ViewHandoff:
