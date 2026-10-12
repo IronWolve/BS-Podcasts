@@ -17,7 +17,7 @@ from PySide6.QtCore import QCoreApplication, QDir, QEvent, QEventLoop, QObject, 
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 import getpass
 from PySide6.QtGui import QIcon, QImageReader
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from .artwork import ArtworkCache
 from .assets import icon_path, logo_path, shell_icon_path
@@ -497,33 +497,114 @@ def _read_file_request(raw):
     return _incoming_paths(value.get('paths'), absolute=True)
 
 
-def _probe_instance_status(name: str, timeout_ms: int = 300, files=()) -> str:
-    """Transport observation only; an answer never substitutes for a lease."""
+def _instance_socket_status(name: str, connect_ms: int, bound_ms: int, files, stop=None) -> str:
+    """One raise or file-request exchange, driven by an event loop on the thread that runs it.
+
+    QLocalSocket's blocking waits hold the interpreter lock in this binding, so
+    the exchange never blocks: connect, write and reply are signal handlers, and
+    timers bound the connect and the whole exchange. The worker thread owns its
+    socket, loop and timers. `stop()` ends the exchange early when it is true."""
+    loop = QEventLoop()
+    socket = QLocalSocket()
+    outcome = {}
+    connected = []
+    payload = _file_request(files) if files else b"raise " + _profile_key().encode("ascii") + b"\n"
+
+    def finish(status):
+        outcome.setdefault('status', status)  # the first outcome stands
+        loop.quit()
+
+    def on_connected():
+        connected.append(True)
+        socket.write(payload)
+
+    def on_ready():
+        reply = socket.read(32).data()
+        if reply.startswith(b'profile-mismatch'):
+            return finish('mismatch')
+        accepted = reply.startswith(b'files-queued') if files else reply.startswith(b'ok')
+        if accepted:
+            return finish('answered')
+        # Older peers must not silently discard file arguments.
+        finish('rejected' if reply.startswith((b'err', b'ok')) else 'silent')
+
+    def on_error(_error):
+        finish('silent' if connected else 'missing')
+
+    def on_poll():
+        if stop is not None and stop():
+            finish('silent')
+
+    socket.connected.connect(on_connected)
+    socket.readyRead.connect(on_ready)
+    socket.errorOccurred.connect(on_error)
+    socket.disconnected.connect(lambda: finish('silent'))
+    connect_timer = QTimer(loop)
+    connect_timer.setSingleShot(True)
+    connect_timer.timeout.connect(lambda: None if connected else finish('missing'))
+    connect_timer.start(connect_ms)
+    bound_timer = QTimer(loop)
+    bound_timer.setSingleShot(True)
+    bound_timer.timeout.connect(lambda: finish('silent'))
+    bound_timer.start(bound_ms)
+    poll = QTimer(loop)
+    poll.setInterval(20)
+    poll.timeout.connect(on_poll)
+    poll.start()
+    socket.connectToServer(name)
+    loop.exec()
+    socket.abort()
+    return outcome.get('status', 'silent')
+
+
+def _pump_until(done, seconds: float) -> None:
+    """Run the toolkit loop until done() is true or `seconds` have passed.
+
+    A timer polls `done`, so windows keep painting and answering input while
+    the caller waits; nothing blocks the toolkit thread."""
+    loop = QEventLoop()
+    poll = QTimer(loop)
+    poll.setInterval(10)
+    limit = time.monotonic() + seconds
+
+    def check():
+        if done() or time.monotonic() >= limit:
+            loop.quit()
+
+    poll.timeout.connect(check)
+    poll.start()
+    loop.exec()
+    poll.stop()
+
+
+def _probe_instance_status(name: str, timeout_ms: int = 300, files=(), *, bound_ms: int = 2000, stop=None) -> str:
+    """Transport observation only; an answer never substitutes for a lease.
+
+    The exchange runs on a worker thread, so the toolkit thread keeps painting
+    while the caller waits. The whole probe is bounded by `bound_ms`: a probe
+    still busy at the bound reports 'silent', and a connection that is not
+    made within `timeout_ms` reports 'missing'. `stop()` ends the wait early."""
     if name is None or _endpoint_is_foreign(name):
         return 'silent'  # nothing is sent to, or believed from, another account's listener
-    probe = QLocalSocket()
-    probe.connectToServer(name)
-    if not probe.waitForConnected(timeout_ms):
-        probe.abort()
-        return 'missing'
-    # The raise names the library profile, so an instance of another profile
-    # can decline it instead of raising its own window. A bare b"raise" is
-    # still served for launcher scripts and older senders.
-    probe.write(_file_request(files) if files else b"raise " + _profile_key().encode("ascii") + b"\n")
-    probe.waitForBytesWritten(300)
-    if probe.waitForReadyRead(1500):
-        reply = probe.read(32).data()
-        if reply.startswith(b'profile-mismatch'):
-            probe.disconnectFromServer()
-            return 'mismatch'
-        accepted = reply.startswith(b'files-queued') if files else reply.startswith(b'ok')
-        probe.disconnectFromServer()
-        if accepted:
-            return 'answered'
-        if reply.startswith((b'err', b'ok')):
-            return 'rejected'  # Older peers must not silently discard file arguments.
-    probe.abort()
-    return 'silent'
+    bound_ms = max(1, int(bound_ms))
+    connect_ms = max(1, min(timeout_ms, bound_ms))
+    result = {}
+
+    def exchange():
+        try:
+            result['status'] = _instance_socket_status(name, connect_ms, bound_ms, files, stop)
+        except Exception as exc:  # raised again on the calling thread
+            result['error'] = exc
+
+    worker = threading.Thread(target=exchange, name='bs-instance-probe', daemon=True)
+    worker.start()
+    if QCoreApplication.instance() is None:
+        worker.join(bound_ms / 1000 + 0.5)
+    else:
+        _pump_until(lambda: 'status' in result or 'error' in result, bound_ms / 1000 + 0.5)
+    if 'error' in result:
+        raise result['error']
+    return result.get('status', 'silent')
 
 
 def _probe_running_instance(name: str, timeout_ms: int = 300, files=()) -> bool:
@@ -640,6 +721,38 @@ class _ShowWatcher(QObject):
         if event.type() in (QEvent.Type.Show, QEvent.Type.WindowStateChange):
             QTimer.singleShot(0, self._callback)
         return False
+
+
+LEASE_WAIT_SECONDS = 3.0
+
+
+class _LeaseWaitWindow(QWidget):
+    """Shown at once when a second launch finds the library held by a running copy."""
+
+    def __init__(self):
+        super().__init__()
+        self._cancelled = False
+        self.setWindowTitle(APP_NAME)
+        heading = QLabel(f"{APP_NAME} is already open")
+        note = QLabel("Waiting for the running copy to answer. This window closes when it does, "
+                      f"or after {LEASE_WAIT_SECONDS:g} seconds.")
+        note.setWordWrap(True)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self._request_cancel)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        layout = QVBoxLayout(self)
+        layout.addWidget(heading)
+        layout.addWidget(note)
+        layout.addLayout(buttons)
+        self.setMinimumWidth(360)
+
+    def _request_cancel(self):
+        self._cancelled = True
+
+    def cancelled(self) -> bool:
+        return self._cancelled
 
 
 def _join_playback_shutdown(commands, playback, deadline) -> int:
@@ -839,6 +952,87 @@ def _start_library_services(database):
     return repository, library, downloads
 
 
+def _acquire_library_lease(root, name, incoming):
+    """(lease, None) once this process owns the library; (None, status) when startup must end.
+
+    A second launch shows a status window at once and waits at most
+    LEASE_WAIT_SECONDS: the running copy is asked to raise its window, and the
+    lease is retried between the asks. Cancel ends the wait at once."""
+    from .data.lease import LibraryLease, LibraryInUseError
+
+    wait = None
+    lease_wait_until = 0.0
+
+    def close_wait():
+        if wait is not None:
+            wait.close()
+            wait.deleteLater()
+
+    while True:
+        try:
+            lease = LibraryLease(root / "library.db")
+        except OSError as exc:
+            from .ui.dialogs import StartupErrorDialog
+
+            if not isinstance(exc, LibraryInUseError):
+                close_wait()
+                dialog = StartupErrorDialog(
+                    "Library could not be opened",
+                    "Close the app and inspect "
+                    f"the library at {root / 'library.db'}.\n\n{exc}",
+                )
+                dialog.exec()
+                return None, 1
+        else:
+            close_wait()
+            return lease, None
+        # Ordinary second launch: the peer holds the library and raises its
+        # window. A peer that no longer answers is finishing its quit (it stops
+        # listening first), so give its lease a moment to free.
+        if wait is None:
+            wait = _LeaseWaitWindow()
+            wait.show()
+            lease_wait_until = time.monotonic() + LEASE_WAIT_SECONDS
+        remaining_ms = int((lease_wait_until - time.monotonic()) * 1000)
+        reply = 'silent'
+        if remaining_ms > 0:
+            reply = _probe_instance_status(name, timeout_ms=500, files=incoming,
+                                           bound_ms=min(2000, remaining_ms), stop=wait.cancelled)
+        if reply == 'answered':
+            close_wait()
+            return None, 0
+        if reply in ('mismatch', 'rejected'):
+            close_wait()
+            from .ui.dialogs import StartupErrorDialog
+
+            if reply == 'mismatch':
+                dialog = StartupErrorDialog('BS Podcasts is already running',
+                    'This library is open in a running instance, but the instance answering on this '
+                    'computer belongs to a different library profile, so its window was not raised. '
+                    'Find this library\'s window or tray icon, or close the other profile first.')
+            else:
+                dialog = StartupErrorDialog('Files were not accepted',
+                    'The existing instance could not queue this file request (it may be closing, or is an older build). '
+                    'No files were imported. Retry after it has closed, or after closing its dialog or restarting the updated app.')
+            dialog.exec(); dialog.deleteLater()
+            return None, 1
+        if wait.cancelled():
+            close_wait()
+            return None, 1
+        if time.monotonic() >= lease_wait_until:
+            close_wait()
+            from .ui.dialogs import StartupErrorDialog
+
+            dialog = StartupErrorDialog(
+                "BS Podcasts is starting or closing",
+                "The library is still in use by another instance. It may be "
+                "starting, finishing shutdown, or not responding. Try again in a moment.",
+            )
+            dialog.exec()
+            return None, 1
+        _pump_until(wait.cancelled, 0.25)
+
+
 def main() -> int:
     # Startup phase marks, logged once the window is up. When a platform
     # stalls at launch (the Mac build took 11 s to show), one run of the app
@@ -864,52 +1058,9 @@ def main() -> int:
     name = _instance_endpoint()
     # Probing a predictable pipe name is not proof that the library is owned.
     # Acquire the lease first; only actual contention can justify yielding.
-    from .data.lease import LibraryLease, LibraryInUseError
-
-    lease = None
-    lease_wait_until = time.monotonic() + 30.0
-    while lease is None:
-        try:
-            lease = LibraryLease(root / "library.db")
-        except OSError as exc:
-            from .ui.dialogs import StartupErrorDialog
-
-            if not isinstance(exc, LibraryInUseError):
-                dialog = StartupErrorDialog(
-                    "Library could not be opened",
-                    "Close the app and inspect "
-                    f"the library at {root / 'library.db'}.\n\n{exc}",
-                )
-                dialog.exec()
-                return 1
-            # Ordinary second launch: the peer holds the library and raises
-            # its window. A peer that no longer answers is finishing its quit
-            # (it stops listening first), so give its lease a moment to free.
-            reply = _probe_instance_status(name, timeout_ms=1500, files=incoming)
-            if reply == 'answered':
-                return 0
-            if reply == 'mismatch':
-                dialog = StartupErrorDialog('BS Podcasts is already running',
-                    'This library is open in a running instance, but the instance answering on this '
-                    'computer belongs to a different library profile, so its window was not raised. '
-                    'Find this library\'s window or tray icon, or close the other profile first.')
-                dialog.exec(); dialog.deleteLater()
-                return 1
-            if reply == 'rejected':
-                dialog = StartupErrorDialog('Files were not accepted',
-                    'The existing instance could not queue this file request (it may be closing, or is an older build). '
-                    'No files were imported. Retry after it has closed, or after closing its dialog or restarting the updated app.')
-                dialog.exec(); dialog.deleteLater()
-                return 1
-            if time.monotonic() >= lease_wait_until:
-                dialog = StartupErrorDialog(
-                    "BS Podcasts is starting or closing",
-                    "The library is still in use by another instance. It may be "
-                    "starting, finishing shutdown, or not responding. Try again in a moment.",
-                )
-                dialog.exec()
-                return 1
-            time.sleep(0.25)
+    lease, status = _acquire_library_lease(root, name, incoming)
+    if lease is None:
+        return status
     server = _claim_single_instance(app)
     _mark("single-instance")
     notice = None
