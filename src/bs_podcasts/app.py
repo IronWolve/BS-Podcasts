@@ -291,6 +291,8 @@ def create_application(argv=None) -> QApplication:
     load_fonts()
     app.setFont(app_font())
     apply_app_stylesheet(app)
+    from .ui.widgets import install_rounded_popups
+    install_rounded_popups(app)  # menus are rounded windows, not rounded borders inside square ones
     QCoreApplication.setApplicationVersion(app_version())
     if os.environ.get("BS_PODCASTS_TRACE"):
         _install_stall_monitor(app)

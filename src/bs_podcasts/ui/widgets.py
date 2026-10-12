@@ -119,6 +119,30 @@ def plain_tooltip(text: str) -> str:
     return text
 
 
+class RoundedPopups(QObject):
+    """Every menu gets a see-through window behind its rounded frame.
+
+    The stylesheet rounds QMenu's border, but a popup window is square, so the corners outside the radius
+    showed as the window's own background: a rounded border drawn inside a square box. Setting the
+    attribute at polish time, before the window exists, makes the corners transparent. The platform's drop
+    shadow is turned off with it (it would be drawn for the square window)."""
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Polish and isinstance(watched, QMenu) and not watched.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
+            watched.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint, True)
+            watched.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        return False
+
+
+def install_rounded_popups(app):
+    """Install the menu rounding once per application."""
+    if app.property("_bs_rounded_popups") is None:
+        rounded = RoundedPopups(app)
+        app.installEventFilter(rounded)
+        app.setProperty("_bs_rounded_popups", True)
+    return app.property("_bs_rounded_popups")
+
+
 def exec_menu(menu, position):
     """Release one-shot menus after their modal actions have returned."""
     try:
@@ -2138,9 +2162,10 @@ class Popover(QFrame):
     """Small level-2 surface anchored above a button."""
 
     def __init__(self, parent=None):
-        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
         self.setObjectName("popover")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)  # rounded corners, not a square window
 
     def show_above(self, anchor: QWidget):
         self.adjustSize()
