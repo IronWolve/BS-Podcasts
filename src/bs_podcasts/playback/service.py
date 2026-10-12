@@ -12,7 +12,11 @@ from ..data.repositories import LibraryRepository
 from ..urlguard import UnsafeUrl, ensure_media_source, ensure_web_url, ensure_fetchable, is_web_url
 from ..privacy import redact
 from .engine import EngineEvent, LibraryBusy, PlaybackUnavailable
+from .metering import ListeningMeter
+from .recovery import StreamRecovery
+from .review import ReviewSettings
 from .persistence import PlaybackPersistence
+from .sleep import SleepTimer
 
 # Enclosure hosts that are redirect trackers: their chains routinely exceed
 # FFmpeg's 8-redirect limit, so the first open failed and the rescue path
@@ -82,7 +86,14 @@ logger = logging.getLogger("bs_podcasts")
 
 
 class PlaybackService:
-    def __init__(self, repository: LibraryRepository, engine, listening=None):
+    def _now(self):
+        """Monotonic seconds: the injected clock, else the module clock looked up on each call."""
+        return self._clock() if self._clock is not None else time.monotonic()
+
+    def __init__(self, repository: LibraryRepository, engine, listening=None, *, clock=None, resolve_final=None):
+        # Named test seams: `clock` replaces the monotonic time source, `resolve_final` the URL resolver
+        # (the default resolver is the static _resolve_final). Production passes neither.
+        self._clock = clock
         self.repository = repository
         self.engine = engine
         self.listening = listening
@@ -97,23 +108,21 @@ class PlaybackService:
         self._listener_failures = set()
         self._lock = RLock()
         self._last_saved_position = -10.0
-        self._sleep_timer: Timer | None = None
-        self._sleep_token = 0
+        self._sleep = SleepTimer()
         self._load_watchdog: Timer | None = None
         self._load_token = 0
         self._buffering_started_at: float | None = None
-        # Redirect rescue (see _start_redirect_rescue): which source already
-        # got its one retry, and whether the current load wanted autoplay.
-        self._rescued_source = ""
+        # Redirect rescue and mid-play reopen limits (see _start_redirect_rescue
+        # and _start_stream_recovery) live in StreamRecovery.
+        self._recovery = StreamRecovery()
+        # Whether the current load wanted autoplay.
         self._load_autoplay = False
-        # Mid-play stream recovery (see _start_stream_recovery): attempts per
-        # item inside a time window, so a dead source cannot loop forever.
-        self._recovery_key = None
-        self._recovery_times = []
         self._load_generation = 0
-        self._load_started_at = time.monotonic()
+        self._load_started_at = self._now()
         self._resolve_cancel = Event()
         self.intent_revision = 0
+        if resolve_final is not None:
+            self._resolve_final = resolve_final
         self._last_write_stamp = 0.0
         self._engine_generation = None
         self._resolving = False
@@ -129,8 +138,6 @@ class PlaybackService:
         self._unstarted_id = None
         self._retiring_shows = set()
         self._dead = False
-        self._last_metric_time = None
-        self._last_metric_position = None
         # Resume target the file-loaded seek has not been seen to reach yet
         # (see _confirm_start); saves wait so a failed seek keeps the old one.
         self._start_target = None
@@ -142,14 +149,8 @@ class PlaybackService:
         except (TypeError, ValueError):
             saved_volume = 100.0
         self.snapshot = replace(self.snapshot, volume=max(0.0, min(100.0, saved_volume)))
-        self._unsaved_silence = 0.0
-        self._silence_balance = 0.0
-        self._unsaved_listening = 0.0
-        # Silence is measured over windows of a second or more, and ticks
-        # before a seek lands count as neither listening nor silence.
-        self._silence_window = None
-        self._metric_seek_target = None
-        self._metric_seek_deadline = 0.0
+        self._meter = ListeningMeter(self._persistence, lambda: self.listening, self._silence_saved)
+        self._review = ReviewSettings()
         self._restore_snapshot()
 
     def subscribe(self, listener):
@@ -170,10 +171,10 @@ class PlaybackService:
             raise PlaybackUnavailable('Library storage is busy saving playback; retry shortly.')
 
     def join_persistence(self, grace_seconds=3.0):
-        deadline = time.monotonic() + max(0.0, grace_seconds)
+        deadline = self._now() + max(0.0, grace_seconds)
         busy = self._persistence.join(grace_seconds)
         if self._event_commands is not None:
-            busy += self._event_commands.join(max(0.0, deadline - time.monotonic()))
+            busy += self._event_commands.join(max(0.0, deadline - self._now()))
         return busy
 
     def unsubscribe(self, listener):
@@ -192,11 +193,8 @@ class PlaybackService:
     # Download-first wait: no download result may ever arrive (it was paused,
     # or absorbed into another transfer), so the wait reports itself.
     DOWNLOAD_WAIT_TIMEOUT = 600.0
-    STREAM_RECOVERY_LIMIT = 3
-    STREAM_RECOVERY_WINDOW = 600.0
     START_TOLERANCE = 10.0
     NOTICE_SECONDS = 12.0  # how long the can't-seek notice stays on the player bar
-    SLEEP_RECHECK = 15.0  # longest a sleep timer waits before it compares the wall clock again
     SEEK_UNSUPPORTED = "This server can’t seek, so playback started from the beginning. Your saved position was kept."
     RECONNECTING = "Reconnecting…"
     SLEEP_NOT_PAUSED = "Sleep timer ended, but playback could not be paused."
@@ -357,6 +355,10 @@ class PlaybackService:
                     self._volume_applied = True
                 except Exception:
                     pass  # retried on the next load so saved volume still lands
+            if not same:
+                self._review.clear_repeat()
+            trim_level = show.trim_level if show else "off"
+            self._review.trim = trim_level
             self.snapshot = PlaybackSnapshot(
                 state=PlaybackState.LOADING,
                 episode_id=episode.id,
@@ -368,7 +370,7 @@ class PlaybackService:
                 duration=float(episode.duration_seconds),
                 speed=speed,
                 volume=self.snapshot.volume,
-                trim_level=show.trim_level if show else "off",
+                trim_level=trim_level,
                 silence_saved=silence_saved,
                 artwork_path=episode.artwork_path,
                 **kept,
@@ -383,7 +385,7 @@ class PlaybackService:
             except Exception as exc:
                 self._failed_load(exc)
                 raise
-            self._rescued_source = ""
+            self._recovery.reset_rescue()
             self._load_autoplay = autoplay
             if download_first:
                 # All entrypoints (Play, resume, bookmarks, Next and EOF) share
@@ -484,6 +486,7 @@ class PlaybackService:
                     self._volume_applied = True
                 except Exception:
                     pass  # retried on the next load so saved volume still lands
+            self._review.reset()
             self.snapshot = PlaybackSnapshot(
                 state=PlaybackState.LOADING,
                 title=title or "Podcast episode",
@@ -502,7 +505,7 @@ class PlaybackService:
             except Exception as exc:
                 self._failed_load(exc)
                 raise
-            self._rescued_source = ""
+            self._recovery.reset_rescue()
             self._load_autoplay = autoplay
             try:
                 self._load_source(source, 0.0, autoplay)
@@ -640,7 +643,7 @@ class PlaybackService:
             self.snapshot, state=PlaybackState.LOADING, position=position, buffering=None,
             message=self.snapshot.message if keep_notice else ""
         )
-        self._rescued_source = ""
+        self._recovery.reset_rescue()
         self._load_autoplay = autoplay
         try:
             self._load_source(self.snapshot.source, position, autoplay)
@@ -700,6 +703,7 @@ class PlaybackService:
                 self._best_effort("engine unload", unload)
             self._engine_loaded = False
             self._close_silence_window()
+            self._review.reset()
             self.snapshot = PlaybackSnapshot(speed=self.snapshot.speed, volume=self.snapshot.volume)
             if episode_id is not None:
                 self._set_current_playback(None, PlaybackState.IDLE.value)
@@ -931,41 +935,49 @@ class PlaybackService:
                 self._emit()
             self.engine.skip(delta)
 
+    def _publish_review(self):
+        # The window reads the markers and the trim level from the snapshot;
+        # the review settings are the one place they change. Callers emit.
+        review = self._review
+        self.snapshot = replace(self.snapshot, ab_start=review.start, ab_end=review.end, trim_level=review.trim)
+
     def set_ab_start(self):
         with self._lock:
             self._guard()
-            self.snapshot = replace(
-                self.snapshot, ab_start=self.snapshot.position, ab_end=None
-            )
+            self._review.mark_start(self.snapshot.position)
+            self._publish_review()
             self._emit()
 
     def set_ab_end(self):
         with self._lock:
             self._guard()
-            if self.snapshot.ab_start is None or self.snapshot.position <= self.snapshot.ab_start:
+            position = self.snapshot.position
+            if not self._review.can_end(position):
                 raise PlaybackUnavailable("B must be after A.")
-            self.engine.set_ab_repeat(self.snapshot.ab_start, self.snapshot.position)
-            self.snapshot = replace(self.snapshot, ab_end=self.snapshot.position)
+            self.engine.set_ab_repeat(self._review.start, position)
+            self._review.end_at(position)
+            self._publish_review()
             self._emit()
 
     def clear_ab_repeat(self):
         with self._lock:
             self._guard()
             self.engine.clear_ab_repeat()
-            self.snapshot = replace(self.snapshot, ab_start=None, ab_end=None)
+            self._review.clear_repeat()
+            self._publish_review()
             self._emit()
 
     def set_trim_level(self, level: str):
         with self._lock:
             self._guard()
-            if level not in {"off", "light", "medium", "strong"}:
-                raise ValueError("Unknown silence-trim level.")
+            level = ReviewSettings.checked_trim(level)
             self.engine.set_silence_trim(level)
             if self.snapshot.show_id:
                 self.repository.update_show_playback(
                     self.snapshot.show_id, trim_level=level
                 )
-            self.snapshot = replace(self.snapshot, trim_level=level)
+            self._review.trim = level
+            self._publish_review()
             self._emit()
 
     def set_speed(self, speed: float):
@@ -996,25 +1008,16 @@ class PlaybackService:
                 return
             deadline = time.time() + seconds
             self.snapshot = replace(self.snapshot, sleep_deadline=deadline)
-            self._arm_sleep_timer(deadline)
+            self._sleep.arm(deadline, self._sleep_tick)
             self._emit()
-
-    def _arm_sleep_timer(self, deadline: float):
-        # The countdown on screen is wall-clock time, but a timer counts on the
-        # monotonic clock, which a suspend stops and a clock change does not
-        # touch. Wait in short steps and compare the shown deadline each time.
-        wait = max(0.0, min(self.SLEEP_RECHECK, deadline - time.time()))
-        self._sleep_timer = Timer(wait, self._sleep_tick, args=(self._sleep_token,))
-        self._sleep_timer.daemon = True
-        self._sleep_timer.start()
 
     def _sleep_tick(self, token):
         with self._lock:
-            if self._dead or token != self._sleep_token:
+            if self._dead or token != self._sleep.token:
                 return
             deadline = self.snapshot.sleep_deadline
             if deadline is not None and deadline - time.time() > 0.5:
-                self._arm_sleep_timer(deadline)  # the shown deadline is not here yet
+                self._sleep.arm(deadline, self._sleep_tick)  # the shown deadline is not here yet
                 return
         self._sleep_expired(token)
 
@@ -1027,10 +1030,7 @@ class PlaybackService:
 
     def cancel_sleep_timer(self):
         with self._lock:
-            self._sleep_token += 1
-            if self._sleep_timer:
-                self._sleep_timer.cancel()
-                self._sleep_timer = None
+            self._sleep.cancel()
             if self.snapshot.sleep_deadline is not None or self.snapshot.sleep_at_end:
                 self.snapshot = replace(self.snapshot, sleep_deadline=None, sleep_at_end=False)
                 self._emit()
@@ -1046,10 +1046,7 @@ class PlaybackService:
                 self._submit_progress(final[0], position=(final[1], final[2], False))
             unfinished, self._unfinished_end = self._unfinished_end, None
             self._close_silence_window()
-            if self._unsaved_silence > 0 and self.listening:
-                self._persistence.submit('silence', self.listening.add_silence_saved,
-                                         self._unsaved_silence, additive=True)
-                self._unsaved_silence = 0.0
+            self._meter.flush_silence()
             self._flush_listening()
             self.cancel_sleep_timer()
             self._cancel_load_watchdog()
@@ -1119,9 +1116,7 @@ class PlaybackService:
                              self._engine_generation, source_kind, self.snapshot.position, detail)
             if event.kind == "position":
                 position = max(0.0, float(event.value))
-                target = self._metric_seek_target
-                if (target is not None and abs(position - target) > 1.0
-                        and time.monotonic() < self._metric_seek_deadline):
+                if self._meter.seek_in_progress(position, self._now()):
                     # A seek has not landed yet, so this tick is still the old
                     # position. It must not replace the target the snapshot
                     # holds, nor be saved as the resume point.
@@ -1164,12 +1159,12 @@ class PlaybackService:
             elif event.kind == "file_loaded":
                 logger.info("Playback source loaded: generation=%s source=%s autoplay=%s seconds=%.3f",
                             self._engine_generation, source_kind, self._load_autoplay,
-                            max(0.0, time.monotonic() - self._load_started_at))
+                            max(0.0, self._now() - self._load_started_at))
                 self._engine_loaded = True
                 if self.snapshot.episode_id == self._unstarted_id:
                     self._unstarted_id = None
                 self._cancel_load_watchdog()
-                self._metric_seek_target = None  # the load applied any pending seek
+                self._meter.clear_seek()  # the load applied any pending seek
                 self._reset_metrics(self.snapshot.position)
                 # A start at 0 needs no seek. Anything later is confirmed by
                 # the first ticks before progress is saved over it. A reopen
@@ -1177,7 +1172,7 @@ class PlaybackService:
                 # so a server that cannot seek leaves the saved position alone.
                 if self._start_target is None:
                     self._start_target = self._desired_position if self._desired_position > 5.0 else None
-                self._start_loaded_at = time.monotonic()
+                self._start_loaded_at = self._now()
                 self._start_reported = False
                 self._buffering_started_at = None
                 self.snapshot = replace(self.snapshot, buffering=None)
@@ -1186,23 +1181,23 @@ class PlaybackService:
                     self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED, message="")
                 elif self.snapshot.message == self.RECONNECTING:
                     self.snapshot = replace(self.snapshot, message="")
-                if (self.snapshot.ab_start is not None and self.snapshot.ab_end is not None
+                if (self._review.start is not None and self._review.end is not None
                         and self.engine.capabilities.ab_repeat):
                     # Every engine load drops the A-B loop; a reopen of the
-                    # same item keeps its snapshot, so give the loop back.
+                    # same item keeps its markers, so give the loop back.
                     try:
-                        self.engine.set_ab_repeat(self.snapshot.ab_start, self.snapshot.ab_end)
+                        self.engine.set_ab_repeat(self._review.start, self._review.end)
                     except Exception as exc:
                         logger.warning("Could not restore the A-B loop after reopening: %s", redact(exc))
             elif event.kind == "buffering":
                 previous_buffer = self.snapshot.buffering
                 if event.value is not None and previous_buffer is None:
-                    self._buffering_started_at = time.monotonic()
+                    self._buffering_started_at = self._now()
                     logger.info("Playback buffering started: generation=%s percent=%s",
                                 self._engine_generation, event.value)
                 elif event.value is None and previous_buffer is not None:
                     started = self._buffering_started_at
-                    elapsed = time.monotonic() - started if started is not None else 0.0
+                    elapsed = self._now() - started if started is not None else 0.0
                     if elapsed >= 1.0:
                         logger.info("Playback buffering ended: generation=%s seconds=%.1f",
                                     self._engine_generation, elapsed)
@@ -1363,7 +1358,7 @@ class PlaybackService:
         return accepted
 
     def _begin_load(self, position: float, autoplay: bool, keep_target: bool = False):
-        self._load_started_at = time.monotonic()
+        self._load_started_at = self._now()
         self._resolve_cancel.set()
         self._resolve_cancel = Event()
         self._cancel_load_watchdog()
@@ -1388,7 +1383,7 @@ class PlaybackService:
             raise
         self._resolving = True
         logger.info("Playback preparation finished: generation=%s seconds=%.3f",
-                    self._engine_generation, time.monotonic() - self._load_started_at)
+                    self._engine_generation, self._now() - self._load_started_at)
 
     def _failed_load(self, error):
         self._cancel_load_watchdog()
@@ -1408,7 +1403,7 @@ class PlaybackService:
         import threading
         tracker = _is_tracker_url(source)
         if tracker:
-            self._rescued_source = source
+            self._recovery.mark_rescued(source)
         threading.Thread(
             target=self._resolve_then_load,
             args=(source, position, autoplay, self._load_generation, tracker, self._resolve_cancel),
@@ -1417,7 +1412,7 @@ class PlaybackService:
 
     def _resolve_then_load(self, source: str, position: float, autoplay: bool, generation=None, tracker=True, cancel=None):
         from ..netlimits import request_scope
-        started = time.monotonic()
+        started = self._now()
         final, error = "", ""
         try:
             # DNS screening belongs off the GUI thread, for every web source.
@@ -1434,7 +1429,7 @@ class PlaybackService:
                 return
             self._resolving = False
             logger.info("Playback URL resolution finished: generation=%s tracker=%s seconds=%.3f success=%s",
-                        self._engine_generation, tracker, time.monotonic() - started, not bool(error))
+                        self._engine_generation, tracker, self._now() - started, not bool(error))
             try:
                 if error:
                     raise PlaybackUnavailable(error)
@@ -1485,9 +1480,8 @@ class PlaybackService:
         import threading
 
         source = self.snapshot.source
-        if not source or not is_web_url(source) or self._rescued_source == source:
+        if not source or not is_web_url(source) or not self._recovery.claim_rescue(source):
             return False
-        self._rescued_source = source
         # A reopen that failed keeps its unconfirmed resume target (None on a first open).
         try:
             self._begin_load(self.snapshot.position, self._load_autoplay, keep_target=True)
@@ -1517,24 +1511,18 @@ class PlaybackService:
         source = self.snapshot.source
         if not source or not is_web_url(source):
             return False
-        now = time.monotonic()
-        key = (self.snapshot.episode_id, source)
-        if key != self._recovery_key:
-            self._recovery_key, self._recovery_times = key, []
-        self._recovery_times = [t for t in self._recovery_times if now - t < self.STREAM_RECOVERY_WINDOW]
-        if len(self._recovery_times) >= self.STREAM_RECOVERY_LIMIT:
+        attempt = self._recovery.attempt((self.snapshot.episode_id, source), self._now())
+        if not attempt:
             logger.error("Playback stream recovery stopped: %d reopen attempts within %d minutes",
-                         len(self._recovery_times), int(self.STREAM_RECOVERY_WINDOW // 60))
+                         StreamRecovery.LIMIT, int(StreamRecovery.WINDOW // 60))
             return False
-        self._recovery_times.append(now)
         episode_id = self.snapshot.episode_id
         generation = self._load_generation
         self._engine_loaded = False
         self._resolving = True
         self._desired_position = self.snapshot.position
         logger.warning("Playback stream lost at %.1fs; reopening there, attempt %d of %d, autoplay=%s",
-                       self._desired_position, len(self._recovery_times),
-                       self.STREAM_RECOVERY_LIMIT, self._load_autoplay)
+                       self._desired_position, attempt, StreamRecovery.LIMIT, self._load_autoplay)
         self.snapshot = replace(self.snapshot, state=PlaybackState.LOADING,
                                 message=self.RECONNECTING, buffering=None)
         self._arm_load_watchdog(episode_id, source)
@@ -1760,7 +1748,7 @@ class PlaybackService:
         may end before that. The write runs on a helper thread that retries a
         refused write until the budget ends. A write still blocked when the
         budget ends finishes on its own; the queued copy stays with the writer."""
-        deadline = time.monotonic() + self.SHUTDOWN_SAVE_SECONDS
+        deadline = self._now() + self.SHUTDOWN_SAVE_SECONDS
 
         def write():
             while True:
@@ -1769,13 +1757,13 @@ class PlaybackService:
                 except Exception as exc:
                     logger.warning("Final playback position was not saved: %s", redact(exc))
                     return
-                if saved is not False or time.monotonic() >= deadline:
+                if saved is not False or self._now() >= deadline:
                     return
                 time.sleep(0.05)
 
         worker = Thread(target=write, name="playback-final-save", daemon=True)
         worker.start()
-        worker.join(max(0.0, deadline - time.monotonic()))
+        worker.join(max(0.0, deadline - self._now()))
         if worker.is_alive():
             logger.warning("Final playback position is still being saved after %.1f s; the queued copy stays with the writer.",
                            self.SHUTDOWN_SAVE_SECONDS)
@@ -1796,12 +1784,12 @@ class PlaybackService:
             return
         if self._start_reported:
             if (self.snapshot.message == self.SEEK_UNSUPPORTED
-                    and time.monotonic() - self._start_reported_at >= self.NOTICE_SECONDS):
+                    and self._now() - self._start_reported_at >= self.NOTICE_SECONDS):
                 self.snapshot = replace(self.snapshot, message="")
             return
-        if time.monotonic() - self._start_loaded_at >= 1.0:
+        if self._now() - self._start_loaded_at >= 1.0:
             self._start_reported = True
-            self._start_reported_at = time.monotonic()
+            self._start_reported_at = self._now()
             logger.warning("Playback resume seek did not land: target=%.1fs position=%.1fs", target, position)
             self.snapshot = replace(self.snapshot, message=self.SEEK_UNSUPPORTED)
 
@@ -1813,90 +1801,32 @@ class PlaybackService:
             if self.snapshot.message == self.SEEK_UNSUPPORTED:
                 self.snapshot = replace(self.snapshot, message="")
 
+    def _silence_saved(self, delta: float):
+        self.snapshot = replace(self.snapshot, silence_saved=self.snapshot.silence_saved + delta)
+
     def _expect_seek(self, target: float):
-        self._metric_seek_target = target
-        self._metric_seek_deadline = time.monotonic() + 3.0
+        self._meter.expect_seek(target, self._now())
 
     def _reset_metrics(self, position: float, now: float | None = None):
-        self._close_silence_window()
-        self._last_metric_time = time.monotonic() if now is None else now
-        self._last_metric_position = position
-        self._silence_window = (self._last_metric_time, position)
+        snapshot = self.snapshot
+        self._meter.reset(position, self._now() if now is None else now, snapshot.trim_level, snapshot.speed)
 
     def _close_silence_window(self):
-        # Count the open window up to the last tick measured while playing,
-        # never the tick that ended it (a seek, a pause, a stall).
-        window, self._silence_window = self._silence_window, None
-        if window is not None and self._last_metric_time is not None and self.snapshot.trim_level != "off":
-            window_time, window_position = window
-            if self._last_metric_time > window_time:
-                self._add_silence((self._last_metric_position - window_position)
-                                  - (self._last_metric_time - window_time) * self.snapshot.speed)
-        self._silence_balance = 0.0  # the chain of windows ends here
-
-    def _add_silence(self, skipped: float):
-        # Windows share their end ticks, so delivery jitter cancels across
-        # them: a window that measured less than none is held against the
-        # next ones, not dropped, which kept only the positive half.
-        owed = self._silence_balance + skipped
-        self._silence_balance = min(0.0, owed)
-        self._unsaved_silence += max(0.0, owed)
-        if self._unsaved_silence >= 1.0 and self.listening:
-            delta, listening = self._unsaved_silence, self.listening
-            self._persistence.submit('silence', listening.add_silence_saved, delta, additive=True)
-            self._unsaved_silence = 0.0
-            saved = self.snapshot.silence_saved + delta
-            self.snapshot = replace(self.snapshot, silence_saved=saved)
+        self._meter.close_window(self.snapshot.trim_level, self.snapshot.speed)
 
     def _measure_silence(self, position: float):
-        now = time.monotonic()
-        target = self._metric_seek_target
-        if target is not None:
-            # Until the seek lands (or is given up on), a tick is either the
-            # old position or the jump itself; neither is listening or silence.
-            if abs(position - target) <= 1.0 or now >= self._metric_seek_deadline:
-                self._metric_seek_target = None
-            self._reset_metrics(position, now)
-            return
-        if (self._last_metric_time is None or self._last_metric_position is None
-                or self.snapshot.state != PlaybackState.PLAYING or self.snapshot.buffering is not None
-                or position < self._last_metric_position):
-            self._reset_metrics(position, now)
-            return
-        elapsed = max(0.0, min(10.0, now - self._last_metric_time))
-        self._last_metric_time = now
-        self._last_metric_position = position
-        if self.snapshot.show_id:
-            self._unsaved_listening += elapsed
-            if self._unsaved_listening >= 30:
-                self._flush_listening()
-        if self.snapshot.trim_level == "off":
-            return
-        if self._silence_window is None:
-            self._silence_window = (now, position)
-            return
-        window_time, window_position = self._silence_window
-        skipped = (position - window_position) - (now - window_time) * self.snapshot.speed
-        # Tick delivery jitter is milliseconds and cancels across windows
-        # (see _add_silence), instead of each positive wobble counting as
-        # skipped silence. A trimmed pause jumps a quarter second or more
-        # and counts at once.
-        if now - window_time >= 1.0 or skipped >= 0.25:
-            self._silence_window = (now, position)
-            self._add_silence(skipped)
+        snapshot = self.snapshot
+        self._meter.measure(position, self._now(), snapshot.state == PlaybackState.PLAYING,
+                            snapshot.buffering is not None, snapshot.show_id, snapshot.trim_level, snapshot.speed)
 
     def _flush_listening(self):
-        if self._unsaved_listening > 0 and self.listening and self.snapshot.show_id:
-            show_id, seconds, listening = self.snapshot.show_id, self._unsaved_listening, self.listening
-            self._persistence.submit(('listening', show_id), lambda value: listening.add_listening(show_id, value),
-                                     seconds, additive=True)
-            self._unsaved_listening = 0.0
+        self._meter.flush_listening(self.snapshot.show_id)
 
     def _sleep_expired(self, token):
         with self._lock:
-            if self._dead or token != self._sleep_token:
+            if self._dead or token != self._sleep.token:
                 return
-            self._sleep_timer = None
+            self._sleep.fired()
             try:
                 self.pause()
             except Exception as exc:
@@ -1937,6 +1867,7 @@ class PlaybackService:
         if episode is None:
             return
         show = self.repository.get_show(episode.show_id)
+        self._review.trim = show.trim_level if show else "off"
         self.snapshot = PlaybackSnapshot(
             state=PlaybackState.PAUSED,
             episode_id=episode.id,
@@ -1948,7 +1879,7 @@ class PlaybackService:
             duration=float(episode.duration_seconds),
             speed=show.playback_speed if show else 1.0,
             volume=self.snapshot.volume,
-            trim_level=show.trim_level if show else "off",
+            trim_level=self._review.trim,
             silence_saved=self.listening.silence_saved() if self.listening else 0.0,
             artwork_path=episode.artwork_path,
         )
