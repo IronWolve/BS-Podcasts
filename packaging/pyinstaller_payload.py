@@ -20,8 +20,6 @@ UNUSED_BINARIES = (
     "qt6virtualkeyboard", "qtvirtualkeyboard", "qtvirtualkeyboardplugin",
     "imageformats/qpdf", "imageformats/libqpdf", "opengl32sw",
 )
-# In-app badge copies the app never loads: only the 512 px badge ships (DQ01).
-UNSHIPPED_BADGES = tuple(f"assets/branding/bs-podcasts-icon-{size}.png" for size in (32, 64, 128, 256))
 # Whether an uncaught traceback in the windowed build is suppressed (True) or shown in a dialog (False).
 # The owner has not chosen one value for both platforms, so this is the only place either value is set.
 DISABLE_WINDOWED_TRACEBACK = {"windows": False, "macos": True}
@@ -36,8 +34,6 @@ def dropped_payload(name):
     if any(part == "pil" or part.startswith("pil.") or part == "pillow" or part.startswith("pillow.") for part in parts):
         return True
     if {"setuptools", "pkg_resources", "_distutils_hack", "distutils"}.intersection(parts):
-        return True
-    if normalized.endswith(UNSHIPPED_BADGES):
         return True
     return any(marker in normalized for marker in UNUSED_BINARIES)
 
