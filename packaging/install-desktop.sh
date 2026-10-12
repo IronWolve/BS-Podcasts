@@ -49,6 +49,21 @@ if [[ "${1:-}" == "--status" ]]; then
   report_stats checks 3 failed "$failed"
   exit "$failed"
 fi
+if [[ "${1:-}" == "--uninstall" ]]; then
+  # Removes exactly the files this installer writes: the five icon copies, the entry, the launcher and its project
+  # record. Nothing else under the data home is touched, and the launcher folder goes only when it is then empty.
+  removed=0
+  for size in 32 64 128 256 512; do
+    target="$ICONS/${size}x${size}/apps/bs-podcasts.png"
+    if [[ -e "$target" || -L "$target" ]]; then rm -- "$target"; report ok "Removed $target"; removed=$((removed + 1)); fi
+  done
+  for target in "$APPS/bs-podcasts.desktop" "$LAUNCHER_DIR/launch.sh" "$LAUNCHER_DIR/project-root"; do
+    if [[ -e "$target" || -L "$target" ]]; then rm -- "$target"; report ok "Removed $target"; removed=$((removed + 1)); fi
+  done
+  rmdir -- "$LAUNCHER_DIR" 2>/dev/null || true
+  report_stats "files removed" "$removed" "launcher folder" "$LAUNCHER_DIR"
+  exit 0
+fi
 test -f "$WORKSPACE/dists/linux/runner.py" || { echo 'Build the Linux deployment first.' >&2; exit 1; }
 # Validate all inputs before writing to the user's desktop directories. The
 # deployment receipt, not current checkout contents, identifies the built icons.
