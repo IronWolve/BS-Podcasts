@@ -16,6 +16,7 @@ from check_dependencies import check
 from report import Reporter, size_text, tree_size
 from build_manifest import require_keys
 from prune_helper import prune_previous_deployments as prune_rollbacks
+from prune_helper import confirm_and_prune
 
 
 # Mac rollbacks are named by mkdtemp with this prefix. The shared folder also
@@ -147,7 +148,9 @@ def _finish_macos(workspace, work, prune, report):
     # nothing to recover (a first build retires nothing), so it is neither kept, counted nor reported.
     retained=previous if any(previous.iterdir()) else None
     if retained is None: previous.rmdir()
-    pruned=prune_previous_deployments(workspace/'.cache/previous-deployments',retain=retained) if prune else None
+    # Pruning lists the exact rollbacks and sizes, then deletes only after a typed YES in a terminal.
+    pruned=(confirm_and_prune(workspace/'.cache/previous-deployments',ROLLBACK_PREFIX,report,retain=retained)
+            if prune else None)
     signed=bool(os.environ.get('BS_PODCASTS_SIGN_IDENTITY'))
     app_files,app_bytes=tree_size(target/app.name)
     report.ok(f'Built and headless/relocation-verified BS Podcasts {version}: {target}')
@@ -165,7 +168,7 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check',action='store_true')
     parser.add_argument('--prune-old-deployments',action='store_true',
-                        help='delete all but the newest 3 Mac rollbacks after a successful build')
+                        help='after a successful build, list the Mac rollbacks beyond the newest 3 and delete them only after a typed YES')
     parser.add_argument('--plain',action='store_true',help='no colour')
     args=parser.parse_args()
     report=Reporter(plain=args.plain)

@@ -14,6 +14,7 @@ from runtime_state import runtime_lock, retire_stale
 from report import Reporter, size_text
 from build_manifest import require_keys
 from prune_helper import prune_previous_deployments as prune_rollbacks
+from prune_helper import confirm_and_prune
 
 
 # Linux rollbacks are named by mkdtemp with this prefix. The shared folder also
@@ -166,7 +167,9 @@ def _deploy_staged(workspace, destination, temporary, prune, report):
     retained = previous if any(previous.iterdir()) else None
     if retained is None:
         previous.rmdir()
-    pruned = prune_previous_deployments(workspace/'.cache/previous-deployments', retain=retained) if prune else None
+    # Pruning lists the exact rollbacks and sizes, then deletes only after a typed YES in a terminal.
+    pruned = (confirm_and_prune(workspace/'.cache/previous-deployments', ROLLBACK_PREFIX, report, retain=retained)
+              if prune else None)
     deployed_bytes = sum((destination/relative).stat().st_size for relative in deployed)
     report.ok(f'Built BS Podcasts {version}: {destination}')
     if retained is not None:
@@ -185,7 +188,7 @@ if __name__ == '__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check',action='store_true')
     parser.add_argument('--prune-old-deployments',action='store_true',
-                        help='delete all but the newest 3 Linux rollbacks after a successful build')
+                        help='after a successful build, list the Linux rollbacks beyond the newest 3 and delete them only after a typed YES')
     parser.add_argument('--plain',action='store_true',help='no colour')
     args=parser.parse_args()
     report = Reporter(plain=args.plain)
