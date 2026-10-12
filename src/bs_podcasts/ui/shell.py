@@ -1,7 +1,7 @@
 """Wide responsive application shell."""
 
 from contextlib import contextmanager
-from dataclasses import replace as replace_item
+from dataclasses import dataclass, replace as replace_item
 from collections import OrderedDict
 import json
 import logging
@@ -62,7 +62,7 @@ from .models import EpisodeRow, EpisodeDelegate, EpisodeModel, ItemRoles, ShowRo
 from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, decode_preview_images, install_previews
 from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_accent_token
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, SettingsPage, KeyboardMenu, _ListPageMixin
-from .shortcuts import ShortcutManager
+from .shortcuts import ShortcutManager, set_literal_tooltip
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
 from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu, quiet_signals
 
@@ -143,6 +143,15 @@ _PLAYBACK_ACTIONS = {
 # Written out rather than strftime("%b"): month names follow the system
 # locale and mixed into English text ("Okt 03" beside "Today").
 _MONTH_ABBREVIATIONS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+@dataclass(frozen=True)
+class ViewHandoff:
+    """The view state one window hands the next: a theme rebuild, or the saved view at launch.
+    `saved` is JSON-safe and is the only part written to ui.view_state. `live` holds objects the new window
+    takes over as they are: the previews, the Discover cache and items, and the business bridge and state."""
+    saved: dict
+    live: dict
 
 
 def _item_key(value):
@@ -319,7 +328,7 @@ class MainWindow(QMainWindow):
     # entry holds the whole selection, and both stacks are saved with the view.
     _NAVIGATION_HISTORY_LIMIT = 50
 
-    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None):
+    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None, inline_work=False):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.library = library
@@ -334,7 +343,9 @@ class MainWindow(QMainWindow):
         self._pending_view_restore = None
         self._restoring_view = False
         self.jobs = jobs
-        self.commands = commands or (CommandQueue() if jobs is not None else None)
+        self.commands = commands or CommandQueue()
+        # Test-only: with no job runner, read and command work runs on the Qt thread. Production always passes one.
+        self.inline_work = inline_work
         self.download_jobs = download_jobs or jobs
         # A download-first Play runs on its own worker when the app gives
         # it one, so it never waits behind automatic or bulk downloads.
@@ -398,7 +409,7 @@ class MainWindow(QMainWindow):
         self._discover_result_count = 0
         self._discover_displayed_key = None
         self._discover_retry_request = None
-        self._discover_visited = bool(view_state and view_state.get("discover_visited"))
+        self._discover_visited = bool(view_state and view_state.saved.get("discover_visited"))
         self._previews = FeedResultCache()
         self._preview_pending = set()
         # The selected card's feed is requested once the selection rests, so
@@ -558,8 +569,9 @@ class MainWindow(QMainWindow):
         self._bridge.completed.connect(self._refresh_finished)
         self._bridge.playback_event.connect(self._playback_changed)
         self._bridge.download_event.connect(self._download_progress)
-        self._business_bridge = (view_state or {}).get('_business_bridge') or _BusinessBridge(QApplication.instance())
-        for name, value in (view_state or {}).get('_business_state', {}).items():
+        live = view_state.live if view_state is not None else {}
+        self._business_bridge = live.get('business_bridge') or _BusinessBridge(QApplication.instance())
+        for name, value in live.get('business_state', {}).items():
             if name in self._BUSINESS_STATE:
                 setattr(self, name, value)
 
@@ -1021,15 +1033,13 @@ class MainWindow(QMainWindow):
         page = page if 0 <= page < self.page_count and page != PAGE_SETTINGS else 0
         raw = self.library.setting("ui.view_state", "")
         state = self._incoming_view_state
-        if raw:
-            if state is None:
-                try:
-                    state = json.loads(raw)
-                    if isinstance(state, dict):
-                        state = {key: value for key, value in state.items() if not key.startswith('_')}
-                except (ValueError, TypeError, RecursionError):
-                    state = None
-        if page == PAGE_DISCOVER and isinstance(state, dict) and state.get("page") == PAGE_DISCOVER:
+        if raw and state is None:
+            try:
+                saved = json.loads(raw)
+                state = ViewHandoff(saved=saved, live={}) if isinstance(saved, dict) else None
+            except (ValueError, TypeError, RecursionError):
+                state = None
+        if page == PAGE_DISCOVER and state is not None and state.saved.get("page") == PAGE_DISCOVER:
             # The saved Discover view loads its own results when it is
             # restored (_finish_view_restore). The first-visit For You load
             # would start first and later replace the saved chart and category.
@@ -1037,7 +1047,7 @@ class MainWindow(QMainWindow):
         self.navigation.select(page)
         self._back_stack.clear()
         self._update_navigation_controls()
-        if isinstance(state, dict):
+        if state is not None:
             self._reload_callbacks.append(lambda: self._restore_view_state(state))
 
     def _save_layout(self):
@@ -1057,7 +1067,8 @@ class MainWindow(QMainWindow):
             return
         repository = self.library.repository
         values = dict(values)
-        if self.commands is None:
+        if self.jobs is None:
+            self._require_inline('Saving settings')
             try:
                 repository.persist_settings(values)
             except Exception:
@@ -1083,7 +1094,7 @@ class MainWindow(QMainWindow):
         elif current:
             self._notify('Changes applied for this session were not saved; retry to keep them.', 'error', 'Retry', lambda: self._persist_ui_settings(current))
 
-    def _capture_view_state(self):
+    def _capture_view_state(self) -> ViewHandoff:
         views = {}
         for index in range(self.page_count):
             page = self.pages.widget(index)
@@ -1097,7 +1108,7 @@ class MainWindow(QMainWindow):
                 "filter": page.chips.current() if hasattr(page, "chips") else "All",
                 "sort": getattr(page, "_sort", ""),
             }
-        return {
+        saved = {
             "page": self.pages.currentIndex(), "hero_show_id": self._hero_show_id,
             "preview_url": self._preview_episodes_url, "views": views,
             'catalog_query': self.episode_page.header.search.text().strip() if self._catalog_query else '',
@@ -1114,23 +1125,26 @@ class MainWindow(QMainWindow):
             "discover_loading": self._discover_loading,
             # Operation and value; a chart or topic value becomes a list in JSON.
             "discover_request": [self._discover_operation, self._discover_value],
-            "_previews": OrderedDict(self._previews),
-            "_discover_items": list(self.discover_page.all_items),
-            "_discover_cache": dict(self._discover_cache),
-            "_discover_request": (self._discover_operation, self._discover_value,
-                                  self._discover_limit, self._discover_exhausted),
-            '_business_bridge': self._business_bridge,
-            '_business_state': {name: getattr(self, name) for name in self._BUSINESS_STATE},
         }
+        live = {
+            "previews": OrderedDict(self._previews),
+            "discover_items": list(self.discover_page.all_items),
+            "discover_cache": dict(self._discover_cache),
+            "discover_request": (self._discover_operation, self._discover_value,
+                                 self._discover_limit, self._discover_exhausted),
+            "business_bridge": self._business_bridge,
+            "business_state": {name: getattr(self, name) for name in self._BUSINESS_STATE},
+        }
+        return ViewHandoff(saved=saved, live=live)
 
     def _save_view_state(self):
         if self.library is not None:
             state = self._capture_view_state()
-            self._persist_ui_settings({"ui.view_state": json.dumps(
-                {key: value for key, value in state.items() if not key.startswith("_")})})
+            self._persist_ui_settings({"ui.view_state": json.dumps(state.saved)})
 
-    def _restore_view_state(self, state: dict):
-        state = dict(state)
+    def _restore_view_state(self, handoff: ViewHandoff):
+        live = handoff.live
+        state = dict(handoff.saved)
         for flag in ('now_playing', 'search_open', 'discover_visited', 'discover_loading'):
             state[flag] = state.get(flag) is True
         for name in ('preview_url', 'search_query', 'discover_summary', 'discover_sort', 'catalog_query'):
@@ -1150,15 +1164,15 @@ class MainWindow(QMainWindow):
                   min(limits[1], max(HISTORY_PAGE_SIZE, getattr(self, '_history_total', 0))))
         if limits != (self._episodes_limit, self._history_limit):
             self._episodes_limit, self._history_limit = limits
-            self._request_reload(lambda: self._restore_view_state(state))
+            self._request_reload(lambda: self._restore_view_state(handoff))
             return
-        self._previews.update(state.get("_previews", {}))
-        self._discover_cache.update(state.get("_discover_cache", {}))
-        if "_discover_items" in state:
-            self.discover_page.set_items(state["_discover_items"])
-        if "_discover_request" in state:
+        self._previews.update(live.get("previews", {}))
+        self._discover_cache.update(live.get("discover_cache", {}))
+        if "discover_items" in live:
+            self.discover_page.set_items(live["discover_items"])
+        if "discover_request" in live:
             (self._discover_operation, self._discover_value,
-             self._discover_limit, self._discover_exhausted) = state["_discover_request"]
+             self._discover_limit, self._discover_exhausted) = live["discover_request"]
             self._discover_displayed_key = (self._discover_operation, repr(self._discover_value))
         else:
             request = self._saved_directory_request(state.get("discover_request"))
@@ -2020,7 +2034,7 @@ class MainWindow(QMainWindow):
         if show_id in self._retained_removals:
             self._notify('This podcast is already being removed.', 'info')
             return
-        if self.commands is None or self.jobs is None:
+        if self.jobs is None:
             self._notify('Podcast removal is unavailable in this session.', 'error')
             return
         dialog = RemovePodcastDialog(preview, self._format_bytes, self)
@@ -2939,7 +2953,7 @@ class MainWindow(QMainWindow):
             jobs = tuple(self._pending_jobs)
         return (
             any(not future.done() for future in jobs)
-            or (self.commands is not None and self.commands.pending())
+            or self.commands.pending()
             or self._reload_timer.isActive()
             or self._download_reload_timer.isActive()
             or self.search_overlay.debounce_pending()
@@ -2966,6 +2980,12 @@ class MainWindow(QMainWindow):
             return self.history_page
         return None  # Dialog/action/overlay failures belong to feedback, not an unrelated page.
 
+    def _require_inline(self, what: str):
+        """Work with no job runner runs on the Qt thread only in a window built with inline_work (the private
+        checks). Production always passes jobs, so reaching this without the flag is an error, not a fallback."""
+        if not self.inline_work:
+            raise RuntimeError(f"{what} needs a job runner: pass jobs, or inline_work=True in a check")
+
     def _run_read(self, work, apply, key: str, pool=None, *, coalesce=True, bulk=False):
         """Run `work()` on a worker, then `apply(result)` on the main thread.
         Read-only keys retain one active request and one replaceable latest.
@@ -2975,6 +2995,7 @@ class MainWindow(QMainWindow):
         if self._closed:
             return
         if self.jobs is None:
+            self._require_inline('A read')
             apply(work())
             return
         owner = self._read_owner(key)
@@ -3088,7 +3109,8 @@ class MainWindow(QMainWindow):
     def _run_command(self, work, apply=None, *, keep=True, bulk=False):
         if self._closed:
             return
-        if self.commands is None:
+        if self.jobs is None:
+            self._require_inline('A command')
             try:
                 value = work()
                 if apply is not None:
@@ -3107,8 +3129,8 @@ class MainWindow(QMainWindow):
             return
         if supersedes:
             self._play_after_download = 0
-            token = commands.supersede() if commands is not None else None
-            if cancellable and commands is not None:
+            token = commands.supersede()
+            if cancellable:
                 kwargs["cancelled"] = lambda: not commands.current(token)
         # Every position change is retained: Quit drains retained commands
         # before the shutdown finalizer saves the position, so a pending seek
@@ -4147,9 +4169,9 @@ class MainWindow(QMainWindow):
         if self.library is None:
             return
         library, commands = self.library, self.commands
-        token = commands.supersede() if commands else None
+        token = commands.supersede()
         def apply(episodes):
-            if commands is not None and not commands.current(token):
+            if not commands.current(token):
                 return
             if not episodes:
                 self._notify("This podcast has no playable episodes yet.", "info")
@@ -4839,14 +4861,11 @@ class MainWindow(QMainWindow):
             self._refresh_context_item(current, update(current))
 
     def _delete_played_quietly(self, episode_ids=None, confirm=False, if_enabled=False):
-        """Auto-delete downloads for episodes that JUST became played.
-
-        The setting reads per-episode; deleting every historical played
-        download without confirmation violated the destructive-storage rule.
-        Bulk cleanup stays behind the confirming dialog, and `confirm` puts
-        a bulk mark's files behind it too. `if_enabled` has the worker read
-        the delete-played setting, so a finished episode never makes the
-        window thread wait on the database."""
+        """Offer the played downloads of episodes that just finished: the worker finds them, and the
+        preview dialog (exact count and bytes) runs before anything is deleted. `if_enabled` has the
+        worker read the delete-played setting, so a finished episode never makes the window thread wait
+        on the database. Without episode ids every played download is offered, and only then is the
+        dialog asked for by the caller's own request."""
         if self.downloads is None or (episode_ids is None and not confirm):
             # No ids means every played download: only the dialog may ask.
             return
@@ -5273,14 +5292,14 @@ class MainWindow(QMainWindow):
             return
         self._play_after_download = 0
         library, playback, commands = self.library, self.playback, self.commands
-        token = commands.supersede() if commands else None
-        current = lambda: commands is None or commands.current(token)
+        token = commands.supersede()
+        current = lambda: commands.current(token)
         def work():
             if not current():
                 return None
             playback.load_episode(episode_id, autoplay=True, cancelled=lambda: not current(), force_stream=force_stream)
             return None
-        if commands is None:
+        if self.jobs is None:
             self._run_command(work, lambda value: self._on_play_prepared('play-prepared',
                 (episode_id, token), JobResult(JobStatus.OK, value=value)))
         else:
@@ -5288,7 +5307,7 @@ class MainWindow(QMainWindow):
 
     def _on_play_prepared(self, kind, identifier, result):
         episode_id, token = identifier
-        if self.commands is not None and not self.commands.current(token):
+        if not self.commands.current(token):
             return
         if result.status not in {JobStatus.OK, JobStatus.EMPTY}:
             self._notify(result.message or 'Could not prepare playback', 'error')
@@ -5338,8 +5357,8 @@ class MainWindow(QMainWindow):
         # A different playback intent supersedes any queued play-on-download.
         self._play_after_download = 0
         playback, commands = self.playback, self.commands
-        token = commands.supersede() if commands else None
-        cancelled = lambda: commands is not None and not commands.current(token)
+        token = commands.supersede()
+        cancelled = lambda: not commands.current(token)
         self._run_command(lambda: playback.load_episode(item.episode_id, autoplay=True,
             start_position=item.bookmark_position, cancelled=cancelled))
 
@@ -5462,7 +5481,7 @@ class MainWindow(QMainWindow):
 
     def _set_volume(self, volume: float):
         if self.playback is not None:
-            if self.commands is None:
+            if self.jobs is None:
                 self._playback_command('set_volume', volume)
                 return
             future = self.commands.submit_latest('volume', lambda: self.playback.set_volume(volume), keep=True)
@@ -6348,13 +6367,13 @@ class MainWindow(QMainWindow):
             choose = QPushButton(mnemonic_safe(query))
             choose.setObjectName("popoverItem")
             choose.setCursor(Qt.CursorShape.PointingHandCursor)
-            choose.setToolTip(f"Search for {query}")
+            set_literal_tooltip(choose, f"Search for {query}")
             choose.setAccessibleName(f"Search for {query}")
             remove = QPushButton()
             remove.setObjectName("iconButton")
             remove.setIcon(icons.icon("close", COLORS["muted"], scaled_px(12)))
             remove.setFixedSize(scaled_px(26), scaled_px(26))
-            remove.setToolTip(f"Remove {query} from search history")
+            set_literal_tooltip(remove, f"Remove {query} from search history")
             # Icon-only: screen readers need the name, not just the tooltip.
             remove.setAccessibleName(f"Remove {query} from search history")
             choose.clicked.connect(
@@ -7068,14 +7087,14 @@ class MainWindow(QMainWindow):
             if confirm:
                 self._notify("No played episodes have downloads to delete")
             return
-        if confirm:
-            dialog = DeleteFilesDialog(
-                "Delete played downloads",
-                "Verified downloads for finished episodes. Favorites and unverified files are protected; episodes stay in your library.",
-                previews, self._format_bytes, self,
-            )
-            if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
-                return
+        # Automatic and requested cleanup alike show the exact targets and bytes before deletion.
+        dialog = DeleteFilesDialog(
+            "Delete played downloads",
+            "Verified downloads for finished episodes. Favorites and unverified files are protected; episodes stay in your library.",
+            previews, self._format_bytes, self,
+        )
+        if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
+            return
         self._delete_downloads_async(
             previews,
             "Deleted {count} download{plural}  ·  {size} reclaimed" if confirm
@@ -8943,7 +8962,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             self._minimize_to_tray()
             return
-        if not self._keep_services and self.commands is not None:
+        if not self._keep_services:
             if not getattr(self, "_quit_drain_started", 0):
                 self._quit_drain_started = time.monotonic()
                 self._save_layout()
@@ -9001,14 +9020,11 @@ class MainWindow(QMainWindow):
         with _JOBS_LOCK:
             jobs = tuple(self._pending_jobs)
         for future in jobs:
-            if self.commands is None or not self.commands.retained(future):
+            if not self.commands.retained(future):
                 future.cancel()
         with _JOBS_LOCK:
             self._pending_jobs.clear()
-        if self.commands is not None:
-            self.commands.finish(self.playback.shutdown if self.playback is not None else None)
-        elif self.playback is not None:
-            self.playback.shutdown()
+        self.commands.finish(self.playback.shutdown if self.playback is not None else None)
         super().closeEvent(event)
         # The toolkit quits on its own only when the closed window was
         # visible, so a Quit from the tray while hidden tore everything down

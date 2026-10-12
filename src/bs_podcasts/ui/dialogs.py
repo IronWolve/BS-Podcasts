@@ -41,6 +41,7 @@ from ..config import APP_NAME, APP_TAGLINE, GITHUB_URL, app_version
 from . import icons
 from .pixmaps import initials
 from .theme import COLORS, SPACE, scaled_px
+from .shortcuts import set_literal_tooltip
 from .widgets import Artwork, PlainTextLabel as _PlainTextLabel, fit_combo_width, safe_feed_html, exec_menu
 
 
@@ -133,7 +134,7 @@ def _add_value_row(form, label_text: str, value: str, value_labels: list):
     field = PlainTextLabel(_wrap_long_value(value))
     field.setTextFormat(Qt.TextFormat.PlainText)
     field.setWordWrap(True)
-    field.setToolTip(value)
+    set_literal_tooltip(field, value)
     _selectable_value(field)
     label = PlainTextLabel(label_text)
     label.setObjectName("muted")
@@ -1057,13 +1058,13 @@ class PodcastInfoDialog(StyledDialog):
         open_website.setObjectName("primaryButton")
         open_website.setIcon(icons.icon("external", COLORS["on_accent"], 16))
         open_website.setEnabled(bool(website_url))
-        open_website.setToolTip(website_url or "This feed does not provide a website")
+        set_literal_tooltip(open_website, website_url or "This feed does not provide a website")
         open_website.clicked.connect(lambda: open_web_url(website_url))
         copy_feed = QPushButton("Copy RSS feed")
         copy_feed.setObjectName("quietButton")
         copy_feed.setIcon(icons.icon("rss", COLORS["text"], 16))
         copy_feed.setEnabled(bool(feed_url))
-        copy_feed.setToolTip(feed_url or "Feed URL unavailable")
+        set_literal_tooltip(copy_feed, feed_url or "Feed URL unavailable")
         copy_feed.clicked.connect(lambda: _copy_with_feedback(copy_feed, feed_url))
         actions.addWidget(open_website)
         actions.addWidget(copy_feed)
@@ -1187,7 +1188,7 @@ class ShortcutsDialog(StyledDialog):
                 row = QHBoxLayout()
                 key_label = PlainTextLabel(_wrap_long_value(key))
                 key_label.setObjectName("cardTitle")
-                key_label.setToolTip(key)
+                set_literal_tooltip(key_label, key)
                 key_label.setAccessibleName(key or 'Not assigned')
                 key_label.setWordWrap(True)
                 key_label.setMinimumWidth(scaled_px(110))

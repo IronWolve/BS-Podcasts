@@ -39,6 +39,7 @@ from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, P
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, connect_hover_readout, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
 from .widgets import fit_combo_width, quiet_signals
 from .widgets import PlainTextLabel, wheel_needs_focus, exec_menu, FlowLayout
+from .shortcuts import set_literal_tooltip
 from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, reduced_motion, scaled_px, system_theme, theme_name
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 
@@ -2616,4 +2617,4 @@ class SettingsPage(BasePage):
         self.artwork_usage.setText(artwork)
         self.temp_path.setText(temp_path)
         for label in (self.data_root, self.library_path, self.backup_path, self.download_path, self.artwork_path, self.temp_path):
-            label.setToolTip(label.text())
+            set_literal_tooltip(label, label.text())
