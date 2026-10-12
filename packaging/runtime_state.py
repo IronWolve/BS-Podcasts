@@ -8,6 +8,13 @@ import stat
 import sys
 import tempfile
 
+# App identity, the one packaging-side source for the PID record name, its runtime kind and the log name.
+# It must equal bs_podcasts.config.APP_ID (smoke_runtime_partials checks that). The folder name is never used.
+APP_ID = 'bs-podcasts'
+PID_NAME = f'{APP_ID}.pid.json'
+RUNTIME_KIND = f'{APP_ID}-runtime'
+LOG_NAME = f'{APP_ID}.log'
+
 
 def process_stamp(pid):
     try:
@@ -18,12 +25,12 @@ def process_stamp(pid):
 
 def read_record(project, path=None):
     """A well-formed record, including one written before the folder was renamed."""
-    path = path or project/'tmp/bs-podcasts.pid.json'
+    path = path or project/'tmp'/PID_NAME
     try:
         if path.is_symlink():
             return None
         value = json.loads(path.read_text())
-        if (value.get('kind') == 'bs-podcasts-runtime' and isinstance(value.get('project'), str)
+        if (value.get('kind') == RUNTIME_KIND and isinstance(value.get('project'), str)
                 and type(value.get('pid')) is int and value['pid'] > 0
                 and isinstance(value.get('started'), str)):
             return value
@@ -111,7 +118,7 @@ def runtime_lock(project, inherit=False):
 
 def retire_stale(project, path=None):
     """Call while holding runtime_lock. Preserve unknown or live records."""
-    path = path or project/'tmp/bs-podcasts.pid.json'
+    path = path or project/'tmp'/PID_NAME
     if not path.exists() and not path.is_symlink():
         return False
     value = read_record(project,path)
@@ -143,7 +150,7 @@ def retire_stale(project, path=None):
 
 def write_record(project, value, path=None):
     """Publish a complete PID record atomically while holding runtime_lock."""
-    path = path or project / 'tmp/bs-podcasts.pid.json'
+    path = path or project/'tmp'/PID_NAME
     if path.exists() or path.is_symlink():
         raise RuntimeError('PID record already exists; nothing was replaced.')
     descriptor, name = tempfile.mkstemp(prefix='.pid-', suffix='.json', dir=path.parent)

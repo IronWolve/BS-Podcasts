@@ -7,11 +7,11 @@ import shutil
 import signal
 import sys
 import time
-from runtime_state import process_stamp, read_record, process_state, runtime_lock, retire_stale, write_record
+from runtime_state import LOG_NAME, PID_NAME, RUNTIME_KIND, process_stamp, read_record, process_state, runtime_lock, retire_stale, write_record
 
 DEPLOYMENT = Path(__file__).resolve().parent
 PROJECT = DEPLOYMENT.parent.parent
-PID_FILE = PROJECT/'.cache/bs-podcasts.pid.json'
+PID_FILE = PROJECT/'.cache'/PID_NAME
 _LIBRARY_FILES = ('library.db', 'library.db-wal', 'library.db-shm')
 _ADOPTED = 'library-adopted.json'
 # (state, text) lines for the console, filled while the data folder is chosen.
@@ -122,7 +122,7 @@ def adopt_library(found, project=None):
 
 def _legacy_pid_file():
     # Earlier launchers kept the record in tmp/, which may be cleared while the app runs.
-    return PROJECT/'tmp/bs-podcasts.pid.json'
+    return PROJECT/'tmp'/PID_NAME
 
 
 def record():
@@ -275,7 +275,7 @@ def _describe(args,report):
     current=record()
     print(report.paint('1;36',f'BS Podcasts {module.__version__}'),flush=True)
     for label,value in (('Runtime',DEPLOYMENT),('Python',sys.version.split()[0]),
-                        ('Data',os.environ['BS_PODCASTS_DATA_DIR']),('Log',PROJECT/'logs/bs-podcasts.log')):
+                        ('Data',os.environ['BS_PODCASTS_DATA_DIR']),('Log',PROJECT/'logs'/LOG_NAME)):
         report.line('info',f'{label}: {value}')
     for state,text in NOTICES:
         report.line(state,text)
@@ -360,7 +360,7 @@ def _launch(args,extra,report,app_started):
     with runtime_lock(PROJECT,inherit=True):
         _describe(args,report)
         retire_records()
-        value={'kind':'bs-podcasts-runtime','project':str(PROJECT),'pid':os.getpid(),'started':process_stamp(os.getpid())}
+        value={'kind':RUNTIME_KIND,'project':str(PROJECT),'pid':os.getpid(),'started':process_stamp(os.getpid())}
         signals={}
         try:
             write_record(PROJECT, value, PID_FILE)
