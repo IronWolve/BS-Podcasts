@@ -220,6 +220,9 @@ DLL=$(find "$SRC/$MPV_DIR/build-mingw" -name "libmpv-2.dll" | head -1)
 mkdir -p "$ROOT/out"
 cp "$DLL" "$ROOT/out/libmpv-2.dll"
 ${TRIPLE}-strip "$ROOT/out/libmpv-2.dll"
+# Import allow list: the DLL may import Windows system components only. pe_imports.py lists anything else and fails.
+"$BS_PYTHON" -B -I "$BS_BUILD_WORKSPACE/repo/packaging/pe_imports.py" "$ROOT/out/libmpv-2.dll" \
+    || { echo "!!! libmpv-2.dll imports a DLL outside the allow list"; exit 1; }
 # Refuse before the receipt is written if the recipe, helper or inputs changed during the build.
 bs_identity | cmp -s - "$ROOT/identity.txt" || { printf 'Native recipe, helper or pinned inputs changed during the build; refusing provenance.\n' >&2; exit 1; }
 "$BS_PYTHON" -B -I "$BS_BUILD_WORKSPACE/repo/packaging/native_sources.py" --record "$ROOT/out/libmpv-2.dll"
