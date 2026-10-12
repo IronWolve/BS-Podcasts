@@ -8293,7 +8293,8 @@ class MainWindow(QMainWindow):
     def _flush_context_item(self):
         pending, self._context_pending = self._context_pending, None
         if pending is not None and self.pages.currentWidget() is pending[1]:
-            self._show_item(pending[0])
+            # The row can change while the selection settles (a cover arrives), so the pane shows it as it is now.
+            self._show_item(pending[1].current_row())
 
     def _show_item(self, item):
         # An explicit show supersedes a selection still waiting to settle.

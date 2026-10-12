@@ -214,6 +214,10 @@ class _ListPageMixin:
     def selected_keys(self):
         return self._selected_keys()
 
+    def current_row(self):
+        """The current row as the model holds it now, or None when nothing is current."""
+        return self.view.currentIndex().data(ItemRoles.ITEM)
+
     def apply_filters(self, *args, **kwargs):
         return self._apply_filters(*args, **kwargs)
 
