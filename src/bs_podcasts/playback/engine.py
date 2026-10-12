@@ -13,13 +13,26 @@ logger = logging.getLogger("bs_podcasts")
 
 mpv = None
 
+# Set by the launcher to the native library it bound (see packaging/runtime_*.py).
+BOUND_LIBRARY_ENV = "BS_PODCASTS_BOUND_LIBMPV"
+
 
 def _load_mpv():
-    """Import the native binding on first use; loading it dlopens the library."""
+    """Import the native binding on first use; loading it dlopens the library.
+
+    When the launcher published the library it bound, python-mpv must have
+    loaded that same file. Any other library would be a player the release
+    was not built and tested with, so it is refused rather than used."""
     global mpv
     if mpv is None:
         import mpv as mpv_module
 
+        expected = os.environ.get(BOUND_LIBRARY_ENV)
+        if expected:
+            loaded = getattr(getattr(mpv_module, "backend", None), "_name", None)
+            if not loaded or os.path.realpath(str(loaded)) != os.path.realpath(expected):
+                raise PlaybackUnavailable(
+                    "The native player that loaded is not the bundled one; restart with the application launcher.")
         mpv = mpv_module
 
 

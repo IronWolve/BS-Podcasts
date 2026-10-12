@@ -1,7 +1,11 @@
 """Select the release's native player explicitly, without a system fallback."""
 import ctypes.util
 from pathlib import Path
+import os
 import sys
+
+# The bound library's path, published for the playback engine to verify.
+BOUND_LIBRARY_ENV = 'BS_PODCASTS_BOUND_LIBMPV'
 
 
 def bind_native(path):
@@ -16,4 +20,5 @@ def bind_native(path):
     def find_library(name):
         return str(path) if name == 'mpv' else original(name)
     ctypes.util.find_library = find_library
+    os.environ[BOUND_LIBRARY_ENV] = str(path)
     return path
