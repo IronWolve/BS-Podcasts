@@ -1436,7 +1436,8 @@ class LibraryRepository:
             media_url=row["media_url"],
             mime_type=row["mime_type"],
             published_at=row["published_at"],
-            duration_seconds=row["observed_duration_seconds"] or row["duration_seconds"],
+            # The column is REAL, so SQLite hands back 2520.0 for a stored 2520; whole seconds are the contract.
+            duration_seconds=int(round(row["observed_duration_seconds"] or 0)) or row["duration_seconds"],
             position_seconds=row["position_seconds"],
             played=bool(row["played"]),
             is_new=bool(row["is_new"]),
