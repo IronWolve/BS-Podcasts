@@ -107,6 +107,8 @@ ACCENTS = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
 # Page sizes for the two capped global views. Each "Load more" click widens the
 # window by one page; design.md forbids silently substituting a cap for "all".
 EPISODES_PAGE_SIZE = 5000
+# Milliseconds a selection must stay still before the detail pane renders it.
+CONTEXT_SETTLE_MS = 150
 HISTORY_PAGE_SIZE = 200
 # How the command queue treats each playback action, as (supersedes, keeps,
 # cancellable, logs). A superseding action retires the commands queued before
@@ -408,6 +410,13 @@ class MainWindow(QMainWindow):
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(300)
         self._preview_timer.timeout.connect(self._preview_selected)
+        # A selection change renders the detail pane once the selection has settled for
+        # CONTEXT_SETTLE_MS, so holding an arrow key does not render every episode it passes.
+        self._context_pending = None
+        self._context_timer = QTimer(self)
+        self._context_timer.setSingleShot(True)
+        self._context_timer.setInterval(CONTEXT_SETTLE_MS)
+        self._context_timer.timeout.connect(self._flush_context_item)
         self._discover_newest_pending = set()
         self._discover_newest_waiting = []
         self._discover_newest_active = set()
@@ -713,7 +722,7 @@ class MainWindow(QMainWindow):
             if hasattr(page, "context_changed"):
                 # Only the visible page drives the details pane; hidden pages
                 # restoring their selection after a reload must not hijack it.
-                page.context_changed.connect(lambda item, source=page: self._show_item(item) if self.pages.currentWidget() is source else None)
+                page.context_changed.connect(lambda item, source=page: self._select_context_item(item, source) if self.pages.currentWidget() is source else None)
                 page.context_updated.connect(lambda previous, item, source=page:
                     self._refresh_context_item(previous, item) if self.pages.currentWidget() is source else None)
             page.header.back_requested.connect(self.navigate_back)
@@ -8179,7 +8188,20 @@ class MainWindow(QMainWindow):
         self.context.tabs.setCurrentIndex(tab)
         self.context.selected_scroll.verticalScrollBar().setValue(scroll)
 
+    def _select_context_item(self, item, page):
+        """A selection on the visible page: the detail pane shows it once the selection has settled."""
+        self._context_pending = (item, page)
+        self._context_timer.start()
+
+    def _flush_context_item(self):
+        pending, self._context_pending = self._context_pending, None
+        if pending is not None and self.pages.currentWidget() is pending[1]:
+            self._show_item(pending[0])
+
     def _show_item(self, item):
+        # An explicit show supersedes a selection still waiting to settle.
+        self._context_timer.stop()
+        self._context_pending = None
         self._context_revision += 1
         self._preview_timer.stop()
         self._preview_wanted = ""
