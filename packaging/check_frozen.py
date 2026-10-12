@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path, PureWindowsPath
 from types import CodeType
 from PyInstaller.archive.readers import CArchiveReader
+from report import Reporter
 from source_manifest import privacy_scan_bytes, read_deny_file
 
 _ENCODINGS=('utf-8','utf-16-le','utf-16-be')
@@ -112,7 +113,9 @@ def check(root, private_root):
     for name in pyz.toc:
         if name=='bs_podcasts' or name.startswith('bs_podcasts.'):
             count+=1; code_check(pyz.extract(name))
-    print(f'Frozen privacy check: {len(paths)} files, {count} app modules; PASS')
+    console = Reporter()
+    console.ok('Frozen privacy check passed')
+    console.stats([('files', str(len(paths))), ('app modules', str(count))])
 
 
 if __name__=='__main__':

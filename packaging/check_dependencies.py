@@ -6,6 +6,8 @@ import re
 import sys
 import tomllib
 
+from report import Reporter
+
 
 def parse_requirement(text):
     if '==' not in text:
@@ -84,8 +86,10 @@ def check(lock):
             failures.append(f'{name}: expected {version}, found {installed}')
     if failures:
         raise RuntimeError('Environment differs from the approved dependency lock; update it explicitly.\n'+'\n'.join(failures))
-    print(f'Approved dependency versions verified: {count}; Python {sys.version.split()[0]}. '
-          'Package file hashes are enforced when the lock is installed with hash checking required; this check does not compare them.')
+    console = Reporter()
+    console.ok('Approved dependency versions verified')
+    console.info('Package file hashes are enforced when the lock is installed with hash checking required; this check does not compare them.')
+    console.stats([('packages', str(count)), ('python', sys.version.split()[0])])
 
 
 if __name__=='__main__':
