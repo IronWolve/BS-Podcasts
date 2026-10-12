@@ -1297,7 +1297,9 @@ class MainWindow(QMainWindow):
                 query = saved.get("query", "")
                 search.setText(query if isinstance(query, str) else "")
             restored_sort = saved.get("sort", getattr(page, "_sort", ""))
-            if isinstance(restored_sort, str):
+            # The podcast sort is saved on its own at once (ui.podcast_sort); the view state is saved only at
+            # close, so after a crash it would put the older sort back over the one the user chose.
+            if isinstance(restored_sort, str) and page is not self.podcast_page:
                 page.restore_sort(restored_sort)
             if page.filter_name() is not None:
                 value = saved.get("filter", "All")
@@ -2635,10 +2637,9 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(250, self, self._relaunch_for_theme)
             return
         self._keep_services = True
-        # From here until the replacement binds itself, completions wait in the
-        # bridge: one landing on this window in that gap would update counters
-        # the replacement never sees (its copy was taken at the handoff).
-        self._business_bridge.bind(None)
+        # The application unbinds the bridge right before it captures this
+        # window's state (see rebuild_when_possible): a rebuild deferred while
+        # the window is away must keep receiving completions until then.
         self.relaunch_requested.emit()
 
     def _resume_background_work(self):
@@ -3741,7 +3742,10 @@ class MainWindow(QMainWindow):
         library = self.library
         def work():
             from ..data.files import atomic_write
-            return atomic_write(Path(path).expanduser(), library.export_opml())
+            # The owner's own export is a faithful backup (the notice says to keep it private). The
+            # shareable form empties every query value, and two feeds that differ only there collapsed
+            # into one on re-import.
+            return atomic_write(Path(path).expanduser(), library.export_opml(keep_credentials=True))
         self._run_read(work, lambda target: self._notify(
             f"Exported subscriptions to {target.name}. Keep it private: feed URLs may contain access tokens.", "success"), "export-opml", coalesce=False)
 

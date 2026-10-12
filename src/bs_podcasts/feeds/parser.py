@@ -309,20 +309,23 @@ def _rss_enclosure(item) -> tuple[str, str, int]:
 
 
 def _transcript(element) -> tuple[str, str]:
+    # The first element with an address wins: a namespace's element without one (Podlove's, which carries
+    # its data inline) must not hide the podcast-namespace element that follows it.
     for child in element:
         if _local(child.tag) != "transcript":
             continue
-        return (
-            child.attrib.get("url", "").strip(),
-            child.attrib.get("type", "").strip().lower(),
-        )
+        url = child.attrib.get("url", "").strip()
+        if url:
+            return url, child.attrib.get("type", "").strip().lower()
     return "", ""
 
 
 def _chapters(element) -> str:
     for child in element:
         if _local(child.tag) == "chapters":
-            return child.attrib.get("url", "").strip()
+            url = child.attrib.get("url", "").strip()
+            if url:
+                return url
     return ""
 
 
@@ -446,7 +449,7 @@ def _atom_episode(entry) -> FeedEpisodeData | None:
     media_url, mime, enclosure_bytes = _atom_link(entry, "enclosure")
     if not media_url:
         return None
-    published = _date(_text(entry, "published", "updated"))
+    published = _date(_text(entry, "published", "updated", ordered=True))
     external = _external_id(title, published, media_url, _text(entry, "id", "guid"))
     transcript_url, transcript_type = _transcript(entry)
     chapters_url = _chapters(entry)
@@ -568,7 +571,7 @@ def _episode_slot(element, local: str, position: int):
         explicit = _text(element, "guid", "id") or element.attrib.get("{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about", "")
     else:
         media_url, _mime, _length = _atom_link(element, "enclosure")
-        published = _date(_text(element, "published", "updated"))
+        published = _date(_text(element, "published", "updated", ordered=True))
         explicit = _text(element, "id", "guid")
     if not media_url:
         return None
@@ -621,7 +624,7 @@ class _NewestItem:
             published = _date(_text(element, "pubdate", "published", "date"))
         else:
             media_url = _atom_link(element, "enclosure")[0]
-            published = _date(_text(element, "published", "updated"))
+            published = _date(_text(element, "published", "updated", ordered=True))
         if not media_url or not published:
             return False
         if self.best is None or published > self.best[1]:

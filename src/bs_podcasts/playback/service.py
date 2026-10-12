@@ -129,6 +129,7 @@ class PlaybackService:
         self._desired_position = 0.0
         self._engine_loaded = False
         self._deferred_episode_id = None
+        self._deferred_start = None  # a seek made while the deferred episode's download was pending
         # An episode that ended after the command queue closed: its completion
         # was refused, so the shutdown finalizer does it (see _dispatch).
         self._unfinished_end = None
@@ -204,6 +205,7 @@ class PlaybackService:
     # other load of the episode already on screen keeps them all but the notice.
     REOPEN_KEEPS = ("sleep_deadline", "sleep_expired_count", "sleep_at_end", "ab_start", "ab_end", "message")
     SAME_KEEPS = REOPEN_KEEPS[:5]
+    SLEEP_KEEPS = REOPEN_KEEPS[:3]  # carried across the queue's own advance
 
     @staticmethod
     def _best_effort(what: str, work):
@@ -268,7 +270,7 @@ class PlaybackService:
             self._emit()
 
     def load_episode(self, episode_id: int, autoplay: bool = True, *, cancelled=None, start_position=None,
-                     force_stream=False, keep_session=False):
+                     force_stream=False, keep_session=False, keep_sleep=False):
         # Everything that waits on storage happens here, before the service
         # lock is taken: library maintenance or a stalled save would otherwise
         # hold every native event and transport command behind this load.
@@ -339,13 +341,18 @@ class PlaybackService:
             # Opening the episode already on the snapshot (the first Play of a
             # restored one, the end of a download wait, a replay) is the same
             # listening session, so its timer and A-B loop carry on.
-            if not same:
+            # The queue's own advance (and Next) keeps it: a timer set for an
+            # hour means an hour of listening, not the end of one episode.
+            if not same and not keep_sleep:
                 self.cancel_sleep_timer()
-            kept = {name: getattr(self.snapshot, name)
-                    for name in (self.REOPEN_KEEPS if keep else self.SAME_KEEPS if same else ())}
+            names = self.REOPEN_KEEPS if keep else self.SAME_KEEPS if same else ()
+            if keep_sleep and not same:
+                names = (*names, *self.SLEEP_KEEPS)
+            kept = {name: getattr(self.snapshot, name) for name in names}
             # A load that was refused above leaves the restored episode waiting,
             # so the next Play tries again and shows the reason again.
             self._deferred_episode_id = None
+            self._deferred_start = None
             if not keep:
                 self._unstarted_id = episode.id
             self._begin_load(start, autoplay, keep_target=keep)
@@ -412,6 +419,9 @@ class PlaybackService:
                 return
             if not self._load_autoplay:
                 self._resolving = False
+                # The episode stays deferred until Play; the seek made during
+                # the wait goes with it, or Play started from the saved position.
+                self._deferred_start = self._desired_position
                 self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED, download_request=0, message="")
                 self._emit()
                 return
@@ -614,7 +624,17 @@ class PlaybackService:
                 logger.info("Playback play requested: state=%s position=%.1fs",
                             self.snapshot.state.value, self.snapshot.position)
             self.intent_revision += 1
-            opening = self._episode_to_open()
+            if self.snapshot.download_request:
+                # Play while the download-first wait runs: it already plays
+                # when the file lands, or it now should; either way the seek
+                # made during the wait is the start. (Same rule as play_pause.)
+                if self._load_autoplay:
+                    self._emit()
+                    return
+                opening, start = self.snapshot.episode_id, self._desired_position
+            else:
+                opening = self._episode_to_open()
+                start = self._deferred_start if opening is not None and opening == self._deferred_episode_id else None
             if opening is None:
                 if self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR} and self.snapshot.source:
                     self._replay_current()
@@ -624,7 +644,7 @@ class PlaybackService:
                         self.engine.play()
                     self._emit()
                 return
-        self.load_episode(opening, autoplay=True)
+        self.load_episode(opening, autoplay=True, start_position=start)
 
     def _replay_current(self, position=None, autoplay=True, keep_notice=False):
         """Restart the finished item (library episode or transient stream).
@@ -799,7 +819,7 @@ class PlaybackService:
         queue = [episode for episode in self.repository.list_queue()
                  if episode.show_id not in self._retiring_shows]
         if queue:
-            self.load_episode(queue[0].id, autoplay=True)
+            self.load_episode(queue[0].id, autoplay=True, keep_sleep=True)
 
     def previous(self):
         self.seek(0.0)
@@ -944,6 +964,10 @@ class PlaybackService:
     def set_ab_start(self):
         with self._lock:
             self._guard()
+            if self._review.end is not None:
+                # A new A drops B from the snapshot; the native loop must drop it
+                # too, or the player keeps looping the old span until B is set.
+                self.engine.clear_ab_repeat()
             self._review.mark_start(self.snapshot.position)
             self._publish_review()
             self._emit()
@@ -972,24 +996,34 @@ class PlaybackService:
             self._guard()
             level = ReviewSettings.checked_trim(level)
             self.engine.set_silence_trim(level)
-            if self.snapshot.show_id:
-                self.repository.update_show_playback(
-                    self.snapshot.show_id, trim_level=level
-                )
             self._review.trim = level
             self._publish_review()
             self._emit()
+            show_id = self.snapshot.show_id
+        self._remember_show_playback(show_id, trim_level=level)
 
     def set_speed(self, speed: float):
         with self._lock:
             self._guard()
             speed = max(0.5, min(3.0, round(float(speed), 2)))
             self.engine.set_speed(speed)
-            if self.snapshot.show_id:
-                self.repository.update_show_playback(self.snapshot.show_id, speed=speed)
             self._close_silence_window()  # measured at the old speed
             self.snapshot = replace(self.snapshot, speed=speed)
             self._emit()
+            show_id = self.snapshot.show_id
+        self._remember_show_playback(show_id, speed=speed)
+
+    def _remember_show_playback(self, show_id, **values):
+        """Save a podcast's speed or trim after the player has changed, outside
+        the service lock: a library write that waits on maintenance must not
+        hold every native event and command behind it, and a write that fails
+        leaves the player as the user set it for this session."""
+        if not show_id:
+            return
+        try:
+            self.repository.update_show_playback(show_id, **values)
+        except Exception as exc:
+            logger.warning("Could not save the podcast's playback settings: %s", redact(exc))
 
     def set_volume(self, volume: float):
         with self._lock:
@@ -1240,7 +1274,7 @@ class PlaybackService:
                 intent = self.intent_revision
                 finished_snapshot = self.snapshot
                 self._flush_listening()
-                def finish():
+                def finish(attempt=0):
                     # Waits on storage run without the service lock, which the
                     # window thread and the native event thread also need.
                     if self._dead:
@@ -1249,7 +1283,19 @@ class PlaybackService:
                         # A position save queued behind maintenance cannot land
                         # until it ends; refuse now instead of waiting out the
                         # flush. The save stays queued and lands afterwards.
-                        self._library_ready()
+                        try:
+                            self._library_ready()
+                        except PlaybackUnavailable:
+                            # Maintenance holds the library: the completion is
+                            # not lost, it is tried again once a second for up
+                            # to a minute. Giving up at once left the episode
+                            # unplayed, queued and never advanced.
+                            if attempt < 60 and not self._dead:
+                                retry = Timer(1.0, lambda: self._dispatch(lambda: finish(attempt + 1)))
+                                retry.daemon = True
+                                retry.start()
+                                return
+                            raise
                         self._flush_persistence()
                         with self._lock:
                             if self._dead:
@@ -1616,7 +1662,7 @@ class PlaybackService:
                 self._emit()
                 return
         try:
-            self.load_episode(queue[0].id, autoplay=True)
+            self.load_episode(queue[0].id, autoplay=True, keep_sleep=True)
         except Exception as exc:
             with self._lock:
                 self._cancel_load_watchdog()

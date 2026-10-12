@@ -1185,6 +1185,11 @@ class _WindowController:
             return
         self.rebuild_pending = False
         began = time.monotonic()
+        if old is not None:
+            # From here until the replacement binds itself, completions wait in
+            # the bridge: one landing on the old window in that gap would update
+            # counters the replacement never sees (its copy is taken next).
+            old._business_bridge.bind(None)
         view_state = old._capture_view_state() if old is not None else None
         if old is not None:
             old._keep_services = True  # the services outlive this window

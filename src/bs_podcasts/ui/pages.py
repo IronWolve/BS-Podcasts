@@ -1022,7 +1022,9 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         available = self.view.viewport().width() - 4
         if available <= 0:
             return
-        columns = max(2, available // (156 if getattr(self, "_compact", False) else 196))
+        # Scaled with the type size like the card itself, or a larger text size packed the same columns and
+        # the titles wrapped and elided harder.
+        columns = max(2, available // scaled_px(156 if getattr(self, "_compact", False) else 196))
         width = available // columns
         grid = (columns, width, getattr(self, "_compact", False), self.delegate.sizeHint(None, None).height())
         if grid == getattr(self, "_card_grid", None):
@@ -1460,6 +1462,13 @@ class EpisodeListPage(BasePage, _ListPageMixin):
     def apply_metrics(self):
         super().apply_metrics()
         self.load_more.setFixedHeight(scaled_px(38))
+        # The compact breakpoint scales with the type size: a larger text size at the same window width
+        # must take the compact chips and sort button now, not at the next resize.
+        narrow = self.width() < scaled_px(COMPACT_PAGE_PX)
+        if narrow != self._narrow:
+            self._narrow = narrow
+            self.chips.set_compact(narrow)
+            self._update_sort_button()
 
     def _selection_changed(self, *_args):
         self.selection_bar.set_count(len(_selected_rows(self.view.selectionModel())))
@@ -1578,7 +1587,9 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         items = list(self._all_items)
         query = self.header.search.text().strip().lower()
         if query and query != self._catalog_query:
-            items = [item for item in items if query in item.title.lower() or query in item.show.lower()]
+            # Folded like the podcast grid's filter, so "cafe" finds "Café" here too.
+            folded = fold_text(query)
+            items = [item for item in items if folded in fold_text(item.title) or folded in fold_text(item.show)]
         test = self._chip_test()
         if test is not None:
             items = [item for item in items if test(item)]
@@ -2231,6 +2242,7 @@ class SettingsPage(BasePage):
         reset.setCursor(Qt.CursorShape.PointingHandCursor)
         reset.clicked.connect(self.reset_shortcuts_requested)
         shortcut_head.addWidget(reset)
+        self.shortcut_reset = reset  # the editors built later are chained after it in the Tab order
         shortcut_layout.addLayout(shortcut_head)
         hint = PlainTextLabel("Click a field and press the new key combination.")
         hint.setObjectName("settingHint")
@@ -2421,6 +2433,7 @@ class SettingsPage(BasePage):
         row = FlowLayout(nav, spacing=SPACE["xs"])
         row.setContentsMargins(0, 0, 0, SPACE["sm"])
         row.setSpacing(SPACE["xs"])
+        previous = None  # the nav is built last; the scroll area and its fields are chained after it below
         for title, card in self._setting_sections:
             label = labels.get(title)
             if not label:
@@ -2431,6 +2444,11 @@ class SettingsPage(BasePage):
             button.setToolTip(title)
             button.clicked.connect(lambda _checked=False, target=card: self._scroll_to_setting(target))
             row.addWidget(button)
+            if previous is not None:
+                QWidget.setTabOrder(previous, button)
+            previous = button
+        if previous is not None:
+            QWidget.setTabOrder(previous, self.settings_scroll)  # Tab: nav row first, then the fields
         self._settings_nav_layout = row
         self.root.insertWidget(self.root.indexOf(self.settings_scroll), nav)
 
@@ -2578,6 +2596,7 @@ class SettingsPage(BasePage):
                 widget.deleteLater()
         self._shortcut_editors.clear()
         self.shortcut_error.hide()
+        previous = self.shortcut_reset  # rebuilt editors would otherwise land at the end of the Tab order
         for group, entries in SHORTCUT_GROUPS:
             heading = PlainTextLabel(group.upper())
             heading.setObjectName("eyebrow")
@@ -2603,6 +2622,8 @@ class SettingsPage(BasePage):
                 row_layout.addWidget(editor)
                 row_layout.addStretch(1)
                 self.shortcut_form.addWidget(row)
+                QWidget.setTabOrder(previous, editor)
+                previous = editor
 
     def show_shortcut_error(self, name: str, message: str, previous: str):
         editor = self._shortcut_editors.get(name)

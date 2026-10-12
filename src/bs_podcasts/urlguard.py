@@ -62,7 +62,9 @@ def ensure_web_url(value, what: str = "URL") -> str:
 def normalize_feed_url(url: str) -> str:
     """Key used to spot the same feed behind http/https, www, trailing slashes,
     the scheme's default port and a trailing dot on the host."""
-    parsed = urlparse(url.strip())
+    # urlsplit, not urlparse: the latter splits ";params" off the last path segment, and two feeds that
+    # differ only there got one key.
+    parsed = urlsplit(url.strip())
     credentials, separator, host = parsed.netloc.rpartition("@")
     host, colon, port = host.lower().rpartition(":")
     if not colon or "]" in port:

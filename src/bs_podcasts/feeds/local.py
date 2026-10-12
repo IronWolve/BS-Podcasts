@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
-from threading import Timer
+from threading import Event, Timer
 import time
 
 from ..data.repositories import LibraryRepository
@@ -67,55 +67,78 @@ def probe_many(sources, on_result=None) -> list:
         return results
     scratch = cache_dir()/'probes'
     scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
+    unfinished = LocalAudioError('Audio metadata reading did not finish; the file was not imported.')
     with TemporaryDirectory(prefix='audio-', dir=scratch) as directory:
         folder = Path(directory)
-        request = folder/'request.json'
-        request.write_text(json.dumps([str(source) for source in sources], ensure_ascii=False), encoding='utf-8')
-        command = [sys.executable]
-        if not getattr(sys, 'frozen', False):
-            command += ['-B', str(Path(__file__).with_name('local_probe.py'))]
-        command += ['--probe-request', str(request), '--probe-directory', str(folder), '--native-library', native]
-        with (folder/'stderr.log').open('wb') as stderr:
-            try:
-                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=stderr, cwd=directory,
-                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0)
-            except OSError:
-                for index in range(len(sources)):
-                    settle(index, LocalAudioError('Could not start the audio metadata reader.'))
-                return results
-            # The reader is bounded per file; this bound covers a reader that stalls outright.
-            guard = Timer(PROBE_TIMEOUT * len(sources) + 5, process.kill)
-            guard.daemon = True
-            guard.start()
-            pending = set(range(len(sources)))
-
-            def collect():
-                for index in sorted(pending):
-                    answer = folder/f'result-{index}.json'
-                    if answer.is_file():
-                        pending.discard(index)
-                        settle(index, _answer(answer, sources[index]))
-
-            try:
-                while True:
-                    collect()
-                    if not pending or process.poll() is not None:
-                        break
-                    time.sleep(_PROBE_POLL_SECONDS)
-                process.wait()
-            finally:
-                guard.cancel()
-                if process.poll() is None:
+        # One reader per round. The reader's per-file watchdog ends the whole
+        # process when one file hangs, so a round that stops with files still
+        # pending gives up only the file in flight and a new round reads the
+        # rest; every file after a bad one used to be reported as not finished.
+        remaining = list(range(len(sources)))
+        rounds = 0
+        while remaining:
+            rounds += 1
+            request = folder/f'request-{rounds}.json'
+            request.write_text(json.dumps([str(sources[index]) for index in remaining], ensure_ascii=False), encoding='utf-8')
+            answers = folder/f'round-{rounds}'
+            answers.mkdir()
+            command = [sys.executable]
+            if not getattr(sys, 'frozen', False):
+                command += ['-B', str(Path(__file__).with_name('local_probe.py'))]
+            command += ['--probe-request', str(request), '--probe-directory', str(answers), '--native-library', native]
+            timed_out = Event()
+            with (folder/'stderr.log').open('ab') as stderr:
+                try:
+                    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=stderr, cwd=directory,
+                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0)
+                except OSError:
+                    for index in remaining:
+                        settle(index, LocalAudioError('Could not start the audio metadata reader.'))
+                    return results
+                # The reader is bounded per file; this bound covers a reader that stalls outright.
+                def stall():
+                    timed_out.set()
                     process.kill()
+                guard = Timer(PROBE_TIMEOUT * len(remaining) + 5, stall)
+                guard.daemon = True
+                guard.start()
+                pending = set(range(len(remaining)))
+
+                def collect():
+                    for local in sorted(pending):
+                        answer = answers/f'result-{local}.json'
+                        if answer.is_file():
+                            pending.discard(local)
+                            settle(remaining[local], _answer(answer, sources[remaining[local]]))
+
+                try:
+                    while True:
+                        collect()
+                        if not pending or process.poll() is not None:
+                            break
+                        time.sleep(_PROBE_POLL_SECONDS)
                     process.wait()
-            collect()  # answers written just before the reader exited
-            for index in sorted(pending):
-                settle(index, LocalAudioError('Audio metadata reading did not finish; the file was not imported.'))
-            if results and any(isinstance(value, LocalAudioError) for value in results):
-                detail = (folder/'stderr.log').read_bytes()[-2000:].decode('utf-8', 'replace').strip()
-                if detail:
-                    logging.getLogger('bs_podcasts').warning('Audio metadata reader reported: %s', detail)
+                finally:
+                    guard.cancel()
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+                collect()  # answers written just before the reader exited
+            if not pending:
+                break
+            first = min(pending)  # the file the reader was on when it stopped
+            settle(remaining[first], unfinished)
+            pending.discard(first)
+            if timed_out.is_set():
+                for local in sorted(pending):
+                    settle(remaining[local], unfinished)
+                break
+            remaining = [remaining[local] for local in sorted(pending)]
+        if results and any(isinstance(value, LocalAudioError) for value in results):
+            detail = (folder/'stderr.log').read_bytes()[-2000:].decode('utf-8', 'replace').strip()
+            if detail:
+                logging.getLogger('bs_podcasts').warning('Audio metadata reader reported: %s', detail)
     return results
 
 
