@@ -17,6 +17,7 @@ import weakref
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
+from typing import NamedTuple
 from PySide6.QtCore import QByteArray, QEvent, QObject, QTimer, QUrl, Signal, Qt
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
@@ -321,6 +322,20 @@ class _BusinessBridge(QObject):
             window._refresh_finished(payload)
 
 
+class _EpisodeMenuContext(NamedTuple):
+    """What the episode context menu's builders share: the row, its show, the rows the menu acts on,
+    whether that is more than one, the page the menu opened on and the download facts the labels use."""
+    episode: EpisodeRow
+    show: object
+    targets: list
+    many: bool
+    page: object
+    downloaded: bool
+    status: str
+    status_pages: bool
+    continue_listening: bool
+
+
 class MainWindow(QMainWindow):
     relaunch_requested = Signal()
     _BUSINESS_STATE = ('_pending_jobs', '_download_tickets', '_play_after_download',
@@ -338,6 +353,28 @@ class MainWindow(QMainWindow):
     def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None, inline_work=False):
         super().__init__(parent)
         self.setAcceptDrops(True)
+        self._adopt_services(library, jobs, refresh, directory, playback, downloads, listening, download_jobs,
+                             refresh_jobs, network_jobs, commands, artwork_jobs, play_download_jobs, inline_work,
+                             view_state)
+        self.setObjectName("mainWindow")
+        self.setWindowTitle(APP_NAME)
+        self.setMinimumSize(scaled_px(760), scaled_px(600))
+        self._init_state(view_state)
+        self._init_bridges(view_state)
+        self._build_frame()
+        self._build_pages()
+        self._build_shortcuts()
+        self._wire_library()
+        self._wire_playback()
+        self._wire_downloads()
+        self._wire_listening()
+        self._restore_layout()
+        QApplication.instance().installEventFilter(self)
+        self._business_bridge.bind(self)
+
+    def _adopt_services(self, library, jobs, refresh, directory, playback, downloads, listening, download_jobs,
+                        refresh_jobs, network_jobs, commands, artwork_jobs, play_download_jobs, inline_work, view_state):
+        """The services and worker pools this window drives, each with its fallback."""
         self.library = library
         self._incoming_view_state = view_state
         self._context_revision = 0
@@ -371,9 +408,9 @@ class MainWindow(QMainWindow):
         if library is not None:
             library.downloads = downloads
         self.listening = listening
-        self.setObjectName("mainWindow")
-        self.setWindowTitle(APP_NAME)
-        self.setMinimumSize(scaled_px(760), scaled_px(600))
+
+    def _init_state(self, view_state):
+        """Every field the handlers read, with its starting value, and the timers that drive the window."""
         self._context_forced = False
         # The pane's open/closed state is the user's choice, like the rail's
         # compact state: closing it means no path (mode change, selection,
@@ -572,6 +609,9 @@ class MainWindow(QMainWindow):
         self._layout_save_timer.setSingleShot(True)
         self._layout_save_timer.setInterval(500)
         self._layout_save_timer.timeout.connect(self._save_layout)
+
+    def _init_bridges(self, view_state):
+        """The queued-signal bridges from the workers, and the business state a retired window handed over."""
         self._bridge = _JobBridge(self)
         self._bridge.completed.connect(self._refresh_finished)
         self._bridge.playback_event.connect(self._playback_changed)
@@ -582,6 +622,8 @@ class MainWindow(QMainWindow):
             if name in self._BUSINESS_STATE:
                 setattr(self, name, value)
 
+    def _build_frame(self):
+        """The frame: rail, page stack beside the details pane, player bar, toast and overlays."""
         root = QWidget()
         root.setObjectName("appRoot")
         outer = QVBoxLayout(root)
@@ -676,16 +718,6 @@ class MainWindow(QMainWindow):
         self.search_overlay.show_all_requested.connect(self._show_library_search)
         self.search_overlay.menu_requested.connect(self._show_search_result_menu)
         self.pages.installEventFilter(self)
-
-        self._build_pages()
-        self._build_shortcuts()
-        self._wire_library()
-        self._wire_playback()
-        self._wire_downloads()
-        self._wire_listening()
-        self._restore_layout()
-        QApplication.instance().installEventFilter(self)
-        self._business_bridge.bind(self)
 
     # ------------------------------------------------------------------ setup
     @property
@@ -4426,41 +4458,62 @@ class MainWindow(QMainWindow):
             return None
         show = self._episode_show_info(episode)
         if not episode.episode_id:
-            # Preview rows from an unsubscribed feed.
-            url = self._preview_episodes_url
-            if not url:
-                return None
-            menu = QMenu(self)
-            menu.addAction(icons.themed_icon("info", "text", 16), "Show details", lambda: self._show_item(episode))
-            menu.addAction("Episode information…", lambda: self._show_episode_information(episode, show))
-            menu.addAction("Retry artwork", lambda: self._retry_artwork(episode))
-            if episode.website_url:
-                menu.addAction(icons.themed_icon("external", "text", 16), "Open episode page", lambda: self._open_url(episode.website_url))
-            if getattr(show, "website_url", ""):
-                menu.addAction(icons.themed_icon("external", "text", 16), "Open podcast website", lambda: self._open_url(show.website_url))
-            menu.addSeparator()
-            menu.addAction(icons.themed_icon("play", "text", 16), "Play", lambda: self._play_preview_episode(episode))
-            menu.addAction(icons.themed_icon("add", "text", 16), "Subscribe", lambda: self._subscribe_url(url))
-            menu.addSeparator()
-            self._add_episode_copy_menu(menu, episode, show)
-            return menu
+            return self._preview_episode_menu(episode, show)
         page = self.pages.currentWidget()
         selected = [item for item in getattr(page, "selected_items", list)() if isinstance(item, EpisodeRow)]
         targets = selected if len(selected) > 1 and episode in selected else [episode]
         many = len(targets) > 1
+        context = _EpisodeMenuContext(
+            episode=episode, show=show, targets=targets, many=many, page=page,
+            downloaded=bool(episode.downloaded_path),
+            status="downloaded" if episode.downloaded_path else "not downloaded",
+            status_pages=page in {self.home_page, self.history_page, self.episode_page},
+            continue_listening=page is self.home_page and episode.episode_id in {
+                item.episode_id for item in self.home_page.resume_items()
+            },
+        )
         menu = QMenu(self)
+        self._add_episode_primary_actions(menu, context)
+        self._add_episode_queue_actions(menu, context)
+        self._add_episode_download_actions(menu, context)
+        added_remove_download = self._add_episode_page_actions(menu, context)
+        self._add_episode_file_actions(menu, context, added_remove_download)
+        self._add_episode_closing_actions(menu, context)
+        return menu
+
+    def _preview_episode_menu(self, episode, show):
+        """The menu for a preview row from an unsubscribed feed."""
+        url = self._preview_episodes_url
+        if not url:
+            return None
+        menu = QMenu(self)
+        self._add_episode_info_actions(menu, episode, show)
+        menu.addSeparator()
+        menu.addAction(icons.themed_icon("play", "text", 16), "Play", lambda: self._play_preview_episode(episode))
+        menu.addAction(icons.themed_icon("add", "text", 16), "Subscribe", lambda: self._subscribe_url(url))
+        menu.addSeparator()
+        self._add_episode_copy_menu(menu, episode, show)
+        return menu
+
+    def _add_episode_info_actions(self, menu, episode, show):
+        """Details, information, artwork retry and the web pages: the same for preview and stored rows."""
+        menu.addAction(icons.themed_icon("info", "text", 16), "Show details", lambda: self._show_item(episode))
+        menu.addAction("Episode information…", lambda: self._show_episode_information(episode, show))
+        menu.addAction("Retry artwork", lambda: self._retry_artwork(episode))
+        if episode.website_url:
+            menu.addAction(icons.themed_icon("external", "text", 16), "Open episode page", lambda: self._open_url(episode.website_url))
+        if getattr(show, "website_url", ""):
+            menu.addAction(icons.themed_icon("external", "text", 16), "Open podcast website", lambda: self._open_url(show.website_url))
+
+    def _add_episode_primary_actions(self, menu, context):
+        """The selection header, or the single row's details and Play; then the favourite toggle."""
+        episode, show, targets, many = context.episode, context.show, context.targets, context.many
         if many:
             header = menu.addAction(f"{len(targets)} episodes selected")
             header.setEnabled(False)
             menu.addSeparator()
         else:
-            menu.addAction(icons.themed_icon("info", "text", 16), "Show details", lambda: self._show_item(episode))
-            menu.addAction("Episode information…", lambda: self._show_episode_information(episode, show))
-            menu.addAction("Retry artwork", lambda: self._retry_artwork(episode))
-            if episode.website_url:
-                menu.addAction(icons.themed_icon("external", "text", 16), "Open episode page", lambda: self._open_url(episode.website_url))
-            if getattr(show, "website_url", ""):
-                menu.addAction(icons.themed_icon("external", "text", 16), "Open podcast website", lambda: self._open_url(show.website_url))
+            self._add_episode_info_actions(menu, episode, show)
             menu.addSeparator()
             play = menu.addAction(icons.themed_icon("play", "text", 16), "Resume" if 0 < episode.progress < 1 else "Play", lambda: self._play_episode(episode.episode_id))
             play.setShortcut(QKeySequence(Qt.Key.Key_Return))
@@ -4471,12 +4524,10 @@ class MainWindow(QMainWindow):
             "Remove from favorites" if (not many and episode.favorite) else "Add to favorites",
             lambda: self._set_favorites(targets, not (not many and episode.favorite)),
         )
-        downloaded = bool(episode.downloaded_path)
-        status = "downloaded" if downloaded else "not downloaded"
-        status_pages = page in {self.home_page, self.history_page, self.episode_page}
-        continue_listening = page is self.home_page and episode.episode_id in {
-            item.episode_id for item in self.home_page.resume_items()
-        }
+
+    def _add_episode_queue_actions(self, menu, context):
+        """Up Next: remove on the queue page, add (and Play next for one row) everywhere else."""
+        episode, targets, many, page = context.episode, context.targets, context.many, context.page
         if page is self.playlist_page:
             remove = menu.addAction(icons.themed_icon("close", "text", 16), "Remove from Up Next", lambda: self._remove_many_from_queue([item.episode_id for item in targets]))
             remove.setShortcut(QKeySequence(Qt.Key.Key_Delete))
@@ -4486,6 +4537,11 @@ class MainWindow(QMainWindow):
             if not many and episode.episode_id:
                 # Front of the queue, from any row — not only from Up Next.
                 menu.addAction(icons.themed_icon("next", "text", 16), "Play next", lambda: self._queue_to_front(episode.episode_id))
+
+    def _add_episode_download_actions(self, menu, context):
+        """The download state actions for one row, or one Download for the selection's missing files."""
+        episode, targets, many = context.episode, context.targets, context.many
+        downloaded, status, status_pages = context.downloaded, context.status, context.status_pages
         if not many and is_web_url(episode.media_url):
             state_actions = self._download_state_actions(episode.state.lower(), episode.episode_id)
             for icon, label, callback in state_actions:
@@ -4498,6 +4554,13 @@ class MainWindow(QMainWindow):
             if missing:
                 label = f"Download {missing} episode{'' if missing == 1 else 's'}"
                 menu.addAction(icons.themed_icon("download", "text", 16), label, lambda: self._download_many(targets))
+
+    def _add_episode_page_actions(self, menu, context):
+        """What the current page adds: bookmark, history and Continue listening removals, and the download
+        removal on the pages that show the download state. Returns whether that removal was added."""
+        episode, targets, many, page = context.episode, context.targets, context.many, context.page
+        downloaded, status, status_pages = context.downloaded, context.status, context.status_pages
+        continue_listening = context.continue_listening
         if page is self.bookmark_page and not many:
             menu.addSeparator()
             menu.addAction(icons.themed_icon("play", "text", 16), f"Play from {format_media_time(episode.bookmark_position)}", lambda: self._play_bookmark(episode))
@@ -4538,6 +4601,11 @@ class MainWindow(QMainWindow):
                 lambda: self._delete_downloads(targets),
             )
             added_remove_download = True
+        return added_remove_download
+
+    def _add_episode_file_actions(self, menu, context, added_remove_download):
+        """Play next on the queue page, then the downloaded file: location, export and removal."""
+        episode, targets, many, page = context.episode, context.targets, context.many, context.page
         if page is self.playlist_page and not many:
             menu.addAction(icons.themed_icon("next", "text", 16), "Play next", lambda: self._queue_to_front(episode.episode_id))
         if episode.downloaded_path or page is self.download_page:
@@ -4559,6 +4627,10 @@ class MainWindow(QMainWindow):
                 )
                 if page is self.download_page:
                     delete_download.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+
+    def _add_episode_closing_actions(self, menu, context):
+        """The copy menu, played and unplayed, and the way to the podcast."""
+        episode, show, targets, many = context.episode, context.show, context.targets, context.many
         if not many:
             menu.addSeparator()
             self._add_episode_copy_menu(menu, episode, show)
@@ -4570,7 +4642,6 @@ class MainWindow(QMainWindow):
         if not many and episode.show_id:
             menu.addSeparator()
             menu.addAction(icons.themed_icon("podcasts", "text", 16), mnemonic_safe(f"Go to {episode.show}"), lambda: self._open_episode_podcast(episode.show_id))
-        return menu
 
     def _remove_from_queue(self, episode_id: int):
         self._remove_many_from_queue([episode_id])
