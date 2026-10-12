@@ -273,6 +273,7 @@ def _installed_families() -> list:
 def _forget_families():
     global _families_cache
     _families_cache = None
+    _fonts.clear()
 
 
 def load_fonts() -> list[str]:
@@ -399,21 +400,35 @@ def apply_typography(size_key: str = "comfortable", font_key: str = "Inter"):
     _type_scale = _TEXT_SIZE_SCALE.get(size_key, 1.0)
     _font_key = font_key or "Inter"
     _resolved_families.clear()
+    _fonts.clear()
     _rebuild_type()
     _rebuild_space()
 
 
+# Built fonts by (pixel size, weight, family). The delegates ask for the same
+# few fonts for every row they paint; building a QFont each time cost more than
+# the painting. Cleared whenever the type scale or the registered families change.
+_fonts: dict[tuple[int, int, str], QFont] = {}
+
+
 def app_font(size_px: int | None = None, weight: int = QFont.Weight.Normal) -> QFont:
-    """Return the application font at a pixel size so lists match QSS text."""
+    """Return the application font at a pixel size so lists match QSS text.
+
+    The result is the caller's own copy (a QFont copy shares its data until
+    changed), so a caller may adjust it without touching the cached one."""
     if size_px is None:
         size_px = TYPE["body"]
     else:
         size_px = scaled_px(size_px)
     family = resolve_font_family(_font_key)
-    font = QFont(family) if family else QFont()
-    font.setPixelSize(size_px)
-    font.setWeight(weight)
-    return font
+    key = (size_px, int(weight), family)
+    font = _fonts.get(key)
+    if font is None:
+        font = QFont(family) if family else QFont()
+        font.setPixelSize(size_px)
+        font.setWeight(weight)
+        _fonts[key] = font
+    return QFont(font)
 
 
 def app_palette() -> QPalette:
