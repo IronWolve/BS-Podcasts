@@ -27,8 +27,8 @@ def connect_checked(host, port, timeout=None, source_address=None, socket_option
     for family, kind, protocol, canonname, address in answers:
         remaining = deadline.remaining() if deadline is not None else None
         stream = socket.socket(family, kind, protocol)
-        watch_request_socket(stream)
         try:
+            watch_request_socket(stream)
             for option in socket_options or ():
                 stream.setsockopt(*option)
             limit = timeout if timeout is None or isinstance(timeout, (int, float)) else socket.getdefaulttimeout()
@@ -41,12 +41,14 @@ def connect_checked(host, port, timeout=None, source_address=None, socket_option
             if deadline is not None:
                 deadline.remaining()
             return stream
-        except NetworkDeadline:
-            stream.close()
-            raise
         except OSError as exc:
             failure = exc
             stream.close()
+        except BaseException:
+            # A deadline, a bad option value or a cancellation: the socket
+            # that was never handed out is closed before the error travels.
+            stream.close()
+            raise
     raise failure or OSError("No usable server connection.")
 
 
