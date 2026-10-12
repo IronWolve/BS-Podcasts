@@ -66,9 +66,20 @@ def system_reduced_motion() -> bool | None:
 # BS_PODCASTS_DATA_DIR keeps everything under one folder (development / portable).
 
 
+# The resolved form of each BS_PODCASTS_DATA_DIR value seen, so a relative
+# value names one folder for the life of the process, not whichever folder
+# the process is in when a path is next asked for.
+_resolved_overrides: dict[str, Path] = {}
+
+
 def _override() -> Path | None:
     value = os.environ.get("BS_PODCASTS_DATA_DIR")
-    return Path(value).expanduser() if value else None
+    if not value:
+        return None
+    resolved = _resolved_overrides.get(value)
+    if resolved is None:
+        resolved = _resolved_overrides[value] = Path(value).expanduser().absolute()
+    return resolved
 
 
 def data_dir() -> Path:
