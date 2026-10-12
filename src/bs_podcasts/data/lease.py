@@ -34,7 +34,7 @@ class LibraryLease:
             else:
                 busy = exc.errno in {errno.EAGAIN, errno.EWOULDBLOCK}
             if busy:
-                raise LibraryInUseError("The library is in use. Close BS Podcasts before migrating it.") from exc
+                raise LibraryInUseError("The library is in use by another BS Podcasts process.") from exc
             raise OSError(f"Could not acquire the library lock: {exc}") from exc
 
     def close(self):
