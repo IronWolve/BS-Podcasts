@@ -2946,6 +2946,11 @@ class ContextPanel(QFrame):
         # The notes editor grows with its content so the pane scrolls as one surface.
         self.body.setMinimumHeight(int(size.height()) + 12)
 
+    def set_notes(self, episode_id: int, text: str):
+        """The full show notes of the episode the pane shows, once they have been read from the library."""
+        if self.shown_episode_id() == episode_id:
+            self._set_body(text or "No show notes provided for this episode.")
+
     def _set_body(self, text: str):
         self._body_text = text
         _set_document_content(self.body, safe_feed_html(text), rich=True)

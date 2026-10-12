@@ -109,6 +109,9 @@ ACCENTS = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
 EPISODES_PAGE_SIZE = 5000
 # Milliseconds a selection must stay still before the detail pane renders it.
 CONTEXT_SETTLE_MS = 150
+# The most characters of show notes a list row keeps, as plain text. The full notes stay in the library and are
+# read when an episode is selected, copied or shown in its information dialog.
+EPISODE_NOTES_LIMIT = 16384
 HISTORY_PAGE_SIZE = 200
 # How the command queue treats each playback action, as (supersedes, keeps,
 # cancellable, logs). A superseding action retires the commands queued before
@@ -4267,7 +4270,25 @@ class MainWindow(QMainWindow):
         )
 
     def _show_episode_information(self, episode, show):
-        self._exec_dialog(EpisodeInfoDialog(episode, show, self._format_bytes, self))
+        self._with_full_notes(episode, lambda full: self._exec_dialog(EpisodeInfoDialog(full, show, self._format_bytes, self)))
+
+    def _with_full_notes(self, episode, then):
+        """Call `then` with the episode row carrying its full show notes. A stored episode's row keeps at most
+        EPISODE_NOTES_LIMIT characters of plain text, so the full notes are read from the library on a worker;
+        a row with no stored episode (a feed preview) already has what it has."""
+        if not episode.episode_id or self.library is None:
+            then(episode)
+            return
+        library = self.library
+
+        def work():
+            stored = library.episode(episode.episode_id)
+            return stored.description if stored is not None else episode.description
+
+        def apply(notes):
+            then(replace_item(episode, description=notes) if notes != episode.description else episode)
+
+        self._run_read(work, apply, "episode-notes", coalesce=False)
 
     def _show_context_information(self, item):
         if isinstance(item, EpisodeRow):
@@ -4371,7 +4392,13 @@ class MainWindow(QMainWindow):
             ("Artwork URL", episode.artwork_url),
         )
         for label, value in values:
-            if value:
+            if not value:
+                continue
+            if label == "Show notes":
+                # The row holds a bounded preview; the copy is the full notes.
+                copy.addAction(label, lambda _checked=False: self._with_full_notes(
+                    episode, lambda full: QApplication.clipboard().setText(full.description)))
+            else:
                 copy.addAction(label, lambda _checked=False, text=value: QApplication.clipboard().setText(text))
         copy.addSeparator()
         copy.addAction(
@@ -8257,6 +8284,7 @@ class MainWindow(QMainWindow):
                 def apply(data):
                     stored = data[0]
                     if stored is not None and self.context.shown_episode_id() == item.episode_id:
+                        self.context.set_notes(item.episode_id, stored.description)
                         self._ensure_listening_details(stored)
                         self._ensure_episode_artwork(stored)
                 self._run_read(lambda: (library.episode(item.episode_id),), apply, "selected-metadata")
@@ -8783,7 +8811,7 @@ class MainWindow(QMainWindow):
             accent=dominant_color(episode.artwork_path, ACCENTS[episode.show_id % len(ACCENTS)], compute=False),
             episode_id=episode.id,
             show_id=episode.show_id,
-            description=episode.description,
+            description=plain_snippet(episode.description, EPISODE_NOTES_LIMIT),
             artwork_path=episode.artwork_path,
             episode_artwork_path=episode.episode_artwork_path,
             duration_seconds=episode.duration_seconds,
