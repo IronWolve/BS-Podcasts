@@ -42,6 +42,25 @@ def _note_dependency_failure(checks, errors, exc):
     errors['dependency loading'] = _exception_text(exc)
 
 
+_QT_APPLICATION = None  # kept for the life of the process; Qt needs it while fonts are registered
+
+
+def _inter_registers() -> bool:
+    """True when Qt registers the bundled Inter files and reports the Inter family.
+
+    The font database needs a GUI application first: registering a font without
+    one crashes the process (seen on Linux). No window is shown. On Linux with
+    no display the offscreen platform is used, so the check runs headless."""
+    global _QT_APPLICATION
+    from PySide6.QtGui import QGuiApplication
+    from .ui.theme import load_fonts
+    if QGuiApplication.instance() is None:
+        if sys.platform.startswith('linux') and not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
+            os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        _QT_APPLICATION = QGuiApplication([])
+    return 'Inter' in load_fonts()
+
+
 def _native_root():
     """The native folder next to the deployment record; the fixed package depth is the fallback."""
     here = Path(__file__).resolve()
@@ -221,6 +240,13 @@ def main() -> int:
             checks['native library inside bundle'] = Path(mpv.backend._name).resolve().is_relative_to(bundle)
     except Exception as exc:
         _note_dependency_failure(checks, errors, exc)
+    # Counting the font files does not prove Qt accepts them; a rejected Inter
+    # file would silently fall back to another family with different metrics.
+    try:
+        checks['bundled Inter registers with Qt'] = _inter_registers()
+    except Exception as exc:
+        checks['bundled Inter registers with Qt'] = False
+        errors['bundled Inter registers with Qt'] = _exception_text(exc)
     try:
         with TemporaryDirectory(prefix="selfcheck-", dir=workspace_tmp) as temporary:
             _storage_checks(Path(temporary), checks, errors)
