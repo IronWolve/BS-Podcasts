@@ -4208,6 +4208,16 @@ class PlayerBar(QFrame):
         # slider long enough to use when the compact bar leaves only a few buttons.
         self._volume_wrap.setMaximumWidth(max(self._tools_row.sizeHint().width(), self._volume_row_floor(),
                                               self._volume_wrap.minimumSizeHint().width()))
+        # Every input the balance depends on, read live. The settle loop below runs on every resize, show
+        # and chrome change; when nothing it reads has changed since the last pass (a height-only resize, a
+        # repeated show), the widths it would set are the ones in place, and only the cheap follow-ups run.
+        key = self._balance_key(available)
+        if key == getattr(self, "_balanced", None):
+            self._level_volume_row()
+            if hasattr(self, "_now_title"):
+                self._elide_now_labels()
+                return True
+            return False
         floor = max(self.tools_wrap.sizeHint().width(), self.art.width() + self.now_wrap.minimumWidth())
         side = max(floor, int(available * self.SIDE_SHARE))
         # Clamp against the transport's PREFERRED width, not its minimum. Using
@@ -4259,6 +4269,7 @@ class PlayerBar(QFrame):
                 break
             pads = settled
         self._level_volume_row()
+        self._balanced = self._balance_key(available)
         art_width = max(self.art.width(), self.art.minimumWidth())
         self._now_column = max(0, side - art_width - self.left_wrap.layout().spacing())
         # The column width may have changed without a bar resize (compact
@@ -4269,6 +4280,19 @@ class PlayerBar(QFrame):
             self._elide_now_labels()
             return True
         return False
+
+    def _balance_key(self, available):
+        """What _balance_zones reads, plus the widths it sets: equal keys mean a pass would change nothing."""
+        return (
+            available, getattr(self, "_compact", False),
+            self._tools_row.sizeHint().width(), self._volume_wrap.maximumWidth(), self.tools_wrap.sizeHint().width(),
+            self.art.width(), self.now_wrap.minimumWidth(),
+            self.center_wrap.sizeHint().width(), self.center_wrap.minimumSizeHint().width(),
+            self.back.text(), self.forward.text(),
+            self.back.isHidden(), self.forward.isHidden(), self.next.isHidden(),
+            self._pad_left.minimumWidth(), self._pad_right.minimumWidth(),
+            self.left_wrap.width(), self.tools_wrap.width(),
+        )
 
     def _volume_row_floor(self):
         """The narrowest the volume row is held to: the mute button, a slider long enough to use, the value."""
