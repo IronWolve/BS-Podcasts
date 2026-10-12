@@ -65,7 +65,7 @@ from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, Set
 from .shortcuts import ShortcutManager, set_literal_tooltip
 from .playback_actions import PlaybackAction
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
-from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu, quiet_signals
+from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu, open_web_url, quiet_signals
 
 
 class _lazy_dialog:
@@ -8336,17 +8336,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ feed preview
     @staticmethod
     def _open_url(url: str):
-        """Only web URLs leave the app; feeds are untrusted input.
-
-        Shares `urlguard`'s rule with the dialogs' exit rather than repeating
-        the scheme test — this pair had already drifted apart once.
-        """
-        if not url:
-            return
-        if not is_web_url(url):
-            logging.getLogger("bs_podcasts").warning("Refusing to open non-web URL from feed data: %s", url[:120])
-            return
-        QDesktopServices.openUrl(QUrl(url))
+        """Only web URLs leave the app; feeds are untrusted input. The rule is
+        the widgets' open_web_url, shared with the dialogs."""
+        open_web_url(url)
 
     def _discover_sort_changed(self, key: str):
         if key != "newest":

@@ -7,6 +7,7 @@ from dataclasses import replace
 from functools import lru_cache
 from html import escape as html_escape, unescape as html_unescape
 from typing import NamedTuple
+import logging
 import time
 import weakref
 
@@ -20,6 +21,7 @@ from PySide6.QtCore import (
     QRectF,
     QSize,
     QTimer,
+    QUrl,
     Qt,
     Signal,
 )
@@ -28,6 +30,7 @@ from PySide6.QtGui import (
     QAccessibleAnnouncementEvent,
     QAccessibleEvent,
     QColor,
+    QDesktopServices,
     QFont,
     QIcon,
     QKeySequence,
@@ -77,6 +80,21 @@ from .models import ShowRow
 from .pixmaps import cover, initials
 from .shortcuts import set_literal_tooltip
 from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, play_button_size, reduced_motion, scaled_px, theme_name
+
+
+def open_web_url(url):
+    """The one exit for URLs that come from feed data: HTTP(S) only.
+
+    The shell and the dialogs both open links from feeds through this
+    function, so the scheme rule is written once (the two copies it replaced
+    had drifted apart before)."""
+    value = url.toString() if isinstance(url, QUrl) else str(url or "")
+    if not value:
+        return
+    if not is_web_url(value):
+        logging.getLogger("bs_podcasts").warning("Refusing to open non-web URL from feed data: %s", value[:120])
+        return
+    QDesktopServices.openUrl(QUrl(value))
 
 
 NAV_ITEMS = (

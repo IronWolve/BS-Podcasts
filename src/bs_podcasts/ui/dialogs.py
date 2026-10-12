@@ -42,17 +42,7 @@ from . import icons
 from .pixmaps import initials
 from .theme import COLORS, SPACE, scaled_px
 from .shortcuts import set_literal_tooltip
-from .widgets import Artwork, PlainTextLabel as _PlainTextLabel, fit_combo_width, safe_feed_html, exec_menu
-
-
-def open_web_url(url):
-    """HTTP(S)-only exit for URLs originating in feed data."""
-    value = url.toString() if isinstance(url, QUrl) else str(url or "")
-    if not is_web_url(value):
-        import logging
-        logging.getLogger("bs_podcasts").warning("Refusing to open non-web URL from feed data: %s", value[:120])
-        return
-    QDesktopServices.openUrl(QUrl(value))
+from .widgets import Artwork, PlainTextLabel as _PlainTextLabel, fit_combo_width, open_web_url, safe_feed_html, exec_menu
 
 
 class PlainTextLabel(_PlainTextLabel):
