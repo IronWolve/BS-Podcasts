@@ -11,7 +11,8 @@ CREATE INDEX episodes_favorite ON episodes(favorite, published_at DESC, id DESC)
 
 -- Folder/playlist names were only case-sensitively unique ("News" and
 -- "news" could coexist and read as duplicates in every picker). A collated
--- unique index adds case-insensitive uniqueness WITHOUT rebuilding the
+-- unique index adds uniqueness that ignores the case of ASCII letters only
+-- (SQLite NOCASE; non-ASCII letters are compared exactly) WITHOUT rebuilding the
 -- tables — a rebuild would DROP the parent and cascade-delete memberships.
 -- Existing case-insensitive duplicates are renamed, never dropped.
 CREATE TEMP TABLE folder_renames AS
