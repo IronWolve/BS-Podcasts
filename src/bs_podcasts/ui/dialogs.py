@@ -42,7 +42,7 @@ from . import icons
 from .pixmaps import initials
 from .theme import COLORS, SPACE, scaled_px
 from .shortcuts import set_literal_tooltip
-from .widgets import Artwork, PlainTextLabel as _PlainTextLabel, fit_combo_width, open_web_url, safe_feed_html, exec_menu
+from .widgets import Artwork, PlainTextLabel as _PlainTextLabel, announce, fit_combo_width, open_web_url, safe_feed_html, exec_menu
 
 
 class PlainTextLabel(_PlainTextLabel):
@@ -587,7 +587,7 @@ class AddPodcastDialog(StyledDialog):
         self.error.setText(message)
         self.error.show()
         self.url.setFocus()
-        QAccessible.updateAccessibility(QAccessibleEvent(self.error, QAccessible.Event.Alert))
+        announce(self.error, message, assertive=True)  # spoken by a reader; a system alert would ring
 
     def set_busy(self, busy: bool):
         self.progress.setVisible(busy)

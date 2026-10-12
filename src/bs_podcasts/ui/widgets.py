@@ -119,6 +119,16 @@ def plain_tooltip(text: str) -> str:
     return text
 
 
+def announce(widget, text: str, assertive: bool = False):
+    """Tell a screen reader `text` without a system alert: an announcement is spoken by the reader and
+    makes no sound of its own, where QAccessible.Event.Alert rings the platform's notification sound."""
+    if not text:
+        return
+    event = QAccessibleAnnouncementEvent(widget, text)
+    event.setPoliteness(QAccessible.AnnouncementPoliteness.Assertive if assertive else QAccessible.AnnouncementPoliteness.Polite)
+    QAccessible.updateAccessibility(event)
+
+
 class RoundedPopups(QObject):
     """Every menu gets a see-through window behind its rounded frame.
 
@@ -1145,7 +1155,7 @@ class StateBanner(QFrame):
         self.setAccessibleName(f"{prefix}: {message}" if prefix else message)
         self.show()
         if state in {"partial", "error", "offline", "suspended"} and state != previous:
-            QAccessible.updateAccessibility(QAccessibleEvent(self, QAccessible.Event.Alert))
+            announce(self, self.accessibleName(), assertive=True)
         if state != previous:
             self.state_changed.emit(state)
 
@@ -1336,8 +1346,10 @@ class Toast(QFrame):
         self.setAccessibleName(self._spoken(tone, message))
         self._effect.setOpacity(0.0)
         self.show()
-        # Screen readers never heard toasts: raise an alert event.
-        QAccessible.updateAccessibility(QAccessibleEvent(self, QAccessible.Event.Alert))
+        # Screen readers hear the toast through an announcement. It used to raise
+        # a system Alert event, which on Windows rings the system notification
+        # sound for every toast, whether or not a screen reader is running.
+        announce(self, self.accessibleName(), assertive=(tone == "error"))
         self.raise_()
         self._animation.stop()
         self._animation.setDuration(self._motion_ms(160))

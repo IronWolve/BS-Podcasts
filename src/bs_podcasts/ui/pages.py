@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 from . import icons
 from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, connect_hover_readout, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
-from .widgets import fit_combo_width, quiet_signals
+from .widgets import announce, fit_combo_width, quiet_signals
 from .widgets import PlainTextLabel, wheel_needs_focus, exec_menu, FlowLayout
 from .shortcuts import set_literal_tooltip
 from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, reduced_motion, scaled_px, system_theme, theme_name
@@ -2612,7 +2612,7 @@ class SettingsPage(BasePage):
                 editor.setKeySequence(QKeySequence(previous, QKeySequence.SequenceFormat.PortableText))
         self.shortcut_error.setText(message)
         self.shortcut_error.show()
-        QAccessible.updateAccessibility(QAccessibleEvent(self.shortcut_error, QAccessible.Event.Alert))
+        announce(self.shortcut_error, message, assertive=True)  # spoken by a reader; a system alert would ring
 
     def set_storage_info(self, data_root, library_path, download_path, downloads, artwork_path, artwork, temp_path, log_path="", backups=""):
         self.log_path.setText(log_path or "—")
