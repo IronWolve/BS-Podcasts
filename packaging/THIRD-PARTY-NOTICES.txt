@@ -87,6 +87,9 @@ Inter font family
   License: SIL Open Font License 1.1 (see OFL.txt in the application's
   bundled assets/fonts folder)
   https://github.com/rsms/inter
+  Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter).
+  That line is the copyright string in name ID 0 of each bundled Inter font and
+  the first line of OFL.txt; smoke_remediation_ofl_header checks the match.
 
 Additional bundled/transitive software
   Qt 6.11.2 third-party copyright and license texts:
