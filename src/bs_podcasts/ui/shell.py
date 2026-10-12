@@ -1492,6 +1492,10 @@ class MainWindow(QMainWindow):
     def _live_artwork_paths(self):
         paths = {item.artwork_path for page in (self.podcast_page, self.discover_page, self.episode_page)
                  for item in page.all_items if item.artwork_path}
+        # Completed Discover results re-apply from this cache when the user switches back; their covers must
+        # survive the prune too, or the switch re-fetches them and each re-fetch repaints from scratch.
+        for _stamp, _limit, items in self._discover_cache.values():
+            paths.update(item.artwork_path for item in items if getattr(item, 'artwork_path', ''))
         if self.playback is not None and self.playback.snapshot.artwork_path:
             paths.add(self.playback.snapshot.artwork_path)
         return paths
@@ -3442,8 +3446,10 @@ class MainWindow(QMainWindow):
         self._prime_accents(show.artwork_path for show in stored_shows)
         if self.jobs is not None and not self._preview_warm_started:
             self._preview_warm_started = True
+            # Every cover of the library, not a bounded cohort: the preview cache is sized to hold them all,
+            # and a cover warmed here is never painted as initials later in the session.
             paths = list(dict.fromkeys(show.artwork_path for show in stored_shows
-                                       if show.artwork_path and show.artwork_path not in preview_images))[:256]
+                                       if show.artwork_path and show.artwork_path not in preview_images))
             self._later(50, lambda: self._warm_library_artwork(paths))
         if not self._stale_check_done:
             # First successful load: the window has its data, so the heavy

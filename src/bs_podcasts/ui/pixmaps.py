@@ -26,7 +26,7 @@ import time
 import weakref
 from itertools import count
 
-from PySide6.QtCore import QObject, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QObject, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPainterPath, QPixmap
 
 from . import icons
@@ -45,21 +45,27 @@ class _ArtworkCache:
     not turn already-loaded covers into placeholders merely because Qt evicts.
     """
 
-    def __init__(self, limit_bytes=96 * 1024 * 1024, max_entries=4096):
+    def __init__(self, limit_bytes=192 * 1024 * 1024, max_entries=8192):
         self.limit_bytes = limit_bytes
         self.max_entries = max_entries
         self.bytes = 0
         self._items = OrderedDict()
         self._sources = {}
         self._source_keys = {}
+        self._path_groups = {}
         self._protected = set()
+
+    def resize(self, limit_bytes, max_entries):
+        """Grow (never shrink below what is held) so a library's covers all fit; eviction applies on the next insert."""
+        self.limit_bytes = max(self.limit_bytes, int(limit_bytes))
+        self.max_entries = max(self.max_entries, int(max_entries))
 
     def protect(self, keys):
         reserved = 0
         protected = set()
         for key in dict.fromkeys(keys):
             cost = previews.SIDE ** 2 * 4 + len(key) * 2 + 160
-            if len(protected) >= 256 or reserved + cost > self.limit_bytes // 2:
+            if len(protected) >= max(256, self.max_entries // 2) or reserved + cost > self.limit_bytes // 2:
                 break
             protected.add(key)
             reserved += cost
@@ -76,15 +82,23 @@ class _ArtworkCache:
         return QPixmap(entry[0])
 
     def nearest_source(self, path, width, height, revision):
-        closest, distance = None, float("inf")
-        for key in self._sources.get((path, revision), ()):
-            pixmap = self._items[key][0]
-            if pixmap.width() * height != pixmap.height() * width:
-                continue  # Decoded sources are already cropped to their aspect ratio.
-            delta = abs(pixmap.width() - width) + abs(pixmap.height() - height)
-            if delta < distance:
-                closest, distance = key, delta
-        return self.find(closest) if closest is not None else None
+        """The decoded image of `path` nearest to the wanted size: the current revision first, then any older
+        one still held. An older decode is the right interim after a producer replaced the file: the previous
+        cover until the new one lands, never the initials."""
+        groups = [(path, revision)] + sorted((g for g in self._path_groups.get(path, ()) if g[1] != revision),
+                                             key=lambda g: -g[1])
+        for group in groups:
+            closest, distance = None, float("inf")
+            for key in self._sources.get(group, ()):
+                pixmap = self._items[key][0]
+                if pixmap.width() * height != pixmap.height() * width:
+                    continue  # Decoded sources are already cropped to their aspect ratio.
+                delta = abs(pixmap.width() - width) + abs(pixmap.height() - height)
+                if delta < distance:
+                    closest, distance = key, delta
+            if closest is not None:
+                return self.find(closest)
+        return None
 
     def _unindex(self, key):
         group = self._source_keys.pop(key, None)
@@ -93,6 +107,11 @@ class _ArtworkCache:
             variants.pop(key)
             if not variants:
                 del self._sources[group]
+                groups = self._path_groups.get(group[0])
+                if groups is not None:
+                    groups.discard(group)
+                    if not groups:
+                        del self._path_groups[group[0]]
 
     def _index(self, key):
         if not key.startswith('src:'):
@@ -106,6 +125,7 @@ class _ArtworkCache:
             return
         self._source_keys[key] = group
         self._sources.setdefault(group, OrderedDict())[key] = None
+        self._path_groups.setdefault(group[0], set()).add(group)
 
     def insert(self, key, pixmap):
         cost = pixmap.width() * pixmap.height() * max(1, (pixmap.depth() + 7) // 8)
@@ -136,8 +156,11 @@ class _ArtworkCache:
 
 
 _artwork_cache = _ArtworkCache()
-# Large/high-DPI renditions must not evict every usable image of a show.
-_preview_cache = _ArtworkCache(limit_bytes=32 * 1024 * 1024, max_entries=512)
+# Large/high-DPI renditions must not evict every usable image of a show. The
+# preview cache is the fallback that outlives every size, accent, theme and
+# revision change, so protect_artwork_previews sizes it to hold the library.
+_preview_cache = _ArtworkCache(limit_bytes=64 * 1024 * 1024, max_entries=1024)
+PREVIEW_CACHE_MAX_BYTES = 256 * 1024 * 1024
 _preview_library_paths = ()
 _preview_visible_paths = ()
 _painted_episode_art = weakref.WeakKeyDictionary()
@@ -182,9 +205,15 @@ def _remember_episode_frame(frames, identity, pixmap):
 
 
 def protect_artwork_previews(paths):
-    """GUI-thread bounded library cohort; visible previews take priority."""
+    """GUI-thread library cohort; visible previews take priority.
+
+    The preview cache grows to hold every cover of the library (with a bounded ceiling), so a cover that was
+    decoded once in this session is never shown as initials again merely because other covers came after it."""
     global _preview_library_paths
-    _preview_library_paths = tuple(dict.fromkeys(path for path in paths if path))[:256]
+    library = tuple(dict.fromkeys(path for path in paths if path))
+    entries = min(8192, max(1024, len(library) + 256))
+    _preview_cache.resize(min(PREVIEW_CACHE_MAX_BYTES, entries * (previews.SIDE ** 2 * 4 + 512)), entries)
+    _preview_library_paths = library[:entries]
     _preview_cache.protect((*_preview_visible_paths, *_preview_library_paths))
 
 
@@ -572,7 +601,11 @@ _revision_ids = count(1)
 _decode_stopped = False
 _decode_errors_logged: set[str] = set()
 MAX_PENDING_DECODES = 64
+FAILED_RETRY_SECONDS = 5.0  # how long a failed decode is not retried
 _bridge = None
+
+
+MAX_REVISIONS = 65536  # ints keyed by path; a path pushed out would come back under a new revision and lose its cached decodes
 
 
 def _revision_for(path):
@@ -581,7 +614,7 @@ def _revision_for(path):
     if path not in _revisions:
         _revisions[path] = next(_revision_ids)
     _revisions.move_to_end(path)
-    while len(_revisions) > MAX_METADATA:
+    while len(_revisions) > MAX_REVISIONS:
         _revisions.popitem(last=False)
     return _revisions[path]
 
@@ -635,6 +668,11 @@ class _DecodeBridge(QObject):
                 _remember_failed(key)
         if _decode_stopped:
             return
+        if image.isNull():
+            # The failure is remembered for FAILED_RETRY_SECONDS; nothing else repaints the row when that
+            # window ends, so one deferred repaint asks again (a file that was mid-replacement reads then).
+            QTimer.singleShot(int(FAILED_RETRY_SECONDS * 1000) + 200,
+                              lambda: [_repaint(widget) for widget in list(_watchers.get(path, ()))])
         if not image.isNull() and key.endswith(f':v{_revisions.get(path, -1)}'):
             _artwork_cache.insert(key, QPixmap.fromImage(image))
             _retain_preview(path, image)
@@ -699,7 +737,9 @@ def invalidate_artwork(path: str, *, accent_token=None):
     global _accents_dirty
     _revisions[path] = next(_revision_ids)
     _revision_for(path)
-    _preview_cache.drop(path)
+    # The preview and the older decodes stay: they are the interim the rows show until the replacement
+    # decodes, and _retain_preview swaps the preview when it lands. Dropping them here showed initials on
+    # every refresh that touched a cover file.
     with _disk_lock:
         current = (_dominant.get(path), _dominant_signatures.get(path))
         if accent_token is None or current != accent_token or current[1] is None:
@@ -756,7 +796,7 @@ def _source(path: str, width: int, height: int, sync: bool = False, notify=None)
         return cached
     with _decode_lock:
         failed_at = _failed.get(key)
-        if failed_at is not None and (sync or time.monotonic() - failed_at >= 5):
+        if failed_at is not None and (sync or time.monotonic() - failed_at >= FAILED_RETRY_SECONDS):
             del _failed[key]
             failed_at = None
     if failed_at is not None:
@@ -804,9 +844,18 @@ def cover(
     def present(pixmap):
         return _present_episode_art(notify, identity, pixmap)
 
+    _watch(path, notify)
+    # The real cover's key names the image and its geometry only. The accent and the theme colours belong to
+    # the placeholder alone: keyed into the cover as well, a retint or a theme change produced a second copy
+    # of every cover and the first copies were evicted for nothing.
+    key = f"cover:{path}:{width}x{height}:{radius}:{scale}:v{_revision_for(path)}" if path else None
+    cached = _artwork_cache.find(key) if key else None
+    if cached is not None and not cached.isNull():
+        # Before the scroll hold: a cover that is decoded is shown, whatever frame the hold kept for the row.
+        return present(cached)
+
     held = _scroll_episode_art.get(notify, {}).get(identity) if notify is not None and identity is not None else None
     if held is not None:
-        _watch(path, notify)
         if path:
             _source(path, max(1, round(width * scale)), max(1, round(height * scale)), sync, notify)
         return present(held)
@@ -815,20 +864,16 @@ def cover(
     # mutates in place — and rebuilding the window does not clear artwork.
     # Keying only on the arguments meant a placeholder rendered before a theme
     # switch was served back afterwards in the old theme's colours, for as long
-    # as the cache kept it. Bake the resolved colours into the key.
+    # as the cache kept it. Bake the resolved colours into the placeholder keys.
     theme_key = (
         f":{fallback_color or COLORS['surface_soft']}:{COLORS['muted']}"
         f":{COLORS['surface_raised']}:{COLORS['border']}"
     )
-    _watch(path, notify)
-    key = f"cover:{path}:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}:v{_revision_for(path)}"
-    cached = _artwork_cache.find(key)
-    if cached is not None and not cached.isNull():
-        return present(cached)
     physical_w = max(1, int(round(width * scale)))
     physical_h = max(1, int(round(height * scale)))
     source = _source(path, physical_w, physical_h, sync, notify) if path else None
     interim = False
+    pending = False
     if path and source is None:
         source = _artwork_cache.nearest_source(path, physical_w, physical_h, _revision_for(path))
         if source is None and physical_w == physical_h:
@@ -843,7 +888,15 @@ def cover(
     elif path and source is None:
         # Still decoding: draw the placeholder under its own key so the real
         # cover is built (and cached under `key`) on the repaint that follows.
+        # It is not presented through the frame record: a held initials frame
+        # was replayed over a decoded cover on the next scroll.
+        pending = True
         key = f"coverpending:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}"
+        cached = _artwork_cache.find(key)
+        if cached is not None and not cached.isNull():
+            return cached
+    elif not path:
+        key = f"cover::{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}"
         cached = _artwork_cache.find(key)
         if cached is not None and not cached.isNull():
             return present(cached)
@@ -879,5 +932,8 @@ def cover(
     result.setDevicePixelRatio(scale)
     _artwork_cache.insert(key, result)
     if source is not None and not interim:
-        _artwork_cache.drop(f"coverinterim:{key}")
-    return present(result)
+        # The exact cover is in: every interim drawn for this image, at this size under any revision, is stale.
+        stale = f"coverinterim:cover:{path}:{width}x{height}:"
+        for old in [entry for entry in _artwork_cache._items if entry.startswith(stale)]:
+            _artwork_cache.drop(old)
+    return result if pending else present(result)
