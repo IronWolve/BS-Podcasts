@@ -1307,14 +1307,16 @@ class MainWindow(QMainWindow):
                 if not all(isinstance(entry.get(name), kind) for name, kind in required.items()):
                     continue
                 key = entry.get('current')
-                selected = entry.get('selected', [])
                 valid = lambda value: isinstance(value, (tuple, list)) and all(isinstance(part, (str, int)) for part in value)
                 if key is not None and not valid(key):
                     continue
-                if not isinstance(selected, (tuple, list)) or not all(valid(value) for value in selected):
+                # Only the current row and the count of the selection are kept; the rows themselves are not.
+                count = entry.get('selected_count', 0)
+                if not isinstance(count, int) or isinstance(count, bool) or count < 0:
                     continue
-                result.append({**entry, 'selected': [tuple(value) for value in selected]})
-        return result
+                entry = {name: value for name, value in entry.items() if name != 'selected'}
+                result.append(entry)
+        return result[-self._NAVIGATION_HISTORY_LIMIT:]
 
     def _rail_toggled(self, compact: bool):
         self._rail_user_compact = compact
@@ -1905,7 +1907,7 @@ class MainWindow(QMainWindow):
             return
         self._catalog_timer.stop()
         if navigate and self.pages.currentIndex() == PAGE_EPISODES and not self._history_navigation:
-            self._back_stack.append(self._episode_navigation_entry())
+            self._push_history(self._back_stack, self._episode_navigation_entry())
             self._forward_stack.clear()
         try:
             limit = max(500, min(int(limit), max(500, self._episode_total)))
@@ -4036,7 +4038,7 @@ class MainWindow(QMainWindow):
                 'catalog_query': self._catalog_query, 'catalog_limit': self._catalog_limit,
                 'query': page.header.search.text(), 'filter': page._filter, 'sort': page._sort,
                 'scroll': page.scroll_position(), 'scroll_units': 'items', 'current': page._current_key(),
-                'selected': page._selected_keys()}
+                'selected_count': len(page._selected_keys())}
 
     def _open_episode_podcast(self, show_id):
         if not show_id or self.library is None:
@@ -4046,7 +4048,7 @@ class MainWindow(QMainWindow):
         if self.pages.currentWidget() is self.episode_page:
             if self._hero_show_id == show_id:
                 return
-            self._back_stack.append(self._episode_navigation_entry())
+            self._push_history(self._back_stack, self._episode_navigation_entry())
             self._forward_stack.clear()
         self._open_show_id(show_id)
         self._update_navigation_controls()
@@ -4062,8 +4064,8 @@ class MainWindow(QMainWindow):
         page._filter, page._sort = saved['filter'], saved['sort']
         page.chips.select(page._filter)
         page._update_sort_button()
-        page._apply_filters(restore_key=tuple(saved['current']) if saved['current'] else None,
-                            preserve_scroll=True, selected_keys=saved['selected'])
+        current = tuple(saved['current']) if saved['current'] else None
+        page._apply_filters(restore_key=current, preserve_scroll=True, selected_keys=[current] if current else None)
         revision = page._scroll_restore_revision
         value = min(2**31 - 1, page.saved_scroll_value(saved))
         self._later(0, lambda: page.view.verticalScrollBar().setValue(value)
@@ -4073,7 +4075,7 @@ class MainWindow(QMainWindow):
         if self._catalog_query and self.pages.currentIndex() == PAGE_EPISODES and not self._history_navigation:
             entry = self._episode_navigation_entry()
             if not self._back_stack or self._back_stack[-1] != entry:
-                self._back_stack.append(entry)
+                self._push_history(self._back_stack, entry)
             self._forward_stack.clear()
         self._leave_library_search()
         self._pending_episodes_url = ""
@@ -7878,7 +7880,7 @@ class MainWindow(QMainWindow):
             self.search_overlay.hide()
         previous = self.pages.currentIndex()
         if previous >= 0 and previous != index and not self._history_navigation:
-            self._back_stack.append(previous)
+            self._push_history(self._back_stack, previous)
             self._forward_stack.clear()
         self.pages.setCurrentIndex(index)
         if index == PAGE_EPISODES:
@@ -7984,7 +7986,7 @@ class MainWindow(QMainWindow):
         current = self.pages.currentIndex()
         target = self._back_stack.pop()
         if current >= 0:
-            self._forward_stack.append(self._episode_navigation_entry() if current == PAGE_EPISODES else current)
+            self._push_history(self._forward_stack, self._episode_navigation_entry() if current == PAGE_EPISODES else current)
         self._history_navigation = True
         try:
             self._navigate_history_target(target)
@@ -7998,7 +8000,7 @@ class MainWindow(QMainWindow):
         current = self.pages.currentIndex()
         target = self._forward_stack.pop()
         if current >= 0:
-            self._back_stack.append(self._episode_navigation_entry() if current == PAGE_EPISODES else current)
+            self._push_history(self._back_stack, self._episode_navigation_entry() if current == PAGE_EPISODES else current)
         self._history_navigation = True
         try:
             self._navigate_history_target(target)
@@ -8022,10 +8024,12 @@ class MainWindow(QMainWindow):
             self._episode_navigation_prepared = True
             self.navigation.select(PAGE_EPISODES)
 
+    def _push_history(self, stack, entry):
+        """Push one Back or Forward entry; the stack never holds more than the limit."""
+        stack.append(entry)
+        del stack[:-self._NAVIGATION_HISTORY_LIMIT]
+
     def _update_navigation_controls(self):
-        # Navigation refreshes the Back button on every move; trim there.
-        del self._back_stack[:-self._NAVIGATION_HISTORY_LIMIT]
-        del self._forward_stack[:-self._NAVIGATION_HISTORY_LIMIT]
         for index in range(self.pages.count()):
             page = self.pages.widget(index)
             page.header.back.setVisible(index == self.pages.currentIndex() and bool(self._back_stack))
