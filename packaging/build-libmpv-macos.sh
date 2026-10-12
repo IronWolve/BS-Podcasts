@@ -53,6 +53,17 @@ export CFLAGS="-O2 -fPIC -mmacosx-version-min=14.0 -ffile-prefix-map=$BS_WORK=/b
 export CXXFLAGS="$CFLAGS"
 command -v meson ninja pkg-config >/dev/null
 printf 'Native work/log directory: %s\n' "$BS_WORK"
+# The receipt attests the recipe, helper, pinned inputs and patch as they were when this run started. They are
+# hashed now, kept in the work folder, and compared again before the receipt is written (as the Linux recipe does).
+bs_identity() {
+    "$BS_PYTHON" -B -I -c '
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+for name in sys.argv[2:]:
+    print(hashlib.sha256((root / name).read_bytes()).hexdigest(), name)
+' "$BS_PROJECT/repo/packaging" build-libmpv-macos.sh native_sources.py native-sources.json native-sources-macos.json mpv-coreaudio-only.patch
+}
+bs_identity > "$BS_WORK/identity.txt"
 "$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --source "$BS_SRC" --cache "$BS_PROJECT/.cache/native-sources" --macos
 # The fetched directory for a pinned name, read from native-sources.json, so no
 # version is written into this recipe and a pin change cannot leave a stale path.
@@ -138,6 +149,8 @@ BS_UNEXPECTED_LINKS="$(tail -n +2 <<< "$BS_LINKS" | grep -Ev '^[[:space:]]+(/usr
 if [[ -n "$BS_UNEXPECTED_LINKS" ]]; then
     printf 'Unexpected non-system linkage in native player.\n' >&2; exit 1
 fi
+# Refuse before the receipt is written if the recipe, helper, inputs or patch changed during the build.
+bs_identity | cmp -s - "$BS_WORK/identity.txt" || { printf 'Native recipe, helper, pinned inputs or patch changed during the build; refusing provenance.\n' >&2; exit 1; }
 "$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --record "$BS_WORK/out/libmpv.2.dylib"
 BS_CACHE="$BS_PROJECT/.cache/macos-build/libmpv-lgpl"
 if [[ -e "$BS_CACHE" ]]; then

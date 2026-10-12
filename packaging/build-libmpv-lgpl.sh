@@ -28,6 +28,17 @@ if [[ "${1:-}" == --prune-kept ]]; then
 fi
 ROOT="$(mktemp -d "$BS_BUILD_WORKSPACE/tmp/lgpl-mpv.XXXXXX")"
 BS_PYTHON="$BS_BUILD_WORKSPACE/dists/linux/.venv/bin/python"
+# The receipt attests the recipe, helper and pinned inputs as they were when this run started. They are
+# hashed now, kept in the work folder, and compared again before the receipt is written (as the Linux recipe does).
+bs_identity() {
+    "$BS_PYTHON" -B -I -c '
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+for name in sys.argv[2:]:
+    print(hashlib.sha256((root / name).read_bytes()).hexdigest(), name)
+' "$BS_BUILD_WORKSPACE/repo/packaging" build-libmpv-lgpl.sh native_sources.py native-sources.json
+}
+bs_identity > "$ROOT/identity.txt"
 PREFIX="$ROOT/prefix"
 SRC="$ROOT/src"
 JOBS="${BS_NATIVE_JOBS:-2}"
@@ -209,6 +220,8 @@ DLL=$(find "$SRC/$MPV_DIR/build-mingw" -name "libmpv-2.dll" | head -1)
 mkdir -p "$ROOT/out"
 cp "$DLL" "$ROOT/out/libmpv-2.dll"
 ${TRIPLE}-strip "$ROOT/out/libmpv-2.dll"
+# Refuse before the receipt is written if the recipe, helper or inputs changed during the build.
+bs_identity | cmp -s - "$ROOT/identity.txt" || { printf 'Native recipe, helper or pinned inputs changed during the build; refusing provenance.\n' >&2; exit 1; }
 "$BS_PYTHON" -B -I "$BS_BUILD_WORKSPACE/repo/packaging/native_sources.py" --record "$ROOT/out/libmpv-2.dll"
 BS_CACHE="$BS_BUILD_WORKSPACE/.cache/windows-build/libmpv-lgpl"
 mkdir -p "$BS_BUILD_WORKSPACE/.cache/windows-build"
