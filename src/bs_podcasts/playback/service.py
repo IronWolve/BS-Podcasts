@@ -3,7 +3,7 @@
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from threading import Event, RLock, Timer
+from threading import Event, RLock, Thread, Timer
 import logging
 import math
 import time
@@ -184,6 +184,9 @@ class PlaybackService:
         self._listener_failures.discard(id(listener))
 
     LOAD_TIMEOUT = 25.0
+    # Longest the exit waits on the final position save. The app's exit
+    # deadline (3 s) covers this, so the save stays a small share of it.
+    SHUTDOWN_SAVE_SECONDS = 1.0
     RESOLVE_TIMEOUT = 55.0  # HTTP resolver has its own 45-second total budget
     WEB_LOAD_TIMEOUT = 55.0  # the stream's own open (connect, headers, first bytes) can take about 50 s
     # Download-first wait: no download result may ever arrive (it was paused,
@@ -1031,10 +1034,13 @@ class PlaybackService:
 
     def shutdown(self):
         self._resolve_cancel.set()
+        final = None
         with self._lock:
             if self._dead:
                 return
-            self._persist_position(force=True)
+            final = self._position_due(force=True)
+            if final is not None:
+                self._submit_progress(final[0], position=(final[1], final[2], False))
             unfinished, self._unfinished_end = self._unfinished_end, None
             self._close_silence_window()
             if self._unsaved_silence > 0 and self.listening:
@@ -1050,6 +1056,8 @@ class PlaybackService:
                     self.snapshot.episode_id, PlaybackState.SHUTDOWN.value
                 )
             self.snapshot = replace(self.snapshot, state=PlaybackState.SHUTDOWN)
+        if final is not None:
+            self._save_final_position(*final)
         if unfinished is not None:
             self._best_effort("episode completion", lambda: self._complete_episode(unfinished))
         # Terminate mpv *outside* the lock: its event thread may be waiting in
@@ -1713,14 +1721,48 @@ class PlaybackService:
 
     def _persist_position(self, force: bool = False):
         """Keep the latest stamped position per episode on the bounded writer."""
+        save = self._position_due(force)
+        if save is not None:
+            self._submit_progress(save[0], position=(save[1], save[2], False))
+
+    def _position_due(self, force: bool = False):
+        """(episode_id, position, stamp) to save now, or None. Marks the position as saved."""
         if (self.snapshot.episode_id is None or self.snapshot.episode_id == self._unstarted_id
                 or self._start_target is not None):
-            return
-        if force or abs(self.snapshot.position - self._last_saved_position) >= 5.0:
-            episode_id, position = self.snapshot.episode_id, self.snapshot.position
-            stamp = self._write_stamp()
-            self._submit_progress(episode_id, position=(position, stamp, False))
-            self._last_saved_position = position
+            return None
+        if not (force or abs(self.snapshot.position - self._last_saved_position) >= 5.0):
+            return None
+        episode_id, position = self.snapshot.episode_id, self.snapshot.position
+        self._last_saved_position = position
+        return episode_id, position, self._write_stamp()
+
+    def _save_final_position(self, episode_id, position, stamp):
+        """Write the last position during exit, waiting at most SHUTDOWN_SAVE_SECONDS.
+
+        The writer queue cannot carry this save alone: a save that library
+        maintenance refuses waits a second before its retry, and the exit join
+        may end before that. The write runs on a helper thread that retries a
+        refused write until the budget ends. A write still blocked when the
+        budget ends finishes on its own; the queued copy stays with the writer."""
+        deadline = time.monotonic() + self.SHUTDOWN_SAVE_SECONDS
+
+        def write():
+            while True:
+                try:
+                    saved = self.repository.update_position(episode_id, position, stamp=stamp)
+                except Exception as exc:
+                    logger.warning("Final playback position was not saved: %s", redact(exc))
+                    return
+                if saved is not False or time.monotonic() >= deadline:
+                    return
+                time.sleep(0.05)
+
+        worker = Thread(target=write, name="playback-final-save", daemon=True)
+        worker.start()
+        worker.join(max(0.0, deadline - time.monotonic()))
+        if worker.is_alive():
+            logger.warning("Final playback position is still being saved after %.1f s; the queued copy stays with the writer.",
+                           self.SHUTDOWN_SAVE_SECONDS)
 
     def _confirm_start(self, position: float):
         """Release saves once playback is seen at (or past) the resume target.
