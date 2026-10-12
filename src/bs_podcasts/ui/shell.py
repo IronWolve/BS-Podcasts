@@ -3420,12 +3420,11 @@ class MainWindow(QMainWindow):
         self.navigation.set_badge(PAGE_QUEUE, len(queued))
         self.home_page.summary_buttons[1].set_count(len(queued))
 
-    def _start_subscribe(self, feed_url: str, key: str, on_error, on_added, artwork_path: str = ""):
-        """Add a feed on the command pool, then hand the outcome to the caller.
-
-        Every subscribe entry point shares this add, and the artwork a
-        directory card already has. Each keeps its own error surface in
-        `on_error` and its own navigation in `on_added`."""
+    def _subscribe(self, feed_url: str, key: str, *, on_error, navigate, artwork_path: str = ""):
+        """The one subscribe flow: add the feed on the command pool, then on success navigate, reload the
+        library and fetch the new show's episodes. `on_error(text)` shows a failure on the caller's
+        surface. `navigate(show)` is the caller's destination and returns the callback to run once the
+        reload lands, or None. The artwork a directory card already has seeds the new show."""
         if self.library is None:
             return
         library = self.library
@@ -3444,16 +3443,12 @@ class MainWindow(QMainWindow):
             show, error = outcome
             if show is None:
                 on_error(error)
-            else:
-                on_added(show)
+                return
+            after_reload = navigate(show)
+            self._request_reload(after_reload)
+            self._submit_refresh(show.id)
 
         self._run_read(work, apply, key, pool=self.commands, coalesce=False)
-
-    def _reload_and_refresh(self, show, after_reload=None):
-        """The steps every subscribe path ends with: reload the library, then
-        fetch the new show's episodes."""
-        self._request_reload(after_reload)
-        self._submit_refresh(show.id)
 
     def _add_podcast(self):
         if self.library is None:
@@ -3469,15 +3464,16 @@ class MainWindow(QMainWindow):
                 else:
                     self._notify(error, 'error')
 
-            def on_added(show):
+            def navigate(show):
                 visible = dialog.isVisible()
                 dialog.accept()
-                if visible:
-                    self.navigation.select(PAGE_PODCASTS)
-                    self.podcast_page.banner.show_state('loading', f'Added {show.title or "podcast"} — fetching episodes…')
-                self._reload_and_refresh(show, (lambda: self.podcast_page.select_show(show.id)) if visible else None)
+                if not visible:
+                    return None
+                self.navigation.select(PAGE_PODCASTS)
+                self.podcast_page.banner.show_state('loading', f'Added {show.title or "podcast"} — fetching episodes…')
+                return lambda: self.podcast_page.select_show(show.id)
 
-            self._start_subscribe(url, 'add-subscription', on_error, on_added)
+            self._subscribe(url, 'add-subscription', on_error=on_error, navigate=navigate)
 
         dialog.submit_requested.connect(submit)
         self._exec_dialog(dialog)
@@ -3800,12 +3796,12 @@ class MainWindow(QMainWindow):
             self.podcast_page.banner.show_state("error", error)
             self.navigation.select(PAGE_PODCASTS)
 
-        def on_added(show):
+        def navigate(show):
             self.navigation.select(PAGE_PODCASTS)
             self.podcast_page.banner.show_state("loading", f"Added {show.title or 'podcast'} — fetching episodes…")
-            self._reload_and_refresh(show, lambda: self.podcast_page.select_show(show.id))
+            return lambda: self.podcast_page.select_show(show.id)
 
-        self._start_subscribe(feed_url, "add-feed-url", on_error, on_added)
+        self._subscribe(feed_url, "add-feed-url", on_error=on_error, navigate=navigate)
 
     def _confirm_incoming_file_args(self, paths):
         """Incoming file arguments are requests, never permission to read them."""
@@ -3861,8 +3857,7 @@ class MainWindow(QMainWindow):
         def on_error(error):
             self._notify(error or "Could not subscribe to this podcast", "error")
 
-        def on_added(show):
-            self._reload_and_refresh(show)
+        def navigate(show):
             if self.pages.currentWidget() is self.episode_page and self._preview_episodes_url == feed_url:
                 self._preview_episodes_url = ""
                 self._open_podcast(self._ui_podcast(show))
@@ -3877,8 +3872,9 @@ class MainWindow(QMainWindow):
                 self.navigation.select(PAGE_PODCASTS)
                 self.podcast_page.select_show(show.id)
                 self.podcast_page.banner.show_state("loading", "Podcast added — fetching episodes…")
+            return None
 
-        self._start_subscribe(feed_url, "subscribe-url", on_error, on_added, artwork_path)
+        self._subscribe(feed_url, "subscribe-url", on_error=on_error, navigate=navigate, artwork_path=artwork_path)
 
     @staticmethod
     def _feed_keys(show) -> set:
