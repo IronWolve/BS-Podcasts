@@ -135,16 +135,23 @@ class MpvEngine:
         self._http_streams = []
         self._http_lock = Lock()
         self._http_failure = None
-        self._player.register_stream_protocol('bshttp', self._open_http)
-
-        self._player.observe_property("time-pos", self._position_changed)
-        self._player.observe_property("duration", self._duration_changed)
-        self._player.observe_property("pause", self._pause_changed)
-        self._player.observe_property("paused-for-cache", self._cache_paused)
-        self._player.observe_property("cache-buffering-state", self._cache_state)
-        self._event_callback = self._player.event_callback(
-            "start-file", "file-loaded", "end-file", "shutdown"
-        )(self._mpv_event)
+        try:
+            self._player.register_stream_protocol('bshttp', self._open_http)
+            self._player.observe_property("time-pos", self._position_changed)
+            self._player.observe_property("duration", self._duration_changed)
+            self._player.observe_property("pause", self._pause_changed)
+            self._player.observe_property("paused-for-cache", self._cache_paused)
+            self._player.observe_property("cache-buffering-state", self._cache_state)
+            self._event_callback = self._player.event_callback(
+                "start-file", "file-loaded", "end-file", "shutdown"
+            )(self._mpv_event)
+        except BaseException:
+            # The core exists but is not wired: a failed engine must not leave
+            # its native threads and audio device alive behind the exception.
+            player, self._player = self._player, None
+            self._dead = True
+            player.terminate()
+            raise
 
     @staticmethod
     def _missing_option(exc) -> str | None:
@@ -202,8 +209,8 @@ class MpvEngine:
 
     def prepare_load(self):
         """Retire outgoing observations before a new snapshot is published."""
-        self._guard()
         with self._state_lock:
+            player = self._live()
             self._generation += 1
             self._loading = True
             self._resolving = True
@@ -212,7 +219,7 @@ class MpvEngine:
             generation = self._generation
         try:
             self._cancel_http()
-            self._player.command("stop")
+            player.command("stop")
         except BaseException:
             with self._state_lock:
                 if self._generation == generation:
@@ -224,7 +231,7 @@ class MpvEngine:
         return generation
 
     def load(self, source: str, start_position: float = 0.0, autoplay: bool = True):
-        self._guard()
+        self._live()
         from ..urlguard import UnsafeUrl, ensure_media_source, is_web_url
         if not is_web_url(source):
             # The service decides which local files and shares may play; the
@@ -235,6 +242,7 @@ class MpvEngine:
             except UnsafeUrl as exc:
                 raise PlaybackUnavailable(redact(exc)) from exc
         with self._state_lock:
+            player = self._live()
             self._activated = True
             self._resolving = False
             self._loading = True
@@ -243,8 +251,8 @@ class MpvEngine:
             self._pending_autoplay = bool(autoplay)
             self._last_error = ""
             try:
-                self._player.ab_loop_a = "no"
-                self._player.ab_loop_b = "no"
+                player.ab_loop_a = "no"
+                player.ab_loop_b = "no"
             except BaseException:
                 self._loading = False
                 self._expected_entry_id = None
@@ -262,8 +270,8 @@ class MpvEngine:
             if isinstance(cache, bool):
                 cache = 'yes' if cache else 'no'
             try:
-                self._player.loadfile(native_source, "replace", pause="yes", cache=cache)
-                entries = self._player.playlist
+                player.loadfile(native_source, "replace", pause="yes", cache=cache)
+                entries = player.playlist
                 if len(entries) != 1 or "id" not in entries[0]:
                     raise PlaybackUnavailable("Could not identify the native playback entry.")
                 self._expected_entry_id = entries[0]["id"]
@@ -279,68 +287,63 @@ class MpvEngine:
         stop() used to leave the media open inside mpv: a paused episode's
         demuxer cache stayed resident and, on Windows, the file could not be
         deleted (audit F-042, F-043)."""
-        self._guard()
         with self._state_lock:
+            player = self._live()
             self._loading = False
             self._pending_autoplay = False
             self._expected_entry_id = None
             self._event_entry_id = None
         self._cancel_http()
-        self._player.command("stop")
+        player.command("stop")
 
     def play(self):
-        self._guard()
         # Last intent wins: a play/pause while the file is still opening must
         # be what the file-loaded handler applies, not the original autoplay.
         with self._state_lock:
+            self._live()
             self._pending_autoplay = True
         self._set("pause", False)
 
     def pause(self):
-        self._guard()
         with self._state_lock:
+            self._live()
             self._pending_autoplay = False
         self._set("pause", True)
 
     def seek_absolute(self, seconds: float):
-        self._guard()
         with self._state_lock:
+            player = self._live()
             if self._loading:
                 # mpv has no file yet; fold the seek into the pending start so the
                 # file-loaded handler applies it instead of the stale load target.
                 # The service already shows the target in its snapshot.
                 self._pending_position = max(0.0, float(seconds))
                 return
-        self._player.command("seek", max(0.0, float(seconds)), "absolute", "exact")
+        player.command("seek", max(0.0, float(seconds)), "absolute", "exact")
 
     def skip(self, seconds: float):
-        self._guard()
         with self._state_lock:
+            player = self._live()
             if self._loading:
                 self._pending_position = max(0.0, self._pending_position + float(seconds))
                 return
-        self._player.command("seek", float(seconds), "relative", "exact")
+        player.command("seek", float(seconds), "relative", "exact")
 
     def set_speed(self, speed: float):
-        self._guard()
         self._set("speed", max(0.5, min(3.0, float(speed))))
 
     def set_volume(self, volume: float):
-        self._guard()
         self._set("volume", max(0.0, min(100.0, float(volume))))
 
     def set_ab_repeat(self, start: float, end: float):
-        self._guard()
         self._set("ab-loop-a", max(0.0, float(start)))
         self._set("ab-loop-b", max(float(start), float(end)))
 
     def clear_ab_repeat(self):
-        self._guard()
         self._set("ab-loop-a", "no")
         self._set("ab-loop-b", "no")
 
     def set_silence_trim(self, level: str):
-        self._guard()
         thresholds = {
             "light": "-48dB",
             "medium": "-42dB",
@@ -380,11 +383,21 @@ class MpvEngine:
         """
         if isinstance(value, bool):
             value = "yes" if value else "no"
-        self._player.command("set", name, str(value))
+        self._live().command("set", name, str(value))
 
-    def _guard(self):
-        if self._dead or self._player is None:
-            raise PlaybackUnavailable("The internal playback engine has shut down.")
+    def _live(self):
+        """The native handle, taken under the state lock, or PlaybackUnavailable.
+
+        shutdown() clears the handle under the same lock, so a caller that
+        keeps this reference can never find None in its place half-way
+        through a command; it gets this exception before, or the native
+        library's own error from a core that is closing, never an
+        AttributeError.
+        """
+        with self._state_lock:
+            if self._dead or self._player is None:
+                raise PlaybackUnavailable("The internal playback engine has shut down.")
+            return self._player
 
     def _emit(self, kind: str, value=None):
         with self._state_lock:
