@@ -1,6 +1,6 @@
 """Connection factory and numbered transactional migrations."""
 
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from datetime import datetime
 import logging
@@ -466,42 +466,36 @@ class Database:
         finally:
             connection.close()
 
+    def _copy_to(self, target: Path, lock=None):
+        """Copy the library to `target` through SQLite's backup, written to a sidecar in the same folder and
+        put in place only when complete. A copy that failed halfway used to leave a truncated file with a
+        valid backup name, exactly the file a user would later restore from. `lock` is a context manager
+        held around the read (the backup holds the shared lock; a pre-migration copy owns the exclusive one)."""
+        descriptor, name = tempfile.mkstemp(prefix=".library-backup-", suffix=".tmp", dir=target.parent)
+        os.close(descriptor)
+        temporary = Path(name)
+        try:
+            with lock if lock is not None else nullcontext():
+                with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(temporary)) as destination:
+                    source.backup(destination)
+            os.replace(temporary, target)
+            sync_directory(target.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return target
+
     def _backup_before_migration(self):
         """Never replace the original recovery snapshot on an upgrade retry."""
         target = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
         if target.exists():
             target = self.path.with_suffix(self.path.suffix + ".pre-migration-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".bak")
-        descriptor, name = tempfile.mkstemp(prefix=".library-backup-", suffix=".tmp", dir=target.parent)
-        os.close(descriptor)
-        temporary = Path(name)
-        try:
-            with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(temporary)) as destination:
-                source.backup(destination)
-            os.replace(temporary, target)
-            sync_directory(target.parent)
-        finally:
-            temporary.unlink(missing_ok=True)
+        self._copy_to(target)
 
     def backup(self) -> Path:
         directory = self.path.parent / "backups"
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        target = directory / f"library-{stamp}.db"
-        # Write to a sidecar and replace on success: a backup() that failed
-        # halfway used to leave a truncated file with a valid backup name —
-        # exactly the file a user would later restore from.
-        descriptor, name = tempfile.mkstemp(prefix=".library-backup-", suffix=".tmp", dir=directory)
-        os.close(descriptor)
-        temporary = Path(name)
-        try:
-            with self._lock.shared():
-                with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(temporary)) as destination:
-                    source.backup(destination)
-            os.replace(temporary, target)
-            sync_directory(directory)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return target
+        return self._copy_to(directory / f"library-{stamp}.db", lock=self._lock.shared())
 
     def reindex(self):
         with self._lock.exclusive():
