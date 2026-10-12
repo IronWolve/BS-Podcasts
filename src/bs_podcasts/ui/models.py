@@ -154,7 +154,8 @@ def _notify_changed_rows(model, rows):
 
 
 def _replace_items(model, items, key):
-    """Swap in new rows, updating in place when the rows are the same ones."""
+    """Swap in new rows: in place when they are the same rows, by removing and inserting the rows that
+    differ when the shared rows keep their order, and by a reset only when the order itself changed."""
     items = list(items)
     if not model._items and not items:
         return
@@ -164,9 +165,63 @@ def _replace_items(model, items, key):
         model._items = items
         _notify_changed_rows(model, changed)
         return
+    if model._items and items and _patch_rows(model, items, key):
+        return
     model.beginResetModel()
     model._items = items
     model.endResetModel()
+
+
+def _patch_rows(model, items, key) -> bool:
+    """Remove the rows that are gone and insert the new ones, in runs, keeping the shared rows.
+
+    A refresh that adds one episode or an unsubscribe that drops one show used to reset the whole model,
+    which lost the selection and the scroll position every 1.5 s while a refresh batch ran. The shared rows
+    must keep their relative order (a re-sort is a reset) and the keys must be unique on both sides; when
+    nothing is shared a reset is the cheaper path. Returns whether the rows were patched."""
+    old_keys = [key(item) for item in model._items]
+    new_keys = [key(item) for item in items]
+    if len(set(old_keys)) != len(old_keys) or len(set(new_keys)) != len(new_keys):
+        return False
+    old_set, new_set = set(old_keys), set(new_keys)
+    shared_old = [k for k in old_keys if k in new_set]
+    if not shared_old or shared_old != [k for k in new_keys if k in old_set]:
+        return False
+    rows = list(model._items)
+    # Removals, in runs, from the bottom up so the earlier rows keep their numbers.
+    row = len(rows) - 1
+    while row >= 0:
+        if old_keys[row] in new_set:
+            row -= 1
+            continue
+        last = row
+        while row > 0 and old_keys[row - 1] not in new_set:
+            row -= 1
+        model.beginRemoveRows(QModelIndex(), row, last)
+        del rows[row:last + 1]
+        del old_keys[row:last + 1]
+        model._items = rows
+        model.endRemoveRows()
+        row -= 1
+    # Insertions, in runs, from the top down; every row above an insertion point already matches.
+    position = 0
+    while position < len(items):
+        if new_keys[position] in old_set:
+            position += 1
+            continue
+        first = position
+        while position + 1 < len(items) and new_keys[position + 1] not in old_set:
+            position += 1
+        model.beginInsertRows(QModelIndex(), first, position)
+        rows[first:first + 0] = items[first:position + 1]
+        model._items = rows
+        model.endInsertRows()
+        position += 1
+    # The shared rows may carry new data.
+    changed = [row for row, (old, new) in enumerate(zip(rows, items)) if old != new]
+    model._items = items
+    _notify_changed_rows(model, changed)
+    return True
 
 
 class PodcastModel(QAbstractListModel):
@@ -252,11 +307,13 @@ class EpisodeModel(QAbstractListModel):
         _replace_items(self, items, self._key)
 
     def update_items(self, updates):
+        changed = []
         for row, item in enumerate(self._items):
             updated = updates.get(item.episode_id)
             if updated is not None and updated != item:
                 self._items[row] = updated
-                self.dataChanged.emit(self.index(row, 0), self.index(row, 0))
+                changed.append(row)
+        _notify_changed_rows(self, changed)
 
     def update_artwork_batch(self, changes):
         changed = []
