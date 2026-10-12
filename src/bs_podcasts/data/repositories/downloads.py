@@ -28,11 +28,14 @@ class DownloadRepository:
         self.database = database
 
     def prepare(self, episode_id: int, source_url: str, target: Path, partial: Path):
-        """Queue a download, keeping the paths an existing record already has.
+        """Queue a download, keeping the paths and any live transfer an existing record already has.
 
-        Overwriting them on every call made the "honor the prepared paths"
+        Overwriting the paths on every call made the "honor the prepared paths"
         resume branch in DownloadService dead code, and orphaned the old
         partial whenever a feed refresh changed the episode's media URL.
+        A row that is downloading from the same URL keeps its state: a second
+        prepare while the transfer runs (or a wait that timed out) must not
+        turn a live download back into a queued one.
         """
         now = time.time()
         with self.database.connect() as connection:
@@ -44,8 +47,12 @@ class DownloadRepository:
                    etag=CASE WHEN source_url=excluded.source_url THEN etag ELSE '' END,
                    last_modified=CASE WHEN source_url=excluded.source_url THEN last_modified ELSE '' END,
                    expected_total=CASE WHEN source_url=excluded.source_url THEN expected_total ELSE 0 END,
+                   state=CASE WHEN source_url=excluded.source_url AND state='downloading'
+                              THEN state ELSE 'queued' END,
+                   error_message=CASE WHEN source_url=excluded.source_url AND state='downloading'
+                                      THEN error_message ELSE '' END,
                    source_url=excluded.source_url,
-                   state='queued', error_message='', updated_at=MAX(downloads.updated_at+0.000001, excluded.updated_at)
+                   updated_at=MAX(downloads.updated_at+0.000001, excluded.updated_at)
                    WHERE downloads.state != 'complete'""",
                 (episode_id, source_url, str(target), str(partial), now, now),
             )
