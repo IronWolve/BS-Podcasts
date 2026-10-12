@@ -1,11 +1,16 @@
 """Self-contained arm64 QtWidgets bundle with an explicitly reviewed player."""
 import os
+import sys
 from pathlib import Path
-import tomllib
 
 ROOT = Path(os.environ['BS_PODCASTS_SOURCE_STAGE'])
 SOURCE = ROOT / 'src'
-VERSION = tomllib.loads((ROOT/'pyproject.toml').read_text())['project']['version']
+# Excludes, payload filter, version and traceback choice are shared with the Windows spec.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / 'packaging'))
+from pyinstaller_payload import DISABLE_WINDOWED_TRACEBACK, EXCLUDES, dropped_payload, read_version  # noqa: E402
+
+VERSION = read_version(ROOT)
 IDENTITY = os.environ.get('BS_PODCASTS_SIGN_IDENTITY') or None
 analysis = Analysis(
     [str(ROOT/'packaging/windows_launcher.py')], pathex=[str(SOURCE)],
@@ -16,36 +21,15 @@ analysis = Analysis(
            (str(ROOT/'packaging/THIRD-PARTY-NOTICES.txt'), '.')],
     hiddenimports=[], hookspath=[], hooksconfig={},
     runtime_hooks=[str(ROOT/'packaging/runtime_macos.py')],
-    excludes=['mutagen','PIL','Pillow','setuptools','pkg_resources','_distutils_hack','distutils',
-              'PySide6.QtDBus','PySide6.QtQml','PySide6.QtQuick','PySide6.QtPdf'],
+    excludes=list(EXCLUDES),
     noarchive=False, optimize=1,
 )
-UNUSED = ('qtqml','qtquick','qtpdf','qtvirtualkeyboard','qtvirtualkeyboardplugin','imageformats/qpdf','imageformats/libqpdf')
-
-# In-app badge copies the app never loads: only the 512 px badge ships (DQ01).
-UNSHIPPED_BADGES = tuple(f'assets/branding/bs-podcasts-icon-{size}.png' for size in (32, 64, 128, 256))
-
-def _dropped_payload(name):
-    normalized = name.replace('\\','/').lower()
-    parts = normalized.split('/')
-    if normalized.endswith('.qm') or 'translations' in parts:
-        return True
-    if normalized.endswith(UNSHIPPED_BADGES):
-        return True
-    if any(part == 'pil' or part.startswith('pil.') or part == 'pillow' or part.startswith('pillow.') for part in parts):
-        return True
-    if any(part in {'setuptools', 'pkg_resources', '_distutils_hack', 'distutils'} for part in parts):
-        return True
-    return any(marker in normalized for marker in UNUSED)
-
-analysis.binaries = TOC(entry for entry in analysis.binaries if not _dropped_payload(entry[0]))
-analysis.datas = TOC(entry for entry in analysis.datas if not _dropped_payload(entry[0]))
+analysis.binaries = TOC(entry for entry in analysis.binaries if not dropped_payload(entry[0]))
+analysis.datas = TOC(entry for entry in analysis.datas if not dropped_payload(entry[0]))
 pyz = PYZ(analysis.pure)
 exe = EXE(pyz, analysis.scripts, [], exclude_binaries=True, name='BS Podcasts',
           debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
-          # Traceback dialog choice, recorded per platform: True suppresses an uncaught traceback in the windowed build;
-    # Windows shows it (False). The owner has not chosen one value for both.
-    console=False, disable_windowed_traceback=True, argv_emulation=False,
+          console=False, disable_windowed_traceback=DISABLE_WINDOWED_TRACEBACK['macos'], argv_emulation=False,
           target_arch='arm64', codesign_identity=IDENTITY,
           entitlements_file=str(ROOT/'packaging/macos-entitlements.plist') if IDENTITY else None)
 collect = COLLECT(exe, analysis.binaries, analysis.datas, strip=False, upx=False, name='BS Podcasts')

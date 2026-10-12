@@ -7,27 +7,22 @@ starts near-instantly, as a single process.
 """
 
 import os
-import re
-import tomllib
+import sys
 from pathlib import Path
 
 ROOT = Path(os.environ["BS_PODCASTS_SOURCE_STAGE"])
 SOURCE = ROOT / "src"
 LIBMPV = Path(os.environ["BS_PODCASTS_LIBMPV_DLL"])
+# Excludes, payload filter, version and traceback choice are shared with the macOS spec.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / "packaging"))
+from pyinstaller_payload import DISABLE_WINDOWED_TRACEBACK, EXCLUDES, dropped_payload, numeric_version, read_version  # noqa: E402
 
 if not LIBMPV.is_file():
     raise FileNotFoundError(f"Bundled libmpv DLL not found: {LIBMPV}")
 
-try:
-    VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
-except (KeyError, TypeError, tomllib.TOMLDecodeError):
-    VERSION = ""
-if not isinstance(VERSION, str) or not re.search(r"\d", VERSION):
-    # Never stamp a placeholder version into the executable.
-    raise SystemExit("Could not read a version from pyproject.toml; refusing to build.")
-# The release numbers only: a pre-release suffix such as rc1 must not add a number to the version resource.
-RELEASE = re.match(r"\d+(?:\.\d+)*", VERSION)
-NUMERIC = tuple((([int(part) for part in RELEASE.group(0).split(".")] if RELEASE else []) + [0, 0, 0, 0])[:4])
+VERSION = read_version(ROOT)
+NUMERIC = numeric_version(VERSION)
 
 # Identify the process as BS Podcasts (not the Python bootloader) in Task
 # Manager and file properties.
@@ -72,56 +67,13 @@ analysis = Analysis(
     # The app never imports setuptools. It only arrived through urllib3's optional
     # backports.zstd import (Python 3.14 has compression.zstd) plus its own runtime
     # hook. The packaged self-check below the build still gates publication.
-    excludes=[
-        "mutagen",
-        "PIL",
-        "Pillow",
-        "setuptools",
-        "pkg_resources",
-        "_distutils_hack",
-        "distutils",
-        "PySide6.QtDBus",
-        "PySide6.QtQml",
-        "PySide6.QtQuick",
-        "PySide6.QtPdf",
-    ],
+    excludes=list(EXCLUDES),
     noarchive=False,
     optimize=1,
 )
 
-# Qt libraries the PySide6 hook drags in through plugin dependencies but that a
-# QtWidgets-only app never loads: the Qml/Quick stack and the virtual keyboard
-# that needs it, PDF rendering (and its imageformat plugin), and the ~20 MB
-# software-OpenGL rasterizer. Dropping them shrinks what ships and installs.
-_UNUSED_BINARIES = (
-    "qt6qml",
-    "qt6quick",
-    "qt6pdf",
-    "qt6virtualkeyboard",
-    "qtvirtualkeyboardplugin",
-    "imageformats/qpdf",
-    "opengl32sw",
-)
-
-# In-app badge copies the app never loads: only the 512 px badge ships (DQ01).
-_UNSHIPPED_BADGES = tuple(f"assets/branding/bs-podcasts-icon-{size}.png" for size in (32, 64, 128, 256))
-
-def _dropped_payload(name):
-    # Separators are normalised before every test, so a backslash path and a slash path are judged alike.
-    normalized = name.replace("\\", "/").lower()
-    parts = normalized.split("/")
-    if normalized.endswith(".qm") or "translations" in parts:
-        return True
-    if normalized.endswith(_UNSHIPPED_BADGES):
-        return True
-    if any(part == "pil" or part.startswith("pil.") or part == "pillow" or part.startswith("pillow.") for part in parts):
-        return True
-    if {"setuptools", "pkg_resources", "_distutils_hack", "distutils"}.intersection(parts):
-        return True
-    return any(marker in normalized for marker in _UNUSED_BINARIES)
-
-analysis.binaries = TOC(entry for entry in analysis.binaries if not _dropped_payload(entry[0]))
-analysis.datas = TOC(entry for entry in analysis.datas if not _dropped_payload(entry[0]))
+analysis.binaries = TOC(entry for entry in analysis.binaries if not dropped_payload(entry[0]))
+analysis.datas = TOC(entry for entry in analysis.datas if not dropped_payload(entry[0]))
 
 pyz = PYZ(analysis.pure)
 
@@ -138,9 +90,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
-    # Traceback dialog choice, recorded per platform: False here shows an uncaught traceback in the windowed build;
-    # macOS suppresses it (True). The owner has not chosen one value for both.
-    disable_windowed_traceback=False,
+    disable_windowed_traceback=DISABLE_WINDOWED_TRACEBACK["windows"],
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
