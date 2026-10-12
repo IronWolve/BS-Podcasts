@@ -69,11 +69,13 @@
 !/packaging/native-sources.json
 !/packaging/mpv-coreaudio-only.patch
 !/packaging/native_sources.py
+!/packaging/pe_imports.py
 !/packaging/project-build.sh
 !/packaging/project-start.sh
 !/packaging/project-stop.sh
 !/packaging/project-sync.sh
 !/packaging/prune_helper.py
+!/packaging/pyinstaller_payload.py
 !/packaging/render-desktop.py
 !/packaging/release_archives.py
 !/packaging/report.py
@@ -104,6 +106,7 @@
 !/src/bs_podcasts/assets/branding/bs-podcasts-logo.png
 !/src/bs_podcasts/assets/branding/bs-podcasts-shell-icon-128.png
 !/src/bs_podcasts/assets/branding/bs-podcasts-shell-icon-256.png
+!/src/bs_podcasts/assets/branding/bs-podcasts-shell-icon-16.png
 !/src/bs_podcasts/assets/branding/bs-podcasts-shell-icon-32.png
 !/src/bs_podcasts/assets/branding/bs-podcasts-shell-icon-512.png
 !/src/bs_podcasts/assets/branding/bs-podcasts-shell-icon-64.png
@@ -189,6 +192,10 @@
 !/src/bs_podcasts/playback/http_stream.py
 !/src/bs_podcasts/playback/service.py
 !/src/bs_podcasts/playback/persistence.py
+!/src/bs_podcasts/playback/sleep.py
+!/src/bs_podcasts/playback/metering.py
+!/src/bs_podcasts/playback/recovery.py
+!/src/bs_podcasts/playback/review.py
 !/src/bs_podcasts/selfcheck.py
 !/src/bs_podcasts/services/__init__.py
 !/src/bs_podcasts/services/library.py
@@ -201,6 +208,7 @@
 !/src/bs_podcasts/ui/models.py
 !/src/bs_podcasts/ui/pages.py
 !/src/bs_podcasts/ui/pixmaps.py
+!/src/bs_podcasts/ui/playback_actions.py
 !/src/bs_podcasts/ui/shell.py
 !/src/bs_podcasts/ui/shortcuts.py
 !/src/bs_podcasts/ui/theme.py
