@@ -932,8 +932,11 @@ class DownloadService:
             stall = _StallWatch(response, self.STALL_WINDOW_SECONDS, self.STALL_MIN_BYTES, self.MAX_TRANSFER_SECONDS, cancellation)
             stall.start()
             # Progress is persisted by time, not bytes: a 256 KB step meant
-            # ~400 commits for a 100 MB episode of unknown length. The UI
-            # still gets a signal for every byte step, which writes nothing.
+            # ~400 commits for a 100 MB episode of unknown length. The rule:
+            # the UI gets a signal when the transfer has moved at least
+            # report_bytes (the larger of 256 KB and one twentieth of the total)
+            # since the last signal, and once per 2-second save tick. The tick
+            # also writes the row; a byte-step signal writes nothing.
             report_bytes = max(256 * 1024, (total or 0) // 20)
             head = b""
             with open_private(partial, "ab" if append else "wb") as handle:
