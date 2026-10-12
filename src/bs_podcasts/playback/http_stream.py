@@ -2,6 +2,7 @@
 import logging
 import re
 import time
+import warnings
 from threading import Event, Lock, Thread
 
 from ..net import make_session
@@ -28,6 +29,20 @@ SEEK_RETRY_DELAYS = (0.25, 0.5, 1.0)
 STALL_SECONDS = 60.0
 
 logger = logging.getLogger("bs_podcasts")
+
+
+class _StreamFailure(OSError):
+    """A designed end of a stream. on_error has already received its message."""
+
+
+# python-mpv turns any exception raised by a stream callback into a RuntimeWarning
+# whose text is the full traceback, local paths included, printed to stderr. Every
+# _StreamFailure is reported by on_error (and the reader's log line) first, so only
+# that warning is silenced, matched by the exception class in its traceback.
+warnings.filterwarnings(
+    "ignore", category=RuntimeWarning,
+    message=r"Unhandled exception on python-mpv event loop: [\s\S]*"
+            + re.escape(f"{__name__}._StreamFailure") + ": ")
 
 
 class _Cancelled(Exception):
@@ -227,9 +242,9 @@ class HttpStream:
         data, self._buffer = self._buffer[:size], self._buffer[size:]
         self.position += len(data)
         if self.position > MAX_STREAM_BYTES or (self.size is not None and self.position > self.size):
-            self._fail('The audio stream exceeded its declared size.')
+            self._overrun('The audio stream exceeded its declared size.')
         if self._part_end is not None and self.position > self._part_end:
-            self._fail('The audio response exceeded its byte range.')
+            self._overrun('The audio response exceeded its byte range.')
         if self._resume_failures and self.position - self._resumed_at >= RESUME_PROGRESS:
             self._resume_failures = 0
         return data
@@ -318,11 +333,17 @@ class HttpStream:
             self._fail(redact(failure))
         self._fail('The audio connection dropped and could not be reconnected.')
 
+    def _overrun(self, message):
+        """A stream that delivers more than it declared. Nothing else logs this end."""
+        logger.error("Audio stream stopped at byte %s of %s: %s", self.position,
+                     self.size if self.size is not None else "unknown", message)
+        self._fail(message)
+
     def _fail(self, message):
         self._eof = True
         self._failed = True
         self._on_error(message)
-        raise OSError(message) from None
+        raise _StreamFailure(message) from None
 
     def seek(self, offset):
         if self.cancelled.is_set() or offset < 0 or offset > MAX_STREAM_BYTES:
