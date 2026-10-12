@@ -214,10 +214,10 @@ class LibraryService:
                 known[self.normalize_feed_url(show.feed_url)] = show
         return added
 
-    def export_opml(self) -> bytes:
+    def export_opml(self, *, keep_credentials: bool = False) -> bytes:
         from ..feeds.opml import export_opml
 
-        return export_opml(self.shows())
+        return export_opml(self.shows(), keep_credentials=keep_credentials)
 
     def import_local_audio(self, path):
         from ..feeds.local import LocalAudioImporter
