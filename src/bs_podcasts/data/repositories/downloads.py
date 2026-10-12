@@ -113,7 +113,7 @@ class DownloadRepository:
                 ),
             )
 
-    def complete(self, episode_id: int, path: str, size: int, *, length_verified=True):
+    def complete(self, episode_id: int, path: str, size: int, *, length_verified: bool):
         with self.database.connect() as connection:
             changed = connection.execute(
                 """UPDATE downloads SET state='complete', target_path=?,

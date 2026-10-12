@@ -818,7 +818,11 @@ class DownloadService:
                 whole = re.fullmatch(r"bytes \*/(\d+)", response.headers.get("Content-Range", "").strip())
                 if (whole is not None and int(whole.group(1)) == existing
                         and record is not None and record.expected_total in (0, existing)):
-                    return self._finish(episode_id, partial, target, existing, cancellation)
+                    # The server's whole-file size is known; the length is verified
+                    # only when the stored expected total agrees with it. An unknown
+                    # total leaves the file unverified, so automatic cleanup keeps it.
+                    return self._finish(episode_id, partial, target, existing, cancellation,
+                                        length_verified=record.expected_total == existing)
                 raise _StaleResume("The partial range is no longer available; restarting.")
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
@@ -1039,7 +1043,7 @@ class DownloadService:
             if response is not None:
                 response.close()
 
-    def _finish(self, episode_id: int, partial: Path, target: Path, done: int, cancellation: Event, *, length_verified=True):
+    def _finish(self, episode_id: int, partial: Path, target: Path, done: int, cancellation: Event, *, length_verified: bool):
         """Verify the finished partial and rename it into place as complete."""
         if cancellation.is_set():
             return self._park(episode_id, partial)
