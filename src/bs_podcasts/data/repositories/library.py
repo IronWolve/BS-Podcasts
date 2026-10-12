@@ -1190,17 +1190,28 @@ class LibraryRepository:
 
         Returns how many rows were added; an episode already queued, or named
         twice, counts once."""
-        ids = [int(i) for i in episode_ids]
+        ids = list(dict.fromkeys(int(i) for i in episode_ids))
         if not ids:
             return 0
         now = time.time()
         added = 0
         with self.database.connect() as connection:
-            for episode_id in ids:
+            # One statement per 500 ids, not one per id: the ids arrive as a
+            # VALUES table, the ones already queued drop out, and the rest are
+            # numbered in the given order after the queue's last position.
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                values = ", ".join("(?, ?)" for _ in batch)
+                parameters = [value for index, episode_id in enumerate(batch) for value in (episode_id, index)]
+                # The statement begins with INSERT (the CTE belongs to its
+                # SELECT) so the driver reports the rows it added.
                 added += connection.execute(
                     "INSERT OR IGNORE INTO queue(episode_id, position, added_at) "
-                    "SELECT ?, COALESCE(MAX(position), 0) + 1, ? FROM queue",
-                    (episode_id, now),
+                    f"WITH given(episode_id, ordinal) AS (VALUES {values}), "
+                    "fresh AS (SELECT episode_id, ROW_NUMBER() OVER (ORDER BY ordinal) AS rank FROM given "
+                    "          WHERE episode_id NOT IN (SELECT episode_id FROM queue)) "
+                    "SELECT episode_id, (SELECT COALESCE(MAX(position), 0) FROM queue) + rank, ? FROM fresh ORDER BY rank",
+                    parameters + [now],
                 ).rowcount
         return added
 
