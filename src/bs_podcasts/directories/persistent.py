@@ -20,6 +20,9 @@ MAX_CACHE_FILES = 24
 MAX_CACHE_BYTES = 8 * 1024 * 1024
 MAX_ENTRY_BYTES = 2 * 1024 * 1024
 MAX_CANDIDATES = 200
+# Files written by this version. A file without this prefix is from before the
+# digest key, when the key held the typed search text in plain text; prune removes it.
+_FILE_PREFIX = "discover-s2-"
 _TEXT_LIMITS = {
     "title": 2048,
     "author": 2048,
@@ -54,11 +57,17 @@ class PersistentDirectoryCache:
             value = list(value)
         elif not isinstance(value, str):
             return None
-        return json.dumps([operation, value], ensure_ascii=False, separators=(",", ":"))
+        text = json.dumps([operation, value], ensure_ascii=False, separators=(",", ":"))
+        try:
+            encoded = text.encode("utf-8")
+        except UnicodeEncodeError:
+            return None  # text that cannot be stored is a miss, as before
+        # The key is a digest, so a typed search is never written to disk as text.
+        return sha256(encoded).hexdigest()
 
     def _path(self, key):
         digest = sha256(key.encode("utf-8")).hexdigest()
-        return self.directory / f"discover-{digest}.json"
+        return self.directory / f"{_FILE_PREFIX}{digest}.json"
 
     def load(self, operation, value, artwork_cache=None):
         key = self._key(operation, value)
@@ -184,6 +193,13 @@ class PersistentDirectoryCache:
             for path in self.directory.glob("discover-*.json"):
                 if path.is_symlink():
                     continue
+                if not path.name.startswith(_FILE_PREFIX):
+                    # Pre-digest snapshot: its key holds the search text. It is cache, so remove it.
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                    continue
                 try:
                     info = path.stat()
                     entries.append((info.st_mtime_ns, info.st_size, path))
@@ -204,7 +220,7 @@ class PersistentDirectoryCache:
             size -= cost
 
     def clear(self):
-        """Remove every stored snapshot; the stored key holds the typed search text."""
+        """Remove every stored snapshot, including any written before the digest key."""
         removed = 0
         try:
             paths = list(self.directory.glob("discover-*.json"))
