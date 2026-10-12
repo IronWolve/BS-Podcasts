@@ -137,3 +137,21 @@ class ShortcutManager:
             return text
         pattern = "|".join(re.escape(token) for token in sorted(choices, key=len, reverse=True))
         return re.sub(r"(?<![\w+])(?:" + pattern + r")(?![\w+])", lambda match: choices.get(match.group(), match.group()), text)
+
+
+# The window's hint filter reformats a tooltip only when the widget has a
+# template: the text the app wrote itself, recorded under these property names.
+# shell.MainWindow reads the same names.
+HINT_TEMPLATE_PROPERTY = "bsHintTemplate"
+HINT_FORMATTED_PROPERTY = "bsFormattedHint"
+
+
+def set_literal_tooltip(widget, text: str) -> None:
+    """Set tooltip text that is data, such as a title, a feed description or a
+    value. The hint filter rewrites any tooltip that names a binding's default,
+    so data that says "Ctrl+F" would show the current key instead. An empty
+    template tells the filter to leave this tooltip as written until something
+    sets a different one."""
+    widget.setToolTip(text)
+    widget.setProperty(HINT_FORMATTED_PROPERTY, widget.toolTip())
+    widget.setProperty(HINT_TEMPLATE_PROPERTY, "")

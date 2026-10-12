@@ -75,6 +75,7 @@ from ..urlguard import is_web_url
 from . import icons
 from .models import ShowRow
 from .pixmaps import cover, initials
+from .shortcuts import set_literal_tooltip
 from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, play_button_size, reduced_motion, scaled_px, theme_name
 
 
@@ -819,7 +820,7 @@ class PageHeader(QFrame):
             if not full:
                 if label.text():
                     label.setText("")
-                label.setToolTip("")
+                set_literal_tooltip(label, "")
                 continue
             metrics = label.fontMetrics()
             if available <= 0 or metrics.horizontalAdvance(full) <= available:
@@ -829,7 +830,7 @@ class PageHeader(QFrame):
                 tip = full
             if label.text() != wanted:
                 label.setText(wanted)
-            label.setToolTip(tip)
+            set_literal_tooltip(label, tip)
 
     def eventFilter(self, watched, event):
         if watched in (self.title_label, self.subtitle_label) and event.type() in {
@@ -1701,10 +1702,10 @@ class HeroCard(QFrame):
         self.art.set_artwork(artwork_path, initials(title), accent)
         self.title.setText(title)
         self.meta.setText(meta)
-        self.meta.setToolTip(meta)
+        set_literal_tooltip(self.meta, meta)
         summary = plain_snippet(description, 241)
         self.description.setText(summary[:240].rstrip() + "…" if len(summary) > 240 else summary)
-        self.description.setToolTip(description)
+        set_literal_tooltip(self.description, description)
         self.description.setVisible(bool(description))
         self.primary.setText("Play latest" if subscribed else "Subscribe")
         self.primary.setIcon(icons.icon("play" if subscribed else "add", COLORS["on_accent"], 16))
@@ -2659,7 +2660,7 @@ class ContextPanel(QFrame):
         existed."""
         shown = title if len(title) <= 200 else title[:199].rsplit(" ", 1)[0].rstrip() + "…"
         self.latest_episode.setText(f"{shown}\n{date}" if date else shown)
-        self.latest_episode.setToolTip(title if shown != title else "")
+        set_literal_tooltip(self.latest_episode, title if shown != title else "")
 
     def preview_url(self) -> str:
         """Feed URL of the unsubscribed directory result currently shown, if any."""
@@ -3035,7 +3036,7 @@ def set_button_text_elided(button: QPushButton, text: str, cap_px: int):
     tooltip."""
     elided = button.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, cap_px)
     button.setText(mnemonic_safe(elided))
-    button.setToolTip(plain_tooltip(text) if elided != text else "")
+    set_literal_tooltip(button, plain_tooltip(text) if elided != text else "")
 
 
 class ElidedValueLabel(PlainTextLabel):
@@ -3061,7 +3062,7 @@ class ElidedValueLabel(PlainTextLabel):
         QLabel.setText(self, shown)
         # Elided text must keep its full value reachable (product rule:
         # ellipsis + tooltip, never a dead end).
-        self.setToolTip(self._full if shown != self._full else "")
+        set_literal_tooltip(self, self._full if shown != self._full else "")
 
 
 class _ReturnsFocus:
@@ -4190,8 +4191,8 @@ class PlayerBar(QFrame):
         avail = self._now_text_width()
         title = self.title.fontMetrics().elidedText(self._now_title, Qt.TextElideMode.ElideRight, avail)
         self.title.setText(mnemonic_safe(title))
-        self.title.setToolTip(
-            plain_tooltip(self._now_title) if title != self._now_title else "Show now playing"
+        set_literal_tooltip(
+            self.title, plain_tooltip(self._now_title) if title != self._now_title else "Show now playing"
         )
         self._elide_show_label(avail)
 
@@ -4204,9 +4205,9 @@ class PlayerBar(QFrame):
         # Elided: the full name wins the tooltip (text-is-never-cut-off rule).
         # Whole: say what a click does, when it does something.
         if show != line:
-            self.show_label.setToolTip(line)
+            set_literal_tooltip(self.show_label, line)
         else:
-            self.show_label.setToolTip("Open this podcast's episodes" if self._now_show_id else "")
+            set_literal_tooltip(self.show_label, "Open this podcast's episodes" if self._now_show_id else "")
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -4305,7 +4306,7 @@ class PlayerBar(QFrame):
         elided = self.next_label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, avail)
         if self.next_label.text() != elided:
             self.next_label.setText(elided)
-            self.next_label.setToolTip(text if elided != text else "")
+            set_literal_tooltip(self.next_label, text if elided != text else "")
 
     def set_tint(self, color: str):
         """Blend the playing show's colour into the bar background."""
