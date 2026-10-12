@@ -1371,6 +1371,10 @@ class Toast(QFrame):
         if self._owner == owner:
             self.dismiss()
 
+    def sticky_notices(self):
+        """(owner, message) for each sticky notice held behind the shown one, oldest first. Read-only."""
+        return tuple((pushed.owner, pushed.message) for pushed in self._sticky_entries)
+
     def reposition(self):
         parent = self.parentWidget()
         if parent is None:

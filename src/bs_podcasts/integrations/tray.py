@@ -1,18 +1,25 @@
 """Optional system tray controls using the packaged original mark."""
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from ..assets import shell_icon_path
+from ..assets import BRANDING_DIR
 from ..config import APP_NAME
+from ..ui.playback_actions import PlaybackAction
 
 
 _TOOLTIP_LIMIT = 127
 
 
 def _tray_icon() -> QIcon:
-    packaged = QIcon(str(shell_icon_path(64)))
+    # One multi-size icon: Qt takes the file closest to the pixel size the tray
+    # asks for. The 16 px file is a flat plate with the letters, for small trays.
+    packaged = QIcon()
+    for size in (16, 32, 64):
+        path = BRANDING_DIR / f"bs-podcasts-shell-icon-{size}.png"
+        if path.is_file():
+            packaged.addFile(str(path), QSize(size, size))
     if not packaged.isNull():
         return packaged
     pixmap = QPixmap(32, 32)
@@ -40,7 +47,7 @@ class TrayController:
         self._message_callback = None
         self._connected = False
         self._revision = 0
-        self._toggle_action = "play"
+        self._toggle_action = PlaybackAction.PLAY
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         tray = QSystemTrayIcon(_tray_icon(), window)
@@ -98,7 +105,7 @@ class TrayController:
             return
         self._revision = revision
         if not snapshot.source:
-            texts = ("Nothing playing", APP_NAME, "Play / Pause", "play")
+            texts = ("Nothing playing", APP_NAME, "Play / Pause", PlaybackAction.PLAY)
         else:
             title = snapshot.title if len(snapshot.title) <= 60 else snapshot.title[:57] + "…"
             state = str(snapshot.state)
@@ -112,7 +119,7 @@ class TrayController:
                 f"{'▶' if state == 'playing' else '⏸'}  {title}",
                 f"{APP_NAME}\n{detail}",
                 "Pause" if state == "playing" else "Play",
-                "pause" if state == "playing" else "play",
+                PlaybackAction.PAUSE if state == "playing" else PlaybackAction.PLAY,
             )
         # Ten position ticks a second reached here; a tray tooltip update is
         # a shell round-trip on Windows, so only apply changed text.

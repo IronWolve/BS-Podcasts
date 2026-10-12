@@ -389,6 +389,20 @@ def _draw_focus(painter: QPainter, rect: QRect, radius: int):
     painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), radius, radius)
 
 
+def _remaining_text(item) -> str:
+    """Time left for an episode in progress, from its progress fields. A download's progress is not listening progress."""
+    if item.state != "In progress" or not 0 < item.progress < 1 or not item.duration_seconds:
+        return ""
+    left_seconds = int(item.duration_seconds * (1 - item.progress))
+    hours, minutes = divmod(max(1, left_seconds // 60), 60)
+    return f"{hours} hr {minutes} min left" if hours else f"{minutes} min left"
+
+
+def _badge_text(item) -> str:
+    """The download is the badge when an episode is on disk; the listening state keeps its own detail line."""
+    return "DOWNLOADED" if item.downloaded_path else item.state.upper()
+
+
 def _badge(painter: QPainter, right: int, top: int, text: str, color: str, filled: bool = False, height: int = 20):
     """Draw a pill badge right-aligned at `right`; returns its rect."""
     font = app_font(11, QFont.Weight.DemiBold)
@@ -414,6 +428,8 @@ def _badge(painter: QPainter, right: int, top: int, text: str, color: str, fille
 class PodcastDelegate(QStyledItemDelegate):
     MIN_CARD_WIDTH = 140
     CARD_PAD = 10
+    # Painted-box sink for the UI reference tool: called as (index, name, rect) for each box paint draws. Unset in the app.
+    box_sink = None
     # Room for two title lines, the episode count, and the latest-episode date.
     TEXT_BLOCK = 96
 
@@ -444,6 +460,11 @@ class PodcastDelegate(QStyledItemDelegate):
         inset = scaled_px(8)
         return QRect(art.right() - side - inset, art.bottom() - side - inset, side, side)
 
+    def _report(self, index, name, rect):
+        """Hand one painted box to box_sink, so a callout names exactly what was drawn."""
+        if self.box_sink is not None:
+            self.box_sink(index, name, QRect(rect))
+
     def paint(self, painter: QPainter, option, index):
         item = index.data(ItemRoles.ITEM)
         if item is None:
@@ -465,6 +486,7 @@ class PodcastDelegate(QStyledItemDelegate):
         pad = self.CARD_PAD
         art_size = card.width() - 2 * pad
         art = QRect(card.x() + pad, card.y() + pad, art_size, art_size)
+        self._report(index, "art", art)
         scale = painter.device().devicePixelRatioF() if hasattr(painter.device(), "devicePixelRatioF") else 1.0
         painter.drawPixmap(art, cover(item.artwork_path, art.width(), art.height(), 10, initials(item.title), item.accent, scale, notify=_repaint_target(option)))
 
@@ -473,6 +495,7 @@ class PodcastDelegate(QStyledItemDelegate):
         painter.setPen(QColor(COLORS["text"]))
         line_height = scaled_px(18)
         title_rect = QRect(card.x() + pad + 2, art.bottom() + scaled_px(10), card.width() - 2 * pad - 4, line_height * 2)
+        self._report(index, "title", title_rect)
         metrics = painter.fontMetrics()
         lines = _wrap_two_lines(metrics, item.title, title_rect.width())
         for line_index, line in enumerate(lines):
@@ -484,6 +507,7 @@ class PodcastDelegate(QStyledItemDelegate):
 
         painter.setFont(app_font(12))
         meta_rect = QRect(title_rect.x(), title_rect.bottom() + scaled_px(4), title_rect.width() - scaled_px(14), scaled_px(16))
+        self._report(index, "meta", meta_rect)
         meta = item.display_meta or f"{item.episode_count} episodes"
         meta_color = COLORS["muted"]
         if item.show_id and item.health in {"error", "suspended"}:
@@ -506,6 +530,7 @@ class PodcastDelegate(QStyledItemDelegate):
             painter.setFont(app_font(11))
             painter.setPen(QColor(COLORS["subtle"]))
             date_rect = QRect(meta_rect.x(), meta_rect.bottom() + scaled_px(1), meta_rect.width(), scaled_px(14))
+            self._report(index, "date", date_rect)
             painter.drawText(
                 date_rect,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -521,6 +546,7 @@ class PodcastDelegate(QStyledItemDelegate):
         badge_right = art.right() - 7
         if item.new_count:
             rect = _badge(painter, badge_right, art.y() + 8, f"{item.new_count} new", COLORS["accent"], filled=True)
+            self._report(index, "new_badge", rect)
             badge_right = rect.x() - 6
         if item.directory_result and item.subscribed:
             _badge(painter, badge_right, art.y() + 8, "Saved", COLORS["success"], filled=True)
@@ -538,6 +564,7 @@ class PodcastDelegate(QStyledItemDelegate):
         if health_color and item.show_id:
             side = scaled_dim(7)
             dot = QRect(card.right() - pad - scaled_dim(8), meta_rect.center().y() - side // 2, side, side)
+            self._report(index, "health", dot)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(health_color))
             painter.drawEllipse(dot)
@@ -593,6 +620,13 @@ def _wrap_two_lines(metrics, text: str, width: int):
 
 class EpisodeDelegate(QStyledItemDelegate):
     ROW_HEIGHT = 88
+    # Painted-box sink for the UI reference tool: called as (index, name, rect) for each box paint draws. Unset in the app.
+    box_sink = None
+
+    def _report(self, index, name, rect):
+        """Hand one painted box to box_sink, so a callout names exactly what was drawn."""
+        if self.box_sink is not None:
+            self.box_sink(index, name, QRect(rect))
     COMPACT_HEIGHT = 64
     PLAY_ZONE = 48
     SNIPPET_LINE = 17
@@ -691,7 +725,7 @@ class EpisodeDelegate(QStyledItemDelegate):
             if self.can_queue(item):
                 reserve += self.play_rect(rect).width() + scaled_px(8)
             if item.state not in {"New", "Unplayed", "Played", "Preview"}:
-                reserve += QFontMetrics(app_font(11, QFont.Weight.DemiBold)).horizontalAdvance(item.state.upper()) + scaled_px(36)
+                reserve += QFontMetrics(app_font(11, QFont.Weight.DemiBold)).horizontalAdvance(_badge_text(item)) + scaled_px(36)
             text_width = min(max(40, row.right() - reserve - text_left), scaled_px(MAX_ROW_TEXT_PX))
         width = min(text_width, QFontMetrics(app_font(12)).horizontalAdvance(item.show))
         top = row.y() + scaled_px(32) + scaled_px(self.SNIPPET_LINE) * max(1, self.SNIPPET_LINES) - 1 + scaled_px(3)
@@ -733,6 +767,7 @@ class EpisodeDelegate(QStyledItemDelegate):
             left = row.x() + scaled_px(26)
         art_size = scaled_px(44 if self.compact else 60)
         art = QRect(left, row.center().y() - art_size // 2, art_size, art_size)
+        self._report(index, "art", art)
         identity = ('episode', item.episode_id) if item.episode_id else ('preview', item.media_url or item.external_id or item.title)
         painter.drawPixmap(art, cover(item.artwork_path, art_size, art_size, 8, initials(item.show), item.accent, scale,
                                     notify=_repaint_target(option), presentation_key=identity))
@@ -747,11 +782,11 @@ class EpisodeDelegate(QStyledItemDelegate):
         if self.can_queue(item):
             play_zone += self.play_rect(option.rect).width() + scaled_px(8)
         badge_reserve = 0
-        state_color = STATE_COLORS.get(item.state, item.accent)
-        show_badge = item.state not in {"New", "Unplayed", "Played", "Preview"}
+        state_color = STATE_COLORS.get("Downloaded" if item.downloaded_path else item.state, item.accent)
+        show_badge = item.state not in {"New", "Unplayed", "Played", "Preview"} or bool(item.downloaded_path)
         if show_badge:
             painter.setFont(app_font(11, QFont.Weight.DemiBold))
-            badge_reserve = painter.fontMetrics().horizontalAdvance(item.state.upper()) + scaled_px(36)
+            badge_reserve = painter.fontMetrics().horizontalAdvance(_badge_text(item)) + scaled_px(36)
         text_right = row.right() - play_zone - badge_reserve
         # Cap the reading column. On a wide window an episode title used a
         # fraction of a very long row and the eye had to track across
@@ -783,9 +818,11 @@ class EpisodeDelegate(QStyledItemDelegate):
             star = QRect(title_rect.x(), title_rect.center().y() - star_side // 2, star_side, star_side)
             icons.paint(painter, "favorite", COLORS["accent"], star, scale)
             title_rect.adjust(scaled_px(19), 0, 0, 0)
+        self._report(index, "title", title_rect)
         painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(item.title, Qt.TextElideMode.ElideRight, title_rect.width()))
 
         if snippet_rect is not None:
+            self._report(index, "snippet", snippet_rect)
             snippet = item.detail or self._snippet(item)
             if snippet:
                 painter.setFont(app_font(12))
@@ -794,13 +831,10 @@ class EpisodeDelegate(QStyledItemDelegate):
 
         painter.setFont(app_font(12))
         painter.setPen(QColor(COLORS["subtle"]))
-        remaining = ""
-        if item.state == "In progress" and 0 < item.progress < 1 and item.duration_seconds:
-            left_seconds = int(item.duration_seconds * (1 - item.progress))
-            hours, minutes = divmod(max(1, left_seconds // 60), 60)
-            remaining = f"{hours} hr {minutes} min left" if hours else f"{minutes} min left"
+        remaining = _remaining_text(item)
         compact_detail = item.detail if self.compact and item.detail else ""
         meta = compact_detail or "  ·  ".join(part for part in (item.show if not self.compact else "", item.published, remaining or item.duration) if part)
+        self._report(index, "meta", meta_rect)
         if self.can_open_show(item):
             show_rect = self.show_rect(option.rect, item, text_width)
             painter.setPen(QColor(COLORS['blue']))
@@ -817,7 +851,7 @@ class EpisodeDelegate(QStyledItemDelegate):
             painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, text_width))
 
         if show_badge:
-            _badge(painter, row.right() - play_zone - 4, row.center().y() - 10, item.state.upper(), state_color, filled=item.state in {"Downloading", "Error"})
+            _badge(painter, row.right() - play_zone - 4, row.center().y() - 10, _badge_text(item), state_color, filled=item.state in {"Downloading", "Error"})
 
         play = self.play_rect(option.rect)
         if hovered or selected or playing:

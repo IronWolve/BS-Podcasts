@@ -1,15 +1,18 @@
 """Optional Linux MPRIS service implemented with bundled QtDBus."""
 
-from PySide6.QtCore import ClassInfo, Property, QObject, Qt, Signal, Slot, QUrl
+from PySide6.QtCore import ClassInfo, Property, QObject, Qt, QTimer, Signal, Slot, QUrl
 from PySide6.QtDBus import QDBusAbstractAdaptor, QDBusConnection, QDBusMessage, QDBusObjectPath
+from PySide6.QtNetwork import QLocalSocket
 from hashlib import sha256
 import logging
 import math
+import os
 from pathlib import Path
 import stat
 import time
 
 from ..config import APP_ID
+from ..ui.playback_actions import PlaybackAction
 
 _log = logging.getLogger("bs_podcasts")
 
@@ -104,7 +107,7 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
     def Rate(self, value):
         if not self.CanControl or not self._capabilities().speed or not math.isfinite(value):
             return
-        self._command("set_speed", value)
+        self._command(PlaybackAction.SET_SPEED, value)
 
     @Property("QVariantMap")
     def Metadata(self):
@@ -128,7 +131,7 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
     def Volume(self, value):
         if not self.CanControl or not self._capabilities().volume or not math.isfinite(value):
             return
-        self._command("set_volume", float(value) * 100)
+        self._command(PlaybackAction.SET_VOLUME, float(value) * 100)
 
     @Property("qlonglong")
     def Position(self):
@@ -173,36 +176,36 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
 
     @Slot()
     def Next(self):
-        self._command("next")
+        self._command(PlaybackAction.NEXT)
 
     @Slot()
     def Previous(self):
-        self._command("previous")
+        self._command(PlaybackAction.PREVIOUS)
 
     @Slot()
     def Pause(self):
-        self._command("pause")
+        self._command(PlaybackAction.PAUSE)
 
     @Slot()
     def PlayPause(self):
         # The action that matches the reported status, not a toggle that
         # reverses while a stream is still opening.
-        self._command("pause" if self.PlaybackStatus == "Playing" else "play")
+        self._command(PlaybackAction.PAUSE if self.PlaybackStatus == "Playing" else "play")
 
     @Slot()
     def Stop(self):
-        self._command("stop")
+        self._command(PlaybackAction.STOP)
 
     @Slot()
     def Play(self):
-        self._command("play")
+        self._command(PlaybackAction.PLAY)
 
     @Slot("qlonglong")
     def Seek(self, offset):
         playback = self.host.playback
         snapshot = playback.snapshot
         identity = (snapshot.episode_id, snapshot.source, snapshot.load_generation)
-        self._command("seek_current", identity, offset / 1_000_000, True)
+        self._command(PlaybackAction.SEEK_CURRENT, identity, offset / 1_000_000, True)
 
     @Slot(QDBusObjectPath, "qlonglong")
     def SetPosition(self, track, position):
@@ -211,7 +214,63 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
         if track.path() != track_path(snapshot) or not snapshot.source:
             return
         identity = (snapshot.episode_id, snapshot.source, snapshot.load_generation)
-        self._command("seek_current", identity, position / 1_000_000)
+        self._command(PlaybackAction.SEEK_CURRENT, identity, position / 1_000_000)
+
+
+BUS_PROBE_MS = 1000
+
+
+def _session_bus_path():
+    """The socket path of a session bus given as a unix path, or None for any other address."""
+    for entry in os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").split(";"):
+        if entry.startswith("unix:path="):
+            return entry[len("unix:path="):].split(",")[0] or None
+    return None
+
+
+class _BusProbe(QObject):
+    """Asks a unix-path session bus to answer its auth line, within BUS_PROBE_MS.
+
+    QtDBus connects and registers with blocking calls, and in this binding a
+    blocking call holds the interpreter lock. Against a bus that accepts
+    connections but never answers, the toolkit thread would stop for as long as
+    that call waits. This probe is event-driven, so the toolkit thread keeps
+    running while it waits, and the blocking calls run only after an answer."""
+
+    def __init__(self, path, done, parent):
+        super().__init__(parent)
+        self._done = done
+        self._socket = QLocalSocket(self)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(lambda: self._finish(False))
+        self._socket.connected.connect(self._on_connected)
+        self._socket.readyRead.connect(self._on_ready)
+        self._socket.errorOccurred.connect(lambda _error: self._finish(False))
+        self._timer.start(BUS_PROBE_MS)
+        self._socket.connectToServer(path)
+
+    def _on_connected(self):
+        # A NUL byte, then the EXTERNAL auth line with the user id in hex.
+        user = str(os.geteuid()).encode("ascii").hex().encode("ascii")
+        self._socket.write(b"\0AUTH EXTERNAL " + user + b"\r\n")
+
+    def _on_ready(self):
+        if self._socket.canReadLine():
+            self._finish(True)
+
+    def _finish(self, answered):
+        done, self._done = self._done, None
+        if done is None:
+            return
+        self._timer.stop()
+        self._socket.abort()
+        done(answered)
+
+    def cancel(self):
+        self._done = None
+        self._timer.stop()
+        self._socket.abort()
 
 
 class MprisController(QObject):
@@ -230,6 +289,26 @@ class MprisController(QObject):
         self._position_seen = None
         self.root_adaptor = _RootAdaptor(self)
         self.player_adaptor = _PlayerAdaptor(self)
+        self._bridge = None
+        self._stopped = False
+        self._probe = None
+        path = _session_bus_path()
+        if path is None or not hasattr(os, "geteuid"):
+            self._register()
+        else:
+            # The bus is asked first, without blocking the toolkit thread; see _BusProbe.
+            self._probe = _BusProbe(path, self._probe_done, self)
+
+    def _probe_done(self, answered):
+        self._probe = None
+        if self._stopped:
+            return
+        if not answered:
+            _log.warning("MPRIS media keys are unavailable: no session bus, or the service name is already taken.")
+            return
+        self._register()
+
+    def _register(self):
         bus = QDBusConnection.sessionBus()
         if not bus.isConnected() or not bus.registerService(self.service_name):
             _log.warning("MPRIS media keys are unavailable: no session bus, or the service name is already taken.")
@@ -243,7 +322,7 @@ class MprisController(QObject):
             bus.unregisterService(self.service_name)
             _log.warning("MPRIS media keys are unavailable: the object could not be exported on the session bus.")
             return
-        self._bridge = getattr(window, "_bridge", None)
+        self._bridge = getattr(self.window, "_bridge", None)
         if self.available and self._bridge is not None:
             self._bridge.playback_event.connect(self._playback_changed)
 
@@ -319,6 +398,10 @@ class MprisController(QObject):
         submit(lambda: _local_artwork_path(snapshot.artwork_path), apply, "mpris-artwork")
 
     def shutdown(self):
+        self._stopped = True
+        if self._probe is not None:
+            self._probe.cancel()
+            self._probe = None
         self._artwork_token += 1
         if getattr(self, "_bridge", None) is not None:
             try:
