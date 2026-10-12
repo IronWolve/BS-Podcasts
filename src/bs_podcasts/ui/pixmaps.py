@@ -663,7 +663,8 @@ class _DecodeBridge(QObject):
     def _on_decoded(self, key: str, path: str, image: QImage):
         with _decode_lock:
             _inflight.discard(key)
-            _decoding_paths.discard(path)
+            if not any(entry.startswith(f"src:{path}:") for entry in _inflight):
+                _decoding_paths.discard(path)
             if image.isNull():
                 _remember_failed(key)
         if _decode_stopped:
@@ -715,7 +716,14 @@ def _schedule_decode(key: str, path: str, width: int, height: int, notify) -> No
             return
         # A completion repaints every consumer, which requests its current size.
         # Do not queue all the intermediate sizes from a window/splitter drag.
-        if path in _decoding_paths or key in _failed:
+        # The one exception is the 128 px preview: the exact size queues behind
+        # it, so a cover goes initials, preview, sharp in one pass instead of
+        # waiting for the repaint the preview causes to ask for the real size.
+        preview_key = f"src:{path}:{previews.SIDE}x{previews.SIDE}:"
+        busy = path in _decoding_paths and not (
+            (width, height) != (previews.SIDE, previews.SIDE)
+            and all(entry.startswith(preview_key) for entry in _inflight if entry.startswith(f"src:{path}:")))
+        if busy or key in _failed or key in _inflight:
             return
         if len(_inflight) >= MAX_PENDING_DECODES:
             if notify is not None:
@@ -813,9 +821,9 @@ def _source(path: str, width: int, height: int, sync: bool = False, notify=None)
         return pixmap
     if width == height and width != previews.SIDE and _preview_cache.find(path) is None:
         ready = _source(path, previews.SIDE, previews.SIDE, notify=notify)
-        if ready is None:
-            return None
-        _preview_cache.insert(path, ready)
+        if ready is not None:
+            _preview_cache.insert(path, ready)
+        # The exact size queues behind the preview (see _schedule_decode), so one pass yields both.
     _schedule_decode(key, path, width, height, notify)
     return None
 
@@ -886,10 +894,16 @@ def cover(
         if cached is not None and not cached.isNull():
             return present(cached)
     elif path and source is None:
-        # Still decoding: draw the placeholder under its own key so the real
-        # cover is built (and cached under `key`) on the repaint that follows.
-        # It is not presented through the frame record: a held initials frame
-        # was replayed over a decoded cover on the next scroll.
+        # Still decoding. A row that showed a cover before (its image was replaced, or a directory handed it a
+        # new file name) keeps that cover until the new one lands; only a row that never had one gets initials.
+        if notify is not None and identity is not None:
+            previous = _painted_episode_art.get(notify, {}).get(identity)
+            if previous is not None:
+                return previous
+        # Draw the placeholder under its own key so the real cover is built
+        # (and cached under `key`) on the repaint that follows. It is not
+        # presented through the frame record: a held initials frame was
+        # replayed over a decoded cover on the next scroll.
         pending = True
         key = f"coverpending:{width}x{height}:{radius}:{fallback_text}:{fallback_color}:{scale}{theme_key}"
         cached = _artwork_cache.find(key)

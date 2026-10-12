@@ -5881,7 +5881,8 @@ class MainWindow(QMainWindow):
             return
         library, listening = self.library, self.listening
         episode_id = snapshot.episode_id
-        self.now_playing.prepare_episode(episode_id)
+        self.now_playing.prepare_episode(episode_id, snapshot.artwork_path, initials(snapshot.show_title or snapshot.title),
+                                         dominant_color(snapshot.artwork_path, "", compute=False) if snapshot.artwork_path else "")
         def work():
             episode = library.episode(episode_id) if library else None
             chapters = listening.chapters(episode_id) if listening else ()
@@ -7564,7 +7565,9 @@ class MainWindow(QMainWindow):
         cancelled = cancel is not None and cancel.is_set()
         failed = result.status != JobStatus.OK or (result.value and result.value[3])
         if not cancelled:
-            delay = 1 if result.busy else (60 if failed else 300)
+            # A resolved cover is re-checked hourly, not every five minutes: the artwork cache answers from
+            # disk within its own day-long freshness window anyway, so the shorter cadence was job churn.
+            delay = 1 if result.busy else (60 if failed else 3600)
             self._episode_artwork_attempts[identifier] = time.monotonic() + delay
             self._episode_artwork_attempts.move_to_end(identifier)
             while len(self._episode_artwork_attempts) > 2048:

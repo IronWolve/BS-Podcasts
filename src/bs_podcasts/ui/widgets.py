@@ -3375,7 +3375,9 @@ class NowPlayingView(_ReturnsFocus, QFrame):
         self.stats.setVisible(bool(rows))
         self._fit_artwork()
 
-    def prepare_episode(self, episode_id):
+    def prepare_episode(self, episode_id, artwork_path="", fallback="—", accent=""):
+        """Clear the previous episode's details while the new one is read. The cover is set at once from
+        the playback snapshot, so the view opens on the episode's artwork rather than a glyph."""
         if getattr(self, "_episode_id", 0) != episode_id:
             self._episode_id = 0
             self._show_id = 0
@@ -3391,7 +3393,7 @@ class NowPlayingView(_ReturnsFocus, QFrame):
             self.title.setText("Loading episode…")
             self.show_link.hide()
             self.meta.setText("")
-            self.art.set_artwork("", "—", "")
+            self.art.set_artwork(artwork_path, fallback if artwork_path else "—", accent)
             self.notes.setPlainText("Loading show notes…")
             self.set_stats([])
 
