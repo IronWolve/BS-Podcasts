@@ -33,7 +33,10 @@ def _windows_prelaunch():
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     kernel32.WaitNamedPipeW.restype = wintypes.BOOL
     kernel32.WaitNamedPipeW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD)
-    name = f"bs-podcasts-{getpass.getuser()}"
+    # The application's identity comes from config, which imports only the standard library (no Qt and
+    # none of the heavy application modules), so the mutex name and the app's own names share one source.
+    from bs_podcasts.config import APP_ID
+    name = f"{APP_ID}-{getpass.getuser()}"
 
     def create_mutex():
         ctypes.set_last_error(0)
