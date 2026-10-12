@@ -231,8 +231,8 @@ class ArtworkCache:
         """What a full prune would delete right now, as (path, bytes), without deleting.
 
         The same rules as prune: files in `keep`, files written in the last 15
-        minutes and files just used are never candidates, so a confirmation
-        that quotes this list matches what the clear then removes."""
+        minutes and files just used are never candidates. A confirmation quotes
+        this list, and remove_quoted deletes exactly it."""
         threshold = time.time() - 15 * 60
         keep_names = self._keep_names(keep)
         recent_after = time.monotonic() - 15 * 60
@@ -246,6 +246,53 @@ class ArtworkCache:
                     continue
             found.append((path, stamp[1]))
         return found
+
+    def _remove(self, path: Path, unchanged) -> bool:
+        """Unlink one cached file and its validation marker; True when it went.
+
+        The file stays when it is in use, was used in the last 15 minutes, or
+        `unchanged(signature)` says it is no longer the file the caller judged."""
+        with self._locks_guard:
+            if (path.name in self._active_files
+                    or self._recent.get(str(path), 0) > time.monotonic() - 15 * 60):
+                return False
+            # Reserved under the guard, so no fetch or touch can use the file
+            # between the check and the unlink. The unlink runs with the guard
+            # released: a slow delete stalls only this file's digest.
+            self._removing = path.stem
+        try:
+            current = self.signature(path)
+            if current is None or not unchanged(current):
+                return False
+            path.unlink()
+        except OSError:
+            return False
+        finally:
+            self._release_removing()
+        try:
+            path.with_suffix('.checked').unlink(missing_ok=True)
+        except OSError:
+            pass
+        return True
+
+    def remove_quoted(self, quoted, keep: set[str]) -> tuple[int, int]:
+        """Delete exactly the files a confirmation quoted from candidates(), and no others.
+
+        The age threshold is not worked out again, so a file that crossed it
+        since the quote, or one that appeared after it, stays. A quoted file is
+        also kept when it is now in `keep`, in use, used in the last 15 minutes,
+        or no longer the size that was quoted. Returns (count, bytes)."""
+        keep_names = self._keep_names(keep)
+        removed = freed = 0
+        with self._sweep_lock, self._prune_lock:
+            for path, size in quoted:
+                path = Path(path)
+                if path.parent != self.directory or not self._owned_name(path.name) or path.name in keep_names:
+                    continue
+                if self._remove(path, lambda current, size=size: current[1] == size):
+                    removed += 1
+                    freed += size
+        return removed, freed
 
     def prune(self, keep: set[str], max_bytes: int | None = None) -> tuple[int, int]:
         """Delete cached files not in `keep`; see _prune. Sweeps run one at a time."""
@@ -273,26 +320,8 @@ class ArtworkCache:
                     break
                 if path.name in keep_names or stamp[2] / 1e9 >= threshold:
                     continue
-                with self._locks_guard:
-                    if (path.name in self._active_files
-                            or self._recent.get(str(path), 0) > time.monotonic() - 15 * 60):
-                        continue
-                    # Reserved under the guard, so no fetch or touch can use the file
-                    # between the check and the unlink. The unlink runs with the guard
-                    # released: a slow delete stalls only this file's digest.
-                    self._removing = path.stem
-                try:
-                    if self.signature(path) != stamp:
-                        continue
-                    path.unlink()
-                except OSError:
+                if not self._remove(path, lambda current, stamp=stamp: current == stamp):
                     continue
-                finally:
-                    self._release_removing()
-                try:
-                    path.with_suffix('.checked').unlink(missing_ok=True)
-                except OSError:
-                    pass
                 removed += 1
                 freed += stamp[1]
                 total -= stamp[1]
