@@ -4062,13 +4062,27 @@ class PlayerBar(QFrame):
         tools_column.setContentsMargins(0, 0, 0, 0)
         tools_column.setSpacing(SPACE["xs"])
         tools_column.addLayout(tools)
-        volume_row = QHBoxLayout()
+        # The volume row sits under the tool buttons and is no wider than they are, with its right edge on
+        # theirs; it shrinks with the zone (the slider has a small minimum) but never grows past the buttons.
+        # It is anchored at the bottom and levelled with the seek bar in _level_volume_row.
+        volume_wrap = QWidget()
+        volume_wrap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        volume_row = QHBoxLayout(volume_wrap)
         volume_row.setContentsMargins(0, 0, 0, 0)
         volume_row.setSpacing(SPACE["sm"])
         volume_row.addWidget(self.volume)
         volume_row.addWidget(self.volume_slider, 1)
         volume_row.addWidget(self.volume_value)
-        tools_column.addLayout(volume_row)
+        # A leading stretch, not an alignment flag: an aligned item is held to its size hint, so it could not
+        # grow to the width of the buttons above it.
+        volume_line = QHBoxLayout()
+        volume_line.setContentsMargins(0, 0, 0, 0)
+        volume_line.addStretch(1)
+        volume_line.addWidget(volume_wrap, 1000)
+        tools_column.addStretch(1)
+        tools_column.addLayout(volume_line)
+        self._tools_row = tools
+        self._volume_wrap = volume_wrap
         self._volume_row = volume_row
         self.tools_wrap = tools_wrap
         self._volume_metrics()
@@ -4172,6 +4186,10 @@ class PlayerBar(QFrame):
         available = self.width() - margins.left() - margins.right() - 2 * layout.spacing()
         if available <= 0:
             return False
+        # The volume row follows the tool buttons' width, which changes when buttons hide or show, but keeps a
+        # slider long enough to use when the compact bar leaves only a few buttons.
+        self._volume_wrap.setMaximumWidth(max(self._tools_row.sizeHint().width(), self._volume_row_floor(),
+                                              self._volume_wrap.minimumSizeHint().width()))
         floor = max(self.tools_wrap.sizeHint().width(), self.art.width() + self.now_wrap.minimumWidth())
         side = max(floor, int(available * self.SIDE_SHARE))
         # Clamp against the transport's PREFERRED width, not its minimum. Using
@@ -4222,6 +4240,7 @@ class PlayerBar(QFrame):
             if available - 2 * side >= preferred and settled == pads:
                 break
             pads = settled
+        self._level_volume_row()
         art_width = max(self.art.width(), self.art.minimumWidth())
         self._now_column = max(0, side - art_width - self.left_wrap.layout().spacing())
         # The column width may have changed without a bar resize (compact
@@ -4232,6 +4251,35 @@ class PlayerBar(QFrame):
             self._elide_now_labels()
             return True
         return False
+
+    def _volume_row_floor(self):
+        """The narrowest the volume row is held to: the mute button, a slider long enough to use, the value."""
+        return (self.volume.sizeHint().width() + scaled_px(80) + self.volume_value.minimumWidth()
+                + 2 * self._volume_row.spacing())
+
+    def _level_volume_row(self):
+        """Put the volume slider on the seek bar's centre line. The two rows belong to different zones, so
+        neither layout knows about the other: the seek bar sits wherever the transport row leaves room, and the
+        volume row is anchored to the bottom of its zone with the margin that brings its centre to the same
+        line. While nothing plays the seek bar is hidden and the margin stays as it was."""
+        column = self.tools_wrap.layout()
+        zone = self.tools_wrap.height()
+        if not self.slider.isVisible() or zone <= 0:
+            return
+        # The seek slider is in another zone, so its line is read in the bar's coordinates and then taken
+        # relative to this zone's top.
+        level = self.slider.mapTo(self, QPoint(0, 0)).y() + self.slider.height() / 2 - self.tools_wrap.y()
+        # A row centred on that line and ending at the zone's bottom edge is 2 * (zone - level) tall. At the
+        # largest type sizes the buttons are taller than that, so the row gives up some of its transparent
+        # button padding rather than leaving the slider off the line.
+        natural = max(self.volume.sizeHint().height(), self.volume_slider.height())
+        height = max(self.volume_slider.height(), min(natural, int(2 * (zone - level))))
+        if self._volume_wrap.height() != height:
+            self._volume_wrap.setFixedHeight(height)
+        bottom = max(0, zone - level - height // 2)
+        if column.contentsMargins().bottom() != bottom:
+            column.setContentsMargins(0, 0, 0, bottom)
+        column.activate()
 
     def _centre_play(self):
         """Balance the transport row around the play button: the controls are
@@ -4680,6 +4728,7 @@ class PlayerBar(QFrame):
         self.volume_slider.setMinimumWidth(scaled_px(32))
         self.volume_slider.setFixedHeight(max(scaled_px(22), self.volume_value.fontMetrics().height()))
         self.volume_value.setFixedWidth(self.volume_value.fontMetrics().horizontalAdvance('100%') + scaled_px(4))
+        self._volume_wrap.setFixedHeight(max(self.volume.sizeHint().height(), self.volume_slider.height()))
         self.tools_wrap.layout().setSpacing(SPACE['xs'])
         self._volume_row.setSpacing(SPACE['sm'])
 
