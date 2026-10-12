@@ -331,6 +331,9 @@ class MainWindow(QMainWindow):
     # Oldest Back and Forward entries past this are dropped: an episode-view
     # entry holds the whole selection, and both stacks are saved with the view.
     _NAVIGATION_HISTORY_LIMIT = 50
+    # The fields of an episode-view history entry; a restored entry keeps these and nothing else.
+    _NAVIGATION_ENTRY_FIELDS = ('episode_view', 'show_id', 'preview_url', 'catalog_query', 'catalog_limit', 'query', 'filter',
+                                'sort', 'scroll', 'scroll_units', 'current', 'selected_count')
 
     def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None, inline_work=False):
         super().__init__(parent)
@@ -1332,8 +1335,11 @@ class MainWindow(QMainWindow):
                 count = entry.get('selected_count', 0)
                 if not isinstance(count, int) or isinstance(count, bool) or count < 0:
                     continue
-                entry = {name: value for name, value in entry.items() if name != 'selected'}
-                result.append(entry)
+                # A preview entry names the feed it reopens: a web address, never another kind of location.
+                preview = entry.get('preview_url', '')
+                if not isinstance(preview, str) or (preview and not is_web_url(preview)):
+                    continue
+                result.append({name: entry[name] for name in self._NAVIGATION_ENTRY_FIELDS if name in entry})
         return result[-self._NAVIGATION_HISTORY_LIMIT:]
 
     def _rail_toggled(self, compact: bool):
@@ -4081,7 +4087,7 @@ class MainWindow(QMainWindow):
 
     def _episode_navigation_entry(self):
         page = self.episode_page
-        return {'episode_view': True, 'show_id': self._hero_show_id,
+        return {'episode_view': True, 'show_id': self._hero_show_id, 'preview_url': self._preview_episodes_url,
                 'catalog_query': self._catalog_query, 'catalog_limit': self._catalog_limit,
                 'query': page.header.search.text(), 'filter': page.filter_name(), 'sort': page.sort_key(),
                 'scroll': page.scroll_position(), 'scroll_units': 'items', 'current': page.current_key(),
@@ -4102,7 +4108,7 @@ class MainWindow(QMainWindow):
 
     def _restore_episode_navigation(self):
         saved = self._episode_navigation_restore
-        if not saved or saved['show_id'] != self._hero_show_id:
+        if not saved or saved['show_id'] != self._hero_show_id or saved.get('preview_url', '') != self._preview_episodes_url:
             return
         self._episode_navigation_restore = None
         page = self.episode_page
@@ -8105,6 +8111,9 @@ class MainWindow(QMainWindow):
         if isinstance(target.get('catalog_query'), str) and target['catalog_query']:
             self._show_library_search(target['catalog_query'], limit=target.get('catalog_limit', 500))
             return
+        if target.get('preview_url'):
+            self._show_preview_episodes(target['preview_url'])
+            return
         if target['show_id']:
             self._open_show_id(target['show_id'])
         else:
@@ -8599,6 +8608,7 @@ class MainWindow(QMainWindow):
             "partial" if getattr(feed, "truncated", False) else "empty",
             feed_limit_message()
             if getattr(feed, "truncated", False) else "Stream any episode now, or subscribe to save progress, queue and download.")
+        self._restore_episode_navigation()
         if navigate:
             self._episode_navigation_prepared = True
             self.navigation.select(PAGE_EPISODES)
