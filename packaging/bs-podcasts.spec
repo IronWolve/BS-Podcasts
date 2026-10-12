@@ -103,11 +103,16 @@ _UNUSED_BINARIES = (
     "opengl32sw",
 )
 
+# In-app badge copies the app never loads: only the 512 px badge ships (DQ01).
+_UNSHIPPED_BADGES = tuple(f"assets/branding/bs-podcasts-icon-{size}.png" for size in (32, 64, 128, 256))
+
 def _dropped_payload(name):
     # Separators are normalised before every test, so a backslash path and a slash path are judged alike.
     normalized = name.replace("\\", "/").lower()
     parts = normalized.split("/")
     if normalized.endswith(".qm") or "translations" in parts:
+        return True
+    if normalized.endswith(_UNSHIPPED_BADGES):
         return True
     if any(part == "pil" or part.startswith("pil.") or part == "pillow" or part.startswith("pillow.") for part in parts):
         return True

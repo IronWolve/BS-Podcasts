@@ -6,9 +6,11 @@ from pathlib import Path
 BRANDING_DIR = Path(__file__).with_name("assets") / "branding"
 
 
-def icon_path(size: int = 256) -> Path:
-    candidate = BRANDING_DIR / f"bs-podcasts-icon-{size}.png"
-    return candidate if candidate.exists() else BRANDING_DIR / "bs-podcasts-icon-512.png"
+def icon_path(size: int = 512) -> Path:
+    """The round in-app badge. Only its 512 px copy ships; it is the master."""
+    if size != 512:
+        raise ValueError(f"the in-app badge ships at 512 px only, not {size} px")
+    return BRANDING_DIR / "bs-podcasts-icon-512.png"
 
 
 def shell_icon_path(size: int = 256) -> Path:

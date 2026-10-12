@@ -22,10 +22,15 @@ analysis = Analysis(
 )
 UNUSED = ('qtqml','qtquick','qtpdf','qtvirtualkeyboard','qtvirtualkeyboardplugin','imageformats/qpdf','imageformats/libqpdf')
 
+# In-app badge copies the app never loads: only the 512 px badge ships (DQ01).
+UNSHIPPED_BADGES = tuple(f'assets/branding/bs-podcasts-icon-{size}.png' for size in (32, 64, 128, 256))
+
 def _dropped_payload(name):
     normalized = name.replace('\\','/').lower()
     parts = normalized.split('/')
     if normalized.endswith('.qm') or 'translations' in parts:
+        return True
+    if normalized.endswith(UNSHIPPED_BADGES):
         return True
     if any(part == 'pil' or part.startswith('pil.') or part == 'pillow' or part.startswith('pillow.') for part in parts):
         return True
