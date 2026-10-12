@@ -1,8 +1,7 @@
-"""Advanced listening metadata, and storage for folders and saved playlists.
+"""Advanced listening metadata: chapters, transcripts, bookmarks and totals.
 
-The folder and saved-playlist tables and methods are kept, but no screen or
-service uses them yet: nothing in the app creates, fills or shows one. They
-are storage only until a UI is built on them."""
+The folder and saved-playlist tables are not read or written by any method.
+No migration drops them, so rows an earlier build stored stay in the library."""
 
 import math
 import time
@@ -269,46 +268,3 @@ class ListeningRepository:
             "top": [(row["title"], float(row["listened_seconds"]), int(row["completed_episodes"])) for row in top],
         }
 
-    # Names match with COLLATE NOCASE, which folds ASCII letters only (SQLite):
-    # "Cafe" and "cafe" are one name, but "CAFÉ" and "café" are two. The unique
-    # indexes in migration 013 follow the same rule.
-    def create_folder(self, name: str) -> int:
-        with self.database.connect() as connection:
-            connection.execute(
-                "INSERT OR IGNORE INTO folders(name, created_at) VALUES (?, ?)",
-                (name.strip(), time.time()),
-            )
-            row = connection.execute("SELECT id FROM folders WHERE name=? COLLATE NOCASE", (name.strip(),)).fetchone()
-        return row["id"]
-
-    def create_playlist(self, name: str) -> int:
-        with self.database.connect() as connection:
-            connection.execute(
-                "INSERT OR IGNORE INTO saved_playlists(name, created_at) VALUES (?, ?)",
-                (name.strip(), time.time()),
-            )
-            row = connection.execute(
-                "SELECT id FROM saved_playlists WHERE name=? COLLATE NOCASE", (name.strip(),)
-            ).fetchone()
-        return row["id"]
-
-    def set_playlist_items(self, playlist_id: int, episode_ids: list[int]):
-        with self.database.connect() as connection:
-            connection.execute(
-                "DELETE FROM saved_playlist_items WHERE playlist_id=?", (playlist_id,)
-            )
-            for position, episode_id in enumerate(episode_ids, start=1):
-                connection.execute(
-                    """INSERT INTO saved_playlist_items(playlist_id, episode_id, position)
-                       VALUES (?, ?, ?)""",
-                    (playlist_id, episode_id, position),
-                )
-
-    def playlist_items(self, playlist_id: int) -> list[int]:
-        with self.database.connect() as connection:
-            rows = connection.execute(
-                """SELECT episode_id FROM saved_playlist_items
-                   WHERE playlist_id=? ORDER BY position""",
-                (playlist_id,),
-            ).fetchall()
-        return [row["episode_id"] for row in rows]
