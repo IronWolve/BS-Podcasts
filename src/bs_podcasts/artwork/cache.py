@@ -151,15 +151,8 @@ class ArtworkCache:
             if known is not None and known[0] == stamp:
                 self._validated.move_to_end(str(path))
                 return known[1]
-        from PySide6.QtCore import QSize
-        from PySide6.QtGui import QImageReader
-        reader = QImageReader(str(path))
-        reader.setDecideFormatFromContent(True)
-        # The handler chosen here is the one read() uses.
-        valid = header_within_limits(reader)
-        if valid:
-            reader.setScaledSize(QSize(64, 64))
-            valid = not reader.read().isNull()
+        # The verdict stored with this exact file answers a restart without a decode.
+        valid = self._stored_verdict(path, stamp) or self._decodes(path)
         if self.signature(path) != stamp:
             return False
         with self._locks_guard:
@@ -168,6 +161,30 @@ class ArtworkCache:
             while len(self._validated) > 4096:
                 self._validated.popitem(last=False)
         return valid
+
+    @staticmethod
+    def _decodes(path) -> bool:
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QImageReader
+        reader = QImageReader(str(path))
+        reader.setDecideFormatFromContent(True)
+        # The handler chosen here is the one read() uses.
+        if not header_within_limits(reader):
+            return False
+        reader.setScaledSize(QSize(64, 64))
+        return not reader.read().isNull()
+
+    def _stored_verdict(self, path, stamp) -> bool:
+        """True when the marker written for this exact file records that it decoded."""
+        marker = path.with_suffix('.checked')
+        try:
+            if marker.is_symlink():
+                return False
+            with marker.open('rb') as handle:
+                record = json.loads(handle.read(4096))
+            return tuple(record['signature']) == stamp and record.get('valid') is True
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+            return False
 
     def _touch(self, path):
         path = Path(path)
@@ -390,12 +407,14 @@ class ArtworkCache:
         return ''
 
     def _record_checked(self, path, etag='', modified=''):
+        """Mark a cover that was just validated. Only validated covers are recorded,
+        so the stored verdict is always True."""
         stamp = self.signature(path)
         if stamp is None:
             return
         checked = time.time()
         self._remember_checked(path, stamp, checked)
-        record = {'signature': stamp, 'checked': checked}
+        record = {'signature': stamp, 'checked': checked, 'valid': True}
         if etag:
             record['etag'] = etag
         if modified:
