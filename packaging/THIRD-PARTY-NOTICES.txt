@@ -41,6 +41,14 @@ libplacebo (statically linked into the bundled libmpv on Windows, Linux, and mac
   License: GNU Lesser General Public License v2.1 or later
   https://code.videolan.org/videolan/libplacebo
 
+Vulkan-Headers 450bd2232225d6c7728a4108055ac2e37cef6475 (build-time input to libplacebo)
+  Copyright 2015-2023 The Khronos Group Inc.
+  License: Apache-2.0 (licenses/Apache-2.0.txt); some files are offered under
+  MIT as well. The archive's LICENSE.md text is in licenses/Native-bundled-third-party.txt.
+  https://github.com/KhronosGroup/Vulkan-Headers
+  The native library is built with Vulkan disabled, so no Vulkan header is expected
+  in the output. This entry stays until a build log confirms that none is compiled in.
+
 libass (statically linked into the bundled libmpv on Windows, Linux, and macOS)
   License: ISC (licenses/ISC-libass.txt)
   https://github.com/libass/libass
