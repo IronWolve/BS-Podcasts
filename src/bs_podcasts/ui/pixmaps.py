@@ -736,7 +736,8 @@ def _sync_forced() -> bool:
 
 
 def pending_decodes() -> int:
-    """Covers still being decoded (tests and screenshot tools wait on this)."""
+    """Covers still being decoded. A test seam only: no production code calls it. The private checks
+    smoke_artwork_lifecycle, smoke_artwork_async and smoke_remediation_scroll_hold wait on it."""
     with _decode_lock:
         return len(_inflight)
 
