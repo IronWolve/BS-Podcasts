@@ -254,6 +254,10 @@ class DownloadService:
         self._intents = deque()
         self._intent_writer = False
         self._recording = set()
+        # The ticket each in-flight row write belongs to, and the tickets whose
+        # wait a delete gave up on: their row is removed once the write lands.
+        self._recording_tickets = {}
+        self._abandoned = set()
         self._settled = Condition(self._lock)
         # The newest play-intent ticket handed out, as (episode id, ticket).
         # The player waits on one episode at a time, so a newer play intent
@@ -335,12 +339,13 @@ class DownloadService:
                         or episode_id in self._retiring_episodes or episode_id in self._deleting_episodes):
                     continue
                 self._recording.add(episode_id)
+                self._recording_tickets[episode_id] = ticket
             try:
                 if self.downloads.get(episode_id) is None:
                     episode = self.library.get_episode(episode_id)
                     if episode is not None and episode.media_url:
                         target = self._target(episode_id, episode.media_url)
-                        self.downloads.prepare(episode_id, episode.media_url, target,
+                        self.downloads.enqueue(episode_id, episode.media_url, target,
                                                target.with_suffix(target.suffix + ".part"))
             except Exception as exc:
                 # The in-memory ticket still runs; only its survival across
@@ -349,7 +354,17 @@ class DownloadService:
             finally:
                 with self._settled:
                     self._recording.discard(episode_id)
+                    self._recording_tickets.pop(episode_id, None)
+                    abandoned = ticket in self._abandoned
+                    self._abandoned.discard(ticket)
                     self._settled.notify_all()
+                if abandoned:
+                    # A delete gave up waiting for this write and has already run;
+                    # the row it wrote now describes a download that no longer exists.
+                    try:
+                        self.downloads.discard_queued(episode_id)
+                    except Exception:
+                        _log.warning("Could not remove the queued row of episode %s", episode_id, exc_info=True)
 
     def join_intents(self, timeout: float = 3.0) -> int:
         """Wait up to `timeout` seconds for the queued-row writer to finish.
@@ -368,15 +383,24 @@ class DownloadService:
             _log.warning("Quit left %d queued download(s) unrecorded; queue them again after a restart.", unrecorded)
         return running
 
-    def _await_intent(self, episode_id: int):
+    INTENT_WAIT_SECONDS = 2.0
+
+    def _await_intent(self, episode_id: int, *, abandon_on_timeout: bool = False) -> bool:
         """Let an in-flight queued-row write land before the row is read or rewritten.
 
-        A transfer that started first would otherwise have its downloading or
-        complete state reset to queued by the late write, and a discard
-        would miss the row and leave it behind. Worker threads only.
+        The write is insert-only, so a transfer that starts first keeps its
+        state when the write lands late. The wait is bounded: a stuck database
+        must not hold a transfer or a delete. A delete that gives up waiting
+        marks the write, and the writer removes the row it lands. Worker
+        threads only. Returns False when the bound ran out.
         """
         with self._settled:
-            self._settled.wait_for(lambda: episode_id not in self._recording)
+            landed = self._settled.wait_for(lambda: episode_id not in self._recording, self.INTENT_WAIT_SECONDS)
+            if not landed and abandon_on_timeout:
+                ticket = self._recording_tickets.get(episode_id)
+                if ticket is not None:
+                    self._abandoned.add(ticket)
+            return landed
 
     RETRY_DELAYS = (2.0, 5.0, 10.0)
     MIN_FREE_BYTES = 500 * 1024 * 1024
@@ -694,7 +718,7 @@ class DownloadService:
         with self._lock:
             self._queued.pop(episode_id, None)
         self._await_cancelled(episode_id)
-        self._await_intent(episode_id)
+        self._await_intent(episode_id, abandon_on_timeout=True)
         record = self.downloads.get(episode_id)
         if record is None:
             return
@@ -1256,7 +1280,7 @@ class DownloadService:
         with self._lock:
             self._queued.pop(episode_id, None)
         self._await_cancelled(episode_id)
-        self._await_intent(episode_id)
+        self._await_intent(episode_id, abandon_on_timeout=True)
         record = self.downloads.get(episode_id)
         if record is None:
             return 0

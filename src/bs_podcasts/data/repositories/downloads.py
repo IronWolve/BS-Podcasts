@@ -58,6 +58,27 @@ class DownloadRepository:
             )
         return self.get(episode_id)
 
+    def enqueue(self, episode_id: int, source_url: str, target: Path, partial: Path) -> bool:
+        """Insert a queued row for an episode that has none; True when it inserted one.
+
+        Insert-only, unlike prepare(): a late write from the queued-row writer
+        can never change a row a transfer, a pause or a failure already owns.
+        """
+        now = time.time()
+        with self.database.connect() as connection:
+            return connection.execute(
+                """INSERT INTO downloads(
+                   episode_id, source_url, target_path, partial_path, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(episode_id) DO NOTHING""",
+                (episode_id, source_url, str(target), str(partial), now, now),
+            ).rowcount == 1
+
+    def discard_queued(self, episode_id: int):
+        """Remove the episode's row only while it is still queued (never a transfer's row)."""
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM downloads WHERE episode_id=? AND state='queued'", (episode_id,))
+
     def response_metadata(self, episode_id: int, etag: str, last_modified: str, total: int):
         with self.database.connect() as connection:
             connection.execute("UPDATE downloads SET etag=?, last_modified=?, expected_total=?, "
