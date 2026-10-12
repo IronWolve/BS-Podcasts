@@ -458,6 +458,16 @@ def apply_app_stylesheet(app) -> bool:
     return True
 
 
+def apply_saved_appearance(app, setting) -> None:
+    """The appearance steps startup takes once the library opens: the saved theme, type scale, UI font and
+    stylesheet. `setting(key, default)` reads a saved preference. The capture tools call this too, so a capture
+    is drawn with the appearance the app shows."""
+    apply_theme(resolve_theme(setting("ui.theme", "system")))
+    apply_typography(setting("ui.text_size", "comfortable"), setting("ui.font", "Inter"))
+    app.setFont(app_font())
+    apply_app_stylesheet(app)
+
+
 def stylesheet() -> str:
     c = COLORS
     r = RADIUS

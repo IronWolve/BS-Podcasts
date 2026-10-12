@@ -36,7 +36,7 @@ from .playback import LazyMpvEngine, PlaybackService
 from .privacy import redact
 from .services import LibraryService, ListeningService
 from .ui.shell import MainWindow, shutdown_exports
-from .ui.theme import app_font, apply_app_stylesheet, apply_theme, apply_typography, load_fonts, resolve_theme
+from .ui.theme import app_font, apply_app_stylesheet, apply_saved_appearance, apply_theme, load_fonts, resolve_theme
 
 
 def _write_crash_file(text: str):
@@ -607,11 +607,6 @@ def _probe_instance_status(name: str, timeout_ms: int = 300, files=(), *, bound_
     return result.get('status', 'silent')
 
 
-def _probe_running_instance(name: str, timeout_ms: int = 300, files=()) -> bool:
-    """An answered raise request, consulted only after library contention."""
-    return _probe_instance_status(name, timeout_ms, files) == 'answered'
-
-
 def _set_instance_callbacks(server, on_raise, on_files):
     """Bounded asynchronous IPC. File acceptance only queues a future UI prompt."""
     callbacks = getattr(server, '_ipc_callbacks', None)
@@ -1033,6 +1028,286 @@ def _acquire_library_lease(root, name, incoming):
         _pump_until(wait.cancelled, 0.25)
 
 
+class _WindowController:
+    """The main window and everything that changes while the app runs.
+
+    main() builds the services and hands them over. This object owns the
+    window and its rebuilds, the second-launch file hand-off and the quit
+    sequence, and keeps that state in named attributes rather than in one-key
+    dicts shared by closures."""
+
+    def __init__(self, *, app, server, mark, library, downloads, playback, commands, engine, listening,
+                 jobs, download_jobs, play_download_jobs, refresh_jobs, network_jobs, artwork_jobs,
+                 refresh, directory, database, lease):
+        self.app = app
+        self.server = server
+        self._mark = mark
+        self.library = library
+        self.downloads = downloads
+        self.playback = playback
+        self.commands = commands
+        self.engine = engine
+        self.listening = listening
+        self.jobs = jobs
+        self.download_jobs = download_jobs
+        self.play_download_jobs = play_download_jobs
+        self.refresh_jobs = refresh_jobs
+        self.network_jobs = network_jobs
+        self.artwork_jobs = artwork_jobs
+        self.refresh = refresh
+        self.directory = directory
+        self.database = database
+        self.lease = lease
+        self.logger = logging.getLogger("bs_podcasts")
+        self.window = None  # the live main window; None until the first one is built
+        self.rebuild_pending = False
+        self.files_scheduled = False
+        self.contrast_watcher = None
+
+    def start(self, marks):
+        """Build the first window, wire the quit sequence, and start serving second launches."""
+        self.build_window()
+        self.contrast_watcher = _watch_accessibility_contrast(
+            self.app, lambda: self.window, lambda: self.library.setting('ui.theme', 'system'))
+        self.logger.info(
+            "startup phases: %s (total %.2fs)",
+            "  ".join(
+                f"{name}={later - earlier:.2f}s"
+                for (_prev, earlier), (name, later) in zip(marks, marks[1:])
+            ),
+            marks[-1][1] - marks[0][1],
+        )
+        # Warm the playback core off-thread once startup has settled, so the
+        # first press of Play pays only for opening the stream — but only when a
+        # remembered episode makes that press likely; a session that never plays
+        # does not build a core at all.
+        warm = getattr(self.engine, "warm", None)
+        if warm is not None and getattr(self.playback.snapshot, "episode_id", None) is not None:
+            QTimer.singleShot(2000, lambda: self.jobs.submit(warm))
+        _set_instance_callbacks(self.server, self.raise_existing, self.queue_files)
+        self.schedule_files()  # Initial command-line arguments and requests received during startup.
+        self._connect_quit()
+
+    def _connect_quit(self):
+        app, server = self.app, self.server
+        # Stop answering before the final saves: a relaunch during that drain
+        # then sees no instance and waits for the lease instead of exiting.
+        app.aboutToQuit.connect(lambda: _close_local_server(server))
+        app.aboutToQuit.connect(lambda: shutdown_exports(0.2))
+        app.aboutToQuit.connect(lambda: self.window._save_layout() if self.window is not None else None)
+        # window.tray and window.mpris are None until desktop integration ran.
+        # Hiding the tray here removes the icon before the drain, and before a
+        # forced exit that skips the toolkit's own cleanup.
+        app.aboutToQuit.connect(
+            lambda: self.window.tray.shutdown()
+            if self.window is not None and getattr(self.window, "tray", None) is not None
+            else None
+        )
+        app.aboutToQuit.connect(
+            lambda: self.window.mpris.shutdown()
+            if self.window is not None and getattr(self.window, "mpris", None) is not None
+            else None
+        )
+        app.aboutToQuit.connect(lambda: self.downloads.pause_all())
+        # Last: the settings write queued above is kept and drained with playback.
+        app.aboutToQuit.connect(lambda: _finalize_unclosed(self.commands, self.playback))
+        # A session-end query may still be cancelled, so only save, never close.
+        session_query = getattr(app, "commitDataRequest", None)
+        if session_query is not None:
+            session_query.connect(
+                lambda _manager: self.window._save_layout() if self.window is not None else None
+            )
+
+    def build_window(self, view_state=None):
+        window = MainWindow(
+            library=self.library,
+            jobs=self.jobs,
+            refresh=self.refresh,
+            directory=self.directory,
+            playback=self.playback,
+            downloads=self.downloads,
+            listening=self.listening,
+            download_jobs=self.download_jobs,
+            play_download_jobs=self.play_download_jobs,
+            refresh_jobs=self.refresh_jobs,
+            network_jobs=self.network_jobs,
+            artwork_jobs=self.artwork_jobs,
+            view_state=view_state,
+            commands=self.commands,
+        )
+        self._mark("main-window")
+        window.tray = None
+        window.mpris = None
+        window.relaunch_requested.connect(lambda: self.request_rebuild())
+        # Keep this reference. A top-level window with no Python reference is
+        # garbage collected, and then no window is left to show. The rebuild
+        # (rebuild_when_possible, _replace_window) relies on it staying alive
+        # until the replacement is built and shown.
+        self.window = window
+        window.show()
+        self._mark("show")
+        QTimer.singleShot(0, lambda: self._desktop_integration(window))
+        return window
+
+    def _desktop_integration(self, window):
+        # After first paint: neither the tray icon nor MPRIS is needed to
+        # draw the window, and MPRIS in particular touches D-Bus. Building
+        # them first put that work in front of every startup.
+        if window is not self.window:
+            return  # superseded by a rebuild before this ran
+        from .integrations import TrayController
+
+        window.tray = TrayController(window, self.playback)
+        window.player.set_tray_available(window.tray.available)
+        self._mark("tray")
+        from .integrations import MprisController
+
+        window.mpris = MprisController(window, self.playback)
+        self._mark("mpris")
+
+    def request_rebuild(self):
+        self.rebuild_pending = True
+        self.rebuild_when_possible()
+
+    def rebuild_when_possible(self):
+        if not self.rebuild_pending:
+            return
+        old = self.window
+        if old is not None and _window_is_away(old):
+            # The window asked for an immediate rebuild and marked itself as
+            # being replaced; a Quit that arrives while this waits must still quit.
+            old._keep_services = False
+            # Nothing to retry until the user brings the window back.
+            if old.findChild(_ShowWatcher) is None:
+                _ShowWatcher(old, self.rebuild_when_possible)
+            return
+        self.rebuild_pending = False
+        began = time.monotonic()
+        view_state = old._capture_view_state() if old is not None else None
+        if old is not None:
+            old._keep_services = True  # the services outlive this window
+            # Both may still be None: they are now built after first paint,
+            # so a rebuild triggered immediately can arrive before they exist.
+            # A failure in either must not stop the rebuild half way, with
+            # the services marked as kept and the old window left in place.
+            # The tray and the media controls are released first, so the
+            # replacement can take them over without a second icon.
+            if getattr(old, "tray", None) is not None:
+                try:
+                    old.tray.shutdown()
+                except Exception:
+                    self.logger.warning("Tray shutdown failed during the window rebuild", exc_info=True)
+            if getattr(old, "mpris", None) is not None:
+                try:
+                    old.mpris.shutdown()
+                except Exception:
+                    self.logger.warning("Media controls shutdown failed during the window rebuild", exc_info=True)
+        # The replacement is built and shown while the old window still exists,
+        # so a failed build leaves the old window in place rather than nothing.
+        QTimer.singleShot(0, lambda: self._replace_window(old, view_state, began))
+
+    def _replace_window(self, old, view_state, began):
+        # The replacement is built while the old window still exists, so a
+        # failed build leaves the old window in place rather than nothing.
+        try:
+            self.build_window(view_state)
+        except Exception:
+            # No replacement exists. Put the old window back as the window the
+            # quit handlers see, and end the application: CC10 requires a quit
+            # rather than a hidden process without a window or tray.
+            self.window = old
+            self.app.quit()
+            raise
+        built = time.monotonic()
+        # The old window is closed and deleted before the style sheet is
+        # applied. Applied while it still existed, the style sheet restyled
+        # every widget in it first, which was most of the time a rebuild took.
+        if old is not None:
+            old.close()
+            old.deleteLater()
+            try:
+                QCoreApplication.sendPostedEvents(old, QEvent.Type.DeferredDelete)
+            except RuntimeError:
+                pass  # the loop already deleted it
+        closed = time.monotonic()
+        apply_app_stylesheet(self.app)
+        styled = time.monotonic()
+        # Same idea as the startup phase line: a slow rebuild on a
+        # large library shows up in a normal log.
+        self.logger.info("window rebuild: close=%.2fs stylesheet=%.2fs window=%.2fs",
+                         closed - built, styled - closed, built - began)
+
+    def raise_existing(self):
+        window = self.window
+        if window is not None and not window._closed and not window._force_quit:
+            window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
+            window.show()
+            window.raise_()
+            window.activateWindow()
+
+    def schedule_files(self, delay=0):
+        if not self.files_scheduled:
+            self.files_scheduled = True
+            QTimer.singleShot(delay, self.app, self.deliver_files)
+
+    def deliver_files(self):
+        self.files_scheduled = False
+        paths = getattr(self.app, '_incoming_file_args', [])
+        window = self.window
+        if not paths or window is None:
+            return
+        if _window_is_quitting(window):
+            self.app._incoming_file_args = []
+            return  # Accepted as queued, never interpreted as permission to import.
+        if window._closed or QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
+            self.schedule_files(100)
+            return
+        self.app._incoming_file_args = []
+        self.raise_existing()
+        window._confirm_incoming_file_args(paths)  # Only explicit acceptance performs I/O.
+
+    def queue_files(self, paths):
+        if self.window is not None and _window_is_quitting(self.window):
+            return False  # The sender gets an error; an accepted request would be dropped silently.
+        combined = list(dict.fromkeys([*getattr(self.app, '_incoming_file_args', []), *paths]))
+        if len(combined) > 10:
+            return False
+        self.app._incoming_file_args = combined
+        self.schedule_files()
+        return True
+
+    def shut_down(self, code):
+        """Bounded shutdown after the event loop ends: cancel pending jobs, give running ones a moment, then leave.
+
+        Non-daemon worker threads would otherwise hold the process open. One
+        deadline for all pools: four independent 3 s joins let a quit take up
+        to 12 s while background work drained."""
+        self.commands.finish(self.playback.shutdown)
+        deadline = time.monotonic() + 3.0
+        # The playback writer owns 1.5 s of the 3 s exit budget, so its last
+        # position save is not queued behind the download pools; the pools
+        # share what is left of the deadline.
+        busy = _join_playback_shutdown(self.commands, self.playback, time.monotonic() + 1.5)
+        for pool in (self.jobs, self.download_jobs, self.play_download_jobs, self.refresh_jobs,
+                     self.network_jobs, self.artwork_jobs):
+            busy += pool.join(max(0.0, deadline - time.monotonic()))
+        busy += self.downloads.join_intents(max(0.0, deadline - time.monotonic()))
+        busy += shutdown_exports(max(0.0, deadline - time.monotonic()))
+        from .ui.pixmaps import shutdown_decodes
+        busy += shutdown_decodes(max(0.0, deadline - time.monotonic()))
+        if busy:
+            self.logger.warning("Exiting with %d background job(s) still running.", busy)
+            if not _close_busy_database(self.database, grace_seconds=0.1):
+                self.logger.warning("Library workers remain active; committed WAL data will recover on the next start.")
+            # Handles can be reopened by still-alive workers, even after a clean
+            # idle-handle close. Never expose this library to a new owner until exit.
+            logging.shutdown()
+            os._exit(code)
+        self.database.close()
+        self.lease.close()
+        return code
+
+
 def main() -> int:
     # Startup phase marks, logged once the window is up. When a platform
     # stalls at launch (the Mac build took 11 s to show), one run of the app
@@ -1124,10 +1399,7 @@ def main() -> int:
         report.deleteLater()
     from .logging_setup import set_file_logging
     set_file_logging(library.setting("diagnostics.file_logging", "1") == "1")
-    apply_theme(resolve_theme(library.setting("ui.theme", "system")))
-    apply_typography(library.setting("ui.text_size", "comfortable"), library.setting("ui.font", "Inter"))
-    app.setFont(app_font())
-    apply_app_stylesheet(app)
+    apply_saved_appearance(app, library.setting)
     _mark("theme")
     jobs = JobRunner(max_workers=4)
     download_jobs = JobRunner(max_workers=2)
@@ -1161,236 +1433,11 @@ def main() -> int:
     # reconcile_missing() stat()s every completed download; it runs on a
     # worker after the first paint instead (MainWindow), audit F-021.
     _mark("services")
-    state = {"window": None}
-
-    def build_window(view_state=None):
-        window = MainWindow(
-            library=library,
-            jobs=jobs,
-            refresh=refresh,
-            directory=directory,
-            playback=playback,
-            downloads=downloads,
-            listening=listening,
-            download_jobs=download_jobs,
-            play_download_jobs=play_download_jobs,
-            refresh_jobs=refresh_jobs,
-            network_jobs=network_jobs,
-            artwork_jobs=artwork_jobs,
-            view_state=view_state,
-            commands=commands,
-        )
-        _mark("main-window")
-        window.tray = None
-        window.mpris = None
-        window.relaunch_requested.connect(lambda: rebuild_window())
-        # Keep this reference. A top-level window with no Python reference is
-        # garbage collected, and then no window is left to show. The rebuild
-        # (rebuild_when_possible, replace_window) relies on it staying alive
-        # until the replacement is built and shown.
-        state["window"] = window
-        window.show()
-        _mark("show")
-
-        def _desktop_integration():
-            # After first paint: neither the tray icon nor MPRIS is needed to
-            # draw the window, and MPRIS in particular touches D-Bus. Building
-            # them first put that work in front of every startup.
-            if window is not state["window"]:
-                return  # superseded by a rebuild before this ran
-            from .integrations import TrayController
-
-            window.tray = TrayController(window, playback)
-            window.player.set_tray_available(window.tray.available)
-            _mark("tray")
-            from .integrations import MprisController
-
-            window.mpris = MprisController(window, playback)
-            _mark("mpris")
-
-        QTimer.singleShot(0, _desktop_integration)
-        return window
-
-    pending = {"rebuild": False}
-
-    def rebuild_window():
-        pending["rebuild"] = True
-        rebuild_when_possible()
-
-    def rebuild_when_possible():
-        if not pending["rebuild"]:
-            return
-        old = state["window"]
-        if old is not None and _window_is_away(old):
-            # The window asked for an immediate rebuild and marked itself as
-            # being replaced; a Quit that arrives while this waits must still quit.
-            old._keep_services = False
-            # Nothing to retry until the user brings the window back.
-            if old.findChild(_ShowWatcher) is None:
-                _ShowWatcher(old, rebuild_when_possible)
-            return
-        pending["rebuild"] = False
-        began = time.monotonic()
-        view_state = old._capture_view_state() if old is not None else None
-        quit_on_close = app.quitOnLastWindowClosed()
-        if old is not None:
-            old._keep_services = True  # the services outlive this window
-            # Both may still be None: they are now built after first paint,
-            # so a rebuild triggered immediately can arrive before they exist.
-            # A failure in either must not stop the rebuild half way, with
-            # the services marked as kept and the old window left in place.
-            if getattr(old, "tray", None) is not None:
-                try:
-                    old.tray.shutdown()
-                except Exception:
-                    logger.warning("Tray shutdown failed during the window rebuild", exc_info=True)
-            if getattr(old, "mpris", None) is not None:
-                try:
-                    old.mpris.shutdown()
-                except Exception:
-                    logger.warning("Media controls shutdown failed during the window rebuild", exc_info=True)
-            # No window exists until replace_window runs; closing the last
-            # one must not quit the application in between.
-            app.setQuitOnLastWindowClosed(False)
-            old.close()
-            old.deleteLater()
-
-        def replace_window():
-            # One loop turn after the old window was closed and scheduled for
-            # deletion. The style sheet must only meet the new window: applied
-            # while the old one still existed, it restyled every widget in it
-            # first, which was most of the time a rebuild took.
-            try:
-                if old is not None:
-                    try:
-                        QCoreApplication.sendPostedEvents(old, QEvent.Type.DeferredDelete)
-                    except RuntimeError:
-                        pass  # the loop already deleted it
-                closed = time.monotonic()
-                apply_app_stylesheet(app)
-                styled = time.monotonic()
-                build_window(view_state)
-                # Same idea as the startup phase line: a slow rebuild on a
-                # large library shows up in a normal log.
-                logger.info("window rebuild: close=%.2fs stylesheet=%.2fs window=%.2fs",
-                            closed - began, styled - closed, time.monotonic() - styled)
-            except Exception:
-                if state["window"] is old:
-                    state["window"] = None  # deleted; the quit handlers must not reach into it
-                app.quit()  # no window is left to show
-                raise
-            finally:
-                app.setQuitOnLastWindowClosed(quit_on_close)
-
-        QTimer.singleShot(0, replace_window)
-
-    build_window()
-    _contrast_watcher = _watch_accessibility_contrast(
-        app, lambda: state['window'], lambda: library.setting('ui.theme', 'system'))
-    logger.info(
-        "startup phases: %s (total %.2fs)",
-        "  ".join(
-            f"{name}={later - earlier:.2f}s"
-            for (_prev, earlier), (name, later) in zip(_marks, _marks[1:])
-        ),
-        _marks[-1][1] - _marks[0][1],
-    )
-    # Warm the playback core off-thread once startup has settled, so the
-    # first press of Play pays only for opening the stream — but only when a
-    # remembered episode makes that press likely; a session that never plays
-    # does not build a core at all.
-    warm = getattr(engine, "warm", None)
-    if warm is not None and getattr(playback.snapshot, "episode_id", None) is not None:
-        QTimer.singleShot(2000, lambda: jobs.submit(warm))
-
-    def raise_existing():
-        window = state["window"]
-        if window is not None and not window._closed and not window._force_quit:
-            window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
-            window.show()
-            window.raise_()
-            window.activateWindow()
-
-    file_delivery = {'scheduled': False}
-    def schedule_files(delay=0):
-        if not file_delivery['scheduled']:
-            file_delivery['scheduled'] = True
-            QTimer.singleShot(delay, app, deliver_files)
-    def deliver_files():
-        file_delivery['scheduled'] = False
-        paths = getattr(app, '_incoming_file_args', [])
-        window = state['window']
-        if not paths or window is None:
-            return
-        if _window_is_quitting(window):
-            app._incoming_file_args = []
-            return  # Accepted as queued, never interpreted as permission to import.
-        if window._closed or QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
-            schedule_files(100)
-            return
-        app._incoming_file_args = []
-        raise_existing()
-        window._confirm_incoming_file_args(paths)  # Only explicit acceptance performs I/O.
-    def queue_files(paths):
-        if state['window'] is not None and _window_is_quitting(state['window']):
-            return False  # The sender gets an error; an accepted request would be dropped silently.
-        combined = list(dict.fromkeys([*getattr(app, '_incoming_file_args', []), *paths]))
-        if len(combined) > 10:
-            return False
-        app._incoming_file_args = combined
-        schedule_files()
-        return True
-    _set_instance_callbacks(server, raise_existing, queue_files)
-    schedule_files()  # Initial command-line arguments and requests received during startup.
-    # Stop answering before the final saves: a relaunch during that drain
-    # then sees no instance and waits for the lease instead of exiting.
-    app.aboutToQuit.connect(lambda: _close_local_server(server))
-    app.aboutToQuit.connect(lambda: shutdown_exports(0.2))
-    app.aboutToQuit.connect(lambda: state["window"]._save_layout() if state["window"] is not None else None)
-    # window.tray and window.mpris are None until desktop integration ran.
-    # Hiding the tray here removes the icon before the drain, and before a
-    # forced exit that skips the toolkit's own cleanup.
-    app.aboutToQuit.connect(
-        lambda: state["window"].tray.shutdown()
-        if state["window"] is not None and getattr(state["window"], "tray", None) is not None
-        else None
-    )
-    app.aboutToQuit.connect(
-        lambda: state["window"].mpris.shutdown()
-        if state["window"] is not None and getattr(state["window"], "mpris", None) is not None
-        else None
-    )
-    app.aboutToQuit.connect(lambda: downloads.pause_all())
-    # Last: the settings write queued above is kept and drained with playback.
-    app.aboutToQuit.connect(lambda: _finalize_unclosed(commands, playback))
-    # A session-end query may still be cancelled, so only save, never close.
-    session_query = getattr(app, "commitDataRequest", None)
-    if session_query is not None:
-        session_query.connect(
-            lambda _manager: state["window"]._save_layout() if state["window"] is not None else None
-        )
+    controller = _WindowController(
+        app=app, server=server, mark=_mark, library=library, downloads=downloads, playback=playback,
+        commands=commands, engine=engine, listening=listening, jobs=jobs, download_jobs=download_jobs,
+        play_download_jobs=play_download_jobs, refresh_jobs=refresh_jobs, network_jobs=network_jobs,
+        artwork_jobs=artwork_jobs, refresh=refresh, directory=directory, database=database, lease=lease)
+    controller.start(_marks)
     code = app.exec()
-    commands.finish(playback.shutdown)
-    # Bounded shutdown: cancel pending jobs, give running ones a moment, then
-    # leave. Non-daemon worker threads would otherwise hold the process open.
-    # One deadline for all pools: four independent 3 s joins let a quit take
-    # up to 12 s while background work drained.
-    deadline = time.monotonic() + 3.0
-    busy = _join_playback_shutdown(commands, playback, deadline)
-    for pool in (jobs, download_jobs, play_download_jobs, refresh_jobs, network_jobs, artwork_jobs):
-        busy += pool.join(max(0.0, deadline - time.monotonic()))
-    busy += downloads.join_intents(max(0.0, deadline - time.monotonic()))
-    busy += shutdown_exports(max(0.0, deadline - time.monotonic()))
-    from .ui.pixmaps import shutdown_decodes
-    busy += shutdown_decodes(max(0.0, deadline - time.monotonic()))
-    if busy:
-        logging.getLogger("bs_podcasts").warning("Exiting with %d background job(s) still running.", busy)
-        if not _close_busy_database(database, grace_seconds=0.1):
-            logging.getLogger("bs_podcasts").warning("Library workers remain active; committed WAL data will recover on the next start.")
-        # Handles can be reopened by still-alive workers, even after a clean
-        # idle-handle close. Never expose this library to a new owner until exit.
-        logging.shutdown()
-        os._exit(code)
-    database.close()
-    lease.close()
-    return code
+    return controller.shut_down(code)
