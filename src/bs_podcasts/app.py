@@ -1033,6 +1033,10 @@ def main() -> int:
         window.tray = None
         window.mpris = None
         window.relaunch_requested.connect(lambda: rebuild_window())
+        # Keep this reference. A top-level window with no Python reference is
+        # garbage collected, and then no window is left to show. The rebuild
+        # (rebuild_when_possible, replace_window) relies on it staying alive
+        # until the replacement is built and shown.
         state["window"] = window
         window.show()
         _mark("show")
