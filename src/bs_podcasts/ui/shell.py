@@ -2346,7 +2346,7 @@ class MainWindow(QMainWindow):
         if ids and not self._confirm_bulk(len(ids), "Download"):
             return
         for episode_id in ids:
-            self._download_episode(episode_id, quiet=True)
+            self._download_chosen(episode_id, quiet=True)
         if ids:
             self._notify(f"Queued {len(ids)} download{'s' if len(ids) != 1 else ''}", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
 
@@ -4400,7 +4400,7 @@ class MainWindow(QMainWindow):
                 menu.addAction(icons.icon(icon, COLORS["text"], 16), label, callback)
             if not state_actions and not downloaded:
                 label = f"Download ({status})" if status_pages else "Download"
-                menu.addAction(icons.icon("download", COLORS["text"], 16), label, lambda: self._download_episode(episode.episode_id))
+                menu.addAction(icons.icon("download", COLORS["text"], 16), label, lambda: self._download_chosen(episode.episode_id))
         elif many:
             missing = sum(1 for item in targets if is_web_url(item.media_url) and not item.downloaded_path)
             if missing:
@@ -4578,7 +4578,7 @@ class MainWindow(QMainWindow):
         if self._background_paused():
             return
         for episode_id in candidates:
-            self._download_episode(episode_id, quiet=True, automatic=True)
+            self._download_episode(episode_id, quiet=True)
         if candidates:
             self._notify(f"Auto-downloading {len(candidates)} new episode{'s' if len(candidates) != 1 else ''}", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
 
@@ -4875,12 +4875,12 @@ class MainWindow(QMainWindow):
         if state in {"downloading", "queued"}:
             return [("pause", "Pause download", lambda: self._pause_download(episode_id))]
         if state == "paused":
-            return [("play", "Resume download", lambda: self._download_episode(episode_id)),
+            return [("play", "Resume download", lambda: self._download_chosen(episode_id)),
                     ("close", "Discard paused download", lambda: self._discard_download(episode_id))]
         if state == "error":
             # A failed download could only be retried; nothing let the user
             # clear the red ERROR badge off the row.
-            return [("download", "Retry download", lambda: self._download_episode(episode_id)),
+            return [("download", "Retry download", lambda: self._download_chosen(episode_id)),
                     ("close", "Clear failed download", lambda: self._discard_download(episode_id))]
         return []
 
@@ -4899,7 +4899,7 @@ class MainWindow(QMainWindow):
             if not getattr(record, "length_verified", False):
                 menu.addAction("Verify download length…", lambda: self._verify_download_length(episode_id))
         elif not state_actions:
-            menu.addAction(icons.icon("download", COLORS["text"], 16), "Download episode", lambda: self._download_episode(episode_id))
+            menu.addAction(icons.icon("download", COLORS["text"], 16), "Download episode", lambda: self._download_chosen(episode_id))
         exec_menu(menu, global_position)
 
     def _open_external_episode(self, episode_id: int):
@@ -5550,7 +5550,7 @@ class MainWindow(QMainWindow):
                 self._play_after_download_request = request
                 self._play_after_download_intent = self.playback.intent_revision
                 if self.downloads is not None and self.jobs is not None:
-                    ticket = self._download_episode(episode_id, quiet=True, priority=True)
+                    ticket = self._download_chosen(episode_id, quiet=True, priority=True)
                     if ticket is None and not self.downloads.is_active(episode_id):
                         # Refused (the episode is being removed) and no running
                         # transfer will answer this wait: end it now.
@@ -5780,11 +5780,16 @@ class MainWindow(QMainWindow):
         return mapping.get(value, value or "")
 
     # ---------------------------------------------------------------- downloads
-    def _download_episode(self, episode_id: int, quiet: bool = False, priority: bool = False, automatic: bool = False):
-        """Queue a download; returns its ticket, or None when none was created.
+    def _download_chosen(self, episode_id: int, **kwargs):
+        """Queue a download the user asked for. Retention asks before it removes
+        that file; the app's own new-episode downloads do not come through here."""
+        ticket = self._download_episode(episode_id, **kwargs)
+        if ticket is not None:
+            self._persist_ui_settings({self.CHOSEN_KEY.format(episode_id): "1"})
+        return ticket
 
-        `automatic` is set only by the app's own new-episode downloads. Any
-        other queued download is the user's choice and is recorded as such."""
+    def _download_episode(self, episode_id: int, quiet: bool = False, priority: bool = False):
+        """Queue a download; returns its ticket, or None when none was created."""
         if self.downloads is None or self.jobs is None or not episode_id:
             return None
         # `priority` is a play intent: it takes over a ticket still waiting
@@ -5792,8 +5797,6 @@ class MainWindow(QMainWindow):
         ticket = self.downloads.queue(episode_id, priority=True) if priority else self.downloads.queue(episode_id)
         if ticket is None:
             return None
-        if not automatic:
-            self._persist_ui_settings({self.CHOSEN_KEY.format(episode_id): "1"})
         self._download_tickets[episode_id] = ticket
         runner = (self.play_download_jobs or self.download_jobs) if priority else self.download_jobs
         future = runner.submit(self.downloads.download, episode_id, ticket)
@@ -7530,7 +7533,7 @@ class MainWindow(QMainWindow):
         elif result.status in {JobStatus.OK, JobStatus.EMPTY}:
             return  # paused or deduped: nothing transferred, say nothing
         else:
-            self._notify(result.message or "Download failed", "error", "Retry", lambda: self._download_episode(identifier))
+            self._notify(result.message or "Download failed", "error", "Retry", lambda: self._download_chosen(identifier))
             self._native_notify(APP_NAME, result.message or "Download failed", lambda: self.navigation.select(PAGE_DOWNLOADS))
         return
     def _on_refresh(self, kind, identifier, result):
