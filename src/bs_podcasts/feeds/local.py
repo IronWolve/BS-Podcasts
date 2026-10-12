@@ -10,6 +10,8 @@ import os
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from threading import Timer
+import time
 
 from ..data.repositories import LibraryRepository
 from ..domain import FeedData, FeedEpisodeData, Health
@@ -22,6 +24,8 @@ class LocalAudioError(ValueError):
 
 PROBE_TIMEOUT = 12
 MAX_PROBE_RESULT = 64 * 1024
+# How often a batch probe checks for the next answer the reader wrote.
+_PROBE_POLL_SECONDS = 0.05
 
 
 def _storable(name: str) -> str:
@@ -31,53 +35,124 @@ def _storable(name: str) -> str:
 
 def read_metadata(source: Path) -> dict:
     """Use an owned, bounded native probe without touching the active player."""
+    result = probe_many([Path(source)])[0]
+    if isinstance(result, LocalAudioError):
+        raise result
+    return result
+
+
+def probe_many(sources, on_result=None) -> list:
+    """Read the metadata of several local files in one reader session.
+
+    One child interpreter reads the whole list, so a batch pays the start-up
+    cost once. Each answer is a metadata dict or a LocalAudioError, returned in
+    the order of `sources`; `on_result(index, value)` runs as each answer
+    arrives, so a long batch can report progress.
+    """
     from ..config import cache_dir
+    sources = [Path(source) for source in sources]
+    if not sources:
+        return []
+    results = [None] * len(sources)
+
+    def settle(index, value):
+        results[index] = value
+        if on_result is not None:
+            on_result(index, value)
+
     native = ctypes.util.find_library('mpv')
     if not native:
-        raise LocalAudioError('The native audio reader is unavailable; repair the application installation.')
+        for index in range(len(sources)):
+            settle(index, LocalAudioError('The native audio reader is unavailable; repair the application installation.'))
+        return results
     scratch = cache_dir()/'probes'
     scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
     with TemporaryDirectory(prefix='audio-', dir=scratch) as directory:
-        output = Path(directory)/'metadata.json'
+        folder = Path(directory)
+        request = folder/'request.json'
+        request.write_text(json.dumps([str(source) for source in sources], ensure_ascii=False), encoding='utf-8')
         command = [sys.executable]
         if not getattr(sys, 'frozen', False):
             command += ['-B', str(Path(__file__).with_name('local_probe.py'))]
-        command += ['--probe-local-audio', str(source), '--probe-output', str(output), '--native-library', native]
-        try:
-            result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE, cwd=directory, timeout=PROBE_TIMEOUT,
-                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0)
-        except subprocess.TimeoutExpired as exc:
-            raise LocalAudioError('Audio metadata reading timed out; the file was not imported.') from exc
-        except OSError as exc:
-            raise LocalAudioError('Could not start the audio metadata reader.') from exc
-        if not output.is_file() or output.stat().st_size > MAX_PROBE_RESULT:
-            raise LocalAudioError('Audio metadata could not be read safely; the file was not imported.')
-        try:
-            payload = json.loads(output.read_text(encoding='utf-8'))
-        except (ValueError, OSError) as exc:
-            raise LocalAudioError('The audio metadata reader returned an invalid result.') from exc
-        if not isinstance(payload, dict) or result.returncode != 0 or not payload.get('ok'):
-            # The app log keeps why it failed, bounded; the user keeps the generic sentence.
-            reason = payload.get('reason') if isinstance(payload, dict) else None
-            detail = (result.stderr or b'')[-2000:].decode('utf-8', 'replace').strip()
-            logging.getLogger('bs_podcasts').warning(
-                'Audio metadata reader refused %s (exit %s): %s', source.name, result.returncode,
-                reason or detail or 'no reason reported')
-            raise LocalAudioError('Unsupported, damaged or unreadable audio file.')
-        if any(not isinstance(payload.get(key), str) or len(payload[key]) > 4096 for key in ('title','album','artist')):
-            raise LocalAudioError('Audio metadata exceeds the supported limits.')
-        duration = media_seconds(payload.get('duration'))
-        if duration is None:
-            raise LocalAudioError('Audio duration is invalid.')
-        return {**payload, 'duration': duration}
+        command += ['--probe-request', str(request), '--probe-directory', str(folder), '--native-library', native]
+        with (folder/'stderr.log').open('wb') as stderr:
+            try:
+                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=stderr, cwd=directory,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0)
+            except OSError:
+                for index in range(len(sources)):
+                    settle(index, LocalAudioError('Could not start the audio metadata reader.'))
+                return results
+            # The reader is bounded per file; this bound covers a reader that stalls outright.
+            guard = Timer(PROBE_TIMEOUT * len(sources) + 5, process.kill)
+            guard.daemon = True
+            guard.start()
+            pending = set(range(len(sources)))
+
+            def collect():
+                for index in sorted(pending):
+                    answer = folder/f'result-{index}.json'
+                    if answer.is_file():
+                        pending.discard(index)
+                        settle(index, _answer(answer, sources[index]))
+
+            try:
+                while True:
+                    collect()
+                    if not pending or process.poll() is not None:
+                        break
+                    time.sleep(_PROBE_POLL_SECONDS)
+                process.wait()
+            finally:
+                guard.cancel()
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+            collect()  # answers written just before the reader exited
+            for index in sorted(pending):
+                settle(index, LocalAudioError('Audio metadata reading did not finish; the file was not imported.'))
+            if results and any(isinstance(value, LocalAudioError) for value in results):
+                detail = (folder/'stderr.log').read_bytes()[-2000:].decode('utf-8', 'replace').strip()
+                if detail:
+                    logging.getLogger('bs_podcasts').warning('Audio metadata reader reported: %s', detail)
+    return results
+
+
+def _answer(path: Path, source: Path):
+    """One reader answer, checked: its metadata dict, or the LocalAudioError for the file."""
+    unsafe = LocalAudioError('Audio metadata could not be read safely; the file was not imported.')
+    try:
+        if path.stat().st_size > MAX_PROBE_RESULT:
+            return unsafe
+        text = path.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError):
+        return unsafe
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return LocalAudioError('The audio metadata reader returned an invalid result.')
+    if not isinstance(payload, dict) or not payload.get('ok'):
+        # The app log keeps why it failed, bounded; the user keeps the generic sentence.
+        reason = payload.get('reason') if isinstance(payload, dict) else None
+        logging.getLogger('bs_podcasts').warning('Audio metadata reader refused %s: %s', source.name,
+                                                 reason or 'no reason reported')
+        return LocalAudioError('Unsupported, damaged or unreadable audio file.')
+    if any(not isinstance(payload.get(key), str) or len(payload[key]) > 4096 for key in ('title','album','artist')):
+        return LocalAudioError('Audio metadata exceeds the supported limits.')
+    duration = media_seconds(payload.get('duration'))
+    if duration is None:
+        return LocalAudioError('Audio duration is invalid.')
+    return {**payload, 'duration': duration}
 
 
 class LocalAudioImporter:
     def __init__(self, repository: LibraryRepository):
         self.repository = repository
 
-    def import_file(self, path: str | Path):
+    @staticmethod
+    def _source(path: str | Path) -> Path:
+        """The resolved file to import, or LocalAudioError when the path is not a local file."""
         from ..urlguard import UnsafeUrl, ensure_media_source
         refusal = "Network paths are not supported. Copy the audio file to a local drive and import that copy."
         try:
@@ -92,8 +167,52 @@ class LocalAudioImporter:
             raise LocalAudioError(refusal) from exc
         if not source.is_file():
             raise LocalAudioError("Audio file does not exist.")
+        return source
+
+    def import_file(self, path: str | Path):
+        source = self._source(path)
         stat = source.stat()
         metadata = read_metadata(source)
+        return self._store(source, stat, metadata)
+
+    def import_many(self, paths, on_result=None) -> list:
+        """Import several files through one reader session.
+
+        Returns, per path and in order, the stored show or the exception that
+        stopped that file. One file's failure does not stop the others.
+        `on_result(index, outcome)` runs as each file is settled."""
+        paths = list(paths)
+        outcomes = [None] * len(paths)
+        readable = {}
+        for index, path in enumerate(paths):
+            try:
+                source = self._source(path)
+                readable[index] = (source, source.stat())
+            except (LocalAudioError, OSError) as exc:
+                outcomes[index] = exc if isinstance(exc, LocalAudioError) else LocalAudioError("Audio file does not exist.")
+                if on_result is not None:
+                    on_result(index, outcomes[index])
+
+        order = sorted(readable)
+
+        def probed(position, metadata):
+            index = order[position]
+            source, stat = readable[index]
+            if isinstance(metadata, Exception):
+                outcome = metadata
+            else:
+                try:
+                    outcome = self._store(source, stat, metadata)
+                except Exception as exc:
+                    outcome = exc
+            outcomes[index] = outcome
+            if on_result is not None:
+                on_result(index, outcome)
+
+        probe_many([readable[index][0] for index in order], on_result=probed)
+        return outcomes
+
+    def _store(self, source: Path, stat, metadata):
         after = source.stat()
         if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
             raise LocalAudioError('Audio file changed while reading; retry the import.')

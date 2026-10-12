@@ -224,6 +224,12 @@ class LibraryService:
 
         return LocalAudioImporter(self.repository).import_file(path)
 
+    def import_local_audio_many(self, paths, on_result=None):
+        """Import several files in one reader session; see LocalAudioImporter.import_many."""
+        from ..feeds.local import LocalAudioImporter
+
+        return LocalAudioImporter(self.repository).import_many(paths, on_result)
+
     def mark_show_played(self, show_id: int, played: bool = True) -> int:
         return self.repository.mark_show_played(show_id, played)
 

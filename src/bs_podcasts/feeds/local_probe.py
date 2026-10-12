@@ -54,30 +54,36 @@ def probe(source: Path) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--probe-local-audio', type=Path, required=True)
-    parser.add_argument('--probe-output', type=Path, required=True)
+    parser.add_argument('--probe-request', type=Path, required=True,
+                        help='JSON list of absolute local audio paths, read in order.')
+    parser.add_argument('--probe-directory', type=Path, required=True,
+                        help='Folder that receives result-<index>.json for each path as it is read.')
     parser.add_argument('--native-library', required=True)
     args = parser.parse_args()
-    # Also retire an orphaned child if the parent exits during a native stall.
-    watchdog = Timer(8, lambda: os._exit(2)); watchdog.daemon = True; watchdog.start()
     original = ctypes.util.find_library
     def native(name):
         if name.lower() in {'mpv', 'mpv-2.dll', 'libmpv-2.dll', 'mpv-1.dll'}:
             return args.native_library
         return original(name)
     ctypes.util.find_library = native
-    try:
+    sources = json.loads(args.probe_request.read_text(encoding='utf-8'))
+    for index, source in enumerate(sources):
+        # Retire an orphaned reader if the parent exits during a native stall. The
+        # bound applies to each file, so a long batch is not cut short.
+        watchdog = Timer(8, lambda: os._exit(2)); watchdog.daemon = True; watchdog.start()
         try:
-            payload = probe(args.probe_local_audio)
-        except Exception as exc:
-            # The reason and the traceback go to the parent through the result
-            # file and stderr; the user sees one generic sentence either way.
-            payload = {'ok': False, 'reason': f'{type(exc).__name__}: {exc}'[:400]}
-            traceback.print_exc()
-        atomic_write(args.probe_output, json.dumps(payload, ensure_ascii=False).encode('utf-8'))
-        return 0 if payload['ok'] else 1
-    finally:
-        watchdog.cancel()
+            try:
+                payload = probe(Path(source))
+            except Exception as exc:
+                # The reason and the traceback go to the parent through the result
+                # file and stderr; the user sees one generic sentence either way.
+                payload = {'ok': False, 'reason': f'{type(exc).__name__}: {exc}'[:400]}
+                traceback.print_exc()
+            atomic_write(args.probe_directory/f'result-{index}.json',
+                         json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+        finally:
+            watchdog.cancel()
+    return 0
 
 
 if __name__ == '__main__':
