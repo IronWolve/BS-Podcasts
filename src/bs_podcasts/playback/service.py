@@ -1291,6 +1291,15 @@ class PlaybackService:
                             # to a minute. Giving up at once left the episode
                             # unplayed, queued and never advanced.
                             if attempt < 60 and not self._dead:
+                                if attempt == 0:
+                                    # Say what is happening: the file has ended, and
+                                    # the player waits for the library, not for the user.
+                                    with self._lock:
+                                        if generation == self._load_generation and not self._dead:
+                                            self.snapshot = replace(
+                                                self.snapshot, state=PlaybackState.PAUSED, buffering=None,
+                                                message="Playback ended; its completion is saved once library maintenance finishes.")
+                                            self._emit()
                                 retry = Timer(1.0, lambda: self._dispatch(lambda: finish(attempt + 1)))
                                 retry.daemon = True
                                 retry.start()
