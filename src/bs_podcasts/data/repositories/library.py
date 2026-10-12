@@ -322,6 +322,8 @@ class LibraryRepository:
                         bool(row["description_same"]) if column == "description" else row[column]
                         for column in _EPISODE_SYNC_COLUMNS)
             imported = sum(episode.external_id not in existing_ids for episode in feed.episodes)
+            if not initial_import:
+                imported -= self._rekey_moved_episodes(connection, show_id, feed, existing_ids)
             new_flag = 0 if initial_import else 1
             for slot, episode in enumerate(feed.episodes):
                 incoming = tuple(
@@ -385,6 +387,40 @@ class LibraryRepository:
                     ),
                 )
         return imported
+
+    @staticmethod
+    def _rekey_moved_episodes(connection, show_id, feed, existing_ids) -> int:
+        """A publisher that regenerates its GUIDs (a host migration) presents every episode as new. A stored
+        row of the show that this feed no longer names, whose enclosure URL matches an unknown item, is the
+        same episode: it takes the new GUID, so the insert below updates it and its played state, position,
+        favourite, queue entry, bookmarks and downloaded file stay. Only an unambiguous match is re-keyed.
+        Returns how many were, so they are not counted as imported."""
+        incoming = {episode.external_id for episode in feed.episodes}
+        unknown = {}
+        for episode in feed.episodes:
+            if episode.external_id not in existing_ids and episode.media_url:
+                unknown.setdefault(episode.media_url, []).append(episode)
+        if not unknown:
+            return 0
+        candidates = {}
+        urls = list(unknown)
+        for start in range(0, len(urls), 100):
+            batch = urls[start:start + 100]
+            marks = ",".join("?" * len(batch))
+            for row in connection.execute(
+                    f"SELECT id, external_id, media_url FROM episodes WHERE show_id=? AND media_url IN ({marks})",
+                    (show_id, *batch)):
+                if row["external_id"] not in incoming:
+                    candidates.setdefault(row["media_url"], []).append(row)
+        rekeyed = 0
+        for url, rows in candidates.items():
+            episodes = unknown.get(url, ())
+            if len(rows) != 1 or len(episodes) != 1:
+                continue  # two stored rows or two items share one enclosure: nothing certain to re-key
+            connection.execute("UPDATE episodes SET external_id=? WHERE id=?", (episodes[0].external_id, rows[0]["id"]))
+            existing_ids.add(episodes[0].external_id)
+            rekeyed += 1
+        return rekeyed
 
     def episodes_by_ids(self, episode_ids) -> dict[int, Episode]:
         """Fetch episodes in bounded batches for download/bookmark views."""
@@ -857,17 +893,14 @@ class LibraryRepository:
                 if revisions is not None:
                     values = {key: value for key, value in values.items()
                               if self._settings_pending.get(key) == (revisions.get(key), value)}
-            try:
-                with self.database.connect() as connection:
-                    connection.executemany(
-                        "INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                        values.items())
-            except BaseException:
-                with self._settings_lock:
-                    for key, value in values.items():
-                        if revisions is not None and self._settings_pending.get(key) == (revisions.get(key), value):
-                            self._settings_pending.pop(key, None)
-                raise
+            # A failed write leaves the staged values in place: the window
+            # still shows them and offers a retry, so every other reader must
+            # keep seeing them too. They are released only by a later write
+            # of the same key or a successful save.
+            with self.database.connect() as connection:
+                connection.executemany(
+                    "INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    values.items())
             with self._settings_lock:
                 if self._settings_cache is not None:
                     self._settings_cache.update(values)
@@ -895,10 +928,12 @@ class LibraryRepository:
         with self.database.connect() as connection:
             # Position computed inside the INSERT: a separate SELECT let two
             # connections claim the same position.
+            # Joined to episodes: an id whose episode was removed meanwhile adds nothing, instead of failing
+            # the statement on the foreign key (OR IGNORE does not cover that).
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO queue(episode_id, position, added_at) "
-                "SELECT ?, COALESCE(MAX(position), 0) + 1, ? FROM queue",
-                (episode_id, time.time()),
+                "SELECT e.id, (SELECT COALESCE(MAX(position), 0) + 1 FROM queue), ? FROM episodes e WHERE e.id=?",
+                (time.time(), episode_id),
             )
             return cursor.rowcount > 0
 
@@ -1213,8 +1248,9 @@ class LibraryRepository:
                 added += connection.execute(
                     "INSERT OR IGNORE INTO queue(episode_id, position, added_at) "
                     f"WITH given(episode_id, ordinal) AS (VALUES {values}), "
-                    "fresh AS (SELECT episode_id, ROW_NUMBER() OVER (ORDER BY ordinal) AS rank FROM given "
-                    "          WHERE episode_id NOT IN (SELECT episode_id FROM queue)) "
+                    "fresh AS (SELECT g.episode_id, ROW_NUMBER() OVER (ORDER BY g.ordinal) AS rank FROM given g "
+                    "          JOIN episodes e ON e.id=g.episode_id "
+                    "          WHERE g.episode_id NOT IN (SELECT episode_id FROM queue)) "
                     "SELECT episode_id, (SELECT COALESCE(MAX(position), 0) FROM queue) + rank, ? FROM fresh ORDER BY rank",
                     parameters + [now],
                 ).rowcount

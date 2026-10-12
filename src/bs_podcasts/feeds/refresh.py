@@ -214,13 +214,20 @@ class RefreshService:
             response = replace(response, content=b"")
             imported = self.repository.import_feed(show_id, feed)
             health = Health.OK if feed.episodes and not feed.truncated else Health.PARTIAL
-            self.repository.record_refresh_success(
-                show_id,
-                health,
-                response.etag,
-                response.last_modified,
-                stored,
-            )
+            try:
+                self.repository.record_refresh_success(
+                    show_id,
+                    health,
+                    response.etag,
+                    response.last_modified,
+                    stored,
+                )
+            except LOCAL_STORAGE_ERRORS as exc:
+                # The episodes are in; only the bookkeeping failed. The report
+                # must still carry the import count, or the new episodes never
+                # reach auto-download and the badge (the next refresh finds
+                # them already stored and imports none).
+                return replace(self._failure_report(show_id, str(exc), local=True), imported=imported)
 
             artwork_path = self._refresh_artwork(show_id, feed.artwork_url, show.artwork_path)
             message = ""

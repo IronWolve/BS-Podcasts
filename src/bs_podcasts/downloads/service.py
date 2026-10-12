@@ -420,10 +420,18 @@ class DownloadService:
             if episode is None or not episode.media_url:
                 raise DownloadError("Episode has no downloadable media URL.")
             self._await_cancelled(episode_id)
-        except Exception:
+        except Exception as exc:
             with self._lock:
                 if ticket is not None and self._queued.get(episode_id) is ticket:
                     self._queued.pop(episode_id, None)
+            # The row was marked queued when the intent was recorded; with no
+            # worker behind it, it would sit as "Queued" with a Pause that does
+            # nothing until the next start's reconcile. Say what happened.
+            record = self.downloads.get(episode_id)
+            if record is not None and record.state == DownloadState.QUEUED:
+                message = str(exc) or "The download could not start."
+                self.downloads.progress(episode_id, DownloadState.ERROR, 0, 0, message)
+                self._emit(episode_id, DownloadState.ERROR, 0, 0, message)
             raise
         with self._lock:
             stale = ticket is not None and self._queued.get(episode_id) is not ticket

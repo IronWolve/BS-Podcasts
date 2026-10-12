@@ -230,11 +230,14 @@ class ListeningRepository:
                 "UPDATE playback_metrics SET listened_seconds=listened_seconds+? WHERE singleton_id=1",
                 (seconds,),
             )
+            # The show may have been removed while its episode still played: the total above still counts,
+            # the per-show row is skipped rather than failing the transaction on the foreign key.
             connection.execute(
                 """INSERT INTO listening_stats(show_id, listened_seconds)
-                   VALUES (?, ?) ON CONFLICT(show_id) DO UPDATE SET
+                   SELECT id, ? FROM shows WHERE id=?
+                   ON CONFLICT(show_id) DO UPDATE SET
                    listened_seconds=listening_stats.listened_seconds+excluded.listened_seconds""",
-                (show_id, seconds),
+                (seconds, show_id),
             )
 
     def increment_completed(self, show_id: int):
