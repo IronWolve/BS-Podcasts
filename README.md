@@ -14,7 +14,7 @@ playback controls always within reach.
 
 Browse your shows while keeping the next episodes in view.
 
-![BS Podcasts showing the podcast library and Up Next queue](media/screenshots/library.png)
+![BS Podcasts showing the podcast library, the selected episode and the player bar](media/screenshots/library.png)
 
 ### Episodes, details and playback
 
