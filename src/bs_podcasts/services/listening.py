@@ -73,6 +73,9 @@ class ListeningService:
     def transcript(self, episode_id: int, query: str = ""):
         return self.repository.transcript(episode_id, query)
 
+    def bookmark(self, episode_id: int, position: float, title: str = ""):
+        return self.repository.add_bookmark(episode_id, position, title)
+
     def delete_bookmark(self, bookmark_id: int):
         self.repository.delete_bookmark(bookmark_id)
 
