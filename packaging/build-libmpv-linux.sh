@@ -55,6 +55,10 @@ bs_finish() {
         printf "%s Native Linux library prepared: $BS_CACHE/libmpv.so.2\n" "$(bs_paint 32 OK)"
         printf 'No system package or deployed application was changed.\n'
         bs_stats "$BS_CACHE/libmpv.so.2"
+        # The library is in .cache and the log in logs/, so this run's work folder is removed. A failed run keeps it.
+        if [[ "$BS_NATIVE_ROOT" == "$BS_PROJECT"/tmp/linux-native.* ]]; then
+            rm -rf -- "$BS_NATIVE_ROOT"
+        fi
     else
         printf "%s Native Linux build stopped with status $status; work folder kept: %s\n" "$(bs_paint 31 FAIL)" "$BS_NATIVE_ROOT"
     fi

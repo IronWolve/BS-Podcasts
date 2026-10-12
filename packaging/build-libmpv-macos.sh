@@ -36,6 +36,10 @@ bs_finish() {
     if (( status == 0 )); then
         printf "%s Native macOS player ready: $BS_CACHE\n" "$(bs_paint 32 OK)"
         bs_stats "$BS_CACHE/libmpv.2.dylib"
+        # The player is in .cache and the log in logs/, so this run's work folder is removed. A failed run keeps it.
+        if [[ "$BS_WORK" == "$BS_PROJECT"/tmp/macos-native.* ]]; then
+            rm -rf -- "$BS_WORK"
+        fi
     else
         printf "%s Native macOS build stopped with status $status; work folder kept: %s\n" "$(bs_paint 31 FAIL)" "$BS_WORK"
     fi
