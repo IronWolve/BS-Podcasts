@@ -67,7 +67,7 @@ from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, Set
 from .shortcuts import ShortcutManager, set_literal_tooltip
 from .playback_actions import PlaybackAction
 from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
-from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu, open_web_url, quiet_signals
+from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu, hide_hover_bubble, open_web_url, quiet_signals, show_hover_bubble
 
 
 class _lazy_dialog:
@@ -176,11 +176,13 @@ def _newest_item_feed(title, published_at):
 # The window filters every event the application delivers (tooltip hints are
 # formatted app-wide); everything else returns at the first comparison.
 _FILTERED_EVENTS = frozenset({
-    QEvent.Type.ToolTip, QEvent.Type.Enter, QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.Resize,
-    QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove, QEvent.Type.ContextMenu,
-    QEvent.Type.ShortcutOverride,
+    QEvent.Type.ToolTip, QEvent.Type.Enter, QEvent.Type.Leave, QEvent.Type.Wheel, QEvent.Type.Show,
+    QEvent.Type.Hide, QEvent.Type.Resize, QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress,
+    QEvent.Type.MouseMove, QEvent.Type.ContextMenu, QEvent.Type.ShortcutOverride,
 })
 _HINT_EVENTS = frozenset({QEvent.Type.ToolTip, QEvent.Type.Enter})
+# What ends a control's hint bubble: leaving the control, or any press, key or wheel anywhere.
+_HINT_END_EVENTS = frozenset({QEvent.Type.Leave, QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress, QEvent.Type.Wheel})
 # Set by a real Quit and by nothing else. A window rebuild (theme change) closes
 # the old window as well, so a long copy that must stop for a Quit tests this,
 # never `_closed`. It is shared because the worker of a window that was since
@@ -303,6 +305,16 @@ class _BusinessBridge(QObject):
         self._closed = False
         self.completed.connect(self._deliver, Qt.ConnectionType.QueuedConnection)
 
+    def release(self, window, closing=False):
+        """Unbind `window`, but only if the bridge still points at it: on a theme rebuild the replacement has
+        already bound itself when the old window closes, and unbinding it would park every later completion."""
+        current = self._receiver() if self._receiver is not None else None
+        if current is None or current is window:
+            self.bind(None, closing=closing)
+        elif closing:
+            self._closed = True
+            self._waiting.clear()
+
     def bind(self, window, closing=False):
         self._closed = closing
         self._receiver = weakref.ref(window) if window is not None else None
@@ -343,6 +355,7 @@ class MainWindow(QMainWindow):
         '_play_after_download_intent', '_play_after_download_request', '_refresh_batch', '_refresh_generation',
         '_refresh_failed', '_refresh_offline', '_refresh_waiting', '_refresh_in_flight',
         '_manual_refresh_in_flight', '_refresh_quiet', '_refresh_catch_up', '_refresh_changed', '_details_fetched', '_artwork_fetched',
+        '_refresh_resume_requests', '_auto_download_pending',
         '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved', '_settings_desired', '_retained_removals', '_refresh_requested_shows')
     # Oldest Back and Forward entries past this are dropped: an episode-view
     # entry holds the whole selection, and both stacks are saved with the view.
@@ -535,6 +548,10 @@ class MainWindow(QMainWindow):
         self._play_after_download_request = 0
         self._refresh_quiet = False
         self._refresh_catch_up = False  # a Pause dropped feeds of the running batch
+        self._refresh_resume_requests = set()  # user-requested shows a Pause took out of a batch
+        self._auto_download_pending = set()  # shows that imported episodes while paused
+        self._pane_bookmarks_revision = 0  # raised by each bookmarks-only reload of the details pane
+        self._hint_owner = None  # the control whose hint bubble is showing
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._scheduled_refresh)
         self._cache_timer = QTimer(self)
@@ -1618,11 +1635,20 @@ class MainWindow(QMainWindow):
         # shared UI pool is busy with first-paint reads at exactly this time.
         self._run_read(read_stale, self._start_quiet_refresh, "scheduled-refresh", pool=self.refresh_jobs)
 
+    @staticmethod
+    def _refresh_cutoff(interval_minutes, now):
+        """last_refresh values older than this are due. The tick repeats every interval and a show's
+        last_refresh is stamped when its fetch finished, a little after the tick that started it; without
+        slack a show refreshed at T+δ still read as fresh at T+I and waited for T+2I, so feeds refreshed at
+        half the configured rate. The slack is half the interval, at most five minutes."""
+        interval = max(0, int(interval_minutes)) * 60
+        return now - interval + min(300, interval // 2)
+
     def _scheduled_refresh(self):
         if self.library is None or self._refresh_batch[0] or getattr(self.refresh, "refresh", None) is None or self._background_paused():
             return
 
-        cutoff = time.time() - self._refresh_interval() * 60
+        cutoff = self._refresh_cutoff(self._refresh_interval(), time.time())
         def read_all():
             return [show for show in self.library.shows() if show.source != "local" and not show.suspended
                     and (show.last_refresh is None or show.last_refresh < cutoff)]
@@ -1682,14 +1708,24 @@ class MainWindow(QMainWindow):
         _total, done, new_episodes = self._refresh_batch
         if self._refresh_waiting:
             self._refresh_catch_up = True  # resuming catches up, even if the batch is still running by then
+        # A show the user asked for while it waited in the batch is refreshed when work resumes; the
+        # scheduled catch-up only takes stale shows and would miss it.
+        self._refresh_resume_requests.update(self._refresh_requested_shows.intersection(self._refresh_waiting))
         self._refresh_requested_shows.difference_update(self._refresh_waiting)
         self._refresh_waiting.clear()
         self._refresh_batch = [done + len(self._refresh_in_flight), done, new_episodes]
 
     def _pump_refresh_queue(self):
         """Keep at most two batch refreshes in flight — the refresh pool's size."""
+        deferred = 0
         while self._refresh_waiting and len(self._refresh_in_flight) < 2:
             show_id = self._refresh_waiting.pop(0)
+            if show_id in self._manual_refresh_in_flight and deferred < len(self._refresh_waiting):
+                # A manual refresh of this feed is running: take it later, so one outage is not counted
+                # twice against the feed by two back-to-back fetches.
+                self._refresh_waiting.append(show_id)
+                deferred += 1
+                continue
             self._refresh_in_flight.add(show_id)
             self._submit_refresh(show_id, batch=True)
 
@@ -2557,8 +2593,8 @@ class MainWindow(QMainWindow):
                 self._notify("Background work paused" if value == "1" else "Background work resumed", "info")
                 if value == "1":
                     self._wind_down_quiet_batch()
-                elif self._refresh_interval() > 0:
-                    self._scheduled_refresh()  # catch up on what the pause skipped
+                else:
+                    self._resume_background_work()
             elif key == "ui.density":
                 self._apply_density(value == "compact")
             elif key == "ui.episode_lines":
@@ -2599,17 +2635,35 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(250, self, self._relaunch_for_theme)
             return
         self._keep_services = True
+        # From here until the replacement binds itself, completions wait in the
+        # bridge: one landing on this window in that gap would update counters
+        # the replacement never sees (its copy was taken at the handoff).
+        self._business_bridge.bind(None)
         self.relaunch_requested.emit()
+
+    def _resume_background_work(self):
+        """Pick up what the pause set aside: the refreshes the user asked for while they waited in a batch,
+        the auto-downloads of shows that imported episodes meanwhile, then the scheduled catch-up."""
+        requests, self._refresh_resume_requests = self._refresh_resume_requests, set()
+        for show_id in sorted(requests):
+            self._submit_refresh(show_id)
+        pending, self._auto_download_pending = self._auto_download_pending, set()
+        for show_id in sorted(pending):
+            self._auto_download(show_id)
+        if self._refresh_interval() > 0:
+            self._scheduled_refresh()  # catch up on what the pause skipped
 
     def _background_paused(self) -> bool:
         return self.library is not None and self.library.setting("background.paused", "0") == "1"
 
-    def _native_notify(self, title: str, message: str, callback=None):
+    def _native_notify(self, title: str, message: str, callback=None) -> bool:
+        """Show a system notification if the setting allows it; True when one was shown."""
         if self.library is None or self.library.setting("notifications.enabled", "1") != "1":
-            return
+            return False
         tray = getattr(self, "tray", None)
-        if tray is not None:
-            tray.notify(title, message, callback)
+        if tray is None:
+            return False
+        return bool(tray.notify(title, message, callback))
 
     def _int_setting(self, key: str, default: int, low: int, high: int) -> int:
         """A numeric setting within the range Settings offers; a value from
@@ -2958,9 +3012,9 @@ class MainWindow(QMainWindow):
         self._all_episode_items = self._all_episode_items + [
             item for item in chunk if item.episode_id not in known
         ]
-        if self._hero_show_id or self._preview_episodes_url:
-            # The user opened a podcast while the page loaded; keep the wider
-            # cache but leave the detail view alone.
+        if self._hero_show_id or self._preview_episodes_url or self._catalog_query:
+            # The user opened a podcast or ran a library search while the page
+            # loaded; keep the wider cache but leave the view alone.
             return
         self._all_episode_items.sort(key=lambda item: (item.published_at, item.episode_id), reverse=True)
         self.episode_page.set_items(self._all_episode_items, preserve_scroll=True)
@@ -4705,7 +4759,11 @@ class MainWindow(QMainWindow):
         self._run_command(work, lambda _count: self._reload_queue())
 
     def _auto_download(self, show_id: int):
-        if self.library is None or self.downloads is None or self._background_paused():
+        if self.library is None or self.downloads is None:
+            return
+        if self._background_paused():
+            # The import that triggered this is the only trigger; keep the show for the resume.
+            self._auto_download_pending.add(show_id)
             return
         self._run_read(lambda: self._auto_download_candidates(show_id), self._start_auto_downloads, f"auto-download-{show_id}")
 
@@ -5234,6 +5292,7 @@ class MainWindow(QMainWindow):
         chapters/transcript read could supersede the pane's own load of
         another episode, and reset an active transcript search."""
         shown = self.context.shown_episode_id()
+        self._pane_bookmarks_revision += 1
         if self.listening is None or not shown or (episode_id is not None and episode_id != shown):
             return
         listening = self.listening
@@ -7556,7 +7615,8 @@ class MainWindow(QMainWindow):
             self._details_fetched.discard(identity)
         if outcome and (outcome.get("chapters") or outcome.get("transcript")):
             if self.context.shown_episode_id() == identifier:
-                self._load_listening_details(identifier)
+                # Keep the transcript search the pane shows; reloading without it blanked the filter.
+                self._load_listening_details(identifier, self.context.transcript_search.text().strip())
             if self._playing_episode_id == identifier and self.playback is not None:
                 self._read_playback_metadata(self.playback.snapshot, follow=False)
                 if self.now_playing.isVisible():
@@ -8258,6 +8318,19 @@ class MainWindow(QMainWindow):
                 watched.setProperty("bsFormattedHint", formatted)
                 if formatted != tip:
                     watched.setToolTip(formatted)
+            if event.type() == QEvent.Type.ToolTip and watched.toolTip() and not isinstance(watched, QAbstractItemView):
+                # Every control's hint is the app's own rounded bubble, anchored above the control, not the
+                # platform's square tooltip box. Item views show their rows' hints through their delegates.
+                corner = watched.mapToGlobal(watched.rect().topLeft())
+                show_hover_bubble(watched.toolTip(), corner.x() + watched.width() // 2, corner.y())
+                self._hint_owner = weakref.ref(watched)
+                event.accept()
+                return True
+        if event.type() in _HINT_END_EVENTS:
+            owner = self._hint_owner() if self._hint_owner is not None else None
+            if event.type() != QEvent.Type.Leave or watched is owner:
+                hide_hover_bubble()
+                self._hint_owner = None
         if watched is self.context and event.type() in {QEvent.Type.Show, QEvent.Type.Hide}:
             self._place_edge_handles()
         elif watched is self.pages and event.type() == QEvent.Type.Resize:
@@ -8879,6 +8952,9 @@ class MainWindow(QMainWindow):
             self.context.set_bookmarks(())
             return
         listening = self.listening
+        # The bookmarks-only read (_reload_pane_bookmarks) can land while this fuller read is still running;
+        # the older list must not then replace the newer one.
+        bookmarks_revision = self._pane_bookmarks_revision
         def work():
             return listening.chapters(episode_id), listening.transcript(episode_id, query), listening.bookmarks(episode_id)
         def apply(data):
@@ -8886,7 +8962,8 @@ class MainWindow(QMainWindow):
                 return
             self.context.set_chapters(data[0])
             self.context.set_transcript(data[1], query=query)
-            self.context.set_bookmarks(data[2])
+            if self._pane_bookmarks_revision == bookmarks_revision:
+                self.context.set_bookmarks(data[2])
         self._run_read(work, apply, "context-listening")
 
     def _search_transcript(self, episode_id: int, query: str):
@@ -9102,9 +9179,16 @@ class MainWindow(QMainWindow):
         for popover in (self.player.speed_popover, self.player.sleep_popover):
             popover.hide()
         self.hide()
-        if not self._close_to_tray_notice_shown:
-            self._close_to_tray_notice_shown = True
-            self.tray.notify(APP_NAME, "Still running. Click the tray icon or choose Show BS Podcasts to return.")
+        # The "still running" balloon respects the notifications setting like every other system
+        # notification (it used to bypass it, so turning notifications off still rang on every minimize),
+        # and it is shown once per library, not once per launch.
+        shown_before = self.library is not None and self.library.setting("ui.tray_notice_shown", "0") == "1"
+        if not self._close_to_tray_notice_shown and not shown_before:
+            if self._native_notify(APP_NAME, "Still running. Click the tray icon or choose Show BS Podcasts to return."):
+                # Remembered only once it was actually shown: with notifications off it stays due.
+                self._close_to_tray_notice_shown = True
+                if self.library is not None:
+                    self._persist_ui_settings({"ui.tray_notice_shown": "1"})
 
     def _request_quit(self):
         """Explicit Quit (shortcut, tray, MPRIS) exits even when window-close
@@ -9156,7 +9240,10 @@ class MainWindow(QMainWindow):
         self._stop_discover_newest_workers()
         self._directory_waiting = None
         self._directory_artwork_waiting.clear()
-        self._business_bridge.bind(None, closing=not self._keep_services)
+        # Release the bridge only if it still points here: on a theme rebuild
+        # the replacement has already bound itself, and unbinding it would park
+        # every later completion until the next rebuild.
+        self._business_bridge.release(self, closing=not self._keep_services)
         if not getattr(self, "_quit_drain_started", 0):
             self._save_layout()
             self._save_view_state()

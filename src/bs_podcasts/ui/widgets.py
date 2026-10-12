@@ -1871,6 +1871,9 @@ class HoverBubble(QFrame):
         self.setObjectName("seekBubble")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        # The corners outside the rounded frame are see-through, so the bubble reads as a rounded card
+        # and not as a square window with a rounded border drawn inside it.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE["sm"] + 2, 3, SPACE["sm"] + 2, 3)
         layout.setSpacing(0)

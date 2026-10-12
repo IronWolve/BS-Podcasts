@@ -636,8 +636,8 @@ def stylesheet() -> str:
     QMenu::indicator {{ width: {sp(16)}px; height: {sp(16)}px; margin-left: {sp(8)}px; }}
     QMenu::right-arrow {{ margin-right: {sp(8)}px; }}
     QToolTip {{
-        background: {c['surface_raised']}; color: {c['text']};
-        border: 1px solid {c['border']}; padding: {sp(6)}px {sp(9)}px; font-size: {small}px;
+        background: {c['surface_raised']}; color: {c['text_strong']};
+        border: 1px solid {c['border']}; border-radius: {r['sm']}px; padding: {sp(4)}px {sp(8)}px; font-size: {small}px;
     }}
 
     /* ---------- Buttons ---------- */

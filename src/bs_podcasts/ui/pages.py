@@ -2149,7 +2149,7 @@ class SettingsPage(BasePage):
     def _build_desktop_section(self):
         # Desktop --------------------------------------------------------------
         desktop_card, desktop_form = self._card("Desktop", "Small, optional desktop conveniences.")
-        self.notifications = QCheckBox("Show native notifications")
+        self.notifications = QCheckBox("Show system notifications (pop-ups with the system sound)")
         self.close_to_tray = QCheckBox("Keep running in the tray when the window closes")
         self.file_logging = QCheckBox("Write a private diagnostic log file")
         desktop_form.addRow("Notifications", self.notifications)

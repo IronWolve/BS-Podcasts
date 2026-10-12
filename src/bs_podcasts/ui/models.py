@@ -739,12 +739,14 @@ class EpisodeDelegate(QStyledItemDelegate):
             return True
         if event.type() == QEvent.Type.ToolTip and index.isValid():
             item = index.data(ItemRoles.ITEM)
+            # The row's action hints use the same rounded bubble as its preview, not the platform tooltip.
             if self.can_queue(item) and self.queue_rect(option.rect).contains(event.pos()):
-                self.hoverCleared.emit()
-                QToolTip.showText(event.globalPos(), "Add to Up Next", view)
+                point = event.globalPos()
+                self.hoverRequested.emit("Add to Up Next", point.x(), point.y() - 6)
                 return True
             if self.can_open_show(item) and self.show_rect(option.rect, item).contains(event.pos()):
-                QToolTip.showText(event.globalPos(), "Open podcast", view)
+                point = event.globalPos()
+                self.hoverRequested.emit("Open podcast", point.x(), point.y() - 6)
                 return True
             tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
             if tooltip:
