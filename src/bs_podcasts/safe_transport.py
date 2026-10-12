@@ -3,7 +3,7 @@ import ipaddress
 import socket
 
 from .netlimits import bounded_call, Deadline, DNS, NetworkDeadline, PLAYBACK_DNS, watch_request_socket
-from .urlguard import UnsafeUrl, _blocked_reason, ensure_web_url
+from .urlguard import UnsafeUrl, blocked_reason, ensure_web_url
 
 
 def connect_checked(host, port, timeout=None, source_address=None, socket_options=None, deadline=None):
@@ -21,7 +21,7 @@ def connect_checked(host, port, timeout=None, source_address=None, socket_option
     for family, kind, protocol, canonname, address in answers:
         if family not in (socket.AF_INET, socket.AF_INET6):
             raise UnsafeUrl("Unsupported server address family.")
-        if _blocked_reason(ipaddress.ip_address(address[0])):
+        if blocked_reason(ipaddress.ip_address(address[0])):
             raise UnsafeUrl("Connection to a protected network address was blocked.")
     failure = None
     for family, kind, protocol, canonname, address in answers:

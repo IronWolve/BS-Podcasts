@@ -156,7 +156,7 @@ def _sixtofour_ipv4(ip):
     return None
 
 
-def _blocked_reason(ip) -> str:
+def blocked_reason(ip) -> str:
     nat64 = _nat64_ipv4(ip)
     if nat64 is not None:
         return _address_reason(nat64)
@@ -231,7 +231,7 @@ def ensure_fetchable(value, what: str = "URL", resolve: bool = True) -> str:
     if literal is None and not resolve:
         return text
     for ip in ([literal] if literal is not None else _addresses(lookup)):
-        reason = _blocked_reason(ip)
+        reason = blocked_reason(ip)
         if reason:
             raise UnsafeUrl(f"{what} resolves to {reason}: {host}")
     return text

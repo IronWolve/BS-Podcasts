@@ -5,7 +5,7 @@
 the first window paints, so no startup path should pay for it.
 """
 
-from .urlguard import UnsafeUrl, _blocked_reason, ensure_web_url
+from .urlguard import UnsafeUrl, blocked_reason, ensure_web_url
 import threading
 
 _request_context = threading.local()
@@ -160,7 +160,7 @@ def _redirect_guard(response, *args, **kwargs):
             except ValueError:
                 literal = None
             if literal is not None:
-                reason = _blocked_reason(literal)
+                reason = blocked_reason(literal)
                 if reason:
                     raise UnsafeUrl(f"Redirect target resolves to {reason}: {host}")
         except UnsafeUrl as exc:
