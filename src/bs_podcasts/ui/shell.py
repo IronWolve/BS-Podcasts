@@ -841,7 +841,7 @@ class MainWindow(QMainWindow):
             self.podcast_page.header.action.clicked.connect(self._show_library_menu)
         if self.episode_page.header.action:
             self.episode_page.header.action.setObjectName("quietButton")
-            self.episode_page.header.action.setIcon(icons.icon("refresh", COLORS["text"], 16))
+            self.episode_page.header.action.setIcon(icons.themed_icon("refresh", "text", 16))
             self.episode_page.header.action.clicked.connect(self._refresh_episode_view)
         self.episode_page.banner.retry_requested.connect(self._refresh_episode_view)
         self.podcast_page.banner.retry_requested.connect(self._retry_podcast_banner)
@@ -934,7 +934,7 @@ class MainWindow(QMainWindow):
             self.discover_page.header.search.returnPressed.connect(self._directory_search)
             self._load_discover_search_history()
             self._discover_history_action = QAction(
-                icons.icon("chevron-down", COLORS["muted"], 14),
+                icons.themed_icon("chevron-down", "muted", 14),
                 "Recent searches",
                 self.discover_page.header.search,
             )
@@ -1480,10 +1480,11 @@ class MainWindow(QMainWindow):
         if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
         # A row may have started to use a file while the dialog was open, so
-        # the files to keep are worked out again now, not taken from the preview.
+        # the files to keep are worked out again now. The clear removes only
+        # the files the dialog quoted: none that appeared or aged in since.
         live = self._live_artwork_paths()
         self._run_read(
-            lambda: cache.prune(self._referenced_artwork() | live, None),
+            lambda: cache.remove_quoted(stale, self._referenced_artwork() | live),
             self._artwork_cache_cleared,
             "cache-clear",
             coalesce=False,
@@ -2516,9 +2517,24 @@ class MainWindow(QMainWindow):
                 self._apply_typography()
             elif key == "ui.theme":
                 apply_theme(resolve_theme(value))
-                self._save_layout()
-                self._save_view_state()
-                self._relaunch_for_theme()
+                self._restyle_in_place()
+
+    def _restyle_in_place(self):
+        """Show the theme already set in COLORS in this window, without rebuilding it. The palette and the
+        stylesheet swap for the whole application; icons made with themed_icon follow the colours on their next
+        repaint, and each widget that baked a colour into a pixmap or an inline style (it has a `retheme`
+        method) is told to apply it again. Views paint their rows from the colours, so they only repaint."""
+        app = QApplication.instance()
+        self.setUpdatesEnabled(False)
+        try:
+            apply_app_stylesheet(app)
+            for widget in self.findChildren(QWidget):
+                retheme = getattr(widget, "retheme", None)
+                if callable(retheme):
+                    retheme()
+        finally:
+            self.setUpdatesEnabled(True)
+        self.update()
 
     def _relaunch_for_theme(self):
         """Rebuild the window for the new appearance, but never under an open
@@ -3505,20 +3521,20 @@ class MainWindow(QMainWindow):
     def _show_library_menu(self):
         button = self.podcast_page.header.action
         menu = QMenu(self)
-        menu.addAction(icons.icon("rss", COLORS["text"], 16), "Add feed URL…", self._add_podcast)
-        menu.addAction(icons.icon("folder", COLORS["text"], 16), "Import OPML…", self._import_opml)
-        menu.addAction(icons.icon("podcasts", COLORS["text"], 16), "Import local audio…", self._import_local_audio)
+        menu.addAction(icons.themed_icon("rss", "text", 16), "Add feed URL…", self._add_podcast)
+        menu.addAction(icons.themed_icon("folder", "text", 16), "Import OPML…", self._import_opml)
+        menu.addAction(icons.themed_icon("podcasts", "text", 16), "Import local audio…", self._import_local_audio)
         menu.addSeparator()
-        menu.addAction(icons.icon("discover", COLORS["text"], 16), "Browse Discover", lambda: self.navigation.select(PAGE_DISCOVER))
-        menu.addAction(icons.icon("refresh", COLORS["text"], 16), "Refresh all podcasts", self._refresh_all)
+        menu.addAction(icons.themed_icon("discover", "text", 16), "Browse Discover", lambda: self.navigation.select(PAGE_DISCOVER))
+        menu.addAction(icons.themed_icon("refresh", "text", 16), "Refresh all podcasts", self._refresh_all)
         self._add_resume_suspended_action(menu)
-        menu.addAction(icons.icon("external", COLORS["text"], 16), "Export OPML…", self._export_opml)
+        menu.addAction(icons.themed_icon("external", "text", 16), "Export OPML…", self._export_opml)
         exec_menu(menu, button.mapToGlobal(button.rect().bottomLeft()))
 
     def _add_resume_suspended_action(self, menu):
         suspended = sum(1 for show in self._stored_shows if show.suspended)
         if suspended:
-            menu.addAction(icons.icon("refresh", COLORS["text"], 16),
+            menu.addAction(icons.themed_icon("refresh", "text", 16),
                            f"Resume {suspended} suspended podcast{'s' if suspended != 1 else ''}", self._resume_suspended)
 
     def _resume_suspended(self):
@@ -3931,16 +3947,16 @@ class MainWindow(QMainWindow):
             return self._create_episodes_nav_menu()
         menu = QMenu(self)
         menu.addAction(
-            icons.icon(NAV_ITEMS[index][0], COLORS["text"], 16),
+            icons.themed_icon(NAV_ITEMS[index][0], "text", 16),
             f"Open {NAV_ITEMS[index][1]}",
             lambda: self.navigation.select(index),
         )
         if index == PAGE_HOME:
             menu.addSeparator()
-            menu.addAction(icons.icon("search", COLORS["text"], 16), "Search library…", self._open_search)
+            menu.addAction(icons.themed_icon("search", "text", 16), "Search library…", self._open_search)
         elif index == PAGE_PODCASTS:
             menu.addSeparator()
-            menu.addAction(icons.icon("add", COLORS["text"], 16), "Add podcast…", self._add_podcast)
+            menu.addAction(icons.themed_icon("add", "text", 16), "Add podcast…", self._add_podcast)
             menu.addAction("Import OPML…", self._import_opml)
             menu.addAction("Export OPML…", self._export_opml)
             self._add_resume_suspended_action(menu)
@@ -3956,7 +3972,7 @@ class MainWindow(QMainWindow):
             menu.addAction("Delete played downloads…", self._cleanup_played)
         elif index == PAGE_DISCOVER:
             menu.addSeparator()
-            refresh = menu.addAction(icons.icon("refresh", COLORS["text"], 16), "Refresh Discover", self._refresh_discover)
+            refresh = menu.addAction(icons.themed_icon("refresh", "text", 16), "Refresh Discover", self._refresh_discover)
             refresh.setEnabled(self.directory is not None and self.jobs is not None)
         elif index == PAGE_HISTORY:
             menu.addSeparator()
@@ -3964,21 +3980,21 @@ class MainWindow(QMainWindow):
             clear.setEnabled(bool(self.history_page.model.rowCount()))
         elif index == PAGE_SETTINGS:
             menu.addSeparator()
-            menu.addAction(icons.icon("folder", COLORS["text"], 16), "Open data folder", self._open_data_folder)
-            menu.addAction(icons.icon("info", COLORS["text"], 16), "Open log", lambda: self._open_location(str(log_path())))
+            menu.addAction(icons.themed_icon("folder", "text", 16), "Open data folder", self._open_data_folder)
+            menu.addAction(icons.themed_icon("info", "text", 16), "Open log", lambda: self._open_location(str(log_path())))
         return menu
 
     def _create_episodes_nav_menu(self):
         menu = QMenu(self)
         show = menu.addAction(
-            icons.icon("episodes", COLORS["text"], 16),
+            icons.themed_icon("episodes", "text", 16),
             f"Show new episodes ({self._new_episode_total})",
             self._show_new_episodes,
         )
         menu.addSeparator()
         clear = menu.addAction("Clear all new badges", lambda: self._clear_all_new(False))
         played = menu.addAction(
-            icons.icon("check", COLORS["text"], 16),
+            icons.themed_icon("check", "text", 16),
             "Mark all new episodes as played",
             lambda: self._clear_all_new(True),
         )
@@ -4184,29 +4200,29 @@ class MainWindow(QMainWindow):
 
     def _podcast_menu(self, podcast, global_position):
         menu = QMenu(self)
-        menu.addAction(icons.icon("refresh", COLORS["text"], 16), "Retry artwork", lambda: self._retry_artwork(podcast))
+        menu.addAction(icons.themed_icon("refresh", "text", 16), "Retry artwork", lambda: self._retry_artwork(podcast))
         if podcast.show_id:
-            menu.addAction(icons.icon("episodes", COLORS["text"], 16), "Open episodes", lambda: self._open_podcast(podcast))
-            menu.addAction(icons.icon("play", COLORS["text"], 16), "Play latest", lambda: self._play_latest(podcast.show_id))
-            menu.addAction(icons.icon("refresh", COLORS["text"], 16), "Refresh now", lambda: self._submit_refresh(podcast.show_id))
+            menu.addAction(icons.themed_icon("episodes", "text", 16), "Open episodes", lambda: self._open_podcast(podcast))
+            menu.addAction(icons.themed_icon("play", "text", 16), "Play latest", lambda: self._play_latest(podcast.show_id))
+            menu.addAction(icons.themed_icon("refresh", "text", 16), "Refresh now", lambda: self._submit_refresh(podcast.show_id))
             if podcast.health == "suspended":
                 menu.addAction("Resume refreshing", lambda: self._rearm_podcast(podcast.show_id))
             menu.addSeparator()
-            menu.addAction(icons.icon("check", COLORS["text"], 16), "Mark all as played", lambda: self._mark_show_played(podcast.show_id, True))
+            menu.addAction(icons.themed_icon("check", "text", 16), "Mark all as played", lambda: self._mark_show_played(podcast.show_id, True))
             menu.addAction("Mark all as unplayed", lambda: self._mark_show_played(podcast.show_id, False))
             menu.addSeparator()
-            menu.addAction(icons.icon("trash", COLORS["text"], 16), "Unsubscribe…", lambda: self._unsubscribe(podcast.show_id))
+            menu.addAction(icons.themed_icon("trash", "text", 16), "Unsubscribe…", lambda: self._unsubscribe(podcast.show_id))
         elif podcast.feed_url:
-            menu.addAction(icons.icon("add", COLORS["text"], 16), "Subscribe", lambda: self._subscribe_url(podcast.feed_url))
-            menu.addAction(icons.icon("episodes", COLORS["text"], 16), "Show episodes", lambda: self._show_preview_episodes(podcast.feed_url))
+            menu.addAction(icons.themed_icon("add", "text", 16), "Subscribe", lambda: self._subscribe_url(podcast.feed_url))
+            menu.addAction(icons.themed_icon("episodes", "text", 16), "Show episodes", lambda: self._show_preview_episodes(podcast.feed_url))
             preview = self._previews.get(podcast.feed_url)
             website = (preview.website_url if preview else "") or podcast.website_url
             if website or podcast.directory_url:
                 menu.addSeparator()
             if website:
-                menu.addAction(icons.icon("external", COLORS["text"], 16), "Open website", lambda: self._open_url(website))
+                menu.addAction(icons.themed_icon("external", "text", 16), "Open website", lambda: self._open_url(website))
             if podcast.directory_url:
-                menu.addAction(icons.icon("external", COLORS["text"], 16), "Open directory page", lambda: self._open_url(podcast.directory_url))
+                menu.addAction(icons.themed_icon("external", "text", 16), "Open directory page", lambda: self._open_url(podcast.directory_url))
         # Links live together at the bottom of every podcast menu.
         website = podcast.website_url
         if not website and podcast.feed_url:
@@ -4215,9 +4231,9 @@ class MainWindow(QMainWindow):
         if website or podcast.feed_url:
             menu.addSeparator()
         if website and podcast.show_id:
-            menu.addAction(icons.icon("external", COLORS["text"], 16), "Open website", lambda: self._open_url(website))
+            menu.addAction(icons.themed_icon("external", "text", 16), "Open website", lambda: self._open_url(website))
         if podcast.feed_url:
-            menu.addAction(icons.icon("rss", COLORS["text"], 16), "Copy feed URL", lambda: QApplication.clipboard().setText(podcast.feed_url))
+            menu.addAction(icons.themed_icon("rss", "text", 16), "Copy feed URL", lambda: QApplication.clipboard().setText(podcast.feed_url))
         exec_menu(menu, global_position)
 
     def _episode_menu(self, episode, global_position):
@@ -4322,22 +4338,22 @@ class MainWindow(QMainWindow):
         kind, value = payload
         menu = QMenu(self)
         if kind == "podcast":
-            menu.addAction(icons.icon("info", COLORS["text"], 16), "Podcast information…", lambda: self._show_context_information(value))
-            menu.addAction(icons.icon("episodes", COLORS["text"], 16), "Open episodes", lambda: (self.search_overlay.hide(), self._open_podcast(value)))
+            menu.addAction(icons.themed_icon("info", "text", 16), "Podcast information…", lambda: self._show_context_information(value))
+            menu.addAction(icons.themed_icon("episodes", "text", 16), "Open episodes", lambda: (self.search_overlay.hide(), self._open_podcast(value)))
             menu.addAction("Copy podcast title", lambda: QApplication.clipboard().setText(value.title))
         elif kind == "episode":
-            menu.addAction(icons.icon("info", COLORS["text"], 16), "Episode information…", lambda: self._show_context_information(value))
-            menu.addAction(icons.icon("play", COLORS["text"], 16), "Play", lambda: (self.search_overlay.hide(), self._play_episode(value.episode_id)))
+            menu.addAction(icons.themed_icon("info", "text", 16), "Episode information…", lambda: self._show_context_information(value))
+            menu.addAction(icons.themed_icon("play", "text", 16), "Play", lambda: (self.search_overlay.hide(), self._play_episode(value.episode_id)))
             menu.addAction(
-                icons.icon("favorite", COLORS["accent"] if value.favorite else COLORS["text"], 16),
+                icons.themed_icon("favorite", "accent" if value.favorite else "text", 16),
                 "Remove from favorites" if value.favorite else "Add to favorites",
                 lambda: self._set_favorites([value], not value.favorite),
             )
             if value.show_id:
-                menu.addAction(icons.icon("podcasts", COLORS["text"], 16), mnemonic_safe(f"Go to {value.show}"), lambda: (self.search_overlay.hide(), self._open_show_id(value.show_id)))
+                menu.addAction(icons.themed_icon("podcasts", "text", 16), mnemonic_safe(f"Go to {value.show}"), lambda: (self.search_overlay.hide(), self._open_show_id(value.show_id)))
             menu.addAction("Copy episode title", lambda: QApplication.clipboard().setText(value.title))
         else:
-            menu.addAction(icons.icon("discover", COLORS["text"], 16), mnemonic_safe(f"Search the podcast directory for “{value}”"), lambda: self._directory_search_from_overlay(value))
+            menu.addAction(icons.themed_icon("discover", "text", 16), mnemonic_safe(f"Search the podcast directory for “{value}”"), lambda: self._directory_search_from_overlay(value))
         return menu
 
     def _add_episode_copy_menu(self, menu, episode, show):
@@ -4376,16 +4392,16 @@ class MainWindow(QMainWindow):
             if not url:
                 return None
             menu = QMenu(self)
-            menu.addAction(icons.icon("info", COLORS["text"], 16), "Show details", lambda: self._show_item(episode))
+            menu.addAction(icons.themed_icon("info", "text", 16), "Show details", lambda: self._show_item(episode))
             menu.addAction("Episode information…", lambda: self._show_episode_information(episode, show))
             menu.addAction("Retry artwork", lambda: self._retry_artwork(episode))
             if episode.website_url:
-                menu.addAction(icons.icon("external", COLORS["text"], 16), "Open episode page", lambda: self._open_url(episode.website_url))
+                menu.addAction(icons.themed_icon("external", "text", 16), "Open episode page", lambda: self._open_url(episode.website_url))
             if getattr(show, "website_url", ""):
-                menu.addAction(icons.icon("external", COLORS["text"], 16), "Open podcast website", lambda: self._open_url(show.website_url))
+                menu.addAction(icons.themed_icon("external", "text", 16), "Open podcast website", lambda: self._open_url(show.website_url))
             menu.addSeparator()
-            menu.addAction(icons.icon("play", COLORS["text"], 16), "Play", lambda: self._play_preview_episode(episode))
-            menu.addAction(icons.icon("add", COLORS["text"], 16), "Subscribe", lambda: self._subscribe_url(url))
+            menu.addAction(icons.themed_icon("play", "text", 16), "Play", lambda: self._play_preview_episode(episode))
+            menu.addAction(icons.themed_icon("add", "text", 16), "Subscribe", lambda: self._subscribe_url(url))
             menu.addSeparator()
             self._add_episode_copy_menu(menu, episode, show)
             return menu
@@ -4399,20 +4415,20 @@ class MainWindow(QMainWindow):
             header.setEnabled(False)
             menu.addSeparator()
         else:
-            menu.addAction(icons.icon("info", COLORS["text"], 16), "Show details", lambda: self._show_item(episode))
+            menu.addAction(icons.themed_icon("info", "text", 16), "Show details", lambda: self._show_item(episode))
             menu.addAction("Episode information…", lambda: self._show_episode_information(episode, show))
             menu.addAction("Retry artwork", lambda: self._retry_artwork(episode))
             if episode.website_url:
-                menu.addAction(icons.icon("external", COLORS["text"], 16), "Open episode page", lambda: self._open_url(episode.website_url))
+                menu.addAction(icons.themed_icon("external", "text", 16), "Open episode page", lambda: self._open_url(episode.website_url))
             if getattr(show, "website_url", ""):
-                menu.addAction(icons.icon("external", COLORS["text"], 16), "Open podcast website", lambda: self._open_url(show.website_url))
+                menu.addAction(icons.themed_icon("external", "text", 16), "Open podcast website", lambda: self._open_url(show.website_url))
             menu.addSeparator()
-            play = menu.addAction(icons.icon("play", COLORS["text"], 16), "Resume" if 0 < episode.progress < 1 else "Play", lambda: self._play_episode(episode.episode_id))
+            play = menu.addAction(icons.themed_icon("play", "text", 16), "Resume" if 0 < episode.progress < 1 else "Play", lambda: self._play_episode(episode.episode_id))
             play.setShortcut(QKeySequence(Qt.Key.Key_Return))
-            menu.addAction(icons.icon("external", COLORS["text"], 16), "Open in external player…",
+            menu.addAction(icons.themed_icon("external", "text", 16), "Open in external player…",
                            lambda: self._open_external_episode(episode.episode_id))
         menu.addAction(
-            icons.icon("favorite", COLORS["accent"] if episode.favorite else COLORS["text"], 16),
+            icons.themed_icon("favorite", "accent" if episode.favorite else "text", 16),
             "Remove from favorites" if (not many and episode.favorite) else "Add to favorites",
             lambda: self._set_favorites(targets, not (not many and episode.favorite)),
         )
@@ -4423,37 +4439,37 @@ class MainWindow(QMainWindow):
             item.episode_id for item in self.home_page.resume_items()
         }
         if page is self.playlist_page:
-            remove = menu.addAction(icons.icon("close", COLORS["text"], 16), "Remove from Up Next", lambda: self._remove_many_from_queue([item.episode_id for item in targets]))
+            remove = menu.addAction(icons.themed_icon("close", "text", 16), "Remove from Up Next", lambda: self._remove_many_from_queue([item.episode_id for item in targets]))
             remove.setShortcut(QKeySequence(Qt.Key.Key_Delete))
         else:
-            queue = menu.addAction(icons.icon("queue-add", COLORS["text"], 16), "Add to Up Next", lambda: self._queue_many(targets))
+            queue = menu.addAction(icons.themed_icon("queue-add", "text", 16), "Add to Up Next", lambda: self._queue_many(targets))
             queue.setShortcut(QKeySequence(self.shortcuts.bindings().get("queue_selected", "")))
             if not many and episode.episode_id:
                 # Front of the queue, from any row — not only from Up Next.
-                menu.addAction(icons.icon("next", COLORS["text"], 16), "Play next", lambda: self._queue_to_front(episode.episode_id))
+                menu.addAction(icons.themed_icon("next", "text", 16), "Play next", lambda: self._queue_to_front(episode.episode_id))
         if not many and is_web_url(episode.media_url):
             state_actions = self._download_state_actions(episode.state.lower(), episode.episode_id)
             for icon, label, callback in state_actions:
-                menu.addAction(icons.icon(icon, COLORS["text"], 16), label, callback)
+                menu.addAction(icons.themed_icon(icon, "text", 16), label, callback)
             if not state_actions and not downloaded:
                 label = f"Download ({status})" if status_pages else "Download"
-                menu.addAction(icons.icon("download", COLORS["text"], 16), label, lambda: self._download_chosen(episode.episode_id))
+                menu.addAction(icons.themed_icon("download", "text", 16), label, lambda: self._download_chosen(episode.episode_id))
         elif many:
             missing = sum(1 for item in targets if is_web_url(item.media_url) and not item.downloaded_path)
             if missing:
                 label = f"Download {missing} episode{'' if missing == 1 else 's'}"
-                menu.addAction(icons.icon("download", COLORS["text"], 16), label, lambda: self._download_many(targets))
+                menu.addAction(icons.themed_icon("download", "text", 16), label, lambda: self._download_many(targets))
         if page is self.bookmark_page and not many:
             menu.addSeparator()
-            menu.addAction(icons.icon("play", COLORS["text"], 16), f"Play from {format_media_time(episode.bookmark_position)}", lambda: self._play_bookmark(episode))
+            menu.addAction(icons.themed_icon("play", "text", 16), f"Play from {format_media_time(episode.bookmark_position)}", lambda: self._play_bookmark(episode))
             menu.addAction("Rename bookmark…", lambda: self._rename_bookmark(episode))
-            delete_bookmark = menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete bookmark", lambda: self._delete_bookmarks([episode]))
+            delete_bookmark = menu.addAction(icons.themed_icon("trash", "text", 16), "Delete bookmark", lambda: self._delete_bookmarks([episode]))
             delete_bookmark.setShortcut(QKeySequence(Qt.Key.Key_Delete))
         added_remove_download = False
         if page is self.history_page:
             menu.addSeparator()
             remove_history = menu.addAction(
-                icons.icon("close", COLORS["text"], 16),
+                icons.themed_icon("close", "text", 16),
                 f"Remove from history ({status})",
                 lambda: self._remove_history([item.episode_id for item in targets]),
             )
@@ -4461,7 +4477,7 @@ class MainWindow(QMainWindow):
         if continue_listening:
             menu.addSeparator()
             remove_resume = menu.addAction(
-                icons.icon("close", COLORS["text"], 16),
+                icons.themed_icon("close", "text", 16),
                 f"Remove from Continue listening ({status})",
                 lambda: self._remove_from_continue_listening(targets),
             )
@@ -4478,27 +4494,27 @@ class MainWindow(QMainWindow):
                 files = sum(1 for item in targets if item.downloaded_path)
                 remove_download_label = f"Remove {files} download{'' if files == 1 else 's'}"
             menu.addAction(
-                icons.icon("trash", COLORS["text"], 16),
+                icons.themed_icon("trash", "text", 16),
                 remove_download_label,
                 lambda: self._delete_downloads(targets),
             )
             added_remove_download = True
         if page is self.playlist_page and not many:
-            menu.addAction(icons.icon("next", COLORS["text"], 16), "Play next", lambda: self._queue_to_front(episode.episode_id))
+            menu.addAction(icons.themed_icon("next", "text", 16), "Play next", lambda: self._queue_to_front(episode.episode_id))
         if episode.downloaded_path or page is self.download_page:
             menu.addSeparator()
             if episode.downloaded_path:
-                menu.addAction(icons.icon("folder", COLORS["text"], 16), "Open file location", lambda: self._open_location(episode.downloaded_path))
+                menu.addAction(icons.themed_icon("folder", "text", 16), "Open file location", lambda: self._open_location(episode.downloaded_path))
             exportable = [item for item in targets if item.downloaded_path]
             if exportable:
                 menu.addAction(
-                    icons.icon("external", COLORS["text"], 16),
+                    icons.themed_icon("external", "text", 16),
                     "Export media…" if len(exportable) == 1 else f"Export {len(exportable)} media files…",
                     lambda: self._export_downloads(exportable),
                 )
             if not added_remove_download:
                 delete_download = menu.addAction(
-                    icons.icon("trash", COLORS["text"], 16),
+                    icons.themed_icon("trash", "text", 16),
                     "Remove download" if not many else f"Remove {len(targets)} downloads",
                     lambda: self._delete_downloads(targets),
                 )
@@ -4509,12 +4525,12 @@ class MainWindow(QMainWindow):
             self._add_episode_copy_menu(menu, episode, show)
         menu.addSeparator()
         if many or not episode.played:
-            menu.addAction(icons.icon("check", COLORS["text"], 16), "Mark as played", lambda: self._mark_played_many(targets, True))
+            menu.addAction(icons.themed_icon("check", "text", 16), "Mark as played", lambda: self._mark_played_many(targets, True))
         if many or episode.played:
             menu.addAction("Mark as unplayed", lambda: self._mark_played_many(targets, False))
         if not many and episode.show_id:
             menu.addSeparator()
-            menu.addAction(icons.icon("podcasts", COLORS["text"], 16), mnemonic_safe(f"Go to {episode.show}"), lambda: self._open_episode_podcast(episode.show_id))
+            menu.addAction(icons.themed_icon("podcasts", "text", 16), mnemonic_safe(f"Go to {episode.show}"), lambda: self._open_episode_podcast(episode.show_id))
         return menu
 
     def _remove_from_queue(self, episode_id: int):
@@ -4926,14 +4942,14 @@ class MainWindow(QMainWindow):
         state = record.state.value if record is not None else ""
         state_actions = self._download_state_actions(state, episode_id)
         for icon, label, callback in state_actions:
-            menu.addAction(icons.icon(icon, COLORS["text"], 16), label, callback)
+            menu.addAction(icons.themed_icon(icon, "text", 16), label, callback)
         if state == "complete" and item.downloaded_path:
-            menu.addAction(icons.icon("folder", COLORS["text"], 16), "Open file location", lambda: self._open_location(item.downloaded_path))
-            menu.addAction(icons.icon("trash", COLORS["text"], 16), "Remove download", lambda: self._delete_downloads([item]))
+            menu.addAction(icons.themed_icon("folder", "text", 16), "Open file location", lambda: self._open_location(item.downloaded_path))
+            menu.addAction(icons.themed_icon("trash", "text", 16), "Remove download", lambda: self._delete_downloads([item]))
             if not getattr(record, "length_verified", False):
                 menu.addAction("Verify download length…", lambda: self._verify_download_length(episode_id))
         elif not state_actions:
-            menu.addAction(icons.icon("download", COLORS["text"], 16), "Download episode", lambda: self._download_chosen(episode_id))
+            menu.addAction(icons.themed_icon("download", "text", 16), "Download episode", lambda: self._download_chosen(episode_id))
         exec_menu(menu, global_position)
 
     def _open_external_episode(self, episode_id: int):
@@ -5132,9 +5148,9 @@ class MainWindow(QMainWindow):
         item = EpisodeRow(title=bookmark.title, show=bookmark.show_title, published="", duration="", progress=0.0, state="Bookmark", accent="",
                          episode_id=episode_id, bookmark_id=bookmark.id, bookmark_position=bookmark.position_seconds, detail=bookmark.episode_title)
         menu = QMenu(self)
-        menu.addAction(icons.icon("play", COLORS["text"], 16), f"Play from {format_media_time(seconds)}", lambda: self._play_bookmark(item))
+        menu.addAction(icons.themed_icon("play", "text", 16), f"Play from {format_media_time(seconds)}", lambda: self._play_bookmark(item))
         menu.addAction("Rename bookmark…", lambda: self._rename_bookmark(item))
-        menu.addAction(icons.icon("trash", COLORS["text"], 16), "Delete bookmark", lambda: self._delete_bookmarks([item]))
+        menu.addAction(icons.themed_icon("trash", "text", 16), "Delete bookmark", lambda: self._delete_bookmarks([item]))
         exec_menu(menu, global_position)
 
     def _rename_bookmark(self, item):
@@ -6371,7 +6387,7 @@ class MainWindow(QMainWindow):
             choose.setAccessibleName(f"Search for {query}")
             remove = QPushButton()
             remove.setObjectName("iconButton")
-            remove.setIcon(icons.icon("close", COLORS["muted"], scaled_px(12)))
+            remove.setIcon(icons.themed_icon("close", "muted", scaled_px(12)))
             remove.setFixedSize(scaled_px(26), scaled_px(26))
             set_literal_tooltip(remove, f"Remove {query} from search history")
             # Icon-only: screen readers need the name, not just the tooltip.
@@ -8177,11 +8193,11 @@ class MainWindow(QMainWindow):
             item = index.data(Qt.ItemDataRole.UserRole + 1) if index.isValid() else None
             if isinstance(item, EpisodeRow):
                 menu = QMenu(self)
-                menu.addAction(icons.icon("play", COLORS["text"], 16), "Play now", lambda: self._play_episode(item.episode_id))
-                menu.addAction(icons.icon("next", COLORS["text"], 16), "Play next", lambda: self._queue_to_front(item.episode_id))
-                menu.addAction(icons.icon("info", COLORS["text"], 16), "Show details", lambda: self._show_item(item))
+                menu.addAction(icons.themed_icon("play", "text", 16), "Play now", lambda: self._play_episode(item.episode_id))
+                menu.addAction(icons.themed_icon("next", "text", 16), "Play next", lambda: self._queue_to_front(item.episode_id))
+                menu.addAction(icons.themed_icon("info", "text", 16), "Show details", lambda: self._show_item(item))
                 menu.addSeparator()
-                menu.addAction(icons.icon("close", COLORS["text"], 16), "Remove from Up Next", lambda: self._remove_from_queue(item.episode_id))
+                menu.addAction(icons.themed_icon("close", "text", 16), "Remove from Up Next", lambda: self._remove_from_queue(item.episode_id))
                 menu.addAction("Clear Up Next…", self._clear_queue)
                 exec_menu(menu, self.context.queue_view.viewport().mapToGlobal(event.pos()))
                 return True

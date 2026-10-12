@@ -14,8 +14,9 @@ import re
 import stat
 import tempfile
 
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF, Qt
-from PySide6.QtGui import QIcon, QImage, QImageReader, QPainter, QPixmap
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF, QSize, Qt
+from PySide6.QtGui import QIcon, QIconEngine, QImage, QImageReader, QPainter, QPixmap
+from PySide6.QtWidgets import QApplication, QStyleOption
 from PySide6.QtSvg import QSvgRenderer
 
 from ..data.files import atomic_write
@@ -91,6 +92,7 @@ def svg(name: str, color: str) -> bytes:
 
 _pixmaps: dict[tuple, QPixmap] = {}
 _icons: dict[tuple, QIcon] = {}
+_themed_icons: dict[tuple, QIcon] = {}
 _renderers: dict[tuple, QSvgRenderer] = {}
 # The key space is finite today (glyph x palette x a few sizes), but nothing
 # enforced that: one caller minting per-item colours would have grown these
@@ -153,6 +155,58 @@ def icon(name: str, color: str, size: int = 20, disabled: str = "") -> QIcon:
     _icons[key] = result
     _bound(_icons)
     return result
+
+
+class _ThemedIconEngine(QIconEngine):
+    """An icon that names a theme colour, not a colour value: it draws with the colour the role has when it
+    is painted, so a theme switch re-tints every such icon the next time its widget repaints."""
+
+    def __init__(self, name: str, role: str, size: int, disabled: str = ""):
+        super().__init__()
+        self._name, self._role, self._size, self._disabled = name, role, size, disabled
+
+    def clone(self):
+        return _ThemedIconEngine(self._name, self._role, self._size, self._disabled)
+
+    def scaledPixmap(self, size: QSize, mode, state, scale: float) -> QPixmap:
+        from .theme import COLORS
+
+        # Like a plain icon, never larger than the size it was made for.
+        edge = max(1, min(self._size, int(round(min(size.width(), size.height()) / scale))))
+        if mode == QIcon.Mode.Disabled and self._disabled:
+            return pixmap(self._name, COLORS[self._disabled], edge, scale)
+        result = pixmap(self._name, COLORS[self._role], edge, scale)
+        if mode == QIcon.Mode.Disabled:
+            # No disabled colour was given: the style greys the normal glyph, as it does for a plain icon.
+            return QApplication.style().generatedIconPixmap(mode, result, QStyleOption())
+        return result
+
+    def pixmap(self, size: QSize, mode, state) -> QPixmap:
+        return self.scaledPixmap(size, mode, state, 1.0)
+
+    def actualSize(self, size: QSize, mode, state) -> QSize:
+        edge = min(self._size, size.width(), size.height())
+        return QSize(edge, edge)
+
+    def paint(self, painter: QPainter, rect, mode, state):
+        scale = painter.device().devicePixelRatioF() if painter.device() is not None else 1.0
+        pix = self.scaledPixmap(rect.size() * scale, mode, state, scale)
+        shown = pix.deviceIndependentSize()
+        painter.drawPixmap(int(rect.x() + (rect.width() - shown.width()) / 2),
+                           int(rect.y() + (rect.height() - shown.height()) / 2), pix)
+
+
+def themed_icon(name: str, role: str, size: int = 20, disabled: str = "") -> QIcon:
+    """Return a QIcon tinted with the theme colour `role`, and `disabled` (a role) when disabled. Unlike icon(),
+    it follows the theme: after a theme switch the same QIcon draws in the new colours. `size` is the largest
+    size it draws, as for icon()."""
+    key = (name, role, size, disabled)
+    cached = _themed_icons.get(key)
+    if cached is None:
+        cached = QIcon(_ThemedIconEngine(name, role, size, disabled))
+        _themed_icons[key] = cached
+        _bound(_themed_icons)
+    return cached
 
 
 def paint(painter: QPainter, name: str, color: str, rect, scale: float = 1.0):

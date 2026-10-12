@@ -225,7 +225,7 @@ def refit_icon_button(button, glyph: str = ""):
     if glyph:
         button.setProperty("glyph", glyph)
     size = scaled_px(button.property("glyph_px") or 20)
-    button.setIcon(icons.icon(button.property("glyph"), COLORS["text"], size, disabled=COLORS["disabled"]))
+    button.setIcon(icons.themed_icon(button.property("glyph"), "text", size, disabled="disabled"))
     button.setIconSize(QSize(size, size))
 
 
@@ -265,7 +265,7 @@ class EdgeHandle(QPushButton):
         self.set_glyph(name, tooltip)
 
     def set_glyph(self, name: str, tooltip: str):
-        self.setIcon(icons.icon(name, COLORS["text"], 16, disabled=COLORS["disabled"]))
+        self.setIcon(icons.themed_icon(name, "text", 16, disabled="disabled"))
         self.setIconSize(QSize(16, 16))
         self.setToolTip(tooltip)
         self.setAccessibleName(tooltip)
@@ -581,6 +581,13 @@ class NavigationRail(QFrame):
             button.setIcon(icons.icon(glyph, color, size))
             button.setIconSize(QSize(size, size))
 
+    def retheme(self):
+        """Re-tint what was tinted when it was set: the glyphs and the compact badges."""
+        self._paint_icons()
+        for index, count in enumerate(self._badge_counts):
+            if count > 0:
+                self.set_badge(index, count)
+
     def select(self, index: int):
         if not 0 <= index < len(self._buttons):
             return
@@ -646,7 +653,7 @@ class SearchField(QLineEdit):
         self.setPlaceholderText(placeholder)
         self.setAccessibleName(placeholder)
         self.setClearButtonEnabled(True)
-        self.addAction(icons.icon("search", COLORS["subtle"], 16), QLineEdit.ActionPosition.LeadingPosition)
+        self.addAction(icons.themed_icon("search", "subtle", 16), QLineEdit.ActionPosition.LeadingPosition)
 
 
 def combo_chrome_px(combo) -> int:
@@ -1070,15 +1077,23 @@ class StateBanner(QFrame):
         outer.addWidget(self.progress)
         self.hide()
 
+    def _paint_icon(self):
+        size = scaled_px(18)
+        self.icon.setFixedSize(size, size)
+        self.icon.setPixmap(icons.pixmap(self._glyph, COLORS[self._tone], size, self.devicePixelRatioF()))
+
+    def retheme(self):
+        if getattr(self, "_glyph", None):
+            self._paint_icon()
+
     def show_state(self, state: str, message: str, retry: bool = False):
         prefix, glyph, tone = self.LABELS.get(state, (state.replace("_", " ").title(), "info", "muted"))
         previous, self.state = self.state, state
         self.setProperty("state", state)
         self.style().unpolish(self)
         self.style().polish(self)
-        size = scaled_px(18)
-        self.icon.setFixedSize(size, size)
-        self.icon.setPixmap(icons.pixmap(glyph, COLORS[tone], size, self.devicePixelRatioF()))
+        self._glyph, self._tone = glyph, tone
+        self._paint_icon()
         self.prefix.setText(prefix)
         self.prefix.setVisible(bool(prefix))
         self.label.setText(message)
@@ -1211,6 +1226,15 @@ class Toast(QFrame):
         """Fade and settle times in one place: zero under reduced motion."""
         return 0 if reduced_motion() else normal
 
+    def _paint_icon(self):
+        size = scaled_px(18)
+        self.icon.setFixedSize(size, size)
+        self.icon.setPixmap(icons.pixmap(self._glyph, COLORS[self._color], size, self.devicePixelRatioF()))
+
+    def retheme(self):
+        if getattr(self, "_glyph", None):
+            self._paint_icon()
+
     def show_message(self, message: str, tone: str = "info", action: str = "", callback=None, duration_ms: int | None = None, on_close=None, owner=None):
         """duration_ms=0 keeps the toast up until dismissed; on_close runs
         only when the person clicks the X, never on programmatic dismissal
@@ -1251,9 +1275,8 @@ class Toast(QFrame):
         self.setProperty("tone", tone)
         self.style().unpolish(self)
         self.style().polish(self)
-        size = scaled_px(18)
-        self.icon.setFixedSize(size, size)
-        self.icon.setPixmap(icons.pixmap(glyph, COLORS[color], size, self.devicePixelRatioF()))
+        self._glyph, self._color = glyph, color
+        self._paint_icon()
         self.text.setText(message)
         self.action.setText(action)
         self.action.setVisible(bool(action))
@@ -1490,6 +1513,9 @@ class EmptyState(QWidget):
     def _paint_glyph(self):
         self.glyph.setPixmap(icons.pixmap(self._glyph_name, COLORS["muted"], scaled_px(24), self.devicePixelRatioF()))
 
+    def retheme(self):
+        self._paint_glyph()
+
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.DevicePixelRatioChange:
@@ -1537,7 +1563,7 @@ class SectionHeader(QWidget):
         layout.addStretch(1)
         self.link = QPushButton(action)
         self.link.setObjectName("textButton")
-        self.link.setIcon(icons.icon("chevron-right", COLORS["muted"], 14))
+        self.link.setIcon(icons.themed_icon("chevron-right", "muted", 14))
         self.link.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.link.setCursor(Qt.CursorShape.PointingHandCursor)
         self.link.clicked.connect(self.see_all_requested)
@@ -1613,28 +1639,28 @@ class HeroCard(QFrame):
         actions.setSpacing(SPACE["sm"])
         self.primary = QPushButton("Play latest")
         self.primary.setObjectName("primaryButton")
-        self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 16))
+        self.primary.setIcon(icons.themed_icon("play", "on_accent", 16))
         self.primary.setCursor(Qt.CursorShape.PointingHandCursor)
         self.primary.clicked.connect(self._primary)
         self.refresh = QPushButton("Refresh")
         self.refresh.setObjectName("quietButton")
-        self.refresh.setIcon(icons.icon("refresh", COLORS["text"], 16))
+        self.refresh.setIcon(icons.themed_icon("refresh", "text", 16))
         self.refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         self.refresh.clicked.connect(self.refresh_requested)
         self.website = QPushButton("Website")
         self.website.setObjectName("textButton")
-        self.website.setIcon(icons.icon("external", COLORS["muted"], 16))
+        self.website.setIcon(icons.themed_icon("external", "muted", 16))
         self.website.setCursor(Qt.CursorShape.PointingHandCursor)
         self.website.clicked.connect(self.website_requested)
         self.settings = QPushButton("Settings")
         self.settings.setObjectName("textButton")
-        self.settings.setIcon(icons.icon("settings", COLORS["muted"], 16))
+        self.settings.setIcon(icons.themed_icon("settings", "muted", 16))
         self.settings.setCursor(Qt.CursorShape.PointingHandCursor)
         self.settings.setToolTip("Playback settings for this podcast")
         self.settings.clicked.connect(self.settings_requested)
         self.info = QPushButton("Info")
         self.info.setObjectName("textButton")
-        self.info.setIcon(icons.icon("info", COLORS["muted"], 16))
+        self.info.setIcon(icons.themed_icon("info", "muted", 16))
         self.info.setCursor(Qt.CursorShape.PointingHandCursor)
         self.info.setToolTip("Podcast information")
         self.info.clicked.connect(self.information_requested)
@@ -1643,7 +1669,7 @@ class HeroCard(QFrame):
         actions.addWidget(self.website)
         self.unsubscribe = QPushButton("Unsubscribe")
         self.unsubscribe.setObjectName("textButton")
-        self.unsubscribe.setIcon(icons.icon("trash", COLORS["muted"], 16))
+        self.unsubscribe.setIcon(icons.themed_icon("trash", "muted", 16))
         self.unsubscribe.setCursor(Qt.CursorShape.PointingHandCursor)
         self.unsubscribe.clicked.connect(self.unsubscribe_requested)
         actions.addWidget(self.settings)
@@ -1708,13 +1734,22 @@ class HeroCard(QFrame):
         set_literal_tooltip(self.description, description)
         self.description.setVisible(bool(description))
         self.primary.setText("Play latest" if subscribed else "Subscribe")
-        self.primary.setIcon(icons.icon("play" if subscribed else "add", COLORS["on_accent"], 16))
+        self.primary.setIcon(icons.themed_icon("play" if subscribed else "add", "on_accent", 16))
         # Feed previews can be refreshed directly; subscribing is not required.
         self.refresh.setVisible(True)
         self.refresh.setToolTip("Refresh this podcast" if subscribed else "Refresh this feed preview")
         self.settings.setVisible(subscribed)
         self.unsubscribe.setVisible(subscribed)
         self.website.setVisible(has_website)
+        self._accent = accent
+        self._apply_tint()
+        self.show()
+
+    def retheme(self):
+        self._apply_tint()
+
+    def _apply_tint(self):
+        accent = getattr(self, "_accent", "")
         tint = QColor(accent) if accent else QColor(COLORS["surface_raised"])
         css = (
             f"QFrame#heroCard {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
@@ -1726,7 +1761,6 @@ class HeroCard(QFrame):
         if css != getattr(self, "_tint_css", None):
             self._tint_css = css
             self.setStyleSheet(css)
-        self.show()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1734,10 +1768,10 @@ class HeroCard(QFrame):
 
     def _create_context_menu(self):
         menu = QMenu(self)
-        menu.addAction(icons.icon("info", COLORS["text"], 16), "Podcast information…", self.information_requested.emit)
+        menu.addAction(icons.themed_icon("info", "text", 16), "Podcast information…", self.information_requested.emit)
         menu.addSeparator()
-        menu.addAction(icons.icon("refresh", COLORS["text"], 16), "Refresh", self.refresh_requested.emit)
-        website = menu.addAction(icons.icon("external", COLORS["text"], 16), "Open website", self.website_requested.emit)
+        menu.addAction(icons.themed_icon("refresh", "text", 16), "Refresh", self.refresh_requested.emit)
+        website = menu.addAction(icons.themed_icon("external", "text", 16), "Open website", self.website_requested.emit)
         website.setEnabled(self.website.isVisible())
         return menu
 
@@ -1749,10 +1783,10 @@ class HeroCard(QFrame):
             return
         if playing_latest:
             self.primary.setText("Pause" if active else "Resume")
-            self.primary.setIcon(icons.icon("pause" if active else "play", COLORS["on_accent"], 16))
+            self.primary.setIcon(icons.themed_icon("pause" if active else "play", "on_accent", 16))
         else:
             self.primary.setText("Play latest")
-            self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 16))
+            self.primary.setIcon(icons.themed_icon("play", "on_accent", 16))
 
     def _primary(self):
         if self._subscribe_mode:
@@ -1786,7 +1820,7 @@ class SelectionBar(QFrame):
         ):
             button = QPushButton(label)
             button.setObjectName("textButton")
-            button.setIcon(icons.icon(glyph, COLORS["muted"], 16))
+            button.setIcon(icons.themed_icon(glyph, "muted", 16))
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(signal)
             layout.addWidget(button)
@@ -2314,7 +2348,7 @@ class ContextPanel(QFrame):
         self.show_link = QPushButton()
         self.show_link.setObjectName("textButton")
         self.show_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.show_link.setIcon(icons.icon("episodes", COLORS["muted"], 16))
+        self.show_link.setIcon(icons.themed_icon("episodes", "muted", 16))
         self.show_link.clicked.connect(lambda: self.open_show_requested.emit(self._show_id))
         self.show_link.hide()
         self.links = QWidget()
@@ -2326,13 +2360,13 @@ class ContextPanel(QFrame):
         self._directory_url = ""
         self._website_url = ""
         self.episodes_link = QPushButton("Episodes")
-        self.episodes_link.setIcon(icons.icon("episodes", COLORS["muted"], 16))
+        self.episodes_link.setIcon(icons.themed_icon("episodes", "muted", 16))
         self.episodes_link.clicked.connect(lambda: self.preview_episodes_requested.emit(self._preview_url))
         self.website_link = QPushButton("Website")
-        self.website_link.setIcon(icons.icon("external", COLORS["muted"], 16))
+        self.website_link.setIcon(icons.themed_icon("external", "muted", 16))
         self.website_link.clicked.connect(lambda: self.open_url_requested.emit(self._website_url))
         self.directory_link = QPushButton("Directory page")
-        self.directory_link.setIcon(icons.icon("external", COLORS["muted"], 16))
+        self.directory_link.setIcon(icons.themed_icon("external", "muted", 16))
         self.directory_link.clicked.connect(lambda: self.open_url_requested.emit(self._directory_url))
         for button in (self.episodes_link, self.website_link, self.directory_link):
             button.setObjectName("textButton")
@@ -2349,7 +2383,7 @@ class ContextPanel(QFrame):
         actions.setSpacing(SPACE["sm"])
         self.primary = QPushButton("Play")
         self.primary.setObjectName("primaryButton")
-        self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 18))
+        self.primary.setIcon(icons.themed_icon("play", "on_accent", 18))
         self.primary.setCursor(Qt.CursorShape.PointingHandCursor)
         self.primary.clicked.connect(self._primary_clicked)
         self.primary.setAccessibleName("")  # Qt follows the visible action text.
@@ -2357,13 +2391,13 @@ class ContextPanel(QFrame):
         secondary_row.setSpacing(SPACE["sm"])
         self.secondary = QPushButton("Up Next")
         self.secondary.setObjectName("quietButton")
-        self.secondary.setIcon(icons.icon("queue-add", COLORS["text"], 16, disabled=COLORS["disabled"]))
+        self.secondary.setIcon(icons.themed_icon("queue-add", "text", 16, disabled="disabled"))
         self.secondary.setCursor(Qt.CursorShape.PointingHandCursor)
         self.secondary.clicked.connect(self._secondary_clicked)
         self.secondary.setAccessibleName("Add episode to Up Next")
         self.download = QPushButton("Download")
         self.download.setObjectName("quietButton")
-        self.download.setIcon(icons.icon("download", COLORS["text"], 16, disabled=COLORS["disabled"]))
+        self.download.setIcon(icons.themed_icon("download", "text", 16, disabled="disabled"))
         self.download.setCursor(Qt.CursorShape.PointingHandCursor)
         self.download.clicked.connect(self._download_clicked)
         self.download.setAccessibleName("")
@@ -2627,10 +2661,10 @@ class ContextPanel(QFrame):
         self.set_bookmarks(())
         if self._feed_url:
             self.primary.setText("Subscribe to show" if podcast.is_episode else "Subscribe")
-            self.primary.setIcon(icons.icon("add", COLORS["on_accent"], 18))
+            self.primary.setIcon(icons.themed_icon("add", "on_accent", 18))
         else:
             self.primary.setText("Play latest")
-            self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 18))
+            self.primary.setIcon(icons.themed_icon("play", "on_accent", 18))
         self.primary.setEnabled(True)
         self.secondary.setEnabled(False)
         self.download.setText("Download")
@@ -2737,7 +2771,7 @@ class ContextPanel(QFrame):
             self.tabs.setTabVisible(index, True)
         self._episode_progress = episode.progress
         self.primary.setText("Resume" if 0 < episode.progress < 1 else "Play")
-        self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 18))
+        self.primary.setIcon(icons.themed_icon("play", "on_accent", 18))
         self.primary.setEnabled(True)
         self.secondary.setEnabled(bool(self._episode_id))
         self._downloadable = is_web_url(episode.media_url) or bool(episode.downloaded_path)
@@ -2753,18 +2787,18 @@ class ContextPanel(QFrame):
             return
         if state == "Downloaded":
             self.download.setText("Downloaded")
-            self.download.setIcon(icons.icon("downloaded", COLORS["success"], 16, disabled=COLORS["success"]))
+            self.download.setIcon(icons.themed_icon("downloaded", "success", 16, disabled="success"))
             self.download.setEnabled(True)
             self.download.setToolTip("Downloaded — open location or delete")
         elif state in {"Downloading", "Queued"}:
             self.download.setText("Queued…" if state == "Queued" else "Downloading…")
-            self.download.setIcon(icons.icon("pause", COLORS["text"], 16, disabled=COLORS["disabled"]))
+            self.download.setIcon(icons.themed_icon("pause", "text", 16, disabled="disabled"))
             self.download.setToolTip("Download options — pause or manage this download")
             self.download.setEnabled(True)
         else:
             self.download.setToolTip("")
             self.download.setText("Retry download" if state == "Error" else "Resume download" if state == "Paused" else "Download")
-            self.download.setIcon(icons.icon("download", COLORS["text"], 16, disabled=COLORS["disabled"]))
+            self.download.setIcon(icons.themed_icon("download", "text", 16, disabled="disabled"))
             self.download.setEnabled(bool(self._episode_id))
 
     def update_download_state(self, episode_id: int, state: str):
@@ -2890,14 +2924,14 @@ class ContextPanel(QFrame):
         current = self._current_item
         menu = QMenu(self)
         action = menu.addAction(
-            icons.icon("info", COLORS["text"], 16),
+            icons.themed_icon("info", "text", 16),
             "Podcast information…" if hasattr(current, "feed_url") else "Episode information…",
             lambda: self.information_requested.emit(current) if current is not None else None,
         )
         action.setEnabled(current is not None)
         if current is not None and hasattr(current, "favorite") and getattr(current, "episode_id", 0):
             menu.addAction(
-                icons.icon("favorite", COLORS["accent"] if current.favorite else COLORS["text"], 16),
+                icons.themed_icon("favorite", "accent" if current.favorite else "text", 16),
                 "Remove from favorites" if current.favorite else "Add to favorites",
                 lambda: self.favorite_requested.emit(current, not current.favorite),
             )
@@ -2913,7 +2947,16 @@ class ContextPanel(QFrame):
         self.body.setMinimumHeight(int(size.height()) + 12)
 
     def _set_body(self, text: str):
+        self._body_text = text
         _set_document_content(self.body, safe_feed_html(text), rich=True)
+
+    def retheme(self):
+        """Notes carry the link colour in their document style; render them again under the new one."""
+        self._tint_tab_icons()
+        self.body.document().setDefaultStyleSheet(_link_style())
+        self.body._bs_document_content = None
+        if getattr(self, "_body_text", None) is not None:
+            self._set_body(self._body_text)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2958,18 +3001,18 @@ class ContextPanel(QFrame):
             self._was_playing = True
             if loading:
                 self.primary.setText("Opening…")
-                self.primary.setIcon(icons.icon("refresh", COLORS["on_accent"], 18))
+                self.primary.setIcon(icons.themed_icon("refresh", "on_accent", 18))
             elif active:
                 self.primary.setText("Pause")
-                self.primary.setIcon(icons.icon("pause", COLORS["on_accent"], 18))
+                self.primary.setIcon(icons.themed_icon("pause", "on_accent", 18))
             else:
                 self.primary.setText("Resume")
-                self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 18))
+                self.primary.setIcon(icons.themed_icon("play", "on_accent", 18))
         else:
             self._was_playing = False
             progress = getattr(self, "_episode_progress", 0.0)
             self.primary.setText("Resume" if 0 < progress < 1 else "Play")
-            self.primary.setIcon(icons.icon("play", COLORS["on_accent"], 18))
+            self.primary.setIcon(icons.themed_icon("play", "on_accent", 18))
 
     def _primary_clicked(self):
         if self._feed_url:
@@ -3277,9 +3320,9 @@ class NowPlayingView(_ReturnsFocus, QFrame):
 
     def _create_context_menu(self):
         menu = QMenu(self)
-        info = menu.addAction(icons.icon("info", COLORS["text"], 16), "Episode information…", self.information_requested.emit)
+        info = menu.addAction(icons.themed_icon("info", "text", 16), "Episode information…", self.information_requested.emit)
         info.setEnabled(bool(self._episode_id))
-        show = menu.addAction(icons.icon("podcasts", COLORS["text"], 16), "Go to podcast", lambda: self.show_requested.emit(self._show_id))
+        show = menu.addAction(icons.themed_icon("podcasts", "text", 16), "Go to podcast", lambda: self.show_requested.emit(self._show_id))
         show.setEnabled(bool(self._show_id))
         return menu
 
@@ -3333,7 +3376,8 @@ class NowPlayingView(_ReturnsFocus, QFrame):
         set_button_text_elided(self.show_link, snapshot.show_title, scaled_px(230))
         self.show_link.setVisible(bool(snapshot.show_title))
         self._fit_artwork()
-        _set_document_content(self.notes, safe_feed_html(description or "No show notes provided for this episode.", source_label="episode website"), rich=True)
+        self._notes_source = description or "No show notes provided for this episode."
+        _set_document_content(self.notes, safe_feed_html(self._notes_source, source_label="episode website"), rich=True)
         self._chapters = sorted(chapters, key=lambda chapter: chapter.start_seconds)
         self._chapter_starts = [chapter.start_seconds for chapter in self._chapters]
         self.chapter_list.clear()
@@ -3361,14 +3405,22 @@ class NowPlayingView(_ReturnsFocus, QFrame):
             self.bookmark_list.addItem(placeholder)
         self._current_chapter = -1
         self._current_segment = -1
-        self._tint = QColor(accent) if accent else QColor(COLORS["surface_raised"])
+        self._tint_accent = accent
+        self.update()
+
+    def retheme(self):
+        self.notes.document().setDefaultStyleSheet(_link_style())
+        self.notes._bs_document_content = None
+        if getattr(self, "_notes_source", None) is not None:
+            _set_document_content(self.notes, safe_feed_html(self._notes_source, source_label="episode website"), rich=True)
         self.update()
 
     def paintEvent(self, _event):
         # Painted directly: a free-floating child of the page stack must be opaque.
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(COLORS["canvas"]))
-        tint = getattr(self, "_tint", QColor(COLORS["surface_raised"]))
+        accent = getattr(self, "_tint_accent", "")
+        tint = QColor(accent) if accent else QColor(COLORS["surface_raised"])
         gradient = QLinearGradient(0, 0, 0, self.height())
         gradient.setColorAt(0.0, QColor(tint.red(), tint.green(), tint.blue(), 46))
         gradient.setColorAt(0.6, QColor(0, 0, 0, 0))
@@ -3626,7 +3678,7 @@ class SearchOverlay(_ReturnsFocus, QFrame):
         if podcasts:
             self._section("PODCASTS")
             for podcast in podcasts[:6]:
-                item = QListWidgetItem(icons.icon("podcasts", COLORS["muted"], 16), f"{podcast.title}\n{podcast.author}")
+                item = QListWidgetItem(icons.themed_icon("podcasts", "muted", 16), f"{podcast.title}\n{podcast.author}")
                 item.setSizeHint(QSize(0, scaled_px(54)))
                 item.setData(Qt.ItemDataRole.UserRole, ("podcast", podcast))
                 self.results.addItem(item)
@@ -3634,17 +3686,17 @@ class SearchOverlay(_ReturnsFocus, QFrame):
             self._section("EPISODES")
             for episode in episodes[:12]:
                 meta = "  ·  ".join(value for value in (episode.show, episode.published) if value)
-                item = QListWidgetItem(icons.icon("episodes", COLORS["muted"], 16), f"{episode.title}\n{meta}")
+                item = QListWidgetItem(icons.themed_icon("episodes", "muted", 16), f"{episode.title}\n{meta}")
                 item.setSizeHint(QSize(0, scaled_px(62)))
                 item.setData(Qt.ItemDataRole.UserRole, ("episode", episode))
                 self.results.addItem(item)
             if len(episodes) > 12:
-                item = QListWidgetItem(icons.icon('search', COLORS['accent'], 16), f'Show all matching episodes for “{query}”')
+                item = QListWidgetItem(icons.themed_icon('search', "accent", 16), f'Show all matching episodes for “{query}”')
                 item.setData(Qt.ItemDataRole.UserRole, ('show-all', query))
                 self.results.addItem(item)
         if query:
             self._section("DIRECTORY")
-            item = QListWidgetItem(icons.icon("discover", COLORS["accent"], 16), f"Search the podcast directory for “{query}”")
+            item = QListWidgetItem(icons.themed_icon("discover", "accent", 16), f"Search the podcast directory for “{query}”")
             item.setSizeHint(QSize(0, scaled_px(42)))
             item.setData(Qt.ItemDataRole.UserRole, ("directory", query))
             self.results.addItem(item)
@@ -3879,14 +3931,14 @@ class PlayerBar(QFrame):
         controls.addWidget(self._pad_left)
         self.back = QPushButton("15")
         self.back.setObjectName("textButton")
-        self.back.setIcon(icons.icon("skip-back", COLORS["text"], scaled_px(20), disabled=COLORS["disabled"]))
+        self.back.setIcon(icons.themed_icon("skip-back", "text", scaled_px(20), disabled="disabled"))
         self.back.setIconSize(QSize(scaled_px(20), scaled_px(20)))
         self.back.setCursor(Qt.CursorShape.PointingHandCursor)
         self.back.clicked.connect(self.skip_back_requested)
         self.play = QPushButton()
         self.play.setObjectName("playButton")
         self._play_glyph = "play"
-        self.play.setIcon(icons.icon("play", COLORS["on_accent"], scaled_px(22), disabled=COLORS["subtle"]))
+        self.play.setIcon(icons.themed_icon("play", "on_accent", scaled_px(22), disabled="subtle"))
         self.play.setIconSize(QSize(scaled_px(22), scaled_px(22)))
         self.play.setToolTip("Play or pause  ·  Ctrl+Space")
         self.play.setAccessibleName("Play or pause")
@@ -3895,7 +3947,7 @@ class PlayerBar(QFrame):
         self.play.setFixedSize(play_button_size(), play_button_size())
         self.forward = QPushButton("30")
         self.forward.setObjectName("textButton")
-        self.forward.setIcon(icons.icon("skip-forward", COLORS["text"], scaled_px(20), disabled=COLORS["disabled"]))
+        self.forward.setIcon(icons.themed_icon("skip-forward", "text", scaled_px(20), disabled="disabled"))
         self.forward.setIconSize(QSize(scaled_px(20), scaled_px(20)))
         self.forward.setCursor(Qt.CursorShape.PointingHandCursor)
         self.forward.clicked.connect(self.skip_forward_requested)
@@ -4242,12 +4294,12 @@ class PlayerBar(QFrame):
         self.now_wrap.setMinimumWidth(scaled_px(180))
         self.speed.setFixedWidth(scaled_px(52))
         skip = scaled_px(20)
-        self.back.setIcon(icons.icon("skip-back", COLORS["text"], skip, disabled=COLORS["disabled"]))
+        self.back.setIcon(icons.themed_icon("skip-back", "text", skip, disabled="disabled"))
         self.back.setIconSize(QSize(skip, skip))
-        self.forward.setIcon(icons.icon("skip-forward", COLORS["text"], skip, disabled=COLORS["disabled"]))
+        self.forward.setIcon(icons.themed_icon("skip-forward", "text", skip, disabled="disabled"))
         self.forward.setIconSize(QSize(skip, skip))
         play = scaled_px(22)
-        self.play.setIcon(icons.icon(self._play_glyph, COLORS["on_accent"], play, disabled=COLORS["subtle"]))
+        self.play.setIcon(icons.themed_icon(self._play_glyph, "on_accent", play, disabled="subtle"))
         self.play.setIconSize(QSize(play, play))
         for button in (self.next, self.bookmark, self.ab, self.trim, self.sleep, self.queue, self.volume, self.tray_button):
             refit_icon_button(button)
@@ -4312,8 +4364,12 @@ class PlayerBar(QFrame):
             self.next_label.setText(elided)
             set_literal_tooltip(self.next_label, text if elided != text else "")
 
+    def retheme(self):
+        self.set_tint(getattr(self, "_tint_color", ""))
+
     def set_tint(self, color: str):
         """Blend the playing show's colour into the bar background."""
+        self._tint_color = color
         if not color:
             css = ""
         else:
@@ -4525,7 +4581,7 @@ class PlayerBar(QFrame):
         loading = str(snapshot.state) == "loading"
         glyph = "refresh" if loading else "pause" if playing else "play"
         self._play_glyph = glyph
-        self.play.setIcon(icons.icon(glyph, COLORS["on_accent"], scaled_px(22), disabled=COLORS["subtle"]))
+        self.play.setIcon(icons.themed_icon(glyph, "on_accent", scaled_px(22), disabled="subtle"))
         self.play.setToolTip("Opening…" if loading else ("Pause" if playing else "Play") + "  ·  Ctrl+Space")
         self.play.setAccessibleName("Opening; pause when ready" if loading else "Pause" if playing else "Play")
         self.slider.setAccessibleDescription(f"{self._time(position)} of {self._time(self._duration)}")
@@ -4542,11 +4598,11 @@ class PlayerBar(QFrame):
 
     def _create_context_menu(self):
         menu = QMenu(self)
-        show = menu.addAction(icons.icon("playing", COLORS["text"], 16), "Show Now Playing", self.now_playing_requested.emit)
+        show = menu.addAction(icons.themed_icon("playing", "text", 16), "Show Now Playing", self.now_playing_requested.emit)
         show.setEnabled(self._has_episode)
-        podcast = menu.addAction(icons.icon("podcasts", COLORS["text"], 16), "Open podcast", self.podcast_requested.emit)
+        podcast = menu.addAction(icons.themed_icon("podcasts", "text", 16), "Open podcast", self.podcast_requested.emit)
         podcast.setEnabled(bool(self._now_show_id))
-        info = menu.addAction(icons.icon("info", COLORS["text"], 16), "Episode information…", self.information_requested.emit)
+        info = menu.addAction(icons.themed_icon("info", "text", 16), "Episode information…", self.information_requested.emit)
         info.setEnabled(self._durable_episode)
         return menu
 

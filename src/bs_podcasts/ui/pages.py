@@ -891,7 +891,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             secondary_filters.setSpacing(SPACE["sm"])
             self.discover_sort = QPushButton("Chart order")
             self.discover_sort.setObjectName("textButton")
-            self.discover_sort.setIcon(icons.icon("sort", COLORS["muted"], 16))
+            self.discover_sort.setIcon(icons.themed_icon("sort", "muted", 16))
             self.discover_sort.setCursor(Qt.CursorShape.PointingHandCursor)
             self.discover_sort.setToolTip("Sort results")
             self.discover_sort.setAccessibleName("Sort Discover results — Chart order")
@@ -924,7 +924,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             if self.header.action:
                 self.header.action.setText("")
                 self.header.action.setObjectName("iconButton")
-                self.header.action.setIcon(icons.icon("refresh", COLORS["text"], 20))
+                self.header.action.setIcon(icons.themed_icon("refresh", "text", 20))
                 self.header.action.setToolTip("Refresh current Discover view")
                 self.header.action.setAccessibleName("Refresh Discover")
             self._size_discover_controls()
@@ -940,12 +940,12 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self._discover_sort = "rank"
             self.header.search.setPlaceholderText("Filter podcasts")
             if self.header.action:
-                self.header.action.setIcon(icons.icon("add", COLORS["on_accent"], 16))
+                self.header.action.setIcon(icons.themed_icon("add", "on_accent", 16))
             self.LIBRARY_SORTS = (("name", "Name A–Z"), ("date", "Newest episode"))
             self._sort = "name"
             self.sort_button = QPushButton("Name A–Z")
             self.sort_button.setObjectName("textButton")
-            self.sort_button.setIcon(icons.icon("sort", COLORS["muted"], 16))
+            self.sort_button.setIcon(icons.themed_icon("sort", "muted", 16))
             self.sort_button.setCursor(Qt.CursorShape.PointingHandCursor)
             self.sort_button.setAccessibleName("Sort podcasts — Name A–Z")
             self.sort_button.setToolTip("Sorted by name a–z — click to sort by newest episode")
@@ -1299,7 +1299,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         if self.discover:
             self._size_discover_controls()
             if self.header.action is not None:
-                self.header.action.setIcon(icons.icon("refresh", COLORS["text"], scaled_px(20)))
+                self.header.action.setIcon(icons.themed_icon("refresh", "text", scaled_px(20)))
         self.load_more.setFixedHeight(scaled_px(38))
         self._layout_cards()
 
@@ -1371,7 +1371,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         if sortable and not reorder:
             self.sort_button = QPushButton("Newest first")
             self.sort_button.setObjectName("textButton")
-            self.sort_button.setIcon(icons.icon("sort", COLORS["muted"], 16))
+            self.sort_button.setIcon(icons.themed_icon("sort", "muted", 16))
             self.sort_button.setCursor(Qt.CursorShape.PointingHandCursor)
             self.sort_button.setToolTip("Sort episodes")
             self.sort_button.setAccessibleName("Sort episodes")
@@ -1688,6 +1688,11 @@ class SummaryCard(QPushButton):
         self.layout().setContentsMargins(SPACE["lg"], SPACE["md"], SPACE["lg"], SPACE["md"])
         self.layout().setSpacing(SPACE["md"])
         self.glyph_label.setPixmap(icons.pixmap(self._glyph, COLORS["subtle"], scaled_px(22), self.devicePixelRatioF()))
+
+    def retheme(self):
+        self.apply_metrics()
+        if hasattr(self, "_count"):
+            self.set_count(self._count)
 
     def set_count(self, count: int):
         self._count = count
@@ -2288,7 +2293,7 @@ class SettingsPage(BasePage):
         download_row_layout.addWidget(self.download_path, 1)
         self.change_folder_button = QPushButton("Change…")
         self.change_folder_button.setObjectName("textButton")
-        self.change_folder_button.setIcon(icons.icon("folder", COLORS["muted"], 14))
+        self.change_folder_button.setIcon(icons.themed_icon("folder", "muted", 14))
         self.change_folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.change_folder_button.setToolTip("Existing downloads stay where they are; new ones use the new folder")
         self.change_folder_button.setAccessibleName("Change download folder")
@@ -2312,17 +2317,17 @@ class SettingsPage(BasePage):
         destructive_actions.setSpacing(SPACE["sm"])
         open_log = QPushButton("Open log")
         open_log.setObjectName("quietButton")
-        open_log.setIcon(icons.icon("info", COLORS["text"], 16))
+        open_log.setIcon(icons.themed_icon("info", "text", 16))
         open_log.setCursor(Qt.CursorShape.PointingHandCursor)
         open_log.clicked.connect(self.open_log_requested)
         open_folder = QPushButton("Open data folder")
         open_folder.setObjectName("quietButton")
-        open_folder.setIcon(icons.icon("folder", COLORS["text"], 16))
+        open_folder.setIcon(icons.themed_icon("folder", "text", 16))
         open_folder.setCursor(Qt.CursorShape.PointingHandCursor)
         open_folder.clicked.connect(self.open_data_requested)
         refresh_usage = QPushButton("Refresh usage")
         refresh_usage.setObjectName("quietButton")
-        refresh_usage.setIcon(icons.icon("refresh", COLORS["text"], 16))
+        refresh_usage.setIcon(icons.themed_icon("refresh", "text", 16))
         refresh_usage.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_usage.clicked.connect(self.refresh_storage_requested)
         clear_art = QPushButton("Clear artwork cache…")
