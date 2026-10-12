@@ -1072,11 +1072,19 @@ class PlaybackService:
     def _engine_event(self, event: EngineEvent):
         try:
             self._engine_event_locked(event)
-        except Exception:
-            logger.exception('Could not accept playback state changes')
+        except Exception as exc:
+            # Only a refusal by library storage is a storage failure. Anything
+            # else is a bug here, so it is logged in full and the text does not
+            # send the listener to the library.
+            if isinstance(exc, LibraryBusy):
+                logger.warning('Playback changes could not be saved: %s', redact(exc))
+                message = 'Playback changes could not be saved; check library storage.'
+            else:
+                logger.exception('Could not accept playback state changes')
+                message = 'Playback could not be updated; details are in the log.'
             with self._lock:
                 if not self._dead:
-                    self.snapshot = replace(self.snapshot, message='Playback changes could not be saved; check library storage.')
+                    self.snapshot = replace(self.snapshot, message=message)
                     self._emit()
 
     def _engine_event_locked(self, event: EngineEvent):
