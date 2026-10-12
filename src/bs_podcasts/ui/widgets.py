@@ -4180,31 +4180,50 @@ class PlayerBar(QFrame):
         # was squeezed and the play circle drifted off the centre line. The
         # side zones are what must yield: the rule is that the transport stays
         # centred, and a long title has its own elision to fall back on.
-        wanted = max(
-            self.center_wrap.sizeHint().width(),
-            self.center_wrap.minimumSizeHint().width(),
-        )
-        side = min(side, max(0, (available - wanted) // 2))
-        side = max(side, 0)
-        self.left_wrap.setFixedWidth(side)
-        self.tools_wrap.setFixedWidth(side)
+        share = side
+        row = self.center_wrap.layout()
+        pads = None
+        for _ in range(4):
+            wanted = max(
+                self.center_wrap.sizeHint().width(),
+                self.center_wrap.minimumSizeHint().width(),
+            )
+            side = max(0, min(share, (available - wanted) // 2))
+            self.left_wrap.setFixedWidth(side)
+            self.tools_wrap.setFixedWidth(side)
+            # Settle the layout before measuring. The side widths just set are
+            # what determine the transport buttons' final widths, and _centre_play
+            # reads those — measuring first meant it used pre-resize sizes and left
+            # the play circle several pixels off after any width change. activate()
+            # does this synchronously; a deferred pass would fire after teardown.
+            # The bar's own layout is activated too: it hands the transport the
+            # width the side zones left it, which the buttons are laid out in.
+            layout.activate()
+            if row is not None:
+                self.center_wrap.updateGeometry()
+                row.activate()
+            self._centre_play()
+            if row is not None:
+                # Padding can change the constrained button widths. Settle that
+                # layout and measure once more without deferred callbacks.
+                row.activate()
+                self._centre_play()
+            # The pad that centres the play button is part of the transport's
+            # preferred width, and it was set after `wanted` was measured. When
+            # it made the transport wider than the width it was given (a
+            # playing bar with wide skip buttons, just after an idle one), the
+            # side zones yield again, until the transport has what it prefers
+            # and the pad no longer changes.
+            preferred = max(
+                self.center_wrap.sizeHint().width(),
+                self.center_wrap.minimumSizeHint().width(),
+            )
+            settled = (self._pad_left.minimumWidth(), self._pad_right.minimumWidth())
+            if available - 2 * side >= preferred and settled == pads:
+                break
+            pads = settled
         art_width = max(self.art.width(), self.art.minimumWidth())
         self._now_column = max(0, side - art_width - self.left_wrap.layout().spacing())
-        # Settle the layout before measuring. The side widths just set are
-        # what determine the transport buttons' final widths, and _centre_play
-        # reads those — measuring first meant it used pre-resize sizes and left
-        # the play circle several pixels off after any width change. activate()
-        # does this synchronously; a deferred pass would fire after teardown.
-        row = self.center_wrap.layout()
-        if row is not None:
-            self.center_wrap.updateGeometry()
-            row.activate()
-        self._centre_play()
-        if row is not None:
-            # Padding can change the constrained button widths. Settle that
-            # layout and measure once more without deferred callbacks.
-            row.activate()
-            self._centre_play()
         # The column width may have changed without a bar resize (compact
         # flip, first show): re-elide against it now, not on the next resize.
         # Returns whether the labels were elided, so callers elide only when
