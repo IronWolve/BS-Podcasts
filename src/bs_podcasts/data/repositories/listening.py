@@ -1,4 +1,8 @@
-"""Advanced listening metadata and saved collections."""
+"""Advanced listening metadata, and storage for folders and saved playlists.
+
+The folder and saved-playlist tables and methods are kept, but no screen or
+service uses them yet: nothing in the app creates, fills or shows one. They
+are storage only until a UI is built on them."""
 
 import math
 import time
@@ -265,6 +269,9 @@ class ListeningRepository:
             "top": [(row["title"], float(row["listened_seconds"]), int(row["completed_episodes"])) for row in top],
         }
 
+    # Names match with COLLATE NOCASE, which folds ASCII letters only (SQLite):
+    # "Cafe" and "cafe" are one name, but "CAFÉ" and "café" are two. The unique
+    # indexes in migration 013 follow the same rule.
     def create_folder(self, name: str) -> int:
         with self.database.connect() as connection:
             connection.execute(
