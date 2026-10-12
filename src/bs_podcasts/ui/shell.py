@@ -2290,7 +2290,10 @@ class MainWindow(QMainWindow):
         confirmation_key = f"retention.confirmed.{show_id}"
         declined_key = f"retention.declined.{show_id}"
         first_cleanup = self.library.setting(confirmation_key, "0") != "1"
-        if preview_required or first_cleanup:
+        # A download the user chose by hand is not removed by a pass unasked,
+        # even when the rule was confirmed earlier.
+        chosen = any(self.library.setting(self.CHOSEN_KEY.format(preview.episode_id), "0") == "1" for preview in previews)
+        if preview_required or first_cleanup or chosen:
             limits = f"{show.retention_keep}:{show.retention_days}"
             if show_id in self._retention_prompting:
                 self._retention_again.setdefault(show_id, set()).update(keep)
@@ -3549,6 +3552,9 @@ class MainWindow(QMainWindow):
         self._run_read(work, lambda target: self._notify(
             f"Exported subscriptions to {target.name}. Keep it private: feed URLs may contain access tokens.", "success"), "export-opml", coalesce=False)
 
+    # Setting recorded per download the user asked for by hand (not the app's
+    # automatic downloads); retention asks before a pass removes such a file.
+    CHOSEN_KEY = "download.chosen.{}"
     AUDIO_SUFFIXES = (".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac", ".aac", ".m4b")
     # Each file runs a metadata probe of up to a few seconds; a bigger drop
     # imports the first ones and says how many were left out.
@@ -4566,7 +4572,7 @@ class MainWindow(QMainWindow):
         if self._background_paused():
             return
         for episode_id in candidates:
-            self._download_episode(episode_id, quiet=True)
+            self._download_episode(episode_id, quiet=True, automatic=True)
         if candidates:
             self._notify(f"Auto-downloading {len(candidates)} new episode{'s' if len(candidates) != 1 else ''}", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
 
@@ -5768,8 +5774,11 @@ class MainWindow(QMainWindow):
         return mapping.get(value, value or "")
 
     # ---------------------------------------------------------------- downloads
-    def _download_episode(self, episode_id: int, quiet: bool = False, priority: bool = False):
-        """Queue a download; returns its ticket, or None when none was created."""
+    def _download_episode(self, episode_id: int, quiet: bool = False, priority: bool = False, automatic: bool = False):
+        """Queue a download; returns its ticket, or None when none was created.
+
+        `automatic` is set only by the app's own new-episode downloads. Any
+        other queued download is the user's choice and is recorded as such."""
         if self.downloads is None or self.jobs is None or not episode_id:
             return None
         # `priority` is a play intent: it takes over a ticket still waiting
@@ -5777,6 +5786,8 @@ class MainWindow(QMainWindow):
         ticket = self.downloads.queue(episode_id, priority=True) if priority else self.downloads.queue(episode_id)
         if ticket is None:
             return None
+        if not automatic:
+            self._persist_ui_settings({self.CHOSEN_KEY.format(episode_id): "1"})
         self._download_tickets[episode_id] = ticket
         runner = (self.play_download_jobs or self.download_jobs) if priority else self.download_jobs
         future = runner.submit(self.downloads.download, episode_id, ticket)
