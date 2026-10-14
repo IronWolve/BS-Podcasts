@@ -61,10 +61,10 @@ def _menu_icon(name: str) -> QIcon:
 
 def _compact_menu_style():
     return (
-        f"QMenu {{ padding: {scaled_px(4)}px; }}"
-        f"QMenu::item {{ padding: {scaled_px(5)}px {scaled_px(24)}px {scaled_px(5)}px {scaled_px(10)}px; }}"
-        f"QMenu::item:disabled {{ padding-top: {scaled_px(3)}px; padding-bottom: {scaled_px(3)}px; }}"
-        f"QMenu::separator {{ margin: {scaled_px(3)}px {scaled_px(8)}px; }}"
+        f"QMenu {{ padding: {scaled_px(3)}px; }}"
+        f"QMenu::item {{ padding: 0px {scaled_px(24)}px 0px {scaled_px(10)}px; margin: 0px {scaled_px(2)}px; }}"
+        "QMenu::item:disabled { padding-top: 0px; padding-bottom: 0px; }"
+        f"QMenu::separator {{ height: 1px; margin: {scaled_px(1)}px {scaled_px(8)}px; }}"
     )
 
 
