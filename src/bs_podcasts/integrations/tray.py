@@ -2,7 +2,7 @@
 import time
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QFontMetrics, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from ..assets import BRANDING_DIR
@@ -10,10 +10,11 @@ from ..config import APP_NAME
 from ..domain.times import format_media_time
 from ..ui import icons
 from ..ui.playback_actions import PlaybackAction
+from ..ui.theme import scaled_px
 
 
 _TOOLTIP_LIMIT = 127
-_TITLE_LIMIT = 60
+_MENU_TEXT_WIDTH = 260
 SPEED_STEPS = (0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0)
 # (label, seconds): 0 turns the timer off, -1 stops at the end of the episode.
 SLEEP_CHOICES = (("Off", 0), ("15 minutes", 15 * 60), ("30 minutes", 30 * 60), ("45 minutes", 45 * 60),
@@ -56,6 +57,15 @@ def _menu_icon(name: str) -> QIcon:
         return icons.themed_icon(name, "text", 16)
     except Exception:
         return QIcon()  # a tray without the theme tokens shows text only
+
+
+def _compact_menu_style():
+    return (
+        f"QMenu {{ padding: {scaled_px(4)}px; }}"
+        f"QMenu::item {{ padding: {scaled_px(5)}px {scaled_px(24)}px {scaled_px(5)}px {scaled_px(10)}px; }}"
+        f"QMenu::item:disabled {{ padding-top: {scaled_px(3)}px; padding-bottom: {scaled_px(3)}px; }}"
+        f"QMenu::separator {{ margin: {scaled_px(3)}px {scaled_px(8)}px; }}"
+    )
 
 
 def _skip_labels(window):
@@ -105,6 +115,9 @@ class TrayController:
         tray = QSystemTrayIcon(_tray_icon(), window)
         tray.setToolTip(APP_NAME)
         menu = QMenu()
+        menu.setObjectName("trayMenu")
+        menu.setToolTipsVisible(True)
+        menu.setStyleSheet(_compact_menu_style())
         # The now-playing header: the title, then the podcast and the progress as quieter lines.
         self.now_playing = QAction("Nothing playing", menu)
         self.now_playing.setEnabled(False)
@@ -124,6 +137,7 @@ class TrayController:
         self.next = QAction(_menu_icon("next"), "Next episode", menu)
         self.next.triggered.connect(lambda: self._call("_play_next"))
         self.speed_menu = QMenu("Speed", menu)
+        self.speed_menu.setObjectName("trayMenu")
         self.speed_menu.setIcon(_menu_icon("speed"))
         self.speed_group = QActionGroup(self.speed_menu)
         self.speed_group.setExclusive(True)
@@ -136,6 +150,7 @@ class TrayController:
             self.speed_menu.addAction(action)
             self.speed_actions[step] = action
         self.sleep_menu = QMenu("Sleep timer", menu)
+        self.sleep_menu.setObjectName("trayMenu")
         self.sleep_menu.setIcon(_menu_icon("sleep"))
         self.sleep_group = QActionGroup(self.sleep_menu)
         self.sleep_group.setExclusive(True)
@@ -232,8 +247,8 @@ class TrayController:
             if message:
                 progress += f" · {message}"
             texts = (
-                _shorten(getattr(snapshot, "title", "") or "", _TITLE_LIMIT),
-                _shorten(getattr(snapshot, "show_title", "") or "", _TITLE_LIMIT),
+                getattr(snapshot, "title", "") or "",
+                getattr(snapshot, "show_title", "") or "",
                 progress,
                 "Pause" if playing else "Play",
                 PlaybackAction.PAUSE if playing else PlaybackAction.PLAY,
@@ -261,16 +276,28 @@ class TrayController:
                      f"Sleep timer ({remaining} min left)" if deadline else "Sleep timer")
             if self.sleep_menu.title() != title:
                 self.sleep_menu.setTitle(title)
-        if texts == part("_texts"):
+        if part("_menu") is not None:
+            spacing = _compact_menu_style()
+            if self._menu.styleSheet() != spacing:
+                self._menu.setStyleSheet(spacing)
+            self._menu.ensurePolished()
+        font = self._menu.font() if part("_menu") is not None else QApplication.font()
+        font_key = (font.key(), scaled_px(_MENU_TEXT_WIDTH))
+        if texts == part("_texts") and font_key == part("_menu_font_key"):
             return
         self._texts = texts
+        self._menu_font_key = font_key
+        metrics = QFontMetrics(font)
+        compact = lambda text: metrics.elidedText(text, Qt.TextElideMode.ElideRight, font_key[1])
         title, show, progress, toggle_label, toggle_action, toggle_icon, back_label, forward_label = texts
-        self.now_playing.setText(title)
+        self.now_playing.setText(compact(title))
+        self.now_playing.setToolTip(title)
         self.now_playing.setIcon(_menu_icon(toggle_icon) if source else QIcon())
         for name, text in (("now_playing_show", show), ("now_playing_progress", progress)):
             line = part(name)
             if line is not None:
-                line.setText(text)
+                line.setText(compact(text))
+                line.setToolTip(text)
                 line.setVisible(bool(text))
         self.toggle.setText(toggle_label)
         self.toggle.setIcon(_menu_icon(toggle_icon))
