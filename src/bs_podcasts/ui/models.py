@@ -153,6 +153,80 @@ def _notify_changed_rows(model, rows):
     model.dataChanged.emit(model.index(first, 0), model.index(last, 0))
 
 
+class EpisodeRowsIndex:
+    """Positions in one current row list; deltas never scan unrelated rows.
+
+    Structural owners replace the list, change its length, or invalidate after
+    an in-place reorder. Duplicate episode IDs (bookmarks) keep every position;
+    artwork has a separate URL key so stale fetches cannot patch a new source.
+    """
+    def __init__(self):
+        self._items = None
+        self._length = -1
+        self._ids = {}
+        self._artwork = {}
+        self.progress_count = 0
+
+    def invalidate(self):
+        self._items = None
+        self._length = -1
+        self._ids.clear()
+        self._artwork.clear()
+        self.progress_count = 0
+
+    @staticmethod
+    def _progress(item):
+        return item.episode_id > 0 and item.position_seconds > 0
+
+    def bind(self, items):
+        if self._items is items and self._length == len(items):
+            return self
+        self.invalidate()
+        self._items, self._length = items, len(items)
+        for row, item in enumerate(items):
+            self._ids.setdefault(item.episode_id, set()).add(row)
+            self._artwork.setdefault((item.episode_id, item.artwork_url), set()).add(row)
+            self.progress_count += self._progress(item)
+        return self
+
+    def matching(self, changes, *, artwork=False):
+        positions = self._artwork if artwork else self._ids
+        return sorted({row for key in changes for row in positions.get(key, ())})
+
+    def apply(self, changes, merge, *, artwork=False):
+        changed = []
+        for row in self.matching(changes, artwork=artwork):
+            old = self._items[row]
+            key = (old.episode_id, old.artwork_url) if artwork else old.episode_id
+            if changes[key] is None:
+                continue
+            new = merge(old, changes[key])
+            if new == old:
+                continue
+            for positions, old_key, new_key in (
+                    (self._ids, old.episode_id, new.episode_id),
+                    (self._artwork, (old.episode_id, old.artwork_url), (new.episode_id, new.artwork_url))):
+                if old_key != new_key:
+                    positions[old_key].remove(row)
+                    if not positions[old_key]:
+                        del positions[old_key]
+                    positions.setdefault(new_key, set()).add(row)
+            self.progress_count += int(self._progress(new)) - int(self._progress(old))
+            self._items[row] = new
+            changed.append((row, old, new))
+        return changed
+
+
+def artwork_row(current, candidate):
+    return replace(current, artwork_path=candidate.artwork_path,
+                   episode_artwork_path=candidate.episode_artwork_path, accent=candidate.accent)
+
+
+def download_row(current, candidate):
+    return replace(current, state=candidate.state, detail=candidate.detail,
+                   progress=candidate.progress, downloaded_path=candidate.downloaded_path)
+
+
 def _replace_items(model, items, key):
     """Swap in new rows: in place when they are the same rows, by removing and inserting the rows that
     differ when the shared rows keep their order, and by a reset only when the order itself changed."""
@@ -291,6 +365,7 @@ class EpisodeModel(QAbstractListModel):
     def __init__(self, items=(), parent=None):
         super().__init__(parent)
         self._items = list(items)
+        self._row_index = EpisodeRowsIndex()
 
     @staticmethod
     def _key(item):
@@ -307,27 +382,18 @@ class EpisodeModel(QAbstractListModel):
         _replace_items(self, items, self._key)
 
     def update_items(self, updates):
-        changed = []
-        for row, item in enumerate(self._items):
-            updated = updates.get(item.episode_id)
-            if updated is not None and updated != item:
-                self._items[row] = updated
-                changed.append(row)
-        _notify_changed_rows(self, changed)
+        self.apply_updates(updates, lambda _old, new: new)
+
+    def apply_updates(self, updates, merge):
+        changed = self._row_index.bind(self._items).apply(updates, merge)
+        _notify_changed_rows(self, [row for row, _old, _new in changed])
 
     def update_artwork_batch(self, changes):
-        changed = []
-        for row, item in enumerate(self._items):
-            candidate = changes.get((item.episode_id, item.artwork_url))
-            if candidate is None:
-                continue
-            updated = replace(item, artwork_path=candidate.artwork_path,
-                              episode_artwork_path=candidate.episode_artwork_path,
-                              accent=candidate.accent)
-            if updated != item:
-                self._items[row] = updated
-                changed.append(row)
-        _notify_changed_rows(self, changed)
+        changed = self._row_index.bind(self._items).apply(changes, artwork_row, artwork=True)
+        _notify_changed_rows(self, [row for row, _old, _new in changed])
+
+    def has_clearable_progress(self):
+        return bool(self._row_index.bind(self._items).progress_count)
 
     def items(self):
         """The rows now shown, in order. Read only: replace() swaps the list."""
@@ -337,10 +403,8 @@ class EpisodeModel(QAbstractListModel):
         return 0 if parent.isValid() else len(self._items)
 
     def row_for_episode(self, episode_id: int) -> int:
-        for row, item in enumerate(self._items):
-            if item.episode_id == episode_id:
-                return row
-        return -1
+        rows = self._row_index.bind(self._items)._ids.get(episode_id, ())
+        return min(rows) if rows else -1
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or not 0 <= index.row() < len(self._items):
@@ -410,6 +474,7 @@ class EpisodeModel(QAbstractListModel):
                 identities = [self._key(self._items[index.row()]) for index in old_indexes]
                 self.layoutAboutToBeChanged.emit()
                 self._items = rest[:insertion] + selected + rest[insertion:]
+                self._row_index.invalidate()
                 rows = {self._key(item): number for number, item in enumerate(self._items)}
                 self.changePersistentIndexList(old_indexes, [self.index(rows[key], 0) for key in identities])
                 self.layoutChanged.emit()
@@ -435,6 +500,7 @@ class EpisodeModel(QAbstractListModel):
         item = self._items.pop(source_row)
         insertion = destination_child - 1 if source_row < destination_child else destination_child
         self._items.insert(insertion, item)
+        self._row_index.invalidate()
         self.endMoveRows()
         self.order_changed.emit([episode.episode_id for episode in self._items])
         return True

@@ -41,7 +41,3 @@ class StreamRecovery:
             return 0
         self._times.append(now)
         return len(self._times)
-
-    def clear_attempts(self) -> None:
-        """Forget the reopen window, for a test that is not about the limit."""
-        self._times = []

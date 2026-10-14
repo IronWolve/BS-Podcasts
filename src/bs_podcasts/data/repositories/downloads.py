@@ -173,9 +173,6 @@ class DownloadRepository:
             connection.execute("DELETE FROM downloads WHERE episode_id=?", (episode_id,))
             connection.execute("UPDATE episodes SET downloaded_path='' WHERE id=?", (episode_id,))
 
-    def played_complete(self, episode_ids=None) -> list[int]:
-        return [record.episode_id for record in self.played_complete_records(episode_ids)]
-
     def played_complete_records(self, episode_ids=None) -> list[DownloadRecord]:
         ids = None if episode_ids is None else list(dict.fromkeys(int(value) for value in episode_ids))
         if ids == []:

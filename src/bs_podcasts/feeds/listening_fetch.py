@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from html import unescape
 import json
+import logging
 import re
 
 from ..net import USER_AGENT, describe_network_error
@@ -12,7 +13,19 @@ from ..domain.times import media_seconds, media_interval
 
 
 MAX_BYTES = 4 * 1024 * 1024
+MAX_CHAPTERS = 5000
+MAX_SEGMENTS = 50000
 TIMEOUT = 15
+_log = logging.getLogger(__name__)
+
+
+def _bounded_entries(entries, maximum, label):
+    """Bound row objects and database/UI work independently of the byte budget."""
+    for index, entry in enumerate(entries):
+        if index >= maximum:
+            _log.warning("%s truncated at %s entries", label, maximum)
+            break
+        yield entry
 
 
 class ListeningFetchError(RuntimeError):
@@ -68,7 +81,7 @@ def parse_chapters(content: bytes) -> list[ChapterData]:
         raise ListeningFetchError("Chapters exceed the size limit.")
     entries = _json_entries(_decoded_text(content), 'chapters', 'Chapters')
     chapters = []
-    for entry in entries or ():
+    for entry in _bounded_entries(entries or (), MAX_CHAPTERS, "Chapters"):
         if not isinstance(entry, dict):
             continue
         start, end = media_interval(entry.get("startTime", 0), entry.get("endTime"))
@@ -167,7 +180,7 @@ def _json_entries(text: str, field: str, label: str) -> list:
 def _parse_json_transcript(text: str) -> list[SegmentData]:
     entries = _json_entries(text, 'segments', 'Transcript segments')
     segments = []
-    for entry in entries or ():
+    for entry in _bounded_entries(entries or (), MAX_SEGMENTS, "Transcript segments"):
         if not isinstance(entry, dict):
             continue
         body = str(entry.get("body") or entry.get("text") or "").strip()
@@ -203,6 +216,9 @@ def _parse_cues(text: str) -> list[SegmentData]:
             start_text, _arrow, end_text = timing.partition("-->")
             body = unescape(_TAGS.sub("", " ".join(body_lines))).strip()
             if body:
+                if len(segments) >= MAX_SEGMENTS:
+                    _log.warning("Transcript cues truncated at %s entries", MAX_SEGMENTS)
+                    return _merge_short(segments)
                 segments.append(SegmentData(text=body, start_seconds=_stamp(start_text), end_seconds=_stamp(end_text)))
     return _merge_short(segments)
 
@@ -211,7 +227,8 @@ def _parse_plain(text: str) -> list[SegmentData]:
     paragraphs = [para.strip() for para in re.split(r"\n\s*\n", text) if para.strip()]
     if len(paragraphs) <= 1:
         paragraphs = [line.strip() for line in text.split("\n") if line.strip()]
-    return [SegmentData(text=para, start_seconds=_stamp(para[:16])) for para in paragraphs]
+    return [SegmentData(text=para, start_seconds=_stamp(para[:16]))
+            for para in _bounded_entries(paragraphs, MAX_SEGMENTS, "Transcript paragraphs")]
 
 
 def _merge_short(segments: list[SegmentData], target_chars: int = 180) -> list[SegmentData]:

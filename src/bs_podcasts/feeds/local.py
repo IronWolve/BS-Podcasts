@@ -41,13 +41,14 @@ def read_metadata(source: Path) -> dict:
     return result
 
 
-def probe_many(sources, on_result=None) -> list:
+def probe_many(sources, on_result=None, *, cancelled=None) -> list:
     """Read the metadata of several local files in one reader session.
 
     One child interpreter reads the whole list, so a batch pays the start-up
     cost once. Each answer is a metadata dict or a LocalAudioError, returned in
     the order of `sources`; `on_result(index, value)` runs as each answer
-    arrives, so a long batch can report progress.
+    arrives, so a long batch can report progress. A true `cancelled()` stops
+    the owned reader and settles unread files as cancellation errors.
     """
     from ..config import cache_dir
     sources = [Path(source) for source in sources]
@@ -59,6 +60,15 @@ def probe_many(sources, on_result=None) -> list:
         results[index] = value
         if on_result is not None:
             on_result(index, value)
+
+    def is_cancelled():
+        return cancelled is not None and cancelled()
+
+    cancelled_error = LocalAudioError('Audio import cancelled.')
+    if is_cancelled():
+        for index in range(len(sources)):
+            settle(index, cancelled_error)
+        return results
 
     native = ctypes.util.find_library('mpv')
     if not native:
@@ -77,6 +87,10 @@ def probe_many(sources, on_result=None) -> list:
         remaining = list(range(len(sources)))
         rounds = 0
         while remaining:
+            if is_cancelled():
+                for index in remaining:
+                    settle(index, cancelled_error)
+                break
             rounds += 1
             request = folder/f'request-{rounds}.json'
             request.write_text(json.dumps([str(sources[index]) for index in remaining], ensure_ascii=False), encoding='utf-8')
@@ -107,6 +121,8 @@ def probe_many(sources, on_result=None) -> list:
 
                 def collect():
                     for local in sorted(pending):
+                        if is_cancelled():
+                            break
                         answer = answers/f'result-{local}.json'
                         if answer.is_file():
                             pending.discard(local)
@@ -114,17 +130,24 @@ def probe_many(sources, on_result=None) -> list:
 
                 try:
                     while True:
+                        if is_cancelled():
+                            break
                         collect()
                         if not pending or process.poll() is not None:
                             break
                         time.sleep(_PROBE_POLL_SECONDS)
-                    process.wait()
+                    if not is_cancelled():
+                        process.wait()
                 finally:
                     guard.cancel()
                     if process.poll() is None:
                         process.kill()
                         process.wait()
                 collect()  # answers written just before the reader exited
+            if is_cancelled():
+                for local in sorted(pending):
+                    settle(remaining[local], cancelled_error)
+                break
             if not pending:
                 break
             first = min(pending)  # the file the reader was on when it stopped
@@ -198,17 +221,20 @@ class LocalAudioImporter:
         metadata = read_metadata(source)
         return self._store(source, stat, metadata)
 
-    def import_many(self, paths, on_result=None) -> list:
+    def import_many(self, paths, on_result=None, *, cancelled=None) -> list:
         """Import several files through one reader session.
 
         Returns, per path and in order, the stored show or the exception that
         stopped that file. One file's failure does not stop the others.
-        `on_result(index, outcome)` runs as each file is settled."""
+        `on_result(index, outcome)` runs as each file is settled. Cancellation
+        preserves completed imports and refuses storage for remaining files."""
         paths = list(paths)
         outcomes = [None] * len(paths)
         readable = {}
         for index, path in enumerate(paths):
             try:
+                if cancelled is not None and cancelled():
+                    raise LocalAudioError('Audio import cancelled.')
                 source = self._source(path)
                 readable[index] = (source, source.stat())
             except (LocalAudioError, OSError) as exc:
@@ -221,7 +247,9 @@ class LocalAudioImporter:
         def probed(position, metadata):
             index = order[position]
             source, stat = readable[index]
-            if isinstance(metadata, Exception):
+            if cancelled is not None and cancelled():
+                outcome = LocalAudioError('Audio import cancelled.')
+            elif isinstance(metadata, Exception):
                 outcome = metadata
             else:
                 try:
@@ -232,7 +260,7 @@ class LocalAudioImporter:
             if on_result is not None:
                 on_result(index, outcome)
 
-        probe_many([readable[index][0] for index in order], on_result=probed)
+        probe_many([readable[index][0] for index in order], on_result=probed, cancelled=cancelled)
         return outcomes
 
     def _store(self, source: Path, stat, metadata):

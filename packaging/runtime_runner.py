@@ -8,6 +8,7 @@ import signal
 import sys
 import time
 from runtime_state import LOG_NAME, PID_NAME, RUNTIME_KIND, process_stamp, read_record, process_state, runtime_lock, retire_stale, write_record
+from report import Reporter, size_text, tree_size
 
 DEPLOYMENT = Path(__file__).resolve().parent
 PROJECT = DEPLOYMENT.parent.parent
@@ -224,56 +225,17 @@ def _run_gui(extra, requested):
         sys.argv=original_argv
 
 
-class Report:
-    """State lines and a stats block in the build commands' format.
-
-    Colour only on a terminal; --plain, NO_COLOR or TERM=dumb turn it off."""
-    STATES={'ok':('OK  ','32'),'warn':('WARN','33'),'fail':('FAIL','31'),'info':('    ','')}
-
-    def __init__(self,plain=False):
-        self.colour=(not plain and not os.environ.get('NO_COLOR') and os.environ.get('TERM')!='dumb'
-                     and sys.stdout.isatty())
-        self.started=time.monotonic()
-
-    def paint(self,code,text):
-        return f'\033[{code}m{text}\033[0m' if self.colour and code else text
-
-    def line(self,state,text):
-        label,code=self.STATES[state]
-        print(self.paint(code,label)+' '+text,flush=True)
-
-    def stats(self,rows):
-        rows=[*rows,('elapsed',f'{time.monotonic()-self.started:.1f} s')]
-        width=max(len(label) for label,_ in rows)
-        print(self.paint('1','Stats'))
-        for label,value in rows:
-            print(f'  {label:<{width}}  {value}')
-        sys.stdout.flush()
-
-
 def _size(path):
     """File count and human size under path, without following links."""
-    files=total=0
-    for root,_,names in os.walk(path):
-        for name in names:
-            entry=os.path.join(root,name)
-            try:
-                if not os.path.islink(entry):
-                    total+=os.path.getsize(entry); files+=1
-            except OSError:
-                pass
-    value=float(total)
-    for unit in ('bytes','KB','MB','GB'):
-        if value<1024 or unit=='GB':
-            break
-        value/=1024
-    return f'{files:,} files, '+(f'{total:,} bytes' if unit=='bytes' else f'{value:.1f} {unit}')
+    files,total=tree_size(path)
+    # The launcher's compact stats omit the exact-byte suffix used by builds.
+    return f'{files:,} files, '+size_text(total).split(' (',1)[0]
 
 
 def _describe(args,report):
     module=environment()
     current=record()
-    print(report.paint('1;36',f'BS Podcasts {module.__version__}'),flush=True)
+    print(report._paint('1;36',f'BS Podcasts {module.__version__}'),flush=True)
     for label,value in (('Runtime',DEPLOYMENT),('Python',sys.version.split()[0]),
                         ('Data',os.environ['BS_PODCASTS_DATA_DIR']),('Log',PROJECT/'logs'/LOG_NAME)):
         report.line('info',f'{label}: {value}')
@@ -292,7 +254,7 @@ def main():
     parser.add_argument('--check',action='store_true')
     parser.add_argument('--stop',action='store_true')
     args,extra=parser.parse_known_args()
-    report=Report(plain=args.plain)
+    report=Reporter(plain=args.plain)
     app_started=[]
     try:
         return _launch(args,extra,report,app_started)

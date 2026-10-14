@@ -23,11 +23,6 @@ class SleepTimer:
         """Bumped by every cancel; a callback carrying an older token does nothing."""
         return self._token
 
-    @property
-    def timer(self) -> Timer | None:
-        """The armed timer, or None once it has fired or been cancelled."""
-        return self._timer
-
     def arm(self, deadline: float, fire) -> None:
         wait = max(0.0, min(self.RECHECK, deadline - time.time()))
         self._timer = Timer(wait, fire, args=(self._token,))

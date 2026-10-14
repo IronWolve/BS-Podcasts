@@ -60,13 +60,13 @@ from ..urlguard import is_web_url
 from ..privacy import feed_label, redact
 from ..data.database import is_corruption_error
 from . import icons
-from .models import EpisodeRow, EpisodeDelegate, EpisodeModel, ItemRoles, ShowRow, plain_snippet, set_item_tooltips
+from .models import EpisodeRow, EpisodeDelegate, EpisodeModel, EpisodeRowsIndex, ItemRoles, ShowRow, artwork_row, download_row, plain_snippet, set_item_tooltips
 from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, decode_preview_images, install_previews
 from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_accent_token
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, SettingsPage, KeyboardMenu, _ListPageMixin
 from .shortcuts import ShortcutManager, set_literal_tooltip
 from .playback_actions import PlaybackAction
-from .theme import COLORS, app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
+from .theme import app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
 from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu, hide_hover_bubble, open_web_url, quiet_signals, show_hover_bubble
 
 
@@ -87,9 +87,6 @@ class _lazy_dialog:
 
     def __call__(self, *args, **kwargs):
         return self._resolve()(*args, **kwargs)
-
-    def __getattr__(self, attribute):
-        return getattr(self._resolve(), attribute)
 
 
 AboutDialog = _lazy_dialog("AboutDialog")
@@ -461,7 +458,6 @@ class MainWindow(QMainWindow):
         self._directory_artwork_completed = set()
         self._discover_value = ""
         self._discover_limit = 30
-        self._discover_initial_limit = 30
         self._discover_loading = False
         self._discover_exhausted = False
         self._discover_result_count = 0
@@ -526,7 +522,6 @@ class MainWindow(QMainWindow):
         self._episode_artwork_resolved = OrderedDict()
         self._episode_artwork_page = None
         self._last_playback_error = ""
-        self._last_sleep_deadline = None
         self._download_samples = {}
         # Last download records delivered to the UI, by episode id: the
         # click-time dedup reads this instead of querying SQLite on the Qt thread.
@@ -734,6 +729,7 @@ class MainWindow(QMainWindow):
         self.search_overlay.episode_chosen.connect(self._open_search_episode)
         self.search_overlay.directory_chosen.connect(self._directory_search_from_overlay)
         self.search_overlay.show_all_requested.connect(self._show_library_search)
+        self.search_overlay.show_all_podcasts_requested.connect(self._show_podcast_search)
         self.search_overlay.menu_requested.connect(self._show_search_result_menu)
         self.pages.installEventFilter(self)
 
@@ -856,6 +852,8 @@ class MainWindow(QMainWindow):
         self.episode_page.hero.information_requested.connect(self._show_hero_information)
         for page in (self.episode_page, self.download_page, self.history_page, self.bookmark_page):
             page.queue_selected_requested.connect(self._queue_many)
+        self.playlist_page.selection_bar.set_queue_visible(False)
+        for page in (self.episode_page, self.download_page, self.history_page, self.bookmark_page, self.playlist_page):
             page.download_selected_requested.connect(self._download_many)
             page.played_selected_requested.connect(lambda items: self._mark_played_many(items, True))
 
@@ -888,6 +886,7 @@ class MainWindow(QMainWindow):
             # keys flipped play/pause or added a bookmark per key repeat.
             if name in {"play_pause", "queue_selected", "bookmark", "silence_trim", "ab_repeat", "quit", "help"}:
                 shortcut.setAutoRepeat(False)
+        self.shortcuts.flush_repairs()
 
     def _wire_library(self):
         if self.library is None:
@@ -900,8 +899,9 @@ class MainWindow(QMainWindow):
             self.episode_page.header.action.setObjectName("quietButton")
             self.episode_page.header.action.setIcon(icons.themed_icon("refresh", "text", 16))
             self.episode_page.header.action.clicked.connect(self._refresh_episode_view)
-        self.episode_page.banner.retry_requested.connect(self._refresh_episode_view)
-        self.podcast_page.banner.retry_requested.connect(self._retry_podcast_banner)
+        for page in (self.home_page, self.podcast_page, self.episode_page, self.playlist_page,
+                     self.history_page, self.download_page, self.bookmark_page):
+            page.banner.retry_requested.connect(lambda target=page: self._retry_page(target))
         self.home_page.header.search.returnPressed.connect(self._home_search)
         self.home_page.header.search.textEdited.connect(self._home_search_typed)
         self.settings_page.setting_changed.connect(self._save_setting)
@@ -1834,6 +1834,8 @@ class MainWindow(QMainWindow):
             + data["names"] + file_note,
             "Remove all", destructive=True, parent=self,
         )
+        if file_count:
+            dialog.add_file_listing([str(path) for paths in data.get('paths', {}).values() for path in paths])
         if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
         library = self.library
@@ -1880,6 +1882,8 @@ class MainWindow(QMainWindow):
             "Settings and shortcuts are kept; recent Discover searches are cleared too. This cannot be undone.",
             "Reset library", destructive=True, parent=self,
         )
+        if files:
+            dialog.add_file_listing([str(path) for preview in previews for path, _size in preview.get('files', ())])
         if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
         playback = self.playback
@@ -2005,6 +2009,13 @@ class MainWindow(QMainWindow):
         if not episode.show_id:
             return
         self._open_show_id(episode.show_id, select_episode_id=episode.episode_id)
+
+    def _show_podcast_search(self, query):
+        if self.library is None:
+            return
+        self.navigation.select(PAGE_PODCASTS)
+        self.podcast_page.header.search.setText(query)
+        self.podcast_page._apply_filters()
 
     def _show_library_search(self, query: str, navigate=True, limit=500, force=False):
         query = query.strip()
@@ -2837,15 +2848,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_shortcut_hints(self):
         for widget in self.findChildren(QWidget):
-            tip = widget.toolTip()
-            previous = widget.property('bsFormattedHint')
-            template = widget.property('bsHintTemplate') if tip == previous else tip
-            if template:
-                formatted = self.shortcuts.format_hint(template)
-                widget.setProperty('bsHintTemplate', template)
-                widget.setProperty('bsFormattedHint', formatted)
-                if formatted != tip:
-                    widget.setToolTip(formatted)
+            self.shortcuts.format_widget_hint(widget)
 
     # ------------------------------------------------------------------ library
     def _prime_accents(self, artwork_paths=None):
@@ -2875,6 +2878,10 @@ class MainWindow(QMainWindow):
             self._ui_episode_cache.clear()
             self._convert_revision += 1
         self._last_library_data = None
+        repository = getattr(self.library, 'repository', None)
+        clear_search = getattr(repository, 'clear_search_cache', None)
+        if clear_search is not None:
+            clear_search()
 
     def _read_library(self):
         """All queries and UI conversion for a reload. Artwork tints are cache
@@ -2980,10 +2987,13 @@ class MainWindow(QMainWindow):
                 self._catalog_timer.stop()
                 self._requery_library_search()
                 return
-            query, offset = self._catalog_query, len(self._catalog_search_items)
+            query, current_items = self._catalog_query, self._catalog_search_items
+            offset = len(current_items)
+            before = (current_items[-1].published_at, current_items[-1].episode_id) if current_items else None
             self.episode_page.set_load_more_state(True, loading=True, noun='matching episodes')
             def apply(chunk):
-                if self._catalog_query != query:
+                if (self._catalog_query != query or self._catalog_search_items is not current_items
+                        or len(current_items) != offset):
                     return
                 chunk, total = chunk
                 known = {item.episode_id for item in self._catalog_search_items}
@@ -2993,7 +3003,7 @@ class MainWindow(QMainWindow):
                     self._catalog_total = len(self._catalog_search_items)
                 self._catalog_limit = max(500, len(self._catalog_search_items))
                 self._display_library_search()
-            self._run_read(lambda: (self._ui_episodes(self.library.search_episodes(query, 500, offset)),
+            self._run_read(lambda: (self._ui_episodes(self.library.search_episodes(query, 500, before=before)),
                                    self.library.search_episode_count(query)), apply, 'catalog-search-more')
             return
         self.episode_page.set_load_more_state(True, loading=True)
@@ -3753,8 +3763,7 @@ class MainWindow(QMainWindow):
     # automatic downloads); retention asks before a pass removes such a file.
     CHOSEN_KEY = "download.chosen.{}"
     AUDIO_SUFFIXES = (".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac", ".aac", ".m4b")
-    # Each file runs a metadata probe of up to a few seconds; a bigger drop
-    # imports the first ones and says how many were left out.
+    # Probe a bounded batch in one reader session; bigger drops report omissions.
     LOCAL_IMPORT_LIMIT = 50
 
     def _import_local_audio(self):
@@ -3775,16 +3784,13 @@ class MainWindow(QMainWindow):
         started_on = self.pages.currentIndex()
 
         def work():
-            imported, failed = 0, []
-            for position, path in enumerate(chosen):
-                if _QUITTING.is_set():
-                    return imported, failed, len(chosen) - position
-                try:
-                    library.import_local_audio(path)
-                    imported += 1
-                except Exception as exc:
-                    failed.append(f"{Path(path).name}: {exc}")
-            return imported, failed, 0
+            outcomes = library.import_local_audio_many(chosen, cancelled=_QUITTING.is_set)
+            imported = sum(not isinstance(result, Exception) for result in outcomes)
+            failed = [f"{Path(path).name}: {result}" for path, result in zip(chosen, outcomes)
+                      if isinstance(result, Exception) and str(result) != 'Audio import cancelled.']
+            left = max(0, len(chosen) - len(outcomes)) + sum(
+                isinstance(result, Exception) and str(result) == 'Audio import cancelled.' for result in outcomes)
+            return imported, failed, left
 
         def apply(result):
             imported, failed, left = result
@@ -5015,6 +5021,34 @@ class MainWindow(QMainWindow):
             # every loaded row, so completions share one pass per window.
             self._later(250, self._flush_episode_artwork)
 
+    def _indexed_episode_rows(self, slot, items):
+        """One reusable index per fixed shell mirror; each retains only its current list."""
+        indices = getattr(self, '_episode_row_positions', None)
+        if indices is None:
+            indices = self._episode_row_positions = {}
+        index = indices.get(slot)
+        if index is None:
+            index = indices[slot] = EpisodeRowsIndex()
+        return index.bind(items)
+
+    def _patch_episode_mirrors(self, changes, merge, *, artwork=False):
+        for name in ('_all_episode_items', '_catalog_search_items', '_history_items_shown'):
+            items = getattr(self, name, None)
+            if items is not None:
+                self._indexed_episode_rows(name, items).apply(changes, merge, artwork=artwork)
+            elif getattr(self, '_episode_row_positions', None) is not None:
+                self._episode_row_positions.pop(name, None)
+        if self._last_library_data is not None:
+            for name in ('episodes', 'detail_episodes', 'in_progress', 'queued', 'history'):
+                items = self._last_library_data.get(name)
+                if items is not None:
+                    self._indexed_episode_rows('data:' + name, items).apply(changes, merge, artwork=artwork)
+                elif getattr(self, '_episode_row_positions', None) is not None:
+                    self._episode_row_positions.pop('data:' + name, None)
+        elif getattr(self, '_episode_row_positions', None) is not None:
+            for name in ('episodes', 'detail_episodes', 'in_progress', 'queued', 'history'):
+                self._episode_row_positions.pop('data:' + name, None)
+
     def _flush_episode_artwork(self):
         self._episode_artwork_apply_scheduled = False
         changes, self._pending_episode_artwork = self._pending_episode_artwork, {}
@@ -5025,37 +5059,19 @@ class MainWindow(QMainWindow):
             self._episode_artwork_resolved.move_to_end(key)
         while len(self._episode_artwork_resolved) > 2048:
             self._episode_artwork_resolved.popitem(last=False)
-        def update(current):
-            item = changes.get((current.episode_id, current.artwork_url))
-            if item is None:
-                return current
-            return replace_item(current, artwork_path=item.artwork_path,
-                                episode_artwork_path=item.episode_artwork_path, accent=item.accent)
-        def holds(items):
-            return any((current.episode_id, current.artwork_url) in changes for current in items)
-        def updated(items):
-            # A list with none of the changed covers is left as it is.
-            return [update(current) for current in items] if holds(items) else items
         for page in (self.home_page, self.episode_page, self.playlist_page, self.download_page, self.bookmark_page, self.history_page):
-            page.replace_all_items(updated(page.all_items))
-            if holds(page.model.items()):
-                page.model.update_artwork_batch(changes)
+            page.update_episode_artwork(changes)
         queue_model = self.context.queue_view.model()
-        if queue_model is not None and holds(queue_model.items()):
+        if queue_model is not None:
             queue_model.update_artwork_batch(changes)
-        self._all_episode_items = updated(self._all_episode_items)
-        self._catalog_search_items = updated(getattr(self, "_catalog_search_items", []))
-        self._history_items_shown = updated(self._history_items_shown)
-        if self._last_library_data is not None:
-            for name in ('episodes', 'detail_episodes', 'in_progress', 'queued', 'history'):
-                self._last_library_data[name] = updated(self._last_library_data.get(name, []))
+        self._patch_episode_mirrors(changes, artwork_row, artwork=True)
         with self._convert_lock:
             for episode_id, _url in changes:
                 self._ui_episode_cache.pop(episode_id, None)
             self._convert_revision += 1
         current = self.context.current_item()
         if isinstance(current, EpisodeRow) and (current.episode_id, current.artwork_url) in changes:
-            self._refresh_context_item(current, update(current))
+            self._refresh_context_item(current, artwork_row(current, changes[(current.episode_id, current.artwork_url)]))
 
     def _delete_played_quietly(self, episode_ids=None, confirm=False, if_enabled=False):
         """Offer the played downloads of episodes that just finished: the worker finds them, and the
@@ -5826,7 +5842,6 @@ class MainWindow(QMainWindow):
         if expired > getattr(self, "_sleep_expired_count", expired) and state == "paused":
             self._notify("Sleep timer ended — paused", "info", "+15 min", lambda: (self._set_sleep(900), self._play_pause()))
         self._sleep_expired_count = expired
-        self._last_sleep_deadline = snapshot.sleep_deadline
         duration = float(snapshot.duration) or 0.0
         self.player.set_ab_markers(
             (snapshot.ab_start / duration) if duration and snapshot.ab_start is not None else None,
@@ -6232,41 +6247,12 @@ class MainWindow(QMainWindow):
 
     def _apply_download_rows(self, ids, rows):
         self._download_rows_pending.difference_update(ids)
-
-        def merge(current):
-            row = rows.get(current.episode_id)
-            if row is None or (row.state, row.detail, row.progress, row.downloaded_path) == (
-                    current.state, current.detail, current.progress, current.downloaded_path):
-                return current
-            return replace_item(current, state=row.state, detail=row.detail,
-                                progress=row.progress, downloaded_path=row.downloaded_path)
-
-        def merged(items):
-            changed = [merge(current) for current in items]
-            return changed if any(new is not old for new, old in zip(changed, items)) else items
-
-        def deltas(items):
-            changed = {}
-            for current in items:
-                row = merge(current)
-                if row is not current:
-                    changed[row.episode_id] = row
-            return changed
-
         for page in (self.episode_page, self.playlist_page, self.history_page):
-            changes = deltas(page.all_items)
-            if changes:
-                page.update_items(changes)
+            page.update_items(rows, merge=download_row)
         for model in (self.home_page.model, self.context.queue_view.model()):
-            changes = deltas(model.items()) if model is not None else {}
-            if changes:
-                model.update_items(changes)
-        self._all_episode_items = merged(self._all_episode_items)
-        self._catalog_search_items = merged(getattr(self, "_catalog_search_items", []))
-        self._history_items_shown = merged(self._history_items_shown)
-        if self._last_library_data is not None:
-            for name in ('episodes', 'detail_episodes', 'in_progress', 'queued', 'history'):
-                self._last_library_data[name] = merged(self._last_library_data.get(name, []))
+            if model is not None:
+                model.apply_updates(rows, download_row)
+        self._patch_episode_mirrors(rows, download_row)
         # The Downloads page and the active-download counts come from the
         # download records, which changed with the state.
         self._reload_downloads()
@@ -6475,8 +6461,22 @@ class MainWindow(QMainWindow):
             page.banner.clear()
 
     def _show_page_error(self, page, message):
-        page.banner.show_state("error", message)
+        retry = page in (self.podcast_page, self.episode_page, self.playlist_page,
+                         self.download_page, self.history_page, self.home_page,
+                         self.bookmark_page)
+        page.banner.show_state("error", message, retry=retry)
         self._page_errors[page] = message
+
+    def _retry_page(self, page):
+        if self._page_errors.get(page) == page.banner.label.text():
+            if page is self.bookmark_page and self.listening is not None:
+                self._reload_bookmarks()
+            else:
+                self._reload_library_async()
+        elif page is self.episode_page:
+            self._refresh_episode_view()
+        elif page is self.podcast_page:
+            self._retry_podcast_banner()
 
     def _read_bookmark_items(self):
         items = []
@@ -6700,7 +6700,6 @@ class MainWindow(QMainWindow):
         # directory cap in the background (see the result apply); the limit
         # is per request, so laddering 30→60→90 just re-downloaded the list.
         self._discover_limit = retained_limit or (min(50, self._discover_maximum_for(operation)) if operation != "chart" else 30)
-        self._discover_initial_limit = self._discover_limit
         self._discover_exhausted = False
         self._discover_result_count = 0
         self._discover_retry_request = None
@@ -8128,6 +8127,11 @@ class MainWindow(QMainWindow):
         if self.search_overlay.isVisible():
             self.search_overlay.hide()
         previous = self.pages.currentIndex()
+        if (previous == index == PAGE_EPISODES and not self._history_navigation
+                and not self._episode_navigation_prepared
+                and (self._hero_show_id or self._preview_episodes_url or self._catalog_query)):
+            self._push_history(self._back_stack, self._episode_navigation_entry())
+            self._forward_stack.clear()
         if previous >= 0 and previous != index and not self._history_navigation:
             self._push_history(self._back_stack, previous)
             self._forward_stack.clear()
@@ -8313,15 +8317,7 @@ class MainWindow(QMainWindow):
         if event.type() not in _FILTERED_EVENTS:
             return False
         if event.type() in _HINT_EVENTS and isinstance(watched, QWidget) and hasattr(self, "shortcuts"):
-            tip = watched.toolTip()
-            previous = watched.property("bsFormattedHint")
-            template = watched.property("bsHintTemplate") if tip == previous else tip
-            if template:
-                formatted = self.shortcuts.format_hint(template)
-                watched.setProperty("bsHintTemplate", template)
-                watched.setProperty("bsFormattedHint", formatted)
-                if formatted != tip:
-                    watched.setToolTip(formatted)
+            self.shortcuts.format_widget_hint(watched)
             if event.type() == QEvent.Type.ToolTip and watched.toolTip() and not isinstance(watched, QAbstractItemView):
                 # Every control's hint is the app's own rounded bubble, anchored above the control, not the
                 # platform's square tooltip box. Item views show their rows' hints through their delegates.

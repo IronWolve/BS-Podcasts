@@ -145,6 +145,8 @@
 !/src/bs_podcasts/data/migrations/029_listening_attempts.sql
 !/src/bs_podcasts/data/migrations/030_drop_redundant_show_index.sql
 !/src/bs_podcasts/data/migrations/031_listening_source_triggers.sql
+!/src/bs_podcasts/data/migrations/032_storage_indexes.sql
+!/src/bs_podcasts/data/migrations/033_search_revision.sql
 !/src/bs_podcasts/data/repositories/__init__.py
 !/src/bs_podcasts/data/repositories/downloads.py
 !/src/bs_podcasts/data/repositories/library.py

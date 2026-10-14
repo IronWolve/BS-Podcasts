@@ -228,6 +228,9 @@ class TrayController:
             speed = float(getattr(snapshot, "speed", 1.0) or 1.0)
             if abs(speed - 1.0) > 0.01:
                 progress += f" · {speed:g}×"
+            message = getattr(snapshot, "message", "")
+            if message:
+                progress += f" · {message}"
             texts = (
                 _shorten(getattr(snapshot, "title", "") or "", _TITLE_LIMIT),
                 _shorten(getattr(snapshot, "show_title", "") or "", _TITLE_LIMIT),
@@ -243,6 +246,21 @@ class TrayController:
         if tooltip != part("_tooltip"):
             self._tooltip = tooltip
             self.tray.setToolTip(tooltip)
+        # Sleep state can change while all transport text stays identical.
+        # Reflect the chosen duration, not the nearest remaining minute step.
+        deadline = getattr(snapshot, "sleep_deadline", None)
+        at_end = getattr(snapshot, "sleep_at_end", False)
+        chosen = getattr(snapshot, "sleep_seconds", 0)
+        for seconds, action in (part("sleep_actions") or {}).items():
+            action.setChecked((seconds == -1 and at_end) or
+                              (seconds > 0 and bool(deadline) and seconds == chosen) or
+                              (seconds == 0 and not deadline and not at_end))
+        if part("sleep_menu") is not None:
+            remaining = int(max(0, deadline - time.time()) // 60) if deadline else 0
+            title = ("Sleep timer (end of episode)" if at_end else
+                     f"Sleep timer ({remaining} min left)" if deadline else "Sleep timer")
+            if self.sleep_menu.title() != title:
+                self.sleep_menu.setTitle(title)
         if texts == part("_texts"):
             return
         self._texts = texts
@@ -265,13 +283,6 @@ class TrayController:
         speed = float(getattr(snapshot, "speed", 1.0) or 1.0)
         for step, action in (part("speed_actions") or {}).items():
             action.setChecked(abs(step - speed) < 0.01)
-        deadline = getattr(snapshot, "sleep_deadline", None)
-        sleep_actions = part("sleep_actions") or {}
-        for seconds, action in sleep_actions.items():
-            action.setChecked(seconds == 0 and not deadline)
-        if part("sleep_menu") is not None:
-            remaining = int(max(0, deadline - time.time()) // 60) if deadline else 0
-            self.sleep_menu.setTitle(f"Sleep timer ({remaining} min left)" if remaining else "Sleep timer")
 
     def _toggle_playback(self):
         # Submit the action the menu displays, not a deferred toggle whose

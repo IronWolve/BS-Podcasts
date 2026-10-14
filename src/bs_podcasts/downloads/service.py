@@ -484,6 +484,9 @@ class DownloadService:
                     raise DownloadError("The download record is no longer available.")
             if cancellation.is_set():
                 return self._park(episode_id, partial)
+            recovered = self._recover_finished(episode_id, episode.media_url, target, partial, cancellation)
+            if recovered is not None:
+                return recovered
             # Setup lives inside the guard: an unusable path (mkdir or
             # disk_usage raising) previously leaked a permanently "active"
             # episode until restart, with the record stuck at queued.
@@ -567,6 +570,45 @@ class DownloadService:
                 return False  # unreadable is not proof that nothing is there
             return False
         return True
+
+    def _recover_finished(self, episode_id, source_url, target, partial, cancellation):
+        """Recover an atomic rename whose completion write did not land.
+
+        Only a server-declared exact length is completion evidence. A partial,
+        a changed source, an unsafe/replaced target or an unknown length keeps
+        the normal transfer path; no metadata probe or network is needed here.
+        """
+        record = self.downloads.get(episode_id)
+        if (record is None or record.source_url != source_url or record.expected_total <= 0
+                or record.expected_total > self.MAX_DOWNLOAD_BYTES
+                or target.suffix.lower() not in SAFE_MEDIA_SUFFIXES):
+            return None
+        try:
+            partial.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return None
+        else:
+            return None
+        try:
+            before = target.lstat()
+            if not stat.S_ISREG(before.st_mode) or before.st_size != record.expected_total:
+                return None
+            with target.open('rb') as handle:
+                opened = os.fstat(handle.fileno())
+                head = handle.read(512)
+            after = target.lstat()
+            identity = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+            if identity(before) != identity(opened) or identity(before) != identity(after):
+                return None
+            if _looks_like_document(head, final=True) or unsafe_media_payload(head):
+                return None
+        except OSError:
+            return None
+        if cancellation.is_set():
+            return self._park(episode_id, partial)
+        return self._publish_complete(episode_id, target, before.st_size, True, record)
 
     CANCEL_UNWIND_TIMEOUT = 5.0
 
@@ -1092,6 +1134,9 @@ class DownloadService:
         before = self.downloads.get(episode_id)
         os.replace(partial, target)
         sync_directory(target.parent)
+        return self._publish_complete(episode_id, target, done, length_verified, before)
+
+    def _publish_complete(self, episode_id, target, done, length_verified, before):
         # `done` is the transfer's own byte count and equals the file size.
         # Calling stat() here let a concurrent delete turn a complete,
         # correctly-named file into an ERROR record at 0/0.

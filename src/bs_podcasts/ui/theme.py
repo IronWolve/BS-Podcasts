@@ -191,8 +191,8 @@ def resolve_theme(setting: str) -> str:
 
 
 def apply_theme(name: str):
-    """Switch the shared palette. Widgets built afterwards pick it up; existing
-    widgets need rebuilding (the shell relaunches its window)."""
+    """Switch the shared palette. The shell restyles existing widgets in place;
+    only a system contrast-preference change rebuilds its window."""
     global _current_theme
     palette = THEMES.get(name, DARK)
     _current_theme = name if name in THEMES else "dark"
@@ -608,7 +608,7 @@ def stylesheet() -> str:
     QCheckBox::indicator:hover {{ border-color: {c['muted']}; }}
     QCheckBox::indicator:checked {{
         background: {c['accent']}; border-color: {c['accent']};
-        image: url({{icon:check:{c['on_accent']}:14}});
+        image: url({{icon:check:{c['on_accent']}:{sp(14)}}});
     }}
     QCheckBox:focus {{ color: {c['accent']}; }}
     QAbstractItemView {{
@@ -814,15 +814,15 @@ def stylesheet() -> str:
     QLabel#timeLabel {{ color: {c['muted']}; font-size: {small}px; min-width: {sp(44)}px; }}
     /* seekSlider paints its own track and handle (SeekSlider.paintEvent). */
     QSlider#seekSlider {{ background: transparent; }}
-    QSlider#volumeSlider::groove:horizontal {{ height: 4px; background: {c['border']}; border-radius: 2px; }}
-    QSlider#volumeSlider::sub-page:horizontal {{ background: {c['text']}; border-radius: 2px; }}
+    QSlider#volumeSlider::groove:horizontal {{ height: {scaled_dim(4)}px; background: {c['border']}; border-radius: {scaled_dim(2)}px; }}
+    QSlider#volumeSlider::sub-page:horizontal {{ background: {c['text']}; border-radius: {scaled_dim(2)}px; }}
     QSlider#volumeSlider::handle:horizontal {{
-        background: {c['text_strong']}; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px;
+        background: {c['text_strong']}; width: {sp(12)}px; height: {sp(12)}px; margin: -{scaled_dim(4)}px 0; border-radius: {scaled_dim(6)}px;
     }}
     QSlider#volumeSlider::handle:horizontal:focus {{ background: {c['accent']}; }}
     QPushButton#edgeToggle {{
         background: transparent; border: 1px solid transparent;
-        border-radius: 10px; padding: 0;
+        border-radius: {sp(10)}px; padding: 0;
     }}
     QPushButton#edgeToggle:hover {{ background: {c['surface_soft']}; border-color: {c['border']}; }}
     QPushButton#edgeToggle:focus {{ border: {focus_ring}; }}
@@ -869,7 +869,7 @@ def stylesheet() -> str:
     QLabel#emptyTitle {{ font-size: {TYPE['h2']}px; font-weight: 600; color: {c['text_strong']}; }}
     QLabel#emptyBody {{ color: {c['muted']}; }}
     QFrame#emptyGlyph {{
-        background: {c['surface']}; border: 1px solid {c['hairline']}; border-radius: 28px;
+        background: {c['surface']}; border: 1px solid {c['hairline']}; border-radius: {sp(56) / 2:g}px;
     }}
     QLabel#errorText {{ color: {c['danger']}; font-size: {small}px; }}
     QFrame#selectionBar {{

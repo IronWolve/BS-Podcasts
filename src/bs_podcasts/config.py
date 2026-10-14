@@ -66,14 +66,14 @@ def system_reduced_motion() -> bool | None:
 # BS_PODCASTS_DATA_DIR keeps everything under one folder (development / portable).
 
 
-# The resolved form of each BS_PODCASTS_DATA_DIR value seen, so a relative
+# The resolved form of each application directory override seen, so a relative
 # value names one folder for the life of the process, not whichever folder
 # the process is in when a path is next asked for.
 _resolved_overrides: dict[str, Path] = {}
 
 
-def _override() -> Path | None:
-    value = os.environ.get("BS_PODCASTS_DATA_DIR")
+def _override(name="BS_PODCASTS_DATA_DIR") -> Path | None:
+    value = os.environ.get(name)
     if not value:
         return None
     resolved = _resolved_overrides.get(value)
@@ -99,9 +99,9 @@ def data_dir() -> Path:
 
 def cache_dir() -> Path:
     """Artwork and rendered icons — safe to delete at any time."""
-    configured = os.environ.get("BS_PODCASTS_CACHE_DIR")
+    configured = _override("BS_PODCASTS_CACHE_DIR")
     if configured:
-        return Path(configured).expanduser()
+        return configured
     override = _override()
     if override:
         return override / "cache"

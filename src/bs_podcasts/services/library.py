@@ -183,8 +183,8 @@ class LibraryService:
             return self.shows(), self.episodes(limit=limit)
         return self.repository.search(query, limit)
 
-    def search_episodes(self, query: str, limit: int = 500, offset: int = 0):
-        return self.repository.search_episodes(query, limit, offset)
+    def search_episodes(self, query: str, limit: int = 500, offset: int = 0, *, before=None):
+        return self.repository.search_episodes(query, limit, offset, before=before)
 
     def search_episode_count(self, query: str) -> int:
         return self.repository.search_episode_count(query)
@@ -224,11 +224,11 @@ class LibraryService:
 
         return LocalAudioImporter(self.repository).import_file(path)
 
-    def import_local_audio_many(self, paths, on_result=None):
+    def import_local_audio_many(self, paths, on_result=None, *, cancelled=None):
         """Import several files in one reader session; see LocalAudioImporter.import_many."""
         from ..feeds.local import LocalAudioImporter
 
-        return LocalAudioImporter(self.repository).import_many(paths, on_result)
+        return LocalAudioImporter(self.repository).import_many(paths, on_result, cancelled=cancelled)
 
     def mark_show_played(self, show_id: int, played: bool = True) -> int:
         return self.repository.mark_show_played(show_id, played)

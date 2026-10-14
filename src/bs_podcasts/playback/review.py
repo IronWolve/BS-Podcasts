@@ -1,6 +1,6 @@
 """The A-B repeat markers and the silence-trim level of the episode being played."""
 
-TRIM_LEVELS = frozenset({"off", "light", "medium", "strong"})
+from ..domain.models import TRIM_LEVELS
 
 
 class ReviewSettings:

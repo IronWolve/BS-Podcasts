@@ -53,6 +53,7 @@ class _ArtworkCache:
         self._sources = {}
         self._source_keys = {}
         self._path_groups = {}
+        self._interims = {}
         self._protected = set()
 
     def resize(self, limit_bytes, max_entries):
@@ -101,6 +102,13 @@ class _ArtworkCache:
         return None
 
     def _unindex(self, key):
+        if key.startswith('coverinterim:cover:'):
+            group = key.rsplit(':', 3)[0] + ':'
+            variants = self._interims.get(group)
+            if variants is not None:
+                variants.discard(key)
+                if not variants:
+                    del self._interims[group]
         group = self._source_keys.pop(key, None)
         if group is not None:
             variants = self._sources[group]
@@ -114,6 +122,9 @@ class _ArtworkCache:
                         del self._path_groups[group[0]]
 
     def _index(self, key):
+        if key.startswith('coverinterim:cover:'):
+            group = key.rsplit(':', 3)[0] + ':'
+            self._interims.setdefault(group, set()).add(key)
         if not key.startswith('src:'):
             return
         try:
@@ -153,6 +164,11 @@ class _ArtworkCache:
             return
         self.bytes -= old[1]
         self._unindex(key)
+
+    def drop_interims(self, path, width, height):
+        group = f"coverinterim:cover:{path}:{width}x{height}:"
+        for key in tuple(self._interims.get(group, ())):
+            self.drop(key)
 
 
 _artwork_cache = _ArtworkCache()
@@ -783,13 +799,6 @@ def _sync_forced() -> bool:
     return os.environ.get("BS_PODCASTS_SYNC_ARTWORK") == "1"
 
 
-def pending_decodes() -> int:
-    """Covers still being decoded. A test seam only: no production code calls it. The private checks
-    smoke_artwork_lifecycle, smoke_artwork_async and smoke_remediation_scroll_hold wait on it."""
-    with _decode_lock:
-        return len(_inflight)
-
-
 def _source(path: str, width: int, height: int, sync: bool = False, notify=None) -> QPixmap | None:
     """Artwork decoded near its painted size, from the bounded artwork cache.
 
@@ -947,7 +956,5 @@ def cover(
     _artwork_cache.insert(key, result)
     if source is not None and not interim:
         # The exact cover is in: every interim drawn for this image, at this size under any revision, is stale.
-        stale = f"coverinterim:cover:{path}:{width}x{height}:"
-        for old in [entry for entry in _artwork_cache._items if entry.startswith(stale)]:
-            _artwork_cache.drop(old)
+        _artwork_cache.drop_interims(path, width, height)
     return result if pending else present(result)

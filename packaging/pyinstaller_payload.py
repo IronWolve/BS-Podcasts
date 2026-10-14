@@ -20,6 +20,9 @@ UNUSED_BINARIES = (
     "qt6virtualkeyboard", "qtvirtualkeyboard", "qtvirtualkeyboardplugin",
     "imageformats/qpdf", "imageformats/libqpdf", "opengl32sw",
 )
+# Qt's unused Windows TLS provider and its private OpenSSL pair. Python's
+# unsuffixed SSL libraries and the native player's libraries remain required.
+UNUSED_WINDOWS_BINARIES = frozenset({"qopensslbackend.dll", "libcrypto-3-x64.dll", "libssl-3-x64.dll"})
 # Whether an uncaught traceback in the windowed build is suppressed (True) or shown in a dialog (False).
 # The owner has not chosen one value for both platforms, so this is the only place either value is set.
 DISABLE_WINDOWED_TRACEBACK = {"windows": False, "macos": True}
@@ -29,6 +32,8 @@ def dropped_payload(name):
     """True for a bundle entry the app does not need. Separators are normalised before every test."""
     normalized = name.replace("\\", "/").lower()
     parts = normalized.split("/")
+    if parts[-1] in UNUSED_WINDOWS_BINARIES:
+        return True
     if normalized.endswith(".qm") or "translations" in parts:
         return True
     if any(part == "pil" or part.startswith("pil.") or part == "pillow" or part.startswith("pillow.") for part in parts):

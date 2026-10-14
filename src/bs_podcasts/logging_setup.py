@@ -5,9 +5,10 @@ from pathlib import Path
 import faulthandler
 import logging
 import os
+import sys
 import threading
 
-from .config import data_dir
+from .config import data_dir, _override
 from .data.files import open_private, private_file
 from .privacy import redact
 
@@ -45,9 +46,9 @@ class _PrivateLog(RotatingFileHandler):
 
 
 def log_path() -> Path:
-    configured = os.environ.get("BS_PODCASTS_LOG_DIR")
+    configured = _override("BS_PODCASTS_LOG_DIR")
     if configured:
-        return Path(configured).expanduser() / "bs-podcasts.log"
+        return configured / "bs-podcasts.log"
     return data_dir() / "logs" / "bs-podcasts.log"
 
 
@@ -124,7 +125,7 @@ def configure_logging(level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(level)
     logger.propagate = False
-    if not logger.handlers:
+    if not logger.handlers and sys.stderr is not None:
         formatter = _PrivateFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
         console = logging.StreamHandler()
         console.setFormatter(formatter)

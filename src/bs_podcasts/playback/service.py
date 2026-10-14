@@ -64,6 +64,7 @@ class PlaybackSnapshot:
     sleep_deadline: float | None = None
     sleep_expired_count: int = 0
     sleep_at_end: bool = False  # pause when the current episode finishes
+    sleep_seconds: int = 0  # the chosen duration, independent of countdown ticks
     message: str = ""
     ab_start: float | None = None
     ab_end: float | None = None
@@ -203,9 +204,9 @@ class PlaybackService:
     # of the file: a reopen of the same episode (stream recovery) keeps them.
     # The reconnect notice rides along until the file has loaded again. Any
     # other load of the episode already on screen keeps them all but the notice.
-    REOPEN_KEEPS = ("sleep_deadline", "sleep_expired_count", "sleep_at_end", "ab_start", "ab_end", "message")
-    SAME_KEEPS = REOPEN_KEEPS[:5]
-    SLEEP_KEEPS = REOPEN_KEEPS[:3]  # carried across the queue's own advance
+    REOPEN_KEEPS = ("sleep_deadline", "sleep_expired_count", "sleep_at_end", "sleep_seconds", "ab_start", "ab_end", "message")
+    SAME_KEEPS = REOPEN_KEEPS[:6]
+    SLEEP_KEEPS = REOPEN_KEEPS[:4]  # carried across the queue's own advance
 
     @staticmethod
     def _best_effort(what: str, work):
@@ -553,25 +554,6 @@ class PlaybackService:
         finally:
             self._lock.release()
 
-    def _materialize(self, autoplay: bool = False) -> bool:
-        """Open the deferred episode in the engine if it is not loaded yet.
-
-        `autoplay` must reflect the user's intent: a bare engine.play() after
-        an autoplay=False load loses to the later file-loaded event, which
-        re-applies the stored pause once the stream actually opens."""
-        deferred = getattr(self, "_deferred_episode_id", None)
-        if deferred is None:
-            return False
-        # No re-seek afterwards. load_episode() is the single authority on the
-        # start position and already restarts a finished episode from zero;
-        # re-applying the snapshot's own position here put a completed episode
-        # straight back at its duration, so the first Play after a restore
-        # re-hit EOF instantly and silently re-marked/dequeued it. The
-        # snapshot's position is the same durable value load_episode reads, so
-        # nothing is lost by trusting it.
-        self.load_episode(deferred, autoplay=autoplay)
-        return True
-
     def _episode_to_open(self):
         """The library episode a Play has to open first, or None.
 
@@ -647,15 +629,11 @@ class PlaybackService:
         self.load_episode(opening, autoplay=True, start_position=start)
 
     def _replay_current(self, position=None, autoplay=True, keep_notice=False):
-        """Restart the finished item (library episode or transient stream).
+        """Restart a transient stream. Library episodes use load_episode outside the lock.
 
-        Called with the lock held. load_episode restarts a completed
-        episode from zero via its position≈duration rule. keep_notice is for
+        Called with the lock held. keep_notice is for
         a transient stream reopened after it was lost: the reconnect notice
         stays up (a library episode reopens through load_episode instead)."""
-        if self.snapshot.episode_id is not None:
-            self.load_episode(self.snapshot.episode_id, autoplay=autoplay, start_position=position)
-            return
         if position is None:
             position = self.snapshot.position if self.snapshot.state == PlaybackState.ERROR else 0.0
         self._begin_load(position, autoplay)
@@ -820,6 +798,11 @@ class PlaybackService:
                  if episode.show_id not in self._retiring_shows]
         if queue:
             self.load_episode(queue[0].id, autoplay=True, keep_sleep=True)
+        else:
+            with self._lock:
+                if not self._dead and self.snapshot.episode_id == current:
+                    self.snapshot = replace(self.snapshot, message="Nothing in Up Next.")
+                    self._emit()
 
     def previous(self):
         self.seek(0.0)
@@ -831,9 +814,13 @@ class PlaybackService:
             return duration
         return seconds
 
-    def seek(self, seconds: float, *, autoplay=None):
+    def seek(self, seconds: float, *, autoplay=None, _identity=None, _cancelled=None):
         with self._lock:
             self._guard()
+            if _cancelled is not None and _cancelled():
+                return
+            if _identity is not None and tuple(_identity) != self.current_identity():
+                return
             seconds = self._clamp_position(seconds)
             # Download-first is already waiting. Reloading here, including an
             # idle replay, goes through _begin_load and clears the pending Play.
@@ -843,40 +830,48 @@ class PlaybackService:
                 self.snapshot = replace(self.snapshot, position=seconds)
                 self._emit()
                 return
-            if self.snapshot.source and self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR}:
-                self._replay_current(position=seconds, autoplay=bool(autoplay))
+            opening = self._episode_to_open()
+            if opening is None:
+                if self.snapshot.source and self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR}:
+                    self._replay_current(position=seconds, autoplay=bool(autoplay))
+                    return
+                self._expect_seek(seconds)
+                self._desired_position = seconds
+                self._retarget_start(seconds)
+                if self.snapshot.source:
+                    self.snapshot = replace(self.snapshot, position=seconds)
+                    self._emit()
+                if self.snapshot.download_request or self._resolving:
+                    return
+                self.engine.seek_absolute(seconds)
                 return
-            self._materialize()
-            self._expect_seek(seconds)
-            self._desired_position = seconds
-            self._retarget_start(seconds)
-            if self.snapshot.source:
-                self.snapshot = replace(self.snapshot, position=seconds)
-                self._emit()
-            if self.snapshot.download_request or self._resolving:
-                return
-            self.engine.seek_absolute(seconds)
+            identity, intent = self.current_identity(), self.intent_revision
+        # A deferred/replayed episode waits on the library without holding
+        # the playback lock. Stop or a newer transport intent can supersede it.
+        self.load_episode(opening, autoplay=bool(autoplay), start_position=seconds,
+                          cancelled=lambda: self.current_identity() != identity or self.intent_revision != intent
+                          or (_cancelled is not None and _cancelled()))
 
     def seek_episode(self, episode_id: int, seconds: float, *, cancelled=None):
         with self._lock:
             if cancelled is not None and cancelled():
                 return
             same = self.snapshot.episode_id == episode_id and bool(self.snapshot.source)
-            if same and self.snapshot.download_request:
+            controlled = same and (self.snapshot.download_request or self._engine_loaded)
+            if controlled:
                 # Preserve the in-flight download ticket, but make this chapter
                 # action the current play intent and update its resume target.
                 self._load_autoplay = True
-                self.snapshot = replace(self.snapshot, state=PlaybackState.LOADING)
-                self.seek(seconds, autoplay=True)
-                return
-            if same and self._engine_loaded:
-                # A chapter click is a play intent here as well: it moves a
-                # paused episode and starts it, as it does for one not loaded.
-                self._load_autoplay = True
-                self.seek(seconds, autoplay=True)
-                if self.snapshot.state == PlaybackState.PAUSED and not self._resolving:
+                if self.snapshot.download_request:
+                    self.snapshot = replace(self.snapshot, state=PlaybackState.LOADING)
+                identity = self.current_identity()
+        if controlled:
+            self.seek(seconds, autoplay=True, _identity=identity, _cancelled=cancelled)
+            with self._lock:
+                if (self.current_identity() == identity and self.snapshot.state == PlaybackState.PAUSED
+                        and not self._resolving and not self._dead and not (cancelled is not None and cancelled())):
                     self.engine.play()
-                return
+            return
         self.load_episode(episode_id, start_position=seconds, autoplay=True, cancelled=cancelled)
 
     def current_identity(self):
@@ -908,9 +903,9 @@ class PlaybackService:
                 return
             else:
                 past_end = False
-            if not past_end:
-                self.seek(seconds)
-                return
+        if not past_end:
+            self.seek(seconds, _identity=identity)
+            return
         self.next()  # reads the library, so not under the lock
 
     def _global_skip(self, name: str, default: int, low: int, high: int) -> int:
@@ -936,24 +931,21 @@ class PlaybackService:
         with self._lock:
             self._guard()
             delta = float(seconds)
-            if self.snapshot.download_request:
-                self.seek(self.snapshot.position + delta)
+            target = self._desired_position if self._resolving else self.snapshot.position
+            if self.snapshot.download_request or self._resolving or self._episode_to_open() is not None or (
+                    self.snapshot.source and self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR}):
+                identity = self.current_identity()
+            else:
+                target = self._clamp_position(target + delta)
+                self._expect_seek(target)
+                self._desired_position = target
+                self._retarget_start(target)
+                if self.snapshot.source:
+                    self.snapshot = replace(self.snapshot, position=target)
+                    self._emit()
+                self.engine.skip(delta)
                 return
-            if self.snapshot.source and self.snapshot.state in {PlaybackState.IDLE, PlaybackState.ERROR}:
-                self.seek(self.snapshot.position + delta)
-                return
-            self._materialize()
-            if self.snapshot.download_request or self._resolving:
-                self.seek(self._desired_position + delta)
-                return
-            target = self._clamp_position(self.snapshot.position + delta)
-            self._expect_seek(target)
-            self._desired_position = target
-            self._retarget_start(target)
-            if self.snapshot.source:
-                self.snapshot = replace(self.snapshot, position=target)
-                self._emit()
-            self.engine.skip(delta)
+        self.seek(target + delta, _identity=identity)
 
     def _publish_review(self):
         # The window reads the markers and the trim level from the snapshot;
@@ -1041,7 +1033,7 @@ class PlaybackService:
             if seconds <= 0:
                 return
             deadline = time.time() + seconds
-            self.snapshot = replace(self.snapshot, sleep_deadline=deadline)
+            self.snapshot = replace(self.snapshot, sleep_deadline=deadline, sleep_seconds=int(seconds))
             self._sleep.arm(deadline, self._sleep_tick)
             self._emit()
 
@@ -1066,7 +1058,7 @@ class PlaybackService:
         with self._lock:
             self._sleep.cancel()
             if self.snapshot.sleep_deadline is not None or self.snapshot.sleep_at_end:
-                self.snapshot = replace(self.snapshot, sleep_deadline=None, sleep_at_end=False)
+                self.snapshot = replace(self.snapshot, sleep_deadline=None, sleep_at_end=False, sleep_seconds=0)
                 self._emit()
 
     def shutdown(self):
@@ -1890,7 +1882,7 @@ class PlaybackService:
                 logger.warning("Sleep timer could not pause playback: %s", redact(exc))
                 self.snapshot = replace(self.snapshot, message=self.SLEEP_NOT_PAUSED)
             finally:
-                self.snapshot = replace(self.snapshot, sleep_deadline=None,
+                self.snapshot = replace(self.snapshot, sleep_deadline=None, sleep_seconds=0,
                                         sleep_expired_count=self.snapshot.sleep_expired_count + 1)
                 self._emit()
 

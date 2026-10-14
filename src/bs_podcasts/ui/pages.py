@@ -7,7 +7,7 @@ import time
 import unicodedata
 
 from PySide6.QtCore import QEasingCurve, QEvent, QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint, QPropertyAnimation, QTimer, Signal, Qt
-from PySide6.QtGui import QAccessible, QAccessibleEvent, QContextMenuEvent, QCursor, QKeySequence, QShortcut
+from PySide6.QtGui import QContextMenuEvent, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSlider,
@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import icons
-from .models import EpisodeDelegate, EpisodeModel, ItemRoles, PodcastDelegate, PodcastModel
+from .models import EpisodeDelegate, EpisodeModel, EpisodeRowsIndex, ItemRoles, PodcastDelegate, PodcastModel, artwork_row
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, connect_hover_readout, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
 from .widgets import announce, fit_combo_width, quiet_signals
 from .widgets import PlainTextLabel, wheel_needs_focus, exec_menu, FlowLayout
@@ -273,6 +273,19 @@ class _ListPageMixin:
     def replace_all_items(self, items):
         """Swap in a new full item list; the rows on screen are not touched here."""
         self._all_items = items
+        index = getattr(self, '_episode_row_positions', None)
+        if index is not None:
+            index.invalidate()
+
+    def _episode_rows_index(self):
+        index = getattr(self, '_episode_row_positions', None)
+        if index is None:
+            index = self._episode_row_positions = EpisodeRowsIndex()
+        return index.bind(self._all_items)
+
+    def update_episode_artwork(self, changes):
+        self._episode_rows_index().apply(changes, artwork_row, artwork=True)
+        self.model.update_artwork_batch(changes)
 
     def _init_list(self, view: QListView, model, empty: EmptyState):
         self.view = view
@@ -508,10 +521,21 @@ class _ListPageMixin:
             self._tooltip_target = None
 
     def _selected(self, current, previous):
+        if getattr(self, "_replacing_rows", False):
+            return
         item = current.data(ItemRoles.ITEM) if current.isValid() else None
         if item is not None:
             self._context_item = item
             self.context_changed.emit(item)
+
+    def _replace_rows(self, items):
+        # Qt may briefly make a neighbouring row current during removal.
+        # Publish context only after selection has been restored by key.
+        self._replacing_rows = True
+        try:
+            self.model.replace(items)
+        finally:
+            self._replacing_rows = False
 
     def _queue_button_event(self, view, delegate, event):
         self._pause_scroll_for_click(event)
@@ -714,7 +738,11 @@ class _ListPageMixin:
                         previous = row
                     selection.select(chosen, QItemSelectionModel.SelectionFlag.ClearAndSelect)
             else:
-                self.view.setCurrentIndex(self.model.index(target or 0, 0))
+                selection = self.view.selectionModel()
+                selection.setCurrentIndex(self.model.index(target, 0) if target is not None else QModelIndex(),
+                                          QItemSelectionModel.SelectionFlag.NoUpdate)
+                if selection.hasSelection():
+                    selection.clearSelection()
         if preserve_scroll:
             def restore():
                 if revision != self._scroll_restore_revision:
@@ -1113,7 +1141,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             items.sort(key=lambda item: title_sort_key(item.title))
         elif self.discover and self._discover_sort == "newest":
             items.sort(key=lambda item: item.latest_sort_key or "", reverse=True)
-        self.model.replace(items)
+        self._replace_rows(items)
         self._restore_selection(restore_key, preserve_scroll, selected, anchor)
         if self.discover and not items:
             self.context_changed.emit(None)
@@ -1481,17 +1509,15 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         self._apply_filters(restore_key=key, preserve_scroll=preserve_scroll,
                             selected_keys=selected, anchor=anchor)
 
-    def update_items(self, updates):
+    def update_items(self, updates, merge=None):
         """Apply download deltas without resetting selection or untouched rows.
         The list is filtered, sorted and replaced again only when an update
         moves a row into or out of the selected chip."""
-        before = self._all_items
-        self._all_items = [updates.get(item.episode_id, item) for item in before]
+        merge = merge or (lambda _old, new: new)
+        changed = self._episode_rows_index().apply(updates, merge)
         test = self._chip_test()
-        if test is None or not any(
-                item.episode_id in updates and bool(test(item)) != bool(test(updates[item.episode_id]))
-                for item in before):
-            self.model.update_items(updates)
+        if test is None or not any(bool(test(old)) != bool(test(new)) for _row, old, new in changed):
+            self.model.apply_updates(updates, merge)
         else:
             self._apply_filters(restore_key=self._current_key(), preserve_scroll=True,
                                 selected_keys=self._selected_keys())
@@ -1499,8 +1525,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
 
     def _sync_clear_progress(self):
         if self.clear_progress_button is not None:
-            self.clear_progress_button.setEnabled(any(
-                item.episode_id > 0 and item.position_seconds > 0 for item in self.model.items()))
+            self.clear_progress_button.setEnabled(self.model.has_clearable_progress())
 
     def set_catalog_query(self, query: str):
         """The library search whose results the list holds. While the filter
@@ -1603,7 +1628,7 @@ class EpisodeListPage(BasePage, _ListPageMixin):
                 items.sort(key=lambda item: -(item.duration_seconds or 0))
             elif self._sort == "unplayed":
                 items.sort(key=lambda item: item.played)
-        self.model.replace(items)
+        self._replace_rows(items)
         self._restore_selection(restore_key, preserve_scroll, selected, anchor)
         self._update_empty(query)
         self._selection_changed()
@@ -1855,7 +1880,7 @@ class HomePage(BasePage, _ListPageMixin):
         latest = list(latest)
         self._resume_lead = in_progress[: self.RESUME_ROWS]
         shown = latest[:30]
-        self.model.replace(self._resume_lead + shown)
+        self._replace_rows(self._resume_lead + shown)
         if self._resume_lead:
             self.latest_title.title.setText("Continue listening")
             self.latest_title.set_count(len(in_progress), show_link=True)
@@ -1868,9 +1893,6 @@ class HomePage(BasePage, _ListPageMixin):
             has_new = any(episode.is_new for episode in shown)
             self.latest_title.set_count(len(latest) if has_new else len(shown), show_link=has_new)
         self._restore_selection(key, True, selected, anchor)
-
-    def set_items(self, items):  # compatibility: no heading is shown
-        self.set_sections([], items)
 
     def set_playing(self, episode_id: int, active: bool, source: str = ""):
         self.delegate.set_playing(episode_id, active, source)
@@ -2034,7 +2056,7 @@ class SettingsPage(BasePage):
         self.skip_forward.setSuffix(" seconds")
         self.auto_continue = QCheckBox("Continue with the next queued episode")
         for field in (self.speed, self.skip_back, self.skip_forward):
-            field.setFixedWidth(self.FIELD_WIDTH)
+            field.setFixedWidth(scaled_px(self.FIELD_WIDTH))
         form.addRow("Playback speed", self.speed)
         form.addRow("Skip back", self.skip_back)
         form.addRow("Skip forward", self.skip_forward)
@@ -2049,7 +2071,7 @@ class SettingsPage(BasePage):
         self.refresh_interval.setSingleStep(15)
         self.refresh_interval.setSuffix(" minutes")
         self.refresh_interval.setSpecialValueText("Manual only")
-        self.refresh_interval.setFixedWidth(self.FIELD_WIDTH)
+        self.refresh_interval.setFixedWidth(scaled_px(self.FIELD_WIDTH))
         library_form.addRow("Refresh every", self.refresh_interval)
         self.search_depth = QComboBox()
         for label, value in (
@@ -2059,7 +2081,7 @@ class SettingsPage(BasePage):
             ("200 results · directory max", "200"),
         ):
             self.search_depth.addItem(label, value)
-        self.search_depth.setFixedWidth(self.FIELD_WIDTH)
+        self.search_depth.setFixedWidth(scaled_px(self.FIELD_WIDTH))
         library_form.addRow("Result depth", self.search_depth)
         self.search_depth.currentIndexChanged.connect(
             lambda index: self.setting_changed.emit("discover.search_limit", self.search_depth.itemData(index))
@@ -2081,7 +2103,7 @@ class SettingsPage(BasePage):
         self.auto_download_limit = QSpinBox()
         self.auto_download_limit.setRange(1, 10)
         self.auto_download_limit.setSuffix(" per refresh")
-        self.auto_download_limit.setFixedWidth(self.FIELD_WIDTH)
+        self.auto_download_limit.setFixedWidth(scaled_px(self.FIELD_WIDTH))
         self.delete_played = QCheckBox("Delete downloads once an episode is played")
         self.download_first = QCheckBox("Download before playing (no streaming)")
         downloads_form.addRow("After a refresh", self.auto_download)
@@ -2098,23 +2120,23 @@ class SettingsPage(BasePage):
         # Appearance ------------------------------------------------------------
         appearance_card, appearance_form = self._card(
             "Appearance",
-            "Text size and font apply immediately. Changing the theme rebuilds the window; playback keeps going.",
+            "Theme, text size and font apply immediately; playback keeps going.",
         )
         self.theme = QComboBox()
         self.theme.addItem("Follow system", "system")
         self.theme.addItem("Dark", "dark")
         self.theme.addItem("Light", "light")
-        self.theme.setFixedWidth(self.FIELD_WIDTH)
+        self.theme.setFixedWidth(scaled_px(self.FIELD_WIDTH))
         appearance_form.addRow("Theme", self.theme)
         self.density = QComboBox()
         self.density.addItem("Comfortable", "comfortable")
         self.density.addItem("Compact", "compact")
-        self.density.setFixedWidth(self.FIELD_WIDTH)
+        self.density.setFixedWidth(scaled_px(self.FIELD_WIDTH))
         appearance_form.addRow("Density", self.density)
         self.text_size = QComboBox()
         for key, label, _scale in TEXT_SIZES:
             self.text_size.addItem(label, key)
-        self.text_size.setFixedWidth(self.FIELD_WIDTH)
+        self.text_size.setFixedWidth(scaled_px(self.FIELD_WIDTH))
         appearance_form.addRow("Text size", self.text_size)
         self.ui_font = QComboBox()
         for label, key in available_ui_fonts():
@@ -2124,7 +2146,7 @@ class SettingsPage(BasePage):
         self.episode_lines = QSpinBox()
         self.episode_lines.setRange(1, 20)
         self.episode_lines.setSuffix(" lines")
-        self.episode_lines.setFixedWidth(self.FIELD_WIDTH)
+        self.episode_lines.setFixedWidth(scaled_px(self.FIELD_WIDTH))
         appearance_form.addRow("Description lines", self.episode_lines)
         self.hover_previews = QCheckBox("Show preview pop-ups when hovering podcasts and episodes")
         appearance_form.addRow("Hover previews", self.hover_previews)
@@ -2616,7 +2638,8 @@ class SettingsPage(BasePage):
                 # parsed in the platform's native format.
                 editor.setKeySequence(QKeySequence(bindings.get(name, ""), QKeySequence.SequenceFormat.PortableText))
                 editor.setAccessibleName(f"Shortcut for {label}")
-                editor.editingFinished.connect(lambda key=name, ed=editor: self.shortcut_changed.emit(key, ed.keySequence().toString()))
+                editor.editingFinished.connect(lambda key=name, ed=editor: self.shortcut_changed.emit(
+                    key, ed.keySequence().toString(QKeySequence.SequenceFormat.PortableText)))
                 self._shortcut_editors[name] = editor
                 row_layout.addWidget(text)
                 row_layout.addWidget(editor)

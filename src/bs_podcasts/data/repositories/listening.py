@@ -40,23 +40,16 @@ class ListeningRepository:
                 if row is None or row[0] != source_url:
                     return False
             connection.execute("DELETE FROM chapters WHERE episode_id=?", (episode_id,))
+            rows = []
             for index, chapter in enumerate(chapters):
                 start, end = media_interval(chapter[0], chapter[1])
                 if start is None:
                     continue
-                connection.execute(
-                    """INSERT INTO chapters(
-                       episode_id, chapter_index, start_seconds, end_seconds,
-                       title, artwork_url) VALUES (?, ?, ?, ?, ?, ?)""",
-                    (
-                        episode_id,
-                        index,
-                        start,
-                        end,
-                        chapter[2],
-                        chapter[3] if len(chapter) > 3 else "",
-                    ),
-                )
+                rows.append((episode_id, index, start, end, chapter[2], chapter[3] if len(chapter) > 3 else ""))
+            connection.executemany(
+                """INSERT INTO chapters(
+                   episode_id, chapter_index, start_seconds, end_seconds,
+                   title, artwork_url) VALUES (?, ?, ?, ?, ?, ?)""", rows)
 
         return True
 
@@ -65,8 +58,8 @@ class ListeningRepository:
         with self.database.connect() as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO listening_attempts(episode_id, kind, source_url, attempted_at) "
-                "VALUES (?, ?, ?, ?)",
-                (episode_id, kind, source_url, time.time()),
+                "SELECT id, ?, ?, ? FROM episodes WHERE id=?",
+                (kind, source_url, time.time(), episode_id),
             )
 
     def attempted_recently(self, episode_id: int, kind: str, source_url: str, max_age: float) -> bool:
@@ -99,14 +92,14 @@ class ListeningRepository:
             connection.execute(
                 "DELETE FROM transcript_segments WHERE episode_id=?", (episode_id,)
             )
+            rows = []
             for index, segment in enumerate(segments):
                 start, end = media_interval(segment[0], segment[1])
-                connection.execute(
-                    """INSERT INTO transcript_segments(
-                       episode_id, segment_index, start_seconds, end_seconds, text)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (episode_id, index, start, end, segment[2]),
-                )
+                rows.append((episode_id, index, start, end, segment[2]))
+            connection.executemany(
+                """INSERT INTO transcript_segments(
+                   episode_id, segment_index, start_seconds, end_seconds, text)
+                   VALUES (?, ?, ?, ?, ?)""", rows)
 
         return True
 
@@ -249,7 +242,7 @@ class ListeningRepository:
             )
             connection.execute(
                 """INSERT INTO listening_stats(show_id, completed_episodes)
-                   VALUES (?, 1) ON CONFLICT(show_id) DO UPDATE SET
+                   SELECT id, 1 FROM shows WHERE id=? ON CONFLICT(show_id) DO UPDATE SET
                    completed_episodes=listening_stats.completed_episodes+1""",
                 (show_id,),
             )

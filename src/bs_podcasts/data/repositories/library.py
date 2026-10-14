@@ -1,6 +1,7 @@
 """Library persistence with no Qt dependencies."""
 
 from contextlib import nullcontext
+from collections import OrderedDict
 from pathlib import Path
 import json
 import logging
@@ -94,6 +95,8 @@ class LibraryRepository:
         self._settings_pending = {}
         self._settings_revision = 0
         self._settings_generation = 0
+        self._search_cache = OrderedDict()
+        self._search_cache_lock = threading.Lock()
 
     def add_show(
         self,
@@ -151,7 +154,7 @@ class LibraryRepository:
         where = "" if include_suspended else " WHERE s.suspended=0"
         with self.database.connect() as connection:
             rows = connection.execute(
-                self._show_select() + where + " GROUP BY s.id ORDER BY s.title COLLATE NOCASE"
+                self._show_select() + where + " ORDER BY s.title COLLATE NOCASE"
             ).fetchall()
         return [self._show(row) for row in rows]
 
@@ -440,13 +443,13 @@ class LibraryRepository:
         """Every stored episode — the page subtitle must not report the
         capped size of the newest-N read as if it were the library total."""
         with self.database.connect() as connection:
-            return connection.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+            return connection.execute("SELECT COALESCE(SUM(episode_count), 0) FROM shows").fetchone()[0]
 
     def new_episode_count(self) -> int:
         """Library-wide unseen-episode total for badges; cheap during batches."""
         with self.database.connect() as connection:
             return connection.execute(
-                "SELECT COUNT(*) FROM episodes WHERE is_new=1"
+                "SELECT COALESCE(SUM(new_count), 0) FROM shows"
             ).fetchone()[0]
 
     def artwork_paths(self) -> set[str]:
@@ -997,11 +1000,12 @@ class LibraryRepository:
 
     @staticmethod
     def _write_queue_order(connection, episode_ids):
-        for position, episode_id in enumerate(episode_ids, start=1):
-            connection.execute(
-                "UPDATE queue SET position=? WHERE episode_id=?",
-                (position, episode_id),
-            )
+        positions = dict(connection.execute("SELECT episode_id, position FROM queue"))
+        connection.executemany(
+            "UPDATE queue SET position=? WHERE episode_id=?",
+            ((position, episode_id) for position, episode_id in enumerate(episode_ids, start=1)
+             if episode_id in positions and positions[episode_id] != position),
+        )
 
     def update_position(self, episode_id: int, seconds: float, stamp: float | None = None, *, finish: bool = False):
         """Save a playback position ordered by `stamp`.
@@ -1141,8 +1145,6 @@ class LibraryRepository:
                 ids.insert(0, episode_id)
             self._write_queue_order(connection, ids)
 
-    _PLAYED_FIELDS = ("played", "is_new", "position_seconds", "last_played")
-
     def progress_targets(self, episode_ids, exclude_episode_id=None):
         """Snapshot exact saved positions for confirmation, in bounded queries."""
         ids = list(dict.fromkeys(int(value) for value in episode_ids
@@ -1159,17 +1161,13 @@ class LibraryRepository:
 
     def clear_progress(self, targets, exclude_episode_id=None):
         """Reset only confirmed, unchanged positions; retain flags and history."""
-        count = 0
         with self.database.connect() as connection:
-            for episode_id, position, stamp in targets:
-                if episode_id == exclude_episode_id:
-                    continue
-                count += connection.execute(
-                    "UPDATE episodes SET position_seconds=0, "
-                    "position_updated_at=MAX(unixepoch('subsec'),position_updated_at+0.000001) "
-                    "WHERE id=? AND position_seconds>0 AND position_seconds IS ? AND position_updated_at IS ?",
-                    (episode_id, position, stamp)).rowcount
-        return count
+            return connection.executemany(
+                "UPDATE episodes SET position_seconds=0, "
+                "position_updated_at=MAX(unixepoch('subsec'),position_updated_at+0.000001) "
+                "WHERE id=? AND position_seconds>0 AND position_seconds IS ? AND position_updated_at IS ?",
+                ((episode_id, position, stamp) for episode_id, position, stamp in targets
+                 if episode_id != exclude_episode_id)).rowcount
 
     def new_episode_ids(self):
         with self.database.connect() as connection:
@@ -1214,16 +1212,12 @@ class LibraryRepository:
 
     def undo_played(self, changes) -> int:
         """Restore only rows still in the state this operation wrote."""
-        restored = 0
         with self.database.connect() as connection:
-            for before, after in changes:
-                identity, values = before[:3], before[3:]
-                restored += connection.execute(
-                    "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=?, is_new=?, position_seconds=?, last_played=? "
-                    "WHERE id=? AND show_id=? AND external_id=? "
-                    "AND played IS ? AND is_new IS ? AND position_seconds IS ? AND last_played IS ?",
-                    (*values, *identity, *after)).rowcount
-        return restored
+            return connection.executemany(
+                "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'), position_updated_at+0.000001), played=?, is_new=?, position_seconds=?, last_played=? "
+                "WHERE id=? AND show_id=? AND external_id=? "
+                "AND played IS ? AND is_new IS ? AND position_seconds IS ? AND last_played IS ?",
+                ((*before[3:], *before[:3], *after) for before, after in changes)).rowcount
 
     def enqueue_many(self, episode_ids) -> int:
         """Append many episodes to the queue in one transaction, in order.
@@ -1397,7 +1391,7 @@ class LibraryRepository:
             show_rows = connection.execute(
                 self._show_select()
                 + " WHERE " + show_match
-                + " GROUP BY s.id ORDER BY s.title COLLATE NOCASE LIMIT ?",
+                + " ORDER BY s.title COLLATE NOCASE LIMIT ?",
                 show_parameters + (limit,),
             ).fetchall()
             predicate, parameters = self._episode_search_predicate(connection, query)
@@ -1410,24 +1404,79 @@ class LibraryRepository:
             [self._episode(row) for row in episode_rows],
         )
 
-    def search_episodes(self, query: str, limit: int = 500, offset: int = 0) -> list[Episode]:
-        """Page the actual matching corpus, not a newest-episodes fallback."""
+    def search_episodes(self, query: str, limit: int = 500, offset: int = 0, *, before=None) -> list[Episode]:
+        """Page matches; `before=(published_at, id)` continues the stable newest-first order."""
         limit, offset = max(0, int(limit)), max(0, int(offset))
         if not limit:
             return []
+        if before is not None and offset:
+            raise ValueError("Use a search cursor or an offset, not both.")
+        cursor = None if before is None else (str(before[0]), int(before[1]))
         with self.database.connect() as connection:
+            # Cache only committed, snapshot-consistent derived IDs, never live
+            # progress/favorite/download records or an outer writer transaction.
+            cacheable = not connection.in_transaction
+            if cacheable:
+                connection.execute('BEGIN')
+            signature = tuple(connection.execute(
+                'SELECT epoch,revision FROM episode_search_revision WHERE singleton_id=1').fetchone())
+            key = (signature, query.strip(), limit, offset, cursor)
+            cached = self._cached_search(('ids', key)) if cacheable else None
+            if cached is not None:
+                live = {}
+                for start in range(0, len(cached), 500):
+                    ids = cached[start:start+500]
+                    placeholders = ','.join('?' for _ in ids)
+                    live.update((row['id'], self._episode(row)) for row in connection.execute(
+                        _EPISODE_SELECT + f' WHERE e.id IN ({placeholders})', ids))
+                return [live[identifier] for identifier in cached if identifier in live]
             predicate, parameters = self._episode_search_predicate(connection, query)
+            if cursor is not None:
+                predicate = "(e.published_at, e.id) < (?, ?) AND " + predicate
+                parameters = cursor + parameters
             rows = connection.execute(
                 _EPISODE_SELECT + " WHERE " + predicate
                 + " ORDER BY e.published_at DESC,e.id DESC LIMIT ? OFFSET ?",
                 parameters + (limit,offset)).fetchall()
+            if cacheable and len(rows) <= 5000:
+                self._cache_search(('ids', key), tuple(row['id'] for row in rows))
         return [self._episode(row) for row in rows]
 
     def search_episode_count(self, query: str) -> int:
         with self.database.connect() as connection:
+            cacheable = not connection.in_transaction
+            if cacheable:
+                connection.execute('BEGIN')
+            signature = tuple(connection.execute(
+                'SELECT epoch,revision FROM episode_search_revision WHERE singleton_id=1').fetchone())
+            key = ('count', signature, query.strip())
+            cached = self._cached_search(key) if cacheable else None
+            if cached is not None:
+                return cached
             predicate, parameters = self._episode_search_predicate(connection, query)
-            return connection.execute("SELECT COUNT(*) " + _EPISODE_FROM + " WHERE "
-                                      + predicate, parameters).fetchone()[0]
+            count = connection.execute("SELECT COUNT(*) " + _EPISODE_FROM + " WHERE "
+                                       + predicate, parameters).fetchone()[0]
+            if cacheable:
+                self._cache_search(key, count)
+            return count
+
+    def _cached_search(self, key):
+        with self._search_cache_lock:
+            value = self._search_cache.get(key)
+            if value is not None:
+                self._search_cache.move_to_end(key)
+            return value
+
+    def _cache_search(self, key, value):
+        with self._search_cache_lock:
+            self._search_cache[key] = value
+            self._search_cache.move_to_end(key)
+            while len(self._search_cache) > 32:
+                self._search_cache.popitem(last=False)
+
+    def clear_search_cache(self):
+        with self._search_cache_lock:
+            self._search_cache.clear()
 
     @staticmethod
     def _show_select() -> str:

@@ -9,7 +9,7 @@ import re
 import threading
 
 from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, QUrl, Qt, Signal, qVersion
-from PySide6.QtGui import QAccessible, QAccessibleEvent, QColor, QDesktopServices, QPainter, QPen, QPixmap, QKeySequence, QTextDocument, QTextOption
+from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap, QKeySequence, QTextDocument, QTextOption
 
 from ..urlguard import is_web_url
 from ..domain.times import format_media_time
@@ -551,7 +551,7 @@ class AddPodcastDialog(StyledDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add podcast")
-        self.set_card_width(480)
+        self.set_card_width(scaled_px(480))
         self.add_heading("Add a podcast", "Paste the podcast's RSS or Atom feed URL.")
         self.url = QLineEdit()
         self.url.setObjectName("searchField")
@@ -627,7 +627,7 @@ class PodcastSettingsDialog(StyledDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle(f"{title} settings")
-        self.set_card_width(680)
+        self.set_card_width(scaled_px(680))
         self.add_heading(title, "Simple playback, download and retention settings for this podcast.")
         from PySide6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QSpinBox
 
@@ -725,7 +725,7 @@ class RemovePodcastDialog(StyledDialog):
         super().__init__(parent)
         show = preview["show"]
         self.setWindowTitle(f"Unsubscribe from {show.title}")
-        self.set_card_width(560)
+        self.set_card_width(scaled_px(560))
         self.add_heading(f"Unsubscribe from {show.title}?", "This removes the podcast, listening progress and bookmarks from your library. Downloaded files are deleted only when the box below is checked.")
         rows = QVBoxLayout()
         rows.setSpacing(SPACE["xs"])
@@ -760,7 +760,9 @@ class RemovePodcastDialog(StyledDialog):
         self.file_outcome.setWordWrap(True)
         self.card_layout.addWidget(self.file_outcome)
         def update_outcome(checked):
-            self.file_outcome.setText("The listed downloaded files will be deleted." if checked and file_count else "Downloaded files stay on disk but are no longer listed in the library.")
+            self.file_outcome.setText("No downloaded files are affected." if not file_count else
+                                     "The listed downloaded files will be deleted." if checked else
+                                     "Downloaded files stay on disk but are no longer listed in the library.")
         self.delete_files.toggled.connect(update_outcome)
         update_outcome(self.delete_files.isChecked())
         remove = QPushButton("Unsubscribe")
@@ -775,7 +777,7 @@ class DeleteFilesDialog(StyledDialog):
     def __init__(self, title: str, message: str, previews, format_bytes, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.set_card_width(560)
+        self.set_card_width(scaled_px(560))
         total = sum(preview.bytes_reclaimed for preview in previews)
         self.add_heading(title, message)
         summary = PlainTextLabel(f"{len(previews)} file{'s' if len(previews) != 1 else ''}  ·  {format_bytes(total)} reclaimed")
@@ -794,7 +796,7 @@ class TextInputDialog(StyledDialog):
     def __init__(self, title: str, message: str, value: str, action: str = "Save", parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.set_card_width(460)
+        self.set_card_width(scaled_px(460))
         self.add_heading(title, message)
         self.field = QLineEdit(value)
         self.field.setObjectName("searchField")
@@ -1149,7 +1151,7 @@ class ShortcutsDialog(StyledDialog):
     FIXED = (
         ("Space", "Play / pause (outside text fields)"),
         ("Enter", "Play / open the selected row"),
-        ("Delete", "Remove from Up Next · delete download · delete bookmark"),
+        ("Delete", "Remove from Up Next · delete download · delete bookmark · remove from History · clear Continue listening"),
         ("Esc", "Close overlay · clear filter · clear selection"),
         ("↑ ↓", "Move through lists and search results"),
         ("Drag", "Reorder episodes within Up Next"),
@@ -1210,12 +1212,18 @@ class ConfirmDialog(StyledDialog):
     def __init__(self, title: str, message: str, action_label: str, destructive: bool = False, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.set_card_width(460)
+        self.set_card_width(scaled_px(460))
         self.add_heading(title, message)
         action = QPushButton(action_label)
         action.setObjectName("dangerButton" if destructive else "primaryButton")
         action.clicked.connect(self.accept)
         self.add_buttons(action, default_primary=not destructive)
+
+    def add_file_listing(self, lines) -> FileListing:
+        listing = super().add_file_listing(lines)
+        self.card_layout.removeWidget(listing)
+        self.card_layout.insertWidget(self.card_layout.count() - 1, listing)
+        return listing
 
 
 class MigrationNotice(StyledDialog):
@@ -1226,7 +1234,7 @@ class MigrationNotice(StyledDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Updating your library")
-        self.set_card_width(460)
+        self.set_card_width(scaled_px(460))
         self.add_heading(
             "Updating your library…",
             "Making a backup and applying the update. This takes a few seconds on a large library.",
@@ -1241,7 +1249,7 @@ class StartupErrorDialog(StyledDialog):
     def __init__(self, title: str, message: str, parent=None, *, repair=None, repair_path=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.set_card_width(560)
+        self.set_card_width(scaled_px(560))
         self.add_heading(title)
         body = PlainTextLabel(message)
         body.setObjectName("contextBody")
@@ -1348,7 +1356,7 @@ class AboutDialog(StyledDialog):
     def __init__(self, info: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"About {APP_NAME}")
-        self.set_card_width(560)
+        self.set_card_width(scaled_px(560))
         self.logo = PlainTextLabel()
         self._logo_source = QPixmap(str(logo_path()))
         self._logo_ratio = 0.0
@@ -1396,7 +1404,7 @@ class AboutDialog(StyledDialog):
         github.setToolTip(GITHUB_URL)
         github.setEnabled(bool(GITHUB_URL))
         github.setCursor(Qt.CursorShape.PointingHandCursor)
-        github.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(GITHUB_URL)))
+        github.clicked.connect(lambda: open_web_url(GITHUB_URL))
         folder = QPushButton("Open data folder")
         folder.setObjectName("quietButton")
         folder.setCursor(Qt.CursorShape.PointingHandCursor)

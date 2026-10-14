@@ -8,23 +8,16 @@ from pathlib import Path, PurePosixPath
 import shutil
 import tempfile
 import fcntl
-# The version gate lives with the source check; deploy keeps its names for callers.
-from source_manifest import ROOT, archive_map, check, checked_version, inventory, package_version, source_digest, file_digest, stage  # noqa: F401
+from source_manifest import ROOT, archive_map, check, checked_version, inventory, source_digest, file_digest, stage
 from runtime_state import runtime_lock, retire_stale
 from report import Reporter, size_text
 from build_manifest import require_keys
-from prune_helper import prune_previous_deployments as prune_rollbacks
 from prune_helper import confirm_and_prune
 
 
 # Linux rollbacks are named by mkdtemp with this prefix. The shared folder also
 # holds other platforms' rollbacks and staging, which this build never prunes.
 ROLLBACK_PREFIX = 'linux-build-'
-
-
-def prune_previous_deployments(root, keep=3, retain=None):
-    """Keep the newest `keep` Linux rollbacks (always including `retain`); return removed names."""
-    return prune_rollbacks(root, ROLLBACK_PREFIX, keep=keep, retain=retain)
 
 
 # Built by this deploy beside the manifest's runtime destinations: the native library folder and the record.

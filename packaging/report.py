@@ -25,9 +25,13 @@ def tree_size(path):
     for root, _, names in os.walk(path):
         for name in names:
             entry = os.path.join(root, name)
-            if not os.path.islink(entry):
-                files += 1
-                total += os.path.getsize(entry)
+            try:
+                if not os.path.islink(entry):
+                    size = os.path.getsize(entry)
+                    files += 1
+                    total += size
+            except OSError:
+                pass  # Logs and temporary files can disappear during launcher reporting.
     return files, total
 
 

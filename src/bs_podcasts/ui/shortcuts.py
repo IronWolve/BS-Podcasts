@@ -4,6 +4,7 @@ import sys
 import logging
 
 from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import QWidget
 
 _PORTABLE = QKeySequence.SequenceFormat.PortableText
 # "Ctrl" is Command on the Mac, and Command-Space opens Spotlight.
@@ -41,10 +42,12 @@ class ShortcutManager:
         self._save_settings = save_settings
         self._shortcuts = {}
         self._hint_tokens = {}
+        self._repairs = {}
 
     def add(self, name: str, default: str, callback):
         written, default = default, _platform_default(default)
         sequence = self.library.setting(f"shortcut.{name}", default) if self.library else default
+        saved_sequence = sequence
         if sequence == written:
             sequence = default  # a reset stored the reserved default
         stored = _sequence(sequence)
@@ -64,7 +67,21 @@ class ShortcutManager:
         shortcut.activated.connect(callback)
         self._shortcuts[name] = (shortcut, default)
         self._hint_tokens[name] = written
+        if self.library and sequence != saved_sequence:
+            self._repairs[f"shortcut.{name}"] = shortcut.key().toString(_PORTABLE)
         return shortcut
+
+    def flush_repairs(self):
+        """Persist corrected stored bindings once, after registration is complete."""
+        if not self._repairs:
+            return
+        values = dict(self._repairs)
+        if self._save_settings is not None:
+            self._save_settings(values)
+        elif self.library:
+            for key, value in values.items():
+                self.library.set_setting(key, value)
+        self._repairs.clear()
 
     def rebind(self, name: str, sequence: str):
         if name not in self._shortcuts:
@@ -137,6 +154,19 @@ class ShortcutManager:
             return text
         pattern = "|".join(re.escape(token) for token in sorted(choices, key=len, reverse=True))
         return re.sub(r"(?<![\w+])(?:" + pattern + r")(?![\w+])", lambda match: choices.get(match.group(), match.group()), text)
+
+    def format_widget_hint(self, widget):
+        tip = widget.toolTip()
+        previous = widget.property(HINT_FORMATTED_PROPERTY)
+        template = widget.property(HINT_TEMPLATE_PROPERTY) if tip == previous else tip
+        if template:
+            formatted = self.format_hint(template)
+            widget.setProperty(HINT_TEMPLATE_PROPERTY, template)
+            if formatted != tip:
+                # The template already has any metadata escaping. Calling a
+                # label's override here would wrap that escaped tooltip twice.
+                QWidget.setToolTip(widget, formatted)
+            widget.setProperty(HINT_FORMATTED_PROPERTY, widget.toolTip())
 
 
 # The window's hint filter reformats a tooltip only when the widget has a

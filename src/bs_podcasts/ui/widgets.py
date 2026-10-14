@@ -28,7 +28,6 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QAccessible,
     QAccessibleAnnouncementEvent,
-    QAccessibleEvent,
     QColor,
     QDesktopServices,
     QFont,
@@ -79,7 +78,7 @@ from . import icons
 from .models import ShowRow
 from .pixmaps import cover, initials
 from .shortcuts import set_literal_tooltip
-from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, play_button_size, reduced_motion, scaled_px, theme_name
+from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, play_button_size, reduced_motion, scaled_dim, scaled_px, theme_name
 
 
 def open_web_url(url):
@@ -430,7 +429,6 @@ class NavigationRail(QFrame):
         self.setFixedWidth(scaled_px(RAIL_WIDTH))
         self.setAcceptDrops(True)
         self._drop_armed = False
-        self.current_index = 0
         self._compact = False
         self._buttons = []
         self._badges = []
@@ -643,7 +641,6 @@ class NavigationRail(QFrame):
     def select(self, index: int):
         if not 0 <= index < len(self._buttons):
             return
-        self.current_index = index
         for row, (button, _glyph, _label) in enumerate(self._buttons):
             active = row == index
             button.setChecked(active)
@@ -855,6 +852,7 @@ class PageHeader(QFrame):
 
     def set_title(self, text: str):
         self._title_text = text
+        self._fit_search_width()
         self._elide_header_text()
 
     def set_subtitle(self, text: str):
@@ -895,6 +893,8 @@ class PageHeader(QFrame):
         if watched in (self.title_label, self.subtitle_label) and event.type() in {
             QEvent.Type.Resize, QEvent.Type.FontChange,
         }:
+            if event.type() == QEvent.Type.FontChange and hasattr(self, "search"):
+                self._fit_search_width()
             self._elide_header_text()
         return super().eventFilter(watched, event)
 
@@ -917,6 +917,27 @@ class PageHeader(QFrame):
         # worse than the crowding this trades away.
         keep = wide_enough or bool(self.search.text()) or self.search.hasFocus()
         self.search.setVisible(allowed and keep)
+        self._fit_search_width()
+
+    def _fit_search_width(self):
+        """Give the title space before the filter's optional extra width."""
+        if self.search.isHidden():
+            return
+        layout = self.layout()
+        margins = layout.contentsMargins()
+        available = self.width() - margins.left() - margins.right()
+        visible = 2  # title column and filter
+        for index in range(layout.count()):
+            widget = layout.itemAt(index).widget()
+            if widget is not None and widget is not self.search and not widget.isHidden():
+                available -= max(widget.minimumWidth(), widget.sizeHint().width())
+                visible += 1
+        available -= layout.spacing() * (visible - 1)
+        title_width = self.title_label.fontMetrics().horizontalAdvance(self._title_text)
+        width = max(scaled_px(150), min(scaled_px(240), available - title_width))
+        if self.search.maximumWidth() != width:
+            self.search.setMaximumWidth(width)
+            layout.activate()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -928,6 +949,7 @@ class PageHeader(QFrame):
         refit_icon_button(self.back)
         self.search.setMinimumWidth(scaled_px(150))
         self.search.setMaximumWidth(scaled_px(240))
+        self._fit_search_width()
 
 
 class FlowLayout(QLayout):
@@ -1141,9 +1163,10 @@ class StateBanner(QFrame):
     def show_state(self, state: str, message: str, retry: bool = False):
         prefix, glyph, tone = self.LABELS.get(state, (state.replace("_", " ").title(), "info", "muted"))
         previous, self.state = self.state, state
-        self.setProperty("state", state)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        if state != previous:
+            self.setProperty("state", state)
+            self.style().unpolish(self)
+            self.style().polish(self)
         self._glyph, self._tone = glyph, tone
         self._paint_icon()
         self.prefix.setText(prefix)
@@ -1187,8 +1210,6 @@ class _ToastEntry(NamedTuple):
 
 class Toast(QFrame):
     """Transient confirmation anchored above the player bar; auto-dismisses."""
-
-    action_triggered = Signal()
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -1425,10 +1446,6 @@ class Toast(QFrame):
         if self._owner == owner:
             self.dismiss()
 
-    def sticky_notices(self):
-        """(owner, message) for each sticky notice held behind the shown one, oldest first. Read-only."""
-        return tuple((pushed.owner, pushed.message) for pushed in self._sticky_entries)
-
     def reposition(self):
         parent = self.parentWidget()
         if parent is None:
@@ -1519,7 +1536,6 @@ class Toast(QFrame):
         self.dismiss()
         if callback:
             callback()
-        self.action_triggered.emit()
 
 
 class EmptyState(QWidget):
@@ -1644,19 +1660,20 @@ class SkeletonGrid(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         width = max(1, self.width())
-        columns = max(2, width // self.card_width)
+        d = scaled_dim
+        columns = max(2, width // scaled_px(self.card_width))
         card_w = width // columns
-        card_h = card_w + 66
+        card_h = card_w + scaled_px(66)
         for row in range(3):
             for column in range(columns):
-                x = column * card_w + 4
-                y = row * card_h + 4
+                x = column * card_w + d(4)
+                y = row * card_h + d(4)
                 painter.setBrush(QColor(COLORS["surface"]))
-                painter.drawRoundedRect(QRect(x, y, card_w - 8, card_h - 8), 14, 14)
+                painter.drawRoundedRect(QRect(x, y, card_w - d(8), card_h - d(8)), d(14), d(14))
                 painter.setBrush(QColor(COLORS["surface_raised"]))
-                painter.drawRoundedRect(QRect(x + 10, y + 10, card_w - 28, card_w - 28), 10, 10)
-                painter.drawRoundedRect(QRect(x + 12, y + card_w - 6, int((card_w - 28) * 0.7), 12), 6, 6)
-                painter.drawRoundedRect(QRect(x + 12, y + card_w + 14, int((card_w - 28) * 0.4), 10), 5, 5)
+                painter.drawRoundedRect(QRect(x + d(10), y + d(10), card_w - d(28), card_w - d(28)), d(10), d(10))
+                painter.drawRoundedRect(QRect(x + d(12), y + card_w - d(6), int((card_w - d(28)) * 0.7), d(12)), d(6), d(6))
+                painter.drawRoundedRect(QRect(x + d(12), y + card_w + d(14), int((card_w - d(28)) * 0.4), d(10)), d(5), d(5))
 
 
 class HeroCard(QFrame):
@@ -1812,7 +1829,7 @@ class HeroCard(QFrame):
         css = (
             f"QFrame#heroCard {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
             f"stop:0 rgba({tint.red()}, {tint.green()}, {tint.blue()}, 0.16), stop:0.6 {COLORS['surface']}); "
-            f"border: 1px solid {COLORS['hairline']}; border-radius: 16px; }}"
+            f"border: 1px solid {COLORS['hairline']}; }}"
         )
         # A stylesheet set repolishes the card and every child; skip it when
         # the tint has not changed (same show reopened, refresh).
@@ -1882,10 +1899,15 @@ class SelectionBar(QFrame):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(signal)
             layout.addWidget(button)
+            if glyph == "queue-add":
+                self.queue_button = button
         clear = icon_button("close", "Clear selection", size=14)
         clear.clicked.connect(self.clear_requested)
         layout.addWidget(clear)
         self.hide()
+
+    def set_queue_visible(self, visible: bool):
+        self.queue_button.setVisible(visible)
 
     def set_count(self, count: int):
         self.count.setText(f"{count} selected")
@@ -1918,6 +1940,10 @@ class HoverBubble(QFrame):
         layout.addWidget(self.label)
 
     def show_at(self, text: str, global_center_x: int, global_top: int):
+        # QToolTip needs the escaped wrapper for metadata, while this label
+        # always displays plain text. Decode only that exact wrapper.
+        if text.startswith('<qt>') and text.endswith('</qt>'):
+            text = html_unescape(text[4:-5].replace('<br>', '\n'))
         self.label.setText(text)
         self.label.setWordWrap("\n" in text or len(text) > 60)
         self.setMaximumWidth(scaled_px(360))
@@ -2024,12 +2050,13 @@ class SeekSlider(QSlider):
         self._formatter = formatter
 
     def _track_rect(self) -> QRect:
-        inset = self.HANDLE // 2
+        inset = scaled_px(self.HANDLE) // 2
+        height = scaled_dim(self.TRACK_HEIGHT)
         return QRect(
             inset,
-            self.height() // 2 - self.TRACK_HEIGHT // 2,
+            self.height() // 2 - height // 2,
             max(1, self.width() - 2 * inset),
-            self.TRACK_HEIGHT,
+            height,
         )
 
     def _handle_x(self) -> int:
@@ -2148,7 +2175,7 @@ class SeekSlider(QSlider):
                     painter.setFont(app_font(8, QFont.Weight.Bold))
                     painter.drawText(QRect(x - 6, centre - 12, 12, 10), Qt.AlignmentFlag.AlignCenter, label)
                     painter.setPen(Qt.PenStyle.NoPen)
-        size = self.HANDLE
+        size = scaled_px(self.HANDLE)
         handle = QRect(handle_x - size // 2, centre - size // 2, size, size)
         painter.setPen(Qt.PenStyle.NoPen)
         if not enabled:
@@ -2589,7 +2616,7 @@ class ContextPanel(QFrame):
         if model is not None:
             model.replace(episodes)
         count = len(episodes)
-        total = sum(_duration_seconds(episode.duration) for episode in episodes)
+        total = sum(episode.duration_seconds for episode in episodes)
         if count:
             hours, minutes = divmod(total // 60, 60)
             length = f"{hours} hr {minutes} min" if hours else f"{minutes} min"
@@ -3122,16 +3149,6 @@ def _escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _duration_seconds(text: str) -> int:
-    total = 0
-    parts = text.replace("hr", "h").replace("min", "m").split()
-    for index, part in enumerate(parts):
-        if part.isdigit() and index + 1 < len(parts):
-            unit = parts[index + 1]
-            total += int(part) * (3600 if unit.startswith("h") else 60 if unit.startswith("m") else 1)
-    return total
-
-
 def mnemonic_safe(text: str) -> str:
     """Buttons, menu actions, and tabs treat '&' as a mnemonic marker and
     swallow it ("Q&A" renders "QA"); feed-derived text keeps its ampersands
@@ -3157,10 +3174,6 @@ class ElidedValueLabel(PlainTextLabel):
         self._full = text
         self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self._refresh()
-
-    def set_full_text(self, text: str):
-        self._full = text
         self._refresh()
 
     def resizeEvent(self, event):
@@ -3594,6 +3607,7 @@ class SearchOverlay(_ReturnsFocus, QFrame):
     episode_chosen = Signal(object)
     directory_chosen = Signal(str)
     show_all_requested = Signal(str)
+    show_all_podcasts_requested = Signal(str)
     menu_requested = Signal(object, object)
     closed = Signal()
 
@@ -3713,11 +3727,8 @@ class SearchOverlay(_ReturnsFocus, QFrame):
         self.query_changed.emit(self.field.text().strip())
 
     def _debounce(self, _text):
-        self.results.clear()
-        self._result_query = None
-        self._announced = None
-        self.results.setAccessibleDescription("")
-        self.hint.setText(self.HINT)
+        if not self.field.text().strip():
+            self.set_results([], [], "")
         self._timer.start()
 
     def _report_count(self, podcasts, episodes, query: str):
@@ -3726,7 +3737,8 @@ class SearchOverlay(_ReturnsFocus, QFrame):
         parts = []
         if podcasts:
             shown = len(podcasts[:6])
-            parts.append(f"{shown} podcast{'s' if shown != 1 else ''}")
+            of = f" of {len(podcasts)}" if len(podcasts) > 6 else ""
+            parts.append(f"{shown}{of} podcast{'s' if len(podcasts) != 1 else ''}")
         if episodes:
             shown = len(episodes[:12])
             of = f" of {len(episodes)}" if len(episodes) > 12 else ""
@@ -3741,6 +3753,8 @@ class SearchOverlay(_ReturnsFocus, QFrame):
             QAccessible.updateAccessibility(announcement)
 
     def set_results(self, podcasts, episodes, query: str):
+        current = self.results.currentItem()
+        previous_key = self._result_key(current) if current is not None else None
         self._result_query = query
         self.results.clear()
         self._report_count(podcasts, episodes, query)
@@ -3750,6 +3764,10 @@ class SearchOverlay(_ReturnsFocus, QFrame):
                 item = QListWidgetItem(icons.themed_icon("podcasts", "muted", 16), f"{podcast.title}\n{podcast.author}")
                 item.setSizeHint(QSize(0, scaled_px(54)))
                 item.setData(Qt.ItemDataRole.UserRole, ("podcast", podcast))
+                self.results.addItem(item)
+            if len(podcasts) > 6:
+                item = QListWidgetItem(icons.themed_icon("search", "accent", 16), f'Show all matching podcasts for “{query}”')
+                item.setData(Qt.ItemDataRole.UserRole, ("show-all-podcasts", query))
                 self.results.addItem(item)
         if episodes:
             self._section("EPISODES")
@@ -3773,14 +3791,28 @@ class SearchOverlay(_ReturnsFocus, QFrame):
             placeholder = QListWidgetItem("Type to search your library and the directory")
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.results.addItem(placeholder)
-        for row in range(self.results.count()):
-            if self.results.item(row).flags() & Qt.ItemFlag.ItemIsSelectable:
-                self.results.setCurrentRow(row)
-                break
+        selectable = [row for row in range(self.results.count())
+                      if self.results.item(row).flags() & Qt.ItemFlag.ItemIsSelectable]
+        target = next((row for row in selectable if self._result_key(self.results.item(row)) == previous_key),
+                      selectable[0] if selectable else None)
+        if target is not None:
+            self.results.setCurrentRow(target)
+
+    @staticmethod
+    def _result_key(item):
+        payload = item.data(Qt.ItemDataRole.UserRole)
+        if not payload:
+            return None
+        kind, value = payload
+        if kind == "podcast":
+            return kind, value.show_id or value.directory_url
+        if kind == "episode":
+            return kind, value.episode_id or value.media_url
+        return kind, value
 
     def _section(self, title: str):
         item = QListWidgetItem(title)
-        item.setSizeHint(QSize(0, 28))
+        item.setSizeHint(QSize(0, scaled_px(28)))
         item.setFlags(Qt.ItemFlag.NoItemFlags)
         item.setForeground(QColor(COLORS["subtle"]))
         self.results.addItem(item)
@@ -3791,9 +3823,9 @@ class SearchOverlay(_ReturnsFocus, QFrame):
             self._activate(item)
 
     def _activate(self, item):
-        self._timer.stop()
         if getattr(self, "_result_query", None) != self.field.text().strip():
             return
+        self._timer.stop()
         payload = item.data(Qt.ItemDataRole.UserRole)
         if not payload:
             return
@@ -3806,10 +3838,14 @@ class SearchOverlay(_ReturnsFocus, QFrame):
             self.episode_chosen.emit(value)
         elif kind == 'show-all':
             self.show_all_requested.emit(value)
+        elif kind == "show-all-podcasts":
+            self.show_all_podcasts_requested.emit(value)
         else:
             self.directory_chosen.emit(value)
 
     def _show_result_menu(self, position):
+        if getattr(self, "_result_query", None) != self.field.text().strip():
+            return
         item = self.results.itemAt(position)
         payload = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if payload:
@@ -4437,6 +4473,7 @@ class PlayerBar(QFrame):
 
     def apply_metrics(self):
         self._title_metrics()
+        self.slider.setMinimumHeight(scaled_px(22))
         # Fix the play circle's size in code as well as QSS: a layout row can
         # only be shorter than its tallest child when that child's size hint
         # is not yet authoritative (stylesheet polish timing), and a squeezed
@@ -4654,7 +4691,7 @@ class PlayerBar(QFrame):
         # nothing. When only position moved, update the timeline and leave.
         chrome_key = (
             snapshot.state, snapshot.episode_id, snapshot.title, snapshot.show_title,
-            snapshot.source, snapshot.speed, snapshot.volume, snapshot.ab_start,
+            snapshot.source, snapshot.speed, snapshot.ab_start,
             snapshot.ab_end, snapshot.trim_level, snapshot.sleep_deadline,
             snapshot.artwork_path, snapshot.duration,
             getattr(snapshot, "sleep_at_end", False),

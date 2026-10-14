@@ -29,7 +29,6 @@ MAX_FEED_ELEMENTS = 1_000_000
 # flood inside a kept field or item reaches this. Real feeds keep a few
 # hundred; long inline XHTML show notes stay far below it.
 MAX_KEPT_ELEMENTS = 20_000
-MIN_ENCLOSURE_BYTES = 16 * 1024
 # Titles are shown in every list; one with megabytes of text would cost every
 # layout pass. Episode identity is taken from the full title before this cap.
 MAX_TITLE_CHARS = 500

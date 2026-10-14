@@ -15,18 +15,12 @@ from source_manifest import ROOT, stage, source_digest, file_digest, check as ch
 from check_dependencies import check
 from report import Reporter, size_text, tree_size
 from build_manifest import require_keys
-from prune_helper import prune_previous_deployments as prune_rollbacks
 from prune_helper import confirm_and_prune
 
 
 # Mac rollbacks are named by mkdtemp with this prefix. The shared folder also
 # holds other platforms' rollbacks and staging, which this build never prunes.
 ROLLBACK_PREFIX = 'macos-build-'
-
-
-def prune_previous_deployments(root, keep=3, retain=None):
-    """Keep the newest `keep` Mac rollbacks (always including `retain`); return removed names."""
-    return prune_rollbacks(root, ROLLBACK_PREFIX, keep=keep, retain=retain)
 
 
 def run(*args, **kwargs):
