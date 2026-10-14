@@ -6,6 +6,33 @@ import tempfile
 import stat
 
 
+_NETWORK_FILESYSTEMS = frozenset({"nfs", "nfs4", "cifs", "smb3", "smbfs", "sshfs", "fuse.sshfs", "ceph", "glusterfs"})
+
+
+def library_location_warning(path: Path, filesystem_type: str = "") -> str:
+    """Worker-only advisory from OS mount metadata; unknown locations are not blocked."""
+    try:
+        path = Path(path).resolve()
+        remote = filesystem_type.casefold() in _NETWORK_FILESYSTEMS
+        if sys.platform == "win32":
+            import ctypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.GetVolumePathNameW.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
+            kernel.GetVolumePathNameW.restype = ctypes.c_int
+            kernel.GetDriveTypeW.argtypes = (ctypes.c_wchar_p,)
+            kernel.GetDriveTypeW.restype = ctypes.c_uint32
+            volume = ctypes.create_unicode_buffer(32768)
+            if kernel.GetVolumePathNameW(str(path), volume, len(volume)):
+                remote = kernel.GetDriveTypeW(volume.value) == 4  # DRIVE_REMOTE
+        if remote:
+            return ("Your library database is on network storage. Network interruptions and file locking can "
+                    "cause database errors or damage. Keep the library database on a local drive; "
+                    "your download folder can remain separate. Close BS Podcasts before moving library files.")
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
 def private_file(path: Path):
     """Create/protect an app-owned regular file; never follow a final symlink."""
     descriptor = private_descriptor(path)

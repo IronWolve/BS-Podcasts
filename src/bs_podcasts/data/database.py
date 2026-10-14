@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -12,7 +13,7 @@ import weakref
 import tempfile
 import time
 import stat
-from .files import private_file, sync_directory
+from .files import atomic_write, private_file, sync_directory
 
 _log = logging.getLogger("bs_podcasts")
 
@@ -167,6 +168,7 @@ class Database:
         self._handles = weakref.WeakSet()
         self._handles_lock = threading.Lock()
         self._generation = 0
+        self._backup_retention_lock = threading.Lock()
         self.last_repair_lost = {}
         self._preexisting = self.path.is_file() and self.path.stat().st_size > 0
 
@@ -381,6 +383,8 @@ class Database:
                 with self.connect() as connection:
                     connection.execute("INSERT INTO schema_migrations(version) VALUES (?)", (version,))
                 _log.info("Indexed episode search is unavailable in this SQLite runtime; using literal search")
+        if pending and self._preexisting:
+            self._prune_backups()
 
     def _refuse_missing_search_module(self):
         # Migration 025 skips the search index on a runtime without FTS5, but
@@ -490,12 +494,80 @@ class Database:
         if target.exists():
             target = self.path.with_suffix(self.path.suffix + ".pre-migration-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".bak")
         self._copy_to(target)
+        self._mark_automatic_backup(target)
 
     def backup(self) -> Path:
         directory = self.path.parent / "backups"
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        return self._copy_to(directory / f"library-{stamp}.db", lock=self._lock.shared())
+        with self._backup_retention_lock:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            target = self._copy_to(directory / f"library-{stamp}.db", lock=self._lock.shared())
+            self._mark_automatic_backup(target)
+            self._prune_backups()
+            return target
+
+    @staticmethod
+    def _mark_automatic_backup(path):
+        try:
+            info = path.stat()
+            atomic_write(path.with_name(path.name + ".auto"),
+                         f"1 {info.st_size} {info.st_mtime_ns}".encode("ascii"))
+        except OSError:
+            _log.warning("Backup saved but automatic-retention marker unavailable; copy retained", exc_info=True)
+
+    def _prune_backups(self):
+        """Keep three recent generated copies, plus originals and .keep-pinned copies.
+
+        Only runs after a successful backup or completed upgrade. Failed upgrades,
+        damaged/manual copies, links and unmarked legacy copies never authorize deletion.
+        """
+        stamp = r"\d{8}-\d{6}(?:-\d{6})?"
+        patterns = (
+            (self.path.parent, re.compile(re.escape(self.path.name) + r"\.pre-migration-" + stamp + r"\.bak")),
+            (self.path.parent / "backups", re.compile(r"library-" + stamp + r"\.db")),
+        )
+        candidates = []
+        def pinned(path):
+            try:
+                path.with_name(path.name + ".keep").lstat()
+                return True
+            except FileNotFoundError:
+                return False
+        for directory, pattern in patterns:
+            try:
+                if directory.is_symlink():
+                    continue
+                for path in directory.iterdir():
+                    if not pattern.fullmatch(path.name):
+                        continue
+                    info = path.lstat()
+                    if stat.S_ISREG(info.st_mode) and info.st_size > 0 and not pinned(path):
+                        marker = path.with_name(path.name + ".auto")
+                        if marker.is_symlink():
+                            continue
+                        try:
+                            expected = f"1 {info.st_size} {info.st_mtime_ns}"
+                            with marker.open(encoding="ascii") as record:
+                                if record.read(128) == expected:
+                                    candidates.append((info.st_mtime_ns, path.name, path, info))
+                        except (OSError, UnicodeError):
+                            continue
+            except FileNotFoundError:
+                continue
+            except OSError:
+                _log.warning("Could not enumerate library backups; retention skipped", exc_info=True)
+                return
+        for _mtime, _name, path, before in sorted(candidates, reverse=True)[3:]:
+            try:
+                after = path.lstat()
+                if ((before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size)
+                        == (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_size)
+                        and stat.S_ISREG(after.st_mode)
+                        and not path.parent.is_symlink() and not pinned(path)):
+                    path.unlink()
+                    path.with_name(path.name + ".auto").unlink(missing_ok=True)
+            except OSError:
+                _log.warning("Could not prune an older library backup; copy retained", exc_info=True)
 
     def reindex(self):
         with self._lock.exclusive():

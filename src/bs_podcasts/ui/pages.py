@@ -2307,6 +2307,11 @@ class SettingsPage(BasePage):
         self.artwork_usage.setObjectName("meta")
         storage_layout.addRow("Application data", self.data_root)
         storage_layout.addRow("Library database", self.library_path)
+        self.library_location_warning = PlainTextLabel("")
+        self.library_location_warning.setObjectName("settingHint")
+        self.library_location_warning.setWordWrap(True)
+        storage_layout.addRow("", self.library_location_warning)
+        self.library_location_warning.hide()
         backup_row = QWidget()
         backup_layout = QHBoxLayout(backup_row)
         backup_layout.setContentsMargins(0, 0, 0, 0)
@@ -2320,7 +2325,7 @@ class SettingsPage(BasePage):
         backup_layout.addWidget(open_backups, 0, Qt.AlignmentFlag.AlignTop)
         storage_layout.addRow("Library backups", backup_row)
         storage_layout.addRow("Backup usage", self.backup_usage)
-        backup_hint = PlainTextLabel("Upgrade backups may also be beside the database. Close BS Podcasts before restoring files; keep a copy of the current data first.")
+        backup_hint = PlainTextLabel("The three newest automatic backups are kept, plus the original upgrade backup and protected or unmarked legacy copies. To protect another backup, put an empty file named <backup filename>.keep beside it. Close BS Podcasts before restoring files; keep a copy of the current data first.")
         backup_hint.setObjectName("settingHint")
         backup_hint.setWordWrap(True)
         storage_layout.addRow("", backup_hint)
@@ -2658,10 +2663,13 @@ class SettingsPage(BasePage):
         self.shortcut_error.show()
         announce(self.shortcut_error, message, assertive=True)  # spoken by a reader; a system alert would ring
 
-    def set_storage_info(self, data_root, library_path, download_path, downloads, artwork_path, artwork, temp_path, log_path="", backups=""):
+    def set_storage_info(self, data_root, library_path, download_path, downloads, artwork_path, artwork, temp_path, log_path="", backups="", location_warning=None):
         self.log_path.setText(log_path or "—")
         self.data_root.setText(data_root)
         self.library_path.setText(library_path)
+        if location_warning is not None:
+            self.library_location_warning.setText(location_warning)
+            self.library_location_warning.setVisible(bool(location_warning))
         self.backup_path.setText(str(Path(library_path).parent / "backups") if library_path else "—")
         self.backup_usage.setText(backups or 'Not measured')
         self.download_path.setText(download_path)

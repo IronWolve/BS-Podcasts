@@ -2754,6 +2754,12 @@ class MainWindow(QMainWindow):
         artwork_bytes = 0
         backups_text = "Calculating…"
         if include_usage:
+            from PySide6.QtCore import QStorageInfo
+            from ..data.files import library_location_warning
+            storage = QStorageInfo(database_path)
+            filesystem_type = (bytes(storage.fileSystemType()).decode("ascii", errors="replace")
+                               if storage.isValid() and storage.isReady() else "")
+            location_warning = library_location_warning(Path(database_path), filesystem_type)
             backups = self.library.repository.database.path.parent / "backups"
             count = total = 0
             try:
@@ -2774,7 +2780,7 @@ class MainWindow(QMainWindow):
             data_root, database_path, download_path, download_text, artwork_path,
             self._format_bytes(artwork_bytes) if include_usage else "Calculating…",
             str(cache_dir() / "probes"), str(log_path()),
-            backups_text,
+            backups_text, location_warning if include_usage else None,
         )
 
     def _review_orphan_files(self):
