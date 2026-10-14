@@ -2014,6 +2014,7 @@ class MainWindow(QMainWindow):
         if self.library is None:
             return
         self.navigation.select(PAGE_PODCASTS)
+        self.podcast_page.chips.select("All")
         self.podcast_page.header.search.setText(query)
         self.podcast_page._apply_filters()
 
