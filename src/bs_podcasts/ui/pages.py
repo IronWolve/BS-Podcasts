@@ -48,6 +48,7 @@ from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
 FILTER_DEBOUNCE_MS = 200
 LIBRARY_EMPTY_TEXT = ("Your library is empty", "Add a podcast by feed URL, import an OPML file, or browse Discover.", "Add podcast")
 _DIGIT_RUNS = re.compile(r"(\d+)")
+_RESTORE_UNSET = object()
 
 
 def _number_key(digits: str) -> tuple:
@@ -1379,6 +1380,8 @@ SORT_OPTIONS = (
 
 
 class EpisodeListPage(BasePage, _ListPageMixin):
+    podcast_view_changed = Signal()
+    load_previous_requested = Signal()
     play_requested = Signal(object)
     queue_episode_requested = Signal(object)
     open_podcast_requested = Signal(int)
@@ -1459,6 +1462,22 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         view.setItemDelegate(self.delegate)
         connect_hover_readout(self.delegate)
         self._init_list(view, EpisodeModel(items), EmptyState(*empty, glyph=glyph))
+        self._podcast_paging = False
+        self._podcast_scope = self._podcast_view_scope()
+        self._podcast_has_more = False
+        self._podcast_has_previous = False
+        self._podcast_loading = False
+        self._podcast_total = 0
+        self._podcast_progress_total = 0
+        self._podcast_scroll_direction = 0
+        self._podcast_scroll_timer = QTimer(self)
+        self._podcast_scroll_timer.setSingleShot(True)
+        self._podcast_scroll_timer.setInterval(200)
+        self._podcast_scroll_timer.timeout.connect(self._autoload_podcast_page)
+        self.view.verticalScrollBar().valueChanged.connect(self._podcast_scroll_changed)
+        self.view.verticalScrollBar().sliderMoved.connect(self._podcast_slider_moved)
+        self.view.verticalScrollBar().sliderPressed.connect(self._podcast_slider_pressed)
+        self.view.verticalScrollBar().actionTriggered.connect(self._podcast_scroll_action)
         self.view.selectionModel().selectionChanged.connect(self._selection_changed)
         self._connect_filter_box()
         self.header.search.setPlaceholderText("Filter episodes")
@@ -1524,6 +1543,17 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         selected = self._selected_keys()
         anchor = self._scroll_anchor() if preserve_scroll else None
         self._all_items = list(items)
+        if self._podcast_paging:
+            # The server owns filtering and ordering in this mode. Keep its
+            # window intact, including when this is a partial result set.
+            self._podcast_scroll_direction = 0
+            self._replace_rows(self._all_items)
+            self._restore_selection(key, preserve_scroll, selected, anchor)
+            self._update_empty(self.header.search.text().strip().lower())
+            self._update_sort_button()
+            self._selection_changed()
+            self._sync_clear_progress()
+            return
         self._apply_filters(restore_key=key, preserve_scroll=preserve_scroll,
                             selected_keys=selected, anchor=anchor)
 
@@ -1533,6 +1563,14 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         moves a row into or out of the selected chip."""
         merge = merge or (lambda _old, new: new)
         changed = self._episode_rows_index().apply(updates, merge)
+        if self._podcast_paging:
+            self.model.apply_updates(updates, merge)
+            if self._podcast_update_changes_window(changed):
+                # A server window cannot be locally re-filtered or re-sorted:
+                # doing so would create holes and lose rows beyond the window.
+                self.podcast_view_changed.emit()
+            self._sync_clear_progress()
+            return
         test = self._chip_test()
         if test is None or not any(bool(test(old)) != bool(test(new)) for _row, old, new in changed):
             self.model.apply_updates(updates, merge)
@@ -1543,7 +1581,129 @@ class EpisodeListPage(BasePage, _ListPageMixin):
 
     def _sync_clear_progress(self):
         if self.clear_progress_button is not None:
-            self.clear_progress_button.setEnabled(self.model.has_clearable_progress())
+            if self._podcast_paging:
+                self.clear_progress_button.setEnabled(self._podcast_progress_total > 0 and not self._podcast_loading)
+            else:
+                self.clear_progress_button.setEnabled(self.model.has_clearable_progress())
+
+    def _podcast_view_scope(self):
+        return (
+            self.header.search.text().strip().lower(),
+            self._filter,
+            self._sort,
+        )
+
+    def podcast_paging(self) -> bool:
+        return self._podcast_paging
+
+    def set_podcast_paging(self, enabled: bool):
+        enabled = bool(enabled)
+        if enabled == self._podcast_paging:
+            return
+        self._podcast_paging = enabled
+        self._podcast_scroll_timer.stop()
+        self._podcast_scroll_direction = 0
+        # The controller supplies the initial window after enabling paging;
+        # that first set_items must not be mistaken for a changed view.
+        self._podcast_scope = self._podcast_view_scope()
+        if enabled:
+            self.view.installEventFilter(self)
+            self.set_load_more_state(self._podcast_has_more, self._podcast_loading, "episodes")
+        elif not self.reorder:
+            self.view.removeEventFilter(self)
+        self._sync_clear_progress()
+
+    def set_podcast_page_state(self, has_more, has_previous=False, loading=False, total=0, progress_total=0):
+        self._podcast_has_more = bool(has_more)
+        self._podcast_has_previous = bool(has_previous)
+        self._podcast_loading = bool(loading)
+        try:
+            self._podcast_total = max(0, int(total))
+        except (TypeError, ValueError, OverflowError):
+            self._podcast_total = 0
+        try:
+            self._podcast_progress_total = max(0, int(progress_total))
+        except (TypeError, ValueError, OverflowError):
+            self._podcast_progress_total = 0
+        if self._podcast_paging:
+            self.set_load_more_state(self._podcast_has_more, self._podcast_loading, "episodes")
+            self._sync_clear_progress()
+
+    def _podcast_update_changes_window(self, changed):
+        if not changed:
+            return False
+        test = self._chip_test()
+        query = self.header.search.text().strip().lower()
+        folded_query = _fold_filter_text(query) if query and query != self._catalog_query else ""
+
+        def matches(item):
+            if test is not None and not test(item):
+                return False
+            return not folded_query or folded_query in _fold_filter_text(item.title) or folded_query in _fold_filter_text(item.show)
+
+        sort_fields = {
+            "newest": ("published_at", "episode_id"),
+            "oldest": ("published_at", "episode_id"),
+            "shortest": ("duration_seconds",),
+            "longest": ("duration_seconds",),
+            "unplayed": ("played",),
+        }.get(self._sort, ())
+        for _row, old, new in changed:
+            if matches(old) != matches(new):
+                return True
+            if any(getattr(old, field, None) != getattr(new, field, None) for field in sort_fields):
+                return True
+            if folded_query and (old.title != new.title or old.show != new.show):
+                return True
+        return False
+
+    def _note_podcast_scroll(self, direction):
+        if not self._podcast_paging or not direction:
+            return
+        self._podcast_scroll_direction = direction
+        self._podcast_scroll_timer.start()
+
+    def _podcast_scroll_changed(self, _value):
+        # Value changes include the row-aligned 120 ms animation and model
+        # resets. Only a preceding user gesture may arm an automatic request.
+        if self._podcast_paging and self._podcast_scroll_direction:
+            self._podcast_scroll_timer.start()
+
+    def _podcast_slider_moved(self, value):
+        previous = getattr(self, "_podcast_slider_value", value)
+        direction = 1 if value > previous else -1 if value < previous else 0
+        self._podcast_slider_value = value
+        self._note_podcast_scroll(direction)
+
+    def _podcast_slider_pressed(self):
+        self._podcast_slider_value = self.view.verticalScrollBar().value()
+
+    def _podcast_scroll_action(self, action):
+        actions = QAbstractSlider.SliderAction
+        if action in {actions.SliderSingleStepAdd, actions.SliderPageStepAdd, actions.SliderToMaximum}:
+            self._note_podcast_scroll(1)
+        elif action in {actions.SliderSingleStepSub, actions.SliderPageStepSub, actions.SliderToMinimum}:
+            self._note_podcast_scroll(-1)
+
+    def _autoload_podcast_page(self):
+        direction = self._podcast_scroll_direction
+        if (not self._podcast_paging or self._podcast_loading or not direction
+                or not self.isVisible() or not self.view.isVisible()):
+            self._podcast_scroll_direction = 0
+            return
+        if (self.view.verticalScrollBar().isSliderDown()
+                or getattr(self, "_episode_scroll_pixels", False)
+                or (hasattr(self, "_artwork_scroll_timer") and self._artwork_scroll_timer.isActive())):
+            # Let the drag, row-aligned animation and artwork-hover hold finish
+            # before a model update can change the visible row under the pointer.
+            self._podcast_scroll_timer.start()
+            return
+        self._podcast_scroll_direction = 0
+        bar = self.view.verticalScrollBar()
+        if direction > 0 and self._podcast_has_more and bar.maximum() - bar.value() <= 2:
+            self.load_more_requested.emit()
+        elif direction < 0 and self._podcast_has_previous and bar.value() <= 1:
+            self.load_previous_requested.emit()
 
     def set_catalog_query(self, query: str):
         """The library search whose results the list holds. While the filter
@@ -1614,6 +1774,8 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             # "Downloaded" but it can still be played / in progress.
             return lambda item: item.played
         if chip == "In progress":
+            if self._podcast_paging:
+                return lambda item: not item.played and item.position_seconds > 0
             return lambda item: not item.played and (item.position_seconds > 0 or 0 < item.progress < 1)
         if chip == "Downloaded":
             return lambda item: item.downloaded_path
@@ -1621,12 +1783,28 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             return lambda item: item.state.lower() == chip.lower()
         return None
 
-    def _apply_filters(self, *_args, restore_key=None, preserve_scroll=False, selected_keys=None, anchor=None):
+    def _apply_filters(self, *_args, restore_key=_RESTORE_UNSET, preserve_scroll=False, selected_keys=None, anchor=None):
+        restore_requested = (
+            restore_key is not _RESTORE_UNSET or preserve_scroll
+            or selected_keys is not None or anchor is not None
+        )
+        if restore_key is _RESTORE_UNSET:
+            restore_key = None
         anchor = anchor or (self._scroll_anchor() if preserve_scroll else None)
-        selected = list(selected_keys or ())
-        if restore_key is None and not preserve_scroll:
+        selected = list(selected_keys) if selected_keys is not None else []
+        if not restore_requested and not preserve_scroll:
             restore_key = self._current_key()
             selected = self._selected_keys()
+        if getattr(self, "_podcast_paging", False):
+            scope = self._podcast_view_scope()
+            if scope != self._podcast_scope:
+                self._podcast_scope = scope
+                self.podcast_view_changed.emit()
+            if restore_requested:
+                self._restore_selection(restore_key, preserve_scroll, selected, anchor)
+            self._update_sort_button()
+            self._sync_clear_progress()
+            return
         items = list(self._all_items)
         query = self.header.search.text().strip().lower()
         if query and query != self._catalog_query:
@@ -1695,6 +1873,22 @@ class EpisodeListPage(BasePage, _ListPageMixin):
             self.view.scrollTo(self.view.currentIndex())
 
     def eventFilter(self, watched, event):
+        if getattr(self, "_podcast_paging", False):
+            if watched is self.view.viewport() and event.type() == QEvent.Type.Wheel:
+                delta = event.pixelDelta().y() or event.angleDelta().y()
+                self._note_podcast_scroll(1 if delta < 0 else -1 if delta > 0 else 0)
+            elif watched is self.view.viewport() and event.type() in {QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate}:
+                points = event.points()
+                if points:
+                    position = points[0].position().y()
+                    previous = getattr(self, "_podcast_touch_y", position)
+                    self._podcast_touch_y = position
+                    self._note_podcast_scroll(1 if position < previous else -1 if position > previous else 0)
+            elif watched is self.view and event.type() == QEvent.Type.KeyPress:
+                if event.key() in {Qt.Key.Key_Down, Qt.Key.Key_PageDown, Qt.Key.Key_End}:
+                    self._note_podcast_scroll(1)
+                elif event.key() in {Qt.Key.Key_Up, Qt.Key.Key_PageUp, Qt.Key.Key_Home}:
+                    self._note_podcast_scroll(-1)
         if (watched is self.view and self.reorder and event.type() == QEvent.Type.KeyPress
                 and event.modifiers() == Qt.KeyboardModifier.AltModifier
                 and event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down)):

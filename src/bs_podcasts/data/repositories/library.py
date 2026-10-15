@@ -1,6 +1,6 @@
 """Library persistence with no Qt dependencies."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from collections import OrderedDict
 from pathlib import Path
 import json
@@ -8,6 +8,7 @@ import logging
 import sqlite3
 import threading
 import time
+import unicodedata
 
 from ...domain import Episode, FeedData, Health, Show
 from ...domain.models import DEFAULT_TRIM_LEVEL, TRIM_LEVELS
@@ -66,6 +67,21 @@ def _fold_text(value):
     return value.casefold() if isinstance(value, str) else value
 
 
+def _accent_fold_text(value):
+    """Case- and accent-insensitive text used by the saved-podcast filter."""
+    if not isinstance(value, str):
+        return value
+    return "".join(
+        character for character in unicodedata.normalize("NFKD", value)
+        if not unicodedata.combining(character)
+    ).casefold()
+
+
+def _podcast_duration_seconds(observed_duration, feed_duration):
+    """Match Episode.duration_seconds: rounded observed duration or feed value."""
+    return int(round(observed_duration or 0)) or int(feed_duration or 0)
+
+
 # Feed-synced episode columns: drives the change-detection SELECT and both
 # comparison tuples in import_feed so the three can never drift apart.
 _EPISODE_SYNC_COLUMNS = (
@@ -84,6 +100,41 @@ _EPISODE_COLUMNS = (
 )
 _EPISODE_FROM = "FROM episodes e JOIN shows s ON s.id=e.show_id"
 _EPISODE_SELECT = "SELECT " + _EPISODE_COLUMNS + " " + _EPISODE_FROM
+
+_PODCAST_FILTERS = {
+    "All": "",
+    "Favorites": "e.favorite=1",
+    "New": "e.is_new=1",
+    "Unplayed": "e.played=0",
+    "In progress": "e.played=0 AND e.position_seconds>0",
+    "Downloaded": "e.downloaded_path!=''",
+    "Played": "e.played=1",
+}
+_SORT_DURATION = "podcast_duration_seconds(e.observed_duration_seconds,e.duration_seconds)"
+_SHORT_DURATION = f"COALESCE(NULLIF({_SORT_DURATION},0),1000000000)"
+_LONG_DURATION = _SORT_DURATION
+_PODCAST_SORTS = {
+    "newest": "e.published_at DESC,e.id DESC",
+    "oldest": "e.published_at ASC,e.id ASC",
+    "shortest": f"{_SHORT_DURATION} ASC,e.published_at DESC,e.id DESC",
+    "longest": f"{_LONG_DURATION} DESC,e.published_at DESC,e.id DESC",
+    "unplayed": "e.played ASC,e.published_at DESC,e.id DESC",
+}
+
+
+@contextmanager
+def _read_savepoint(connection):
+    """Keep related page metadata and rows on one snapshot, including nesting."""
+    name = "podcast_episode_page_read"
+    connection.execute("SAVEPOINT " + name)
+    try:
+        yield
+    except BaseException:
+        connection.execute("ROLLBACK TO SAVEPOINT " + name)
+        connection.execute("RELEASE SAVEPOINT " + name)
+        raise
+    else:
+        connection.execute("RELEASE SAVEPOINT " + name)
 
 
 class LibraryRepository:
@@ -178,6 +229,124 @@ class LibraryRepository:
         with self.database.connect() as connection:
             rows = connection.execute(sql, params).fetchall()
         return [self._episode(row) for row in rows]
+
+    @staticmethod
+    def _podcast_episode_scope(connection, show_id, query, filter_name):
+        """Build the bound predicate shared by saved-podcast paging and IDs."""
+        clauses = ["e.show_id=?"]
+        parameters: list[object] = [show_id]
+        filter_sql = _PODCAST_FILTERS.get(filter_name, "")
+        if filter_sql:
+            clauses.append(filter_sql)
+        folded_query = _accent_fold_text(str(query or "").strip().lower())
+        if folded_query:
+            try:
+                connection.create_function(
+                    "accent_fold_text", 1, _accent_fold_text, deterministic=True
+                )
+            except sqlite3.OperationalError:
+                pass  # the callback is already registered on this thread's handle
+            clauses.append(
+                "(instr(accent_fold_text(e.title),?)>0 "
+                "OR instr(accent_fold_text(s.title),?)>0)"
+            )
+            parameters.extend((folded_query, folded_query))
+        return " AND ".join(clauses), parameters
+
+    @staticmethod
+    def _podcast_sort_sql(connection, sort):
+        if sort in {"shortest", "longest"}:
+            try:
+                connection.create_function(
+                    "podcast_duration_seconds", 2,
+                    _podcast_duration_seconds, deterministic=True,
+                )
+            except sqlite3.OperationalError:
+                pass  # the callback is already registered on this thread's handle
+        return _PODCAST_SORTS.get(sort, _PODCAST_SORTS["newest"])
+
+    def podcast_episode_page(
+        self, show_id: int, *, query: str = "", filter_name: str = "All",
+        sort: str = "newest", limit: int = 200, offset: int = 0,
+        anchor_id: int = 0,
+    ) -> dict:
+        """Read one filtered page and counts without loading the full catalogue.
+
+        If a matching anchor lies outside the requested window, the returned
+        window moves to the page containing that anchor. Rank calculation stays
+        in SQLite and carries only IDs, never episode descriptions.
+        """
+        limit = max(1, int(limit))
+        offset = max(0, int(offset))
+        filter_name = filter_name if filter_name in _PODCAST_FILTERS else "All"
+        with self.database.connect() as connection:
+            with _read_savepoint(connection):
+                sort_sql = self._podcast_sort_sql(connection, sort)
+                predicate, parameters = self._podcast_episode_scope(
+                    connection, show_id, query, filter_name
+                )
+                counts = connection.execute(
+                    "SELECT COUNT(*),COALESCE(SUM(e.position_seconds>0),0) "
+                    + _EPISODE_FROM + " WHERE " + predicate,
+                    parameters,
+                ).fetchone()
+                total, progress_total = int(counts[0]), int(counts[1])
+                show_total = int(connection.execute(
+                    "SELECT COUNT(*) FROM episodes WHERE show_id=?", (show_id,)
+                ).fetchone()[0])
+
+                if total == 0:
+                    offset = 0
+                elif offset >= total:
+                    offset = ((total - 1) // limit) * limit
+
+                try:
+                    anchor_id = int(anchor_id or 0)
+                except (TypeError, ValueError, OverflowError):
+                    anchor_id = 0
+                if anchor_id:
+                    rank = connection.execute(
+                        "WITH ranked AS ("
+                        "SELECT e.id,ROW_NUMBER() OVER (ORDER BY " + sort_sql + ")-1 AS n "
+                        + _EPISODE_FROM + " WHERE " + predicate + ") "
+                        "SELECT n FROM ranked WHERE id=?",
+                        (*parameters, anchor_id),
+                    ).fetchone()
+                    if rank is not None:
+                        anchor_rank = int(rank[0])
+                        if not offset <= anchor_rank < offset + limit:
+                            offset = (anchor_rank // limit) * limit
+
+                rows = connection.execute(
+                    _EPISODE_SELECT + " WHERE " + predicate
+                    + " ORDER BY " + sort_sql + " LIMIT ? OFFSET ?",
+                    (*parameters, limit, offset),
+                ).fetchall()
+        return {
+            "episodes": [self._episode(row) for row in rows],
+            "total": total,
+            "offset": offset,
+            "show_total": show_total,
+            "progress_total": progress_total,
+        }
+
+    def podcast_episode_ids(
+        self, show_id: int, *, query: str = "", filter_name: str = "All",
+        sort: str = "newest",
+    ) -> list[int]:
+        """Return the complete filtered scope as ordered IDs for bulk actions."""
+        filter_name = filter_name if filter_name in _PODCAST_FILTERS else "All"
+        with self.database.connect() as connection:
+            sort_sql = self._podcast_sort_sql(connection, sort)
+            predicate, parameters = self._podcast_episode_scope(
+                connection, show_id, query, filter_name
+            )
+            rows = connection.execute(
+                "SELECT e.id " + _EPISODE_FROM + " WHERE " + predicate
+                + " ORDER BY " + sort_sql,
+                parameters,
+            ).fetchall()
+        return [int(row[0]) for row in rows]
 
     def get_episode(self, episode_id: int) -> Episode | None:
         with self.database.connect() as connection:

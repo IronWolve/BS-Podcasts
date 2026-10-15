@@ -135,6 +135,26 @@ class LibraryService:
             raise ValueError("An offset needs a limit; limit=None already returns every episode.")
         return self.repository.list_episodes(show_id, limit, offset)
 
+    def podcast_episode_page(
+        self, show_id: int, *, query: str = "", filter_name: str = "All",
+        sort: str = "newest", limit: int = 200, offset: int = 0,
+        anchor_id: int = 0,
+    ) -> dict:
+        """Return a filtered, ordered page from one saved podcast."""
+        return self.repository.podcast_episode_page(
+            show_id, query=query, filter_name=filter_name, sort=sort,
+            limit=limit, offset=offset, anchor_id=anchor_id,
+        )
+
+    def podcast_episode_ids(
+        self, show_id: int, *, query: str = "", filter_name: str = "All",
+        sort: str = "newest",
+    ) -> list[int]:
+        """Return all filtered episode IDs for actions covering the whole view."""
+        return self.repository.podcast_episode_ids(
+            show_id, query=query, filter_name=filter_name, sort=sort,
+        )
+
     def history(self, limit: int = 200, offset: int = 0):
         return self.repository.list_history(limit, offset)
 

@@ -107,6 +107,7 @@ ACCENTS = ("#7CA8FF", "#58D6C2", "#FFB45E", "#C794FF", "#FF7A88", "#76D68A")
 # Page sizes for the two capped global views. Each "Load more" click widens the
 # window by one page; design.md forbids silently substituting a cap for "all".
 EPISODES_PAGE_SIZE = 5000
+PODCAST_PAGE_SIZE = 200
 # Milliseconds a selection must stay still before the detail pane renders it.
 CONTEXT_SETTLE_MS = 150
 # The most characters of show notes a list row keeps, as plain text. The full notes stay in the library and are
@@ -359,7 +360,8 @@ class MainWindow(QMainWindow):
     _NAVIGATION_HISTORY_LIMIT = 50
     # The fields of an episode-view history entry; a restored entry keeps these and nothing else.
     _NAVIGATION_ENTRY_FIELDS = ('episode_view', 'show_id', 'preview_url', 'catalog_query', 'catalog_limit', 'query', 'filter',
-                                'sort', 'scroll', 'scroll_units', 'current', 'selected_count')
+                                'sort', 'scroll', 'scroll_units', 'current', 'selected_count',
+                                'podcast_offset', 'podcast_limit')
 
     def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None, inline_work=False):
         super().__init__(parent)
@@ -579,6 +581,11 @@ class MainWindow(QMainWindow):
         self._catalog_total = 0
         self._catalog_limit = 500
         self._episode_scope_revision = 0
+        self._podcast_scope = None
+        self._podcast_window = (0, PODCAST_PAGE_SIZE, 0)
+        self._podcast_total = 0
+        self._podcast_progress_total = 0
+        self._podcast_loading = False
         self._history_limit = HISTORY_PAGE_SIZE
         self._history_generation = 0
         self._episode_total = 0
@@ -823,6 +830,8 @@ class MainWindow(QMainWindow):
         self.bookmark_page.remove_requested.connect(self._delete_bookmarks)
         self.history_page.remove_requested.connect(lambda items: self._remove_history([item.episode_id for item in items]))
         self.episode_page.load_more_requested.connect(self._load_more_episodes)
+        self.episode_page.load_previous_requested.connect(lambda: self._load_podcast_page(previous=True))
+        self.episode_page.podcast_view_changed.connect(self._podcast_view_changed)
         self.history_page.load_more_requested.connect(self._load_more_history)
         self.context.download_menu_requested.connect(self._download_menu)
         self.context.information_requested.connect(self._show_context_information)
@@ -1166,6 +1175,8 @@ class MainWindow(QMainWindow):
                 "filter": page.chips.current() if hasattr(page, "chips") else "All",
                 "sort": getattr(page, "_sort", ""),
             }
+            if page is self.episode_page and self._hero_show_id:
+                views[str(index)].update(self._podcast_saved_window())
         saved = {
             "page": self.pages.currentIndex(), "hero_show_id": self._hero_show_id,
             "preview_url": self._preview_episodes_url, "views": views,
@@ -2038,6 +2049,7 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError, OverflowError):
             limit = 500
         self._catalog_query, self._catalog_limit = query, limit
+        self._leave_podcast_paging()
         self._hero_show_id, self._preview_episodes_url = 0, ''
         self.episode_page.set_catalog_query(query)
         self.episode_page.hero.hide()
@@ -2073,6 +2085,7 @@ class MainWindow(QMainWindow):
         self._run_read(work, apply, 'catalog-search')
 
     def _display_library_search(self):
+        self._leave_podcast_paging()
         self.episode_page.set_catalog_query(self._catalog_query)
         self.episode_page.header.set_title('Search results')
         self.episode_page.hero.hide()
@@ -2497,7 +2510,7 @@ class MainWindow(QMainWindow):
             return
         page = self.episode_page
         ids = [item.episode_id for item in page.model.items() if item.episode_id > 0]
-        if not ids:
+        if not ids and not self._hero_show_id:
             return
         scope = (self._hero_show_id, self._catalog_query, page.filter_name(), page.header.search.text())
         repository = self.library.repository
@@ -2533,7 +2546,12 @@ class MainWindow(QMainWindow):
                 self._notify(message, 'success' if changed else 'info')
             self._run_command(work, cleared)
 
-        self._run_read(lambda: repository.progress_targets(ids, active), apply, 'clear-progress-preview')
+        show_id, _catalog, filter_name, query = scope
+        def read_targets():
+            targets = (self.library.podcast_episode_ids(show_id, query=query, filter_name=filter_name)
+                       if show_id else ids)
+            return repository.progress_targets(targets, active)
+        self._run_read(read_targets, apply, 'clear-progress-preview')
 
     def _mark_played_many(self, items, played: bool):
         if self.library is None:
@@ -2917,7 +2935,10 @@ class MainWindow(QMainWindow):
         active = self._active_downloads(records)
         episodes = self._ui_episodes(stored_episodes, records)
         detail_show_id = self._hero_show_id if include_detail else 0
-        detail_episodes = self._ui_episodes(self.library.episodes(show_id=detail_show_id, limit=None), records) if detail_show_id else []
+        detail_scope, detail_window = self._podcast_scope, self._podcast_window
+        detail_page = (self._read_podcast_page(detail_scope, *detail_window, records=records)
+                       if detail_show_id and detail_scope and detail_scope[0] == detail_show_id else None)
+        detail_episodes = detail_page['episodes'] if detail_page else []
         previews = {}
         if self.jobs is not None and not self._artwork_prepared:
             paths = [getattr(getattr(self.playback, 'snapshot', None), 'artwork_path', '')]
@@ -2939,6 +2960,8 @@ class MainWindow(QMainWindow):
             "detail_included": include_detail,
             "detail_revision": detail_revision,
             "detail_episodes": detail_episodes,
+            "detail_page": detail_page,
+            "detail_scope": detail_scope,
             "stored_shows": stored_shows,
             "episode_total": episode_total,
             "episodes_limit": episodes_limit,
@@ -2995,7 +3018,10 @@ class MainWindow(QMainWindow):
 
     def _load_more_episodes(self):
         """Widen the global Episodes window by one page (P2-39)."""
-        if self._hero_show_id or self._preview_episodes_url or self.library is None:
+        if self._hero_show_id:
+            self._load_podcast_page()
+            return
+        if self._preview_episodes_url or self.library is None:
             return
         if self._catalog_query:
             if self._catalog_timer.isActive():
@@ -3477,20 +3503,20 @@ class MainWindow(QMainWindow):
             elif not self._hero_show_id and not self._preview_episodes_url:
                 self.episode_page.set_items(episodes)
                 # The global view is windowed for responsiveness; say how much is
-                # shown and offer the rest instead of silently hiding the tail
-                # (each podcast page is complete).
+                # shown and offer the rest instead of silently hiding the tail.
                 self._set_global_episode_chrome(len(episodes))
             elif (self._hero_show_id and not self._preview_episodes_url
                   and data.get("detail_show_id") == self._hero_show_id
-                  and data.get('detail_revision', self._episode_scope_revision) == self._episode_scope_revision):
+                  and data.get('detail_revision', self._episode_scope_revision) == self._episode_scope_revision
+                  and data.get('detail_scope') == self._podcast_scope and not self._podcast_loading):
                 podcast = next((item for item in shows if item.show_id == self._hero_show_id), None)
                 if podcast is not None:
-                    detail = data["detail_episodes"]
-                    self._show_hero(podcast, len(detail))
-                    self.episode_page.set_items(detail, preserve_scroll=True)
+                    if data.get('detail_page'):
+                        self._apply_podcast_page(podcast, data['detail_page'], preserve_scroll=True)
                 else:
                     self._apply_all_episodes(episodes)
-            if not self._preview_episodes_url and (not self._hero_show_id or data.get("detail_included", True)):
+            if (not self._preview_episodes_url and not self._podcast_loading
+                    and (not self._hero_show_id or data.get("detail_included", True))):
                 self._finish_page_load(self.episode_page)
         with self._page_guard(self.home_page, "Home") as home_sections:
             resume_ids = {episode.episode_id for episode in in_progress[:3]}
@@ -4218,7 +4244,121 @@ class MainWindow(QMainWindow):
                 'catalog_query': self._catalog_query, 'catalog_limit': self._catalog_limit,
                 'query': page.header.search.text(), 'filter': page.filter_name(), 'sort': page.sort_key(),
                 'scroll': page.scroll_position(), 'scroll_units': 'items', 'current': page.current_key(),
-                'selected_count': len(page.selected_keys())}
+                'selected_count': len(page.selected_keys()), **self._podcast_saved_window()}
+
+    def _podcast_saved_window(self):
+        return {'podcast_offset': self._podcast_window[0],
+                'podcast_limit': max(PODCAST_PAGE_SIZE, len(self.episode_page.all_items))}
+
+    def _leave_podcast_paging(self):
+        if self._podcast_scope is not None:
+            self._episode_scope_revision += 1
+            self._read_tokens['episodes'] = self._read_tokens.get('episodes', 0) + 1
+        self._podcast_scope = None
+        self._podcast_loading = False
+        self.episode_page.set_podcast_paging(False)
+
+    def _podcast_controls(self):
+        page = self.episode_page
+        return (self._hero_show_id, page.header.search.text().strip().lower(), page.filter_name(), page.sort_key())
+
+    def _read_podcast_page(self, scope, offset, limit, anchor_id=0, *, records=None):
+        show_id, query, filter_name, sort = scope
+        result = self.library.podcast_episode_page(show_id, query=query, filter_name=filter_name,
+                                                  sort=sort, offset=offset, limit=limit, anchor_id=anchor_id)
+        result['episodes'] = self._ui_episodes(result['episodes'], records)
+        return result
+
+    def _podcast_chrome(self):
+        page = self.episode_page
+        offset = self._podcast_window[0]
+        end = offset + len(page.all_items)
+        page.set_podcast_page_state(end < self._podcast_total, offset > 0,
+                                    loading=self._podcast_loading, total=self._podcast_total,
+                                    progress_total=self._podcast_progress_total)
+        page.header.set_subtitle(
+            f'Episodes {offset + 1:,}–{end:,} of {self._podcast_total:,} · Scroll for more'
+            if page.all_items and (offset or end < self._podcast_total) else '')
+
+    def _apply_podcast_page(self, podcast, result, *, preserve_scroll=False):
+        page = self.episode_page
+        self._podcast_total = result['total']
+        self._podcast_progress_total = result['progress_total']
+        episodes = [self._resolved_episode_artwork(item) for item in result['episodes']]
+        self._podcast_window = (result['offset'], max(PODCAST_PAGE_SIZE, len(episodes)),
+                                episodes[0].episode_id if episodes else 0)
+        self._show_hero(podcast, result['show_total'])
+        page.set_items(episodes, preserve_scroll=preserve_scroll)
+        self._podcast_chrome()
+
+    def _podcast_view_changed(self):
+        if self.library is None or not self._hero_show_id or self._preview_episodes_url:
+            return
+        scope = self._podcast_controls()
+        changed = scope != self._podcast_scope
+        self._podcast_scope = scope
+        self._request_podcast_page(reset=changed)
+
+    def _request_podcast_page(self, *, reset=False, offset=None, limit=None, anchor_id=0,
+                              select_episode_id=0, finished=None, reveal_latest=False):
+        scope = self._podcast_scope
+        if not scope or scope != self._podcast_controls():
+            return
+        self._episode_scope_revision += 1
+        revision = self._episode_scope_revision
+        old_offset, old_limit, old_anchor = self._podcast_window
+        offset = (0 if reset else old_offset) if offset is None else offset
+        limit = (PODCAST_PAGE_SIZE if reset else old_limit) if limit is None else limit
+        anchor_id = anchor_id or (0 if reset else old_anchor)
+        self._podcast_loading = True
+        self._podcast_chrome()
+        def work():
+            result = self._read_podcast_page(scope, offset, limit, anchor_id)
+            if reveal_latest:
+                latest = self.library.episodes(show_id=scope[0], limit=1)
+                result['latest_id'] = latest[0].id if latest else 0
+            return self.library.repository.get_show(scope[0]), result
+        def apply(payload):
+            if (revision != self._episode_scope_revision or scope != self._podcast_scope
+                    or scope != self._podcast_controls() or self._preview_episodes_url):
+                return
+            self._podcast_loading = False
+            self._episode_scope_revision += 1  # Retire library snapshots taken during this read.
+            show, result = payload
+            if show is None:
+                self._show_all_episodes()
+                return
+            self.episode_page.banner.clear()
+            self._apply_podcast_page(self._ui_podcast(show), result, preserve_scroll=not reset)
+            if select_episode_id:
+                row = self.episode_page.model.row_for_episode(select_episode_id)
+                if row >= 0:
+                    index = self.episode_page.model.index(row, 0)
+                    self.episode_page.view.setCurrentIndex(index)
+                    self.episode_page.view.scrollTo(index)
+            if reveal_latest:
+                self.episode_page.view.scrollToTop()
+                latest_id = result.get('latest_id', 0)
+                row = self.episode_page.model.row_for_episode(latest_id) if latest_id else 0
+                if row != 0:
+                    self._notify('The latest episode is hidden by the current search, filter or sort.',
+                                 'info', 'Show latest', lambda: self._show_refreshed_episode(scope[0], latest_id))
+            if finished:
+                finished()
+        self._run_read(work, apply, 'episodes')
+
+    def _load_podcast_page(self, *, previous=False):
+        if not self._podcast_scope or self._podcast_loading or self._podcast_controls() != self._podcast_scope:
+            return
+        offset, _limit, _anchor = self._podcast_window
+        size = len(self.episode_page.all_items)
+        if previous:
+            if offset <= 0:
+                return
+            start = max(0, offset - PODCAST_PAGE_SIZE)
+            self._request_podcast_page(offset=start, limit=size + offset - start)
+        elif offset + size < self._podcast_total:
+            self._request_podcast_page(limit=size + PODCAST_PAGE_SIZE)
 
     def _open_episode_podcast(self, show_id):
         if not show_id or self.library is None:
@@ -4272,39 +4412,46 @@ class MainWindow(QMainWindow):
         self._episode_navigation_prepared = True
         self.navigation.select(PAGE_EPISODES)
         self._preview_episodes_url = ""
+        self._leave_podcast_paging()
         self.episode_page.banner.show_state("loading", f"Opening {podcast.title}…")
         self._show_hero(podcast, episode_count=podcast.episode_count)
-        # Empty the list first: the filter reset then has no old rows to re-filter.
+        saved = self._episode_navigation_restore
+        if not saved or saved.get('show_id') != podcast.show_id:
+            state = self._pending_view_restore or {}
+            views = state.get('views', {})
+            saved = (views.get(str(PAGE_EPISODES), {})
+                     if state.get('hero_show_id') == podcast.show_id and isinstance(views, dict) else {})
+        saved = saved if isinstance(saved, dict) else {}
         self.episode_page.set_items([], preserve_scroll=False)
-        self.episode_page.set_filter("All")
-
-        def work():
-            return self._ui_episodes(self.library.episodes(show_id=podcast.show_id, limit=None))
-
-        self._run_read(work, lambda episodes: self._apply_open_podcast(podcast, episodes, select_episode_id), "episodes")
-
-    def _apply_open_podcast(self, podcast, episodes, select_episode_id: int = 0, *, preserve_scroll=False):
-        if self._hero_show_id != podcast.show_id or self._preview_episodes_url:
-            return
-        self.episode_page.banner.clear()
-        self._show_hero(podcast, episode_count=len(episodes))
-        self.episode_page.set_items([self._resolved_episode_artwork(item) for item in episodes], preserve_scroll=preserve_scroll)
-        if select_episode_id:
-            row = self.episode_page.model.row_for_episode(select_episode_id)
-            if row >= 0:
-                index = self.episode_page.model.index(row, 0)
-                self.episode_page.view.setCurrentIndex(index)
-                self.episode_page.view.scrollTo(index)
-        self._finish_view_restore()
-
-        self._restore_episode_navigation()
+        query = saved.get('query', '')
+        filter_name, sort = saved.get('filter', 'All'), saved.get('sort', 'newest')
+        filter_name = filter_name if isinstance(filter_name, str) and filter_name in {
+            'All', 'Favorites', 'New', 'Unplayed', 'In progress', 'Downloaded', 'Played'} else 'All'
+        sort = sort if isinstance(sort, str) and sort in dict(SORT_OPTIONS) else 'newest'
+        self.episode_page.set_view(query if isinstance(query, str) else '', filter_name, sort)
+        self.episode_page.set_podcast_paging(True)
+        self._podcast_scope = self._podcast_controls()
+        self._podcast_total = self._podcast_progress_total = 0
+        try:
+            offset = max(0, min(int(saved.get('podcast_offset', 0)), 2**31 - 1))
+            limit = max(PODCAST_PAGE_SIZE, min(int(saved.get('podcast_limit', PODCAST_PAGE_SIZE)),
+                                             max(PODCAST_PAGE_SIZE, podcast.episode_count)))
+        except (ValueError, TypeError, OverflowError):
+            offset, limit = 0, PODCAST_PAGE_SIZE
+        self._podcast_window = (offset, limit, 0)
+        def finished():
+            self._finish_view_restore()
+            self._restore_episode_navigation()
+        current = _item_key(saved.get('current'))
+        saved_anchor = (current[1] if current and len(current) == 2 and current[0] == 'episode'
+                        and isinstance(current[1], int) and 0 < current[1] < 2**63 else 0)
+        anchor_id = select_episode_id or saved_anchor
+        self._request_podcast_page(reset=True, offset=offset, limit=limit, anchor_id=anchor_id,
+                                    select_episode_id=select_episode_id, finished=finished)
 
     def _show_hero(self, podcast, episode_count: int):
         self.episode_page.header.set_title(podcast.title)
         self.episode_page.header.set_subtitle("")
-        # A podcast detail view is always complete; paging chrome belongs
-        # only to the windowed global list.
-        self.episode_page.set_load_more_state(False)
         if self.episode_page.banner.state == "empty":
             self.episode_page.banner.clear()
         self._hero_show_id = podcast.show_id
@@ -7145,40 +7292,17 @@ class MainWindow(QMainWindow):
         """Refresh just the open podcast, independent of a whole-library batch."""
         if self.library is None or self._hero_show_id != show_id or self._preview_episodes_url:
             return
-        library = self.library
-        def work():
-            return (library.repository.get_show(show_id),
-                    self._ui_episodes(library.episodes(show_id=show_id, limit=None)))
-        def apply(payload):
-            if self._hero_show_id != show_id or self._preview_episodes_url or self._catalog_query:
-                return
-            show, episodes = payload
-            if show is None:
-                return
-            self._episode_scope_revision += 1
-            self._show_hero(self._ui_podcast(show), len(episodes))
-            self.episode_page.set_items([self._resolved_episode_artwork(item) for item in episodes],
-                                       preserve_scroll=not reveal_latest)
-            if reveal_latest:
-                self.episode_page.view.scrollToTop()
-                if episodes:
-                    latest = max(episodes, key=lambda item: (item.published_at, item.episode_id))
-                    row = self.episode_page.model.row_for_episode(latest.episode_id)
-                    if row != 0:
-                        reason = 'hidden by the current search or filter' if row < 0 else 'below the current sort order'
-                        self._notify(f'The latest episode is {reason}.', 'info', 'Show latest',
-                                     lambda: self._show_refreshed_episode(show_id, latest.episode_id))
-        self._run_read(work, apply, 'episodes')
+        self._podcast_scope = self._podcast_controls()
+        self._request_podcast_page(reset=reveal_latest, reveal_latest=reveal_latest)
 
     def _show_refreshed_episode(self, show_id, episode_id):
         if self._hero_show_id != show_id or self._preview_episodes_url or self._catalog_query:
             return
         page = self.episode_page
-        page.set_view('', 'All', 'newest')
-        row = page.model.row_for_episode(episode_id)
-        if row >= 0:
-            page.view.setCurrentIndex(page.model.index(row, 0))
-            page.view.scrollToTop()
+        with quiet_signals(page):
+            page.set_view('', 'All', 'newest')
+        self._podcast_scope = self._podcast_controls()
+        self._request_podcast_page(reset=True, anchor_id=episode_id, select_episode_id=episode_id)
 
     def _refresh_finished(self, payload):
         kind, identifier, result = payload
@@ -7547,7 +7671,10 @@ class MainWindow(QMainWindow):
                 self._notify(message, "error")
             # A failed Load more must not leave its button stuck on
             # "Loading…"; recompute availability so it can be retried.
-            if key == "episodes-more":
+            if key == 'episodes' and self._podcast_scope:
+                self._podcast_loading = False
+                self._podcast_chrome()
+            elif key == "episodes-more":
                 self._set_global_episode_chrome(len(self._all_episode_items))
             elif key == 'catalog-search-more':
                 self.episode_page.set_load_more_state(len(self._catalog_search_items) < self._catalog_total, noun='matching episodes')
@@ -8215,6 +8342,7 @@ class MainWindow(QMainWindow):
             self._display_library_search()
             return
         self._leave_library_search()
+        self._leave_podcast_paging()
         if not self._restoring_view:
             self._pending_view_restore = None
         # A cache hit is a new navigation intent too: retire older async reads.
@@ -8242,6 +8370,7 @@ class MainWindow(QMainWindow):
         self._run_read(work, lambda episodes: self._apply_all_episodes(episodes, filter_value), "episodes")
 
     def _apply_all_episodes(self, episodes, filter_value: str = "All"):
+        self._leave_podcast_paging()
         self.episode_page.header.set_title("Episodes")
         self._set_global_episode_chrome(len(episodes))
         self.episode_page.hero.hide()
@@ -8719,6 +8848,7 @@ class MainWindow(QMainWindow):
         if not feed_url:
             return
         self._leave_library_search()
+        self._leave_podcast_paging()
         self._read_tokens["episodes"] = self._read_tokens.get("episodes", 0) + 1
         feed = feed if feed is not None else self._previews.get(feed_url)
         if feed is None:
