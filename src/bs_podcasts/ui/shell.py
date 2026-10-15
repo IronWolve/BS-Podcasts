@@ -934,6 +934,7 @@ class MainWindow(QMainWindow):
             self.library.setting("playback.auto_continue", "1") == "1",
         )
         self._apply_skip_settings()
+        self.settings_page.load_buffer_profile(self.library.setting('playback.buffer_profile', 'standard'))
         self.settings_page.load_theme(self.library.setting("ui.theme", "system"))
         self.settings_page.set_category(self.library.setting('ui.settings_category', 'General'))
         self.podcast_page.set_sort(self.library.setting("ui.podcast_sort", "name"))

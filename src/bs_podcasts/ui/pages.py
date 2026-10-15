@@ -2340,7 +2340,7 @@ class SettingsPage(BasePage):
 
     def _build_playback_section(self):
         # Playback ----------------------------------------------------------
-        card, form = self._card("Playback", "Defaults for newly added podcasts. Existing podcasts keep their own values.")
+        card, form = self._card("Playback", "Speed, skip and autoplay defaults apply to newly added podcasts. Streaming buffer applies to each new playback.")
         self.speed = QDoubleSpinBox()
         self.speed.setRange(0.5, 3.0)
         self.speed.setSingleStep(0.05)
@@ -2358,7 +2358,36 @@ class SettingsPage(BasePage):
         form.addRow("Skip back", self.skip_back)
         form.addRow("Skip forward", self.skip_forward)
         form.addRow("After an episode", self.auto_continue)
+        self.buffer_profile = QComboBox()
+        for label, value in (('Standard (default)', 'standard'), ('More buffering', 'more'), ('Low memory', 'low_memory')):
+            self.buffer_profile.addItem(label, value)
+        self.buffer_hint = PlainTextLabel('')
+        self.buffer_hint.setObjectName('settingHint')
+        self.buffer_hint.setWordWrap(True)
+        form.addRow('Streaming buffer', self.buffer_profile)
+        form.addRow('', self.buffer_hint)
+        self.buffer_profile.currentIndexChanged.connect(self._buffer_profile_changed)
+        self.load_buffer_profile('standard')
         self.settings_content.addWidget(card)
+
+    def load_buffer_profile(self, value):
+        from ..playback.engine import buffer_profile_name
+        with quiet_signals(self.buffer_profile):
+            self.buffer_profile.setCurrentIndex(self.buffer_profile.findData(buffer_profile_name(value)))
+        self._update_buffer_hint()
+
+    def _buffer_profile_changed(self):
+        self._update_buffer_hint()
+        self.setting_changed.emit('playback.buffer_profile', self.buffer_profile.currentData())
+
+    def _update_buffer_hint(self):
+        descriptions = {
+            'standard': 'Balanced memory use and read-ahead for everyday streaming.',
+            'more': 'Read more audio ahead to help with short connection interruptions. Uses more memory.',
+            'low_memory': 'Use less memory, with less protection against connection interruptions.',
+        }
+        self.buffer_hint.setText(descriptions[self.buffer_profile.currentData()] +
+                                 ' Applies to the next episode you start; current playback is unchanged.')
 
     def _build_library_section(self):
         # Library ---------------------------------------------------------------
@@ -2960,7 +2989,7 @@ class SettingsPage(BasePage):
         for field in (
             self.speed, self.skip_back, self.skip_forward, self.refresh_interval,
             self.auto_download_limit, self.theme, self.density, self.text_size,
-            self.episode_lines, self.search_depth, self.backup_interval, self.backup_keep,
+            self.episode_lines, self.search_depth, self.backup_interval, self.backup_keep, self.buffer_profile,
         ):
             self._fit_field(field, width)
         self._fit_field(self.ui_font, scaled_px(220))

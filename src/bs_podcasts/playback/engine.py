@@ -16,6 +16,18 @@ mpv = None
 # Set by the launcher to the native library it bound (see packaging/runtime_*.py).
 BOUND_LIBRARY_ENV = "BS_PODCASTS_BOUND_LIBMPV"
 
+# Seconds ahead, forward byte limit, backward byte limit. Limits are not
+# preallocated RAM, and do not change the initial buffering wait.
+BUFFER_PROFILES = {
+    'standard': (60, '32MiB', '8MiB'),
+    'more': (180, '64MiB', '16MiB'),
+    'low_memory': (15, '8MiB', '2MiB'),
+}
+
+
+def buffer_profile_name(value):
+    return value if isinstance(value, str) and value in BUFFER_PROFILES else 'standard'
+
 
 def _load_mpv():
     """Import the native binding on first use; loading it dlopens the library.
@@ -97,6 +109,11 @@ class MpvEngine:
         }
         defaults.update(options)
         self._local_cache_policy = defaults['cache']
+        self._buffer_profile = 'standard'
+        self._standard_buffer_options = {
+            key.replace('_', '-'): defaults[key]
+            for key in ('cache_secs', 'demuxer_max_bytes', 'demuxer_max_back_bytes')
+        }
         if os.environ.get("BS_PODCASTS_SILENT") == "1":
             # Route audio to the null device.
             defaults["ao"] = "null"
@@ -230,6 +247,11 @@ class MpvEngine:
             raise
         return generation
 
+    def set_buffer_profile(self, value):
+        """Stage the next file's policy; never reconfigure the playing file."""
+        with self._state_lock:
+            self._buffer_profile = buffer_profile_name(value)
+
     def load(self, source: str, start_position: float = 0.0, autoplay: bool = True):
         self._live()
         from ..urlguard import UnsafeUrl, ensure_media_source, is_web_url
@@ -269,8 +291,16 @@ class MpvEngine:
             cache = 'yes' if is_web_url(source) else self._local_cache_policy
             if isinstance(cache, bool):
                 cache = 'yes' if cache else 'no'
+            buffer_options = {}
+            if is_web_url(source):
+                if self._buffer_profile == 'standard':
+                    buffer_options = dict(self._standard_buffer_options)
+                else:
+                    seconds, forward, backward = BUFFER_PROFILES[self._buffer_profile]
+                    buffer_options = {'cache-secs': seconds, 'demuxer-max-bytes': forward,
+                                      'demuxer-max-back-bytes': backward}
             try:
-                player.loadfile(native_source, "replace", pause="yes", cache=cache)
+                player.loadfile(native_source, "replace", pause="yes", cache=cache, **buffer_options)
                 entries = player.playlist
                 if len(entries) != 1 or "id" not in entries[0]:
                     raise PlaybackUnavailable("Could not identify the native playback entry.")
@@ -645,6 +675,9 @@ class LazyMpvEngine:
 
     def set_speed(self, speed: float):
         self._configure("speed", lambda engine: engine.set_speed(speed))
+
+    def set_buffer_profile(self, value):
+        self._configure('buffer_profile', lambda engine: engine.set_buffer_profile(value))
 
     def set_volume(self, volume: float):
         self._configure("volume", lambda engine: engine.set_volume(volume))

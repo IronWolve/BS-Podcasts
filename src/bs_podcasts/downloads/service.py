@@ -293,10 +293,7 @@ def _guarded_chunks(response, stall: "_StallWatch"):
     import requests
 
     try:
-        # 16 KiB is the most the shared session reads at once; smaller reads
-        # only multiply the per-chunk hand-offs between its reader thread and
-        # this one.
-        yield from response.iter_content(16 * 1024)
+        yield from response.iter_content(DownloadService.DOWNLOAD_CHUNK_SIZE)
     except requests.RequestException:
         if stall.message:
             raise (_TransferStalled if stall.stalled else DownloadError)(stall.message)
@@ -779,9 +776,11 @@ class DownloadService:
 
     MISSING_FILE_MESSAGE = "Downloaded file is missing — retry to download it again."
     STALL_WINDOW_SECONDS = 30.0
-    # Bytes count when a whole 16 KiB read completes, so in practice one read
-    # per window (about 550 B/s) is the floor.
+    # Keep the watchdog's byte floor independent of the larger background
+    # read target. The shared HTTP reader uses read1 for downloads, so bytes
+    # are reported as they arrive rather than after a full 64 KiB.
     STALL_MIN_BYTES = 8 * 1024
+    DOWNLOAD_CHUNK_SIZE = 64 * 1024
     MAX_TRANSFER_SECONDS = 4 * 3600
 
     def reconcile_missing(self, limit: int | None = None) -> int:
@@ -979,13 +978,15 @@ class DownloadService:
                 if budget <= 0:
                     raise DownloadError("The download exceeded its time limit.")
                 policy = {"cancel_event": cancellation, "total_timeout": budget}
-            response = self.session.get(
-                episode.media_url,
-                headers=headers,
-                timeout=(8, 30),
-                stream=True,
-                **policy,
-            )
+            from ..netlimits import download_scope
+            with download_scope():
+                response = self.session.get(
+                    episode.media_url,
+                    headers=headers,
+                    timeout=(8, 30),
+                    stream=True,
+                    **policy,
+                )
             if response.status_code == 416 and existing:
                 # A 416 naming exactly the size already on disk means the
                 # partial is the whole file: the earlier leg reached the true
@@ -1074,12 +1075,11 @@ class DownloadService:
             self._emit(episode_id, DownloadState.DOWNLOADING, done, total)
             last_report = done
             last_report_at = time.monotonic()
-            # A transfer that keeps trickling never hit the per-chunk read
-            # timeout, and iter_content() blocks until a whole chunk has
-            # arrived, so a check inside the loop cannot see a stall either.
-            # The watchdog shuts the socket when fewer than STALL_MIN_BYTES
-            # arrive in STALL_WINDOW_SECONDS or the transfer outlives
-            # MAX_TRANSFER_SECONDS.
+            # A transfer that keeps trickling never hits the per-chunk read
+            # timeout. The shared reader uses read1 for this download so the
+            # watchdog observes available bytes without waiting for a full
+            # write-sized chunk. It stops the socket below the existing byte
+            # floor or when the transfer outlives MAX_TRANSFER_SECONDS.
             stall = _StallWatch(response, self.STALL_WINDOW_SECONDS, self.STALL_MIN_BYTES, self.MAX_TRANSFER_SECONDS, cancellation)
             stall.start()
             # Progress is persisted by time, not bytes: a 256 KB step meant

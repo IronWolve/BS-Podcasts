@@ -11,7 +11,7 @@ import time
 from ..data.repositories import LibraryRepository
 from ..urlguard import UnsafeUrl, ensure_media_source, ensure_web_url, ensure_fetchable, is_web_url
 from ..privacy import redact
-from .engine import EngineEvent, LibraryBusy, PlaybackUnavailable
+from .engine import EngineEvent, LibraryBusy, PlaybackUnavailable, buffer_profile_name
 from .metering import ListeningMeter
 from .recovery import StreamRecovery
 from .review import ReviewSettings
@@ -113,6 +113,7 @@ class PlaybackService:
         self._load_watchdog: Timer | None = None
         self._load_token = 0
         self._buffering_started_at: float | None = None
+        self._buffer_profile = 'standard'
         # Redirect rescue and mid-play reopen limits (see _start_redirect_rescue
         # and _start_stream_recovery) live in StreamRecovery.
         self._recovery = StreamRecovery()
@@ -326,6 +327,7 @@ class PlaybackService:
         speed = show.playback_speed if show else 1.0
         download_first = (not force_stream and not local and is_web_url(source)
                           and self.repository.get_setting("playback.download_first", "0") == "1")
+        buffer_profile = buffer_profile_name(self.repository.get_setting('playback.buffer_profile', 'standard'))
         with self._lock:
             self._guard()
             if cancelled is not None and cancelled():
@@ -337,6 +339,8 @@ class PlaybackService:
             # the sleep timer and the A-B loop carry over (see REOPEN_KEEPS).
             same = self.snapshot.episode_id == episode_id
             keep = keep_session and same
+            if not keep:
+                self._buffer_profile = buffer_profile
             # Sleep is session-scoped: a new load's snapshot has no deadline,
             # so a still-armed timer would pause the NEXT episode unannounced.
             # Opening the episode already on the snapshot (the first Play of a
@@ -474,6 +478,7 @@ class PlaybackService:
         # deliberately, not on top of this transient stream. Listening
         # buckets flush to the outgoing show before the snapshot changes.
         # The saves are queued under the lock and awaited without it.
+        buffer_profile = buffer_profile_name(self.repository.get_setting('playback.buffer_profile', 'standard'))
         with self._lock:
             self._guard()
             if cancelled is not None and cancelled():
@@ -490,6 +495,7 @@ class PlaybackService:
                 self._set_current_playback(None, PlaybackState.IDLE.value)
             self.cancel_sleep_timer()
             self._deferred_episode_id = None
+            self._buffer_profile = buffer_profile
             self._begin_load(0.0, autoplay)
             if not self._volume_applied:
                 try:
@@ -1419,6 +1425,9 @@ class PlaybackService:
         self._desired_position = max(0.0, float(position))
         try:
             # The lookup can build the engine's native core, so it can fail too.
+            configure_buffer = getattr(self.engine, 'set_buffer_profile', None)
+            if configure_buffer is not None:
+                configure_buffer(self._buffer_profile)
             prepare = getattr(self.engine, "prepare_load", None)
             self._engine_generation = prepare() if callable(prepare) else None
             if prepare is None:

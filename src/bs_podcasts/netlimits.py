@@ -19,14 +19,27 @@ _context = threading.local()
 
 
 @contextmanager
-def request_scope(cancel_event=None, foreground=False, deadline=None):
+def request_scope(cancel_event=None, foreground=False, deadline=None, download_stream=False):
     previous = (getattr(_context, 'cancel', None), getattr(_context, 'foreground', False),
-                getattr(_context, 'deadline', None))
+                getattr(_context, 'deadline', None), getattr(_context, 'download_stream', False))
     _context.cancel, _context.foreground, _context.deadline = cancel_event, foreground, deadline
+    _context.download_stream = download_stream
     try:
         yield
     finally:
-        _context.cancel, _context.foreground, _context.deadline = previous
+        (_context.cancel, _context.foreground, _context.deadline,
+         _context.download_stream) = previous
+
+
+@contextmanager
+def download_scope():
+    """Opt this request into larger reads without replacing its other scope."""
+    previous = getattr(_context, 'download_stream', False)
+    _context.download_stream = True
+    try:
+        yield
+    finally:
+        _context.download_stream = previous
 
 
 def current_cancel():
@@ -35,6 +48,10 @@ def current_cancel():
 
 def is_foreground():
     return getattr(_context, 'foreground', False)
+
+
+def is_download_stream():
+    return getattr(_context, 'download_stream', False)
 
 
 class NetworkDeadline(Exception):
@@ -53,6 +70,7 @@ class Deadline:
         self.cancelled = threading.Event()
         self.user_cancel = user_cancel if user_cancel is not None else current_cancel()
         self.foreground = is_foreground() if foreground is None else foreground
+        self.download_stream = is_download_stream() and not self.foreground
         self.parent = getattr(_context, 'deadline', None)
 
     def remaining(self):
@@ -218,6 +236,26 @@ def bounded_call(work, deadline, gate=None, dispose=None):
 
 def bounded_chunks(response, original, deadline, maximum, chunk_size, decode_unicode=False):
     gate = PLAYBACK_BODIES if deadline.foreground else BODIES
+    raw = getattr(response, 'raw', None)
+    raw_stream = getattr(raw, 'stream', None)
+    raw_dict = getattr(raw, '__dict__', None)
+    stream_override = raw_dict.get('stream') if isinstance(raw_dict, dict) else None
+    had_stream_override = isinstance(raw_dict, dict) and 'stream' in raw_dict
+    content_encoding = str(getattr(response, 'headers', {}).get('Content-Encoding', '')).strip().lower()
+    # urllib3.read1 yields bytes as they arrive. Keep the legacy read size for
+    # transports without it and encoded bodies, where a read1 decode can emit
+    # no bytes while its decoder buffers incomplete input.
+    use_read1 = (deadline.download_stream and isinstance(raw_dict, dict)
+                 and callable(getattr(raw, 'read1', None)) and callable(raw_stream)
+                 and content_encoding in {'', 'identity'})
+    # Four bounded slots keep the faster writer decoupled without allowing an
+    # unbounded body queue. Foreground playback stays at 16 KiB.
+    chunk_limit = 64 * 1024 if use_read1 else 16 * 1024
+    read_size = min(chunk_size or 16 * 1024, chunk_limit)
+    results = queue.Queue(4)
+    stopped = threading.Event()
+    # Prepare the reader before taking a permit; invalid arguments or a
+    # malformed injected response must not strand a network-reader slot.
     try:
         admitted = _admit(gate, deadline)
     except NetworkDeadline:
@@ -226,8 +264,6 @@ def bounded_chunks(response, original, deadline, maximum, chunk_size, decode_uni
     if not admitted:
         abort_response(response)
         raise NetworkDeadline("Network readers are busy; retry shortly.")
-    results = queue.Queue(4)
-    stopped = threading.Event()
 
     def deliver(result):
         while not stopped.is_set():
@@ -240,10 +276,32 @@ def bounded_chunks(response, original, deadline, maximum, chunk_size, decode_uni
 
     def read():
         try:
-            for chunk in original(min(chunk_size or 16384, 16384), decode_unicode=decode_unicode):
-                if stopped.is_set():
-                    break
-                deliver((0, chunk))
+            if use_read1:
+                # requests.iter_content delegates to raw.stream(), whose
+                # read() waits for the entire requested amount. Swap only this
+                # response's stream method for the duration of its one reader
+                # thread; urllib3 read1 returns currently available bytes,
+                # including chunked bodies (http.client.read1 preserves their
+                # framing). requests.iter_content still maps transport errors
+                # to the usual Requests exceptions for _guarded_chunks.
+                def available_stream(amount, decode_content=None):
+                    while True:
+                        chunk = raw.read1(amount, decode_content=decode_content)
+                        if not chunk:
+                            return
+                        yield chunk
+                raw.stream = available_stream
+            try:
+                for chunk in original(read_size, decode_unicode=decode_unicode):
+                    if stopped.is_set():
+                        break
+                    deliver((0, chunk))
+            finally:
+                if use_read1:
+                    if had_stream_override:
+                        raw.stream = stream_override
+                    else:
+                        del raw.__dict__['stream']
             if not stopped.is_set():
                 deliver((1, None))
         except Exception as exc:

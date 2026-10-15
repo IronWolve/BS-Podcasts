@@ -9,9 +9,9 @@ Who owns the module-level state (workers only decode, sample and save):
     missing_accents tests membership without the lock, one atomic read.
     _disk_loaded is set under _disk_load_lock and _save_error_logged is
     written inside _disk_write_lock.
-  _decode_lock: _decoder, _bridge, _inflight, _decoding_paths, _failed and
-    writes to _decode_stopped. _remember_failed expects its caller to hold it.
-  The decode worker only: _decode_errors_logged.
+  _decode_lock: _decoder, _bridge, _inflight, _decoding_paths, _failed,
+    _decode_errors_logged and writes to _decode_stopped. _remember_failed
+    expects its caller to hold it.
 """
 
 from collections import OrderedDict
@@ -618,7 +618,7 @@ def _retain_preview(path, image):
 # --- asynchronous decode -----------------------------------------------------
 # paint() used to call QImageReader.read() inline: 5-7 ms per cold cover, and
 # a grid scroll that revealed twenty new covers froze for 180-320 ms (audit
-# F-027). Decoding now happens on one worker thread; paint draws the cached
+# F-027). Decoding now happens on two worker threads; paint draws the cached
 # pixmap when there is one and the placeholder otherwise, and the widgets that
 # asked are repainted when the image lands.
 _decoder: TrackedExecutor | None = None
@@ -727,10 +727,13 @@ def _decode_job(key: str, path: str, width: int, height: int, bridge: _DecodeBri
         image = QImage()  # The file could not be read or decoded.
     except Exception:
         # A programming error: still show initials, but leave one trace per path.
-        if path not in _decode_errors_logged:
-            if len(_decode_errors_logged) >= 256:
-                _decode_errors_logged.clear()
-            _decode_errors_logged.add(path)
+        with _decode_lock:
+            should_log = path not in _decode_errors_logged
+            if should_log:
+                if len(_decode_errors_logged) >= 256:
+                    _decode_errors_logged.clear()
+                _decode_errors_logged.add(path)
+        if should_log:
             logging.getLogger("bs_podcasts").warning("Could not decode artwork %s", Path(path).name, exc_info=True)
         image = QImage()
     try:
@@ -766,9 +769,18 @@ def _schedule_decode(key: str, path: str, width: int, height: int, notify) -> No
         if _bridge is None:
             _bridge = _DecodeBridge()
         if _decoder is None:
-            _decoder = TrackedExecutor(max_workers=1, thread_name_prefix="bs-decode")
+            _decoder = TrackedExecutor(max_workers=2, thread_name_prefix="bs-decode")
         bridge = _bridge
-    _decoder.submit(_decode_job, key, path, width, height, bridge)
+        decoder = _decoder
+    try:
+        decoder.submit(_decode_job, key, path, width, height, bridge)
+    except RuntimeError:
+        # Shutdown can race the reservation above. Never leave a phantom key
+        # occupying the 64-job bound or the path gate; a later paint can retry.
+        with _decode_lock:
+            _inflight.discard(key)
+            if not any(entry.startswith(f"src:{path}:") for entry in _inflight):
+                _decoding_paths.discard(path)
 
 
 
