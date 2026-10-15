@@ -12,6 +12,7 @@ from PySide6.QtGui import QContextMenuEvent, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSlider,
+    QBoxLayout,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -893,9 +894,6 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         chips = () if discover else ("All", "New", "Problems")
         self.chips = ChipRow(chips)
         if discover:
-            banner_policy = self.banner.sizePolicy()
-            banner_policy.setRetainSizeWhenHidden(True)
-            self.banner.setSizePolicy(banner_policy)
             filters = QWidget()
             filters.setObjectName("discoverToolbar")
             self.discover_toolbar = filters
@@ -903,11 +901,12 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             filter_layout.setContentsMargins(0, 0, 0, 0)
             filter_layout.setSpacing(SPACE["sm"])
             primary_filters = QHBoxLayout()
+            self._discover_filter_layout = primary_filters
             primary_filters.setSpacing(SPACE["sm"])
             self.chart = DiscoverModeTabs()
             self.chart.setObjectName("discoverModes")
             self.chart.setAccessibleName("Discover view")
-            self.chart.setExpanding(True)
+            self.chart.setExpanding(False)
             self.chart.setUsesScrollButtons(True)
             self.chart.setElideMode(Qt.TextElideMode.ElideRight)
             self.chart.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -930,7 +929,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
                         "top_series": "Top Series",
                     }[value],
                 )
-            primary_filters.addWidget(self.chart, 1)
+            primary_filters.addWidget(self.chart)
             filter_layout.addLayout(primary_filters)
             self.secondary_filters_widget = QWidget()
             # Filters must never raise the page's minimum width; the splitter would
@@ -948,7 +947,6 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.discover_sort.setAccessibleName("Sort Discover results — Chart order")
             self.discover_sort.clicked.connect(self._show_discover_sort_menu)
             self._discover_sort = "rank"
-            secondary_filters.addWidget(self.discover_sort)
             secondary_filters.addStretch(1)
             self.scope_label = PlainTextLabel("All Categories · Directory chart")
             self.scope_label.setObjectName("scopePill")
@@ -964,12 +962,13 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.topic.setEnabled(False)
             self.topic.addItem("Choose a category first")
             secondary_filters.addWidget(self.topic)
+            secondary_filters.addWidget(self.discover_sort)
             wheel_needs_focus(self.category, self.topic)
-            filter_layout.addWidget(self.secondary_filters_widget)
+            primary_filters.addWidget(self.secondary_filters_widget, 1)
             self.root.addWidget(filters)
-            self.result_summary = PlainTextLabel("Choose For You, search, or select a category.")
-            self.result_summary.setObjectName("meta")
-            self.root.addWidget(self.result_summary)
+            self.result_summary = self.header.subtitle_label
+            self.header.set_inline_subtitle(True)
+            self.header.set_subtitle("Choose For You, search, or select a category.")
             self.header.search.setPlaceholderText("Search")
             self.header.search.setAccessibleName("Search the podcast directory")
             if self.header.action:
@@ -1003,6 +1002,13 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             # Two orders only: a toggle beats a menu for a binary choice.
             self.sort_button.clicked.connect(self._toggle_sort)
             self.chips.add_inline(self.sort_button)
+            self.clear_filters = QPushButton('Show all podcasts')
+            self.clear_filters.setObjectName('textButton')
+            self.clear_filters.setIcon(icons.themed_icon('close', 'muted', 16))
+            self.clear_filters.setToolTip('Clear the search and show every subscribed podcast')
+            self.clear_filters.clicked.connect(self._clear_podcast_filters)
+            self.chips.add_trailing(self.clear_filters)
+            self.clear_filters.hide()
             self.remove_problems = QPushButton("Remove unreachable…")
             self.remove_problems.setObjectName("dangerButton")
             self.remove_problems.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1054,6 +1060,8 @@ class PodcastGridPage(BasePage, _ListPageMixin):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self.discover:
+            self._layout_discover_controls()
         self._layout_cards()
 
     def showEvent(self, event):
@@ -1161,12 +1169,43 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         elif self.discover and self._discover_sort == "newest":
             items.sort(key=lambda item: item.latest_sort_key or "", reverse=True)
         self._replace_rows(items)
+        if not self.discover:
+            self._update_library_summary()
         self._restore_selection(restore_key, preserve_scroll, selected, anchor)
         if self.discover and not items:
             self.context_changed.emit(None)
         self._update_empty(query if not self.discover else "")
         self._layout_cards()
         self._artwork_prefetch_timer.start(0)
+
+    def _clear_podcast_filters(self):
+        with quiet_signals(self.header.search):
+            self.header.search.clear()
+        self.header._apply_search_visibility()
+        self.chips.select('All')
+        self._apply_filters()
+
+    def set_library_total(self, episode_total):
+        self._library_episode_total = episode_total
+        self._update_library_summary()
+
+    def _update_library_summary(self):
+        if self.discover or not hasattr(self, 'clear_filters'):
+            return
+        total, shown = len(self._all_items), self.model.rowCount()
+        query = self.header.search.text().strip()
+        filtered = bool(query) or self.chips.current() != 'All'
+        self.clear_filters.setVisible(filtered)
+        if filtered:
+            text = f'{shown:,} of {total:,} podcasts'
+            if query:
+                text += f' matching “{query}”'
+        else:
+            text = f'{total:,} podcast' + ('' if total == 1 else 's')
+            episodes = getattr(self, '_library_episode_total', None)
+            if episodes is not None:
+                text += f'  ·  {episodes:,} episodes'
+        self.header.set_subtitle(text)
 
     DISCOVER_SORTS = (("rank", "Chart order"), ("newest", "Newest episode"), ("title", "Title A–Z"))
     discover_sort_changed = Signal(str)
@@ -1332,20 +1371,31 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             else:
                 self.topic.addItem("Choose a category first")
                 self.topic.setEnabled(False)
+        self.topic.setVisible(getattr(self, '_discover_show_topic', True) and bool(topics))
+        self._layout_discover_controls()
 
     def _size_discover_controls(self):
         """The Discover toolbar's fixed sizes, set at construction and again
         whenever the scale changes."""
-        self.banner.setFixedHeight(scaled_px(42))
-        self.discover_toolbar.setFixedHeight(scaled_px(88))
-        self.chart.setFixedHeight(scaled_px(40))
+        self.root.setSpacing(SPACE['sm'])
+        self.chart.setFixedHeight(scaled_px(38))
         self.secondary_filters_widget.setFixedHeight(scaled_px(40))
         for combo in (self.category, self.topic):
             combo.setMinimumWidth(scaled_px(140))
-            combo.setMaximumWidth(scaled_px(220))
-        self.result_summary.setFixedHeight(scaled_px(22))
+            combo.setMaximumWidth(scaled_px(210))
         if self.header.action is not None:
             self.header.action.setFixedSize(scaled_px(38), scaled_px(38))
+        self._layout_discover_controls()
+
+    def _layout_discover_controls(self):
+        if not getattr(self, 'discover_toolbar', None):
+            return
+        margins = self.root.contentsMargins()
+        available = self.width() - margins.left() - margins.right()
+        needed = self.chart.sizeHint().width() + self.secondary_filters_widget.sizeHint().width() + SPACE['sm']
+        direction = QBoxLayout.Direction.LeftToRight if available >= needed else QBoxLayout.Direction.TopToBottom
+        if self._discover_filter_layout.direction() != direction:
+            self._discover_filter_layout.setDirection(direction)
 
     def apply_metrics(self):
         super().apply_metrics()
@@ -1358,16 +1408,18 @@ class PodcastGridPage(BasePage, _ListPageMixin):
 
     def set_discover_summary(self, text: str):
         if self.result_summary is not None:
-            self.result_summary.setText(text)
+            self.header.set_subtitle(text)
 
     def set_discover_filter_visibility(self, show_category: bool, show_topic: bool, scope_text: str = "All Categories · Directory chart"):
         if self.secondary_filters_widget is None:
             return
         self.secondary_filters_widget.setVisible(True)
         self.category.setVisible(show_category)
-        self.topic.setVisible(show_topic)
+        self._discover_show_topic = show_topic
+        self.topic.setVisible(show_topic and self.topic.isEnabled() and self.topic.count() > 1)
         self.scope_label.setText(scope_text)
         self.scope_label.setVisible(not show_category and not show_topic)
+        self._layout_discover_controls()
 
 
 SORT_OPTIONS = (
@@ -2532,6 +2584,16 @@ class SettingsPage(BasePage):
         self.notifications = QCheckBox("Show system notifications (pop-ups with the system sound)")
         self.close_to_tray = QCheckBox("Keep running in the tray when the window closes")
         desktop_form.addRow("Notifications", self.notifications)
+        self.notification_duration = QComboBox()
+        self.notification_duration.setAccessibleName('In-app notification duration')
+        for seconds in (5, 10, 15, 30, 60):
+            self.notification_duration.addItem(f'{seconds} seconds' + (' (default)' if seconds == 10 else ''), str(seconds))
+        self.notification_duration.setCurrentIndex(1)
+        self.notification_duration.setToolTip('Completed notices and errors fade away after this delay. Active progress stays visible.')
+        wheel_needs_focus(self.notification_duration)
+        desktop_form.addRow('In-app messages', self.notification_duration)
+        self.notification_duration.currentIndexChanged.connect(
+            lambda index: self.setting_changed.emit('notifications.timeout_seconds', self.notification_duration.itemData(index)))
         desktop_form.addRow("Window close", self.close_to_tray)
         self.settings_content.addWidget(desktop_card)
         self.notifications.toggled.connect(lambda value: self.setting_changed.emit("notifications.enabled", "1" if value else "0"))

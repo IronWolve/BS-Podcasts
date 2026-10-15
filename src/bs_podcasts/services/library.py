@@ -83,11 +83,11 @@ class LibraryService:
                 return show
         return None
 
-    def add_subscription(self, feed_url: str, title: str = ""):
+    def add_subscription(self, feed_url: str, title: str = "", *, feed=None):
         with self._subscription_lock:
-            return self._add_subscription(feed_url, title)
+            return self._add_subscription(feed_url, title, feed=feed)
 
-    def _add_subscription(self, feed_url: str, title: str, known=None, website_url: str = ""):
+    def _add_subscription(self, feed_url: str, title: str, known=None, website_url: str = "", *, feed=None):
         feed_url = ensure_web_url(feed_url, 'Feed URL')
         parsed = urlparse(feed_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -115,6 +115,7 @@ class LibraryService:
             skip_back=skip_back,
             skip_forward=skip_forward,
             auto_continue=auto_continue,
+            feed=feed,
         )
 
     def shows(self):

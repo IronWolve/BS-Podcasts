@@ -2,7 +2,7 @@
 
 from bisect import bisect_right
 from contextlib import contextmanager
-from dataclasses import dataclass, replace as replace_item
+from dataclasses import dataclass, fields, replace as replace_item
 from collections import OrderedDict
 import json
 import logging
@@ -852,7 +852,7 @@ class MainWindow(QMainWindow):
         self.podcast_page.remove_problems_requested.connect(self._remove_unreachable)
         self.settings_page.reset_library_requested.connect(self._reset_library)
         self.discover_page.card_action_requested.connect(self._discover_card_action)
-        self.episode_page.hero.play_latest_requested.connect(lambda: self._play_latest(self._hero_show_id, toggle=True))
+        self.episode_page.hero.play_latest_requested.connect(self._play_hero_latest)
         self.episode_page.hero.refresh_requested.connect(self._refresh_episode_view)
         self.episode_page.hero.subscribe_requested.connect(lambda: self._subscribe_url(self._preview_episodes_url))
         self.episode_page.hero.website_requested.connect(lambda: self._open_url(self._hero_website))
@@ -969,6 +969,7 @@ class MainWindow(QMainWindow):
             self.library.setting("updates.enabled", "1") == "1",
             self.library.setting("diagnostics.file_logging", "1") == "1",
         )
+        self._apply_notification_timeout()
         self.navigation.set_background_paused(self._background_paused())
         self.settings_page.statistics_requested.connect(self._refresh_statistics)
         self.settings_page.update_check_requested.connect(lambda: self._check_for_updates(manual=True))
@@ -2052,6 +2053,18 @@ class MainWindow(QMainWindow):
     def _notify(self, message: str, tone: str = "info", action: str = "", callback=None):
         self.toast.show_message(message, tone, action, callback)
 
+    def _apply_notification_timeout(self):
+        value = self.library.setting('notifications.timeout_seconds', '10') if self.library else '10'
+        value = value if value in {'5', '10', '15', '30', '60'} else '10'
+        with quiet_signals(self.settings_page.notification_duration):
+            self.settings_page.notification_duration.setCurrentIndex(
+                self.settings_page.notification_duration.findData(value))
+        self.toast.default_duration_ms = int(value) * 1000
+        for index in range(self.pages.count()):
+            banner = getattr(self.pages.widget(index), 'banner', None)
+            if banner is not None:
+                banner.set_timeout(int(value) * 1000)
+
     def _escape(self):
         if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
             return
@@ -2247,18 +2260,17 @@ class MainWindow(QMainWindow):
         playback = self.playback
         delete_files = dialog.delete_files.isChecked()
         confirmed_paths = [path for path, _size in preview.get("files", ())] if delete_files else []
-        self._previews.pop(show.feed_url, None)
+        preview = dict(preview)
+        preview['cached_feed'] = self._previews.get(show.feed_url)
+        preview['visible_rows'] = tuple(self.episode_page.all_items) if self._hero_show_id == show_id else ()
         # Episode IDs are never reused (the stable-ID sequences); dropping the
         # whole fetched-once memory just forgets the removed show's episodes
         # and is cheap, since each fetch re-checks its own preconditions.
         self._details_fetched.clear()
         self._artwork_fetched.clear()
-        if self.pages.currentWidget() is self.episode_page and self._hero_show_id == show_id:
-            self._hero_show_id = 0
-            self.navigation.select(PAGE_PODCASTS)
-        self.context.show_empty()
-
         self._retained_removals.add(show_id)
+        if self._hero_show_id == show_id:
+            self.episode_page.hero.unsubscribe.setEnabled(False)
         def prepare():
             if playback is not None:
                 playback.begin_show_retirement(show_id)
@@ -2274,13 +2286,22 @@ class MainWindow(QMainWindow):
             return
         def work():
             try:
+                feed = preview.get('cached_feed')
+                if feed is None and preview['show'].source != 'local':
+                    stored = library.repository.episodes_by_ids(row.episode_id for row in preview.get('visible_rows', ()))
+                    episodes = tuple(FeedEpisodeData(**{field.name: getattr(episode, field.name)
+                                     for field in fields(FeedEpisodeData)}) for episode in stored.values())
+                    show = preview['show']
+                    feed = FeedData(show.title, author=show.author, description=show.description,
+                                    website_url=show.website_url, artwork_url=show.artwork_url, episodes=episodes)
+                    object.__setattr__(feed, '_saved_preview_only', len(episodes) < show.episode_count)
                 result = library.remove_subscription(show_id, delete_files, confirmed_paths)
             finally:
                 if playback is not None:
                     playback.end_show_retirement(show_id)
             removed = set(result.get("removed_files", ()))
             reclaimed = sum(size for path, size in preview["files"] if path in removed)
-            return preview['show'].title, reclaimed, len(result.get("failed_files", ()))
+            return preview['show'].title, reclaimed, len(result.get("failed_files", ())), preview['show'], feed
         try:
             # Retained and bulk, like the other removals: Quit waits for it
             # whatever the read workers are doing; Play and Pause do not.
@@ -2700,6 +2721,8 @@ class MainWindow(QMainWindow):
             if key == "diagnostics.file_logging":
                 from ..logging_setup import set_file_logging
                 set_file_logging(value == "1")
+            elif key == 'notifications.timeout_seconds':
+                self._apply_notification_timeout()
             elif key.startswith('backups.'):
                 self._backup_status_dirty = True
                 if key == 'backups.enabled' and value == '0':
@@ -3732,6 +3755,15 @@ class MainWindow(QMainWindow):
         stored_shows = data["stored_shows"]
         self._stored_shows = list(stored_shows)
         self._stored_shows_ready = True
+        if self.discover_page.all_items:
+            subscribed = self._subscriptions_by_feed(stored_shows)
+            cards = []
+            for item in self.discover_page.all_items:
+                show = subscribed.get(LibraryService.normalize_feed_url(item.feed_url)) if item.feed_url else None
+                cards.append(self._merge_subscription(item, show) if show is not None else
+                             replace_item(item, show_id=0, subscribed=False, new_count=0))
+            if cards != self.discover_page.all_items:
+                self.discover_page.set_items(cards, preserve_scroll=True)
         episode_total = data.get("episode_total", 0)
         shows = data["shows"]
         episodes = data["episodes"]
@@ -3790,7 +3822,8 @@ class MainWindow(QMainWindow):
                     if data.get('detail_page'):
                         self._apply_podcast_page(podcast, data['detail_page'], preserve_scroll=True)
                 else:
-                    self._show_all_episodes()
+                    if self._hero_show_id not in self._retained_removals:
+                        self._show_all_episodes()
             if (not self._preview_episodes_url and not self._podcast_loading
                     and not self._catalog_query and data.get('detail_scope') == self._podcast_scope
                     and data.get('detail_revision') == self._episode_scope_revision
@@ -3828,9 +3861,7 @@ class MainWindow(QMainWindow):
             self.navigation.set_badge(PAGE_QUEUE, len(queued))
             self.navigation.set_badge(PAGE_DOWNLOADS, active_downloads)
         with self._page_guard(self.podcast_page, "your podcasts"):
-            self.podcast_page.header.set_subtitle(
-                f"{show_count} podcast{'s' if show_count != 1 else ''}  ·  {episode_total} episode{'s' if episode_total != 1 else ''}" if show_count else ""
-            )
+            self.podcast_page.set_library_total(episode_total)
         with self._page_guard(None, "the playing marker"):
             self._apply_playing_marker()
         self._prime_accents(show.artwork_path for show in stored_shows)
@@ -3935,7 +3966,7 @@ class MainWindow(QMainWindow):
         self.navigation.set_badge(PAGE_QUEUE, len(queued))
         self.home_page.summary_buttons[1].set_count(len(queued))
 
-    def _subscribe(self, feed_url: str, key: str, *, on_error, navigate, artwork_path: str = ""):
+    def _subscribe(self, feed_url: str, key: str, *, on_error, navigate, artwork_path: str = "", seed_feed=None):
         """The one subscribe flow: add the feed on the command pool, then on success navigate, reload the
         library and fetch the new show's episodes. `on_error(text)` shows a failure on the caller's
         surface. `navigate(show)` is the caller's destination and returns the callback to run once the
@@ -3946,7 +3977,8 @@ class MainWindow(QMainWindow):
 
         def work():
             try:
-                show = library.add_subscription(feed_url)
+                show = (library.add_subscription(feed_url, seed_feed.title, feed=seed_feed)
+                        if seed_feed is not None else library.add_subscription(feed_url))
                 if artwork_path and show is not None and not show.artwork_path:
                     library.repository.set_artwork_path(show.id, artwork_path)
                     show = library.repository.get_show(show.id) or show
@@ -3963,7 +3995,7 @@ class MainWindow(QMainWindow):
             self._request_reload(after_reload)
             self._submit_refresh(show.id)
 
-        self._run_read(work, apply, key, pool=self.commands, coalesce=False)
+        self._run_read(work, apply, key, pool=self.commands, coalesce=False, bulk=seed_feed is not None)
 
     def _add_podcast(self):
         if self.library is None:
@@ -4365,16 +4397,33 @@ class MainWindow(QMainWindow):
         # Seed the new show with the directory card's already-cached artwork:
         # until the first refresh fetches its own, every library-side render
         # of this podcast would flash the initials placeholder ("a letter").
-        card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
+        card = self._preview_card(feed_url)
         artwork_path = card.artwork_path if card is not None and card.artwork_path else ""
+        feed = self._previews.get(feed_url)
+        if self._preview_episodes_url == feed_url:
+            feed = getattr(self, '_preview_page_feed', feed)
 
         def on_error(error):
             self._notify(error or "Could not subscribe to this podcast", "error")
 
         def navigate(show):
             if self.pages.currentWidget() is self.episode_page and self._preview_episodes_url == feed_url:
-                self._preview_episodes_url = ""
-                self._open_podcast(self._ui_podcast(show))
+                saved = self._episode_navigation_entry()
+                anchor = self.episode_page._scroll_anchor()
+                source_key = anchor[0][1] if anchor and anchor[0][0] == 'preview' else ''
+                def work():
+                    with self.library.repository.database.connect() as connection:
+                        row = connection.execute('SELECT id FROM episodes WHERE show_id=? AND (media_url=? OR external_id=?) LIMIT 1',
+                                                 (show.id, source_key, source_key)).fetchone()
+                    return row[0] if row else 0
+                def apply(anchor_id):
+                    if self.pages.currentWidget() is not self.episode_page or self._preview_episodes_url != feed_url:
+                        return
+                    saved.update(show_id=show.id, preview_url='', episode_anchor=anchor_id,
+                                 current=('episode', anchor_id) if anchor_id else None)
+                    self._episode_navigation_restore = saved
+                    self._open_podcast(self._ui_podcast(show))
+                self._run_read(work, apply, 'subscription-view')
                 self._notify(f"Subscribed to {show.title or 'podcast'} — fetching episodes…", "success")
             elif self.pages.currentWidget() is self.discover_page:
                 # Stay in place; flip the card to Saved and offer a way over.
@@ -4383,12 +4432,42 @@ class MainWindow(QMainWindow):
                 )
                 self._notify(f"Subscribed to {show.title or 'podcast'} — fetching episodes…", "success", "Open", lambda: self._open_show_id(show.id))
             else:
-                self.navigation.select(PAGE_PODCASTS)
-                self.podcast_page.select_show(show.id)
-                self.podcast_page.banner.show_state("loading", "Podcast added — fetching episodes…")
+                current = self.context.current_item()
+                if getattr(current, 'feed_url', '') == feed_url:
+                    self.context.show_podcast(self._ui_podcast(show))
+                self._notify(f"Subscribed to {show.title or 'podcast'}", 'success', 'Open', lambda: self._open_show_id(show.id))
             return None
 
-        self._subscribe(feed_url, "subscribe-url", on_error=on_error, navigate=navigate, artwork_path=artwork_path)
+        self._subscribe(feed_url, "subscribe-url", on_error=on_error, navigate=navigate,
+                        artwork_path=artwork_path, seed_feed=feed)
+
+    def _preview_card(self, feed_url):
+        card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
+        detached = getattr(self, '_detached_podcast', None)
+        return card or (detached if getattr(detached, 'feed_url', '') == feed_url else None)
+
+    def _play_hero_latest(self):
+        if self._hero_show_id:
+            self._play_latest(self._hero_show_id, toggle=True)
+            return
+        feed_url = self._preview_episodes_url
+        feed = getattr(self, '_preview_page_feed', None) if feed_url else None
+        if feed is None:
+            self._notify('Episodes are still loading. Try Play latest again once they appear.', 'info')
+            return
+        card = self._preview_card(feed_url)
+        def work():
+            episode = max(feed.episodes, key=lambda item: item.published_at or '', default=None)
+            return (SimpleNamespace(media_url=episode.media_url, title=episode.title, show=feed.title,
+                                    duration_seconds=episode.duration_seconds, artwork_path=card.artwork_path if card else '')
+                    if episode is not None else None)
+        def apply(row):
+            if self._preview_episodes_url == feed_url:
+                if row is not None:
+                    self._play_preview_episode(row)
+                else:
+                    self._notify('This podcast has no playable episodes in this preview.', 'info')
+        self._run_read(work, apply, 'preview-play-latest')
 
     @staticmethod
     def _feed_keys(show) -> set:
@@ -4661,7 +4740,8 @@ class MainWindow(QMainWindow):
             self._episode_scope_revision += 1  # Retire library snapshots taken during this read.
             show, result = payload
             if scope[0] and show is None:
-                self._show_all_episodes()
+                if scope[0] not in self._retained_removals:
+                    self._show_all_episodes()
                 return
             if append or prepend:
                 retained = self.episode_page.all_items
@@ -7841,12 +7921,18 @@ class MainWindow(QMainWindow):
         return
     def _on_unsubscribe(self, kind, identifier, result):
         self._retained_removals.discard(identifier)
-        self._request_reload()
         self._refresh_storage_settings()
+        if self._hero_show_id == identifier:
+            self.episode_page.hero.unsubscribe.setEnabled(True)
         if result.status != JobStatus.OK:
+            self._request_reload()
             self._notify(result.message or "Could not remove the podcast", "error")
             return
-        title, reclaimed, stuck = result.value
+        title, reclaimed, stuck, *details = result.value
+        if details:
+            show, feed = details
+            self._keep_unsubscribed_view(show, feed)
+        self._request_reload()
         note = f"  ·  {self._format_bytes(reclaimed)} reclaimed" if reclaimed else ""
         if stuck:
             # Files that could not be deleted are kept on record rather
@@ -7854,6 +7940,42 @@ class MainWindow(QMainWindow):
             note += f"  ·  {stuck} file{'s' if stuck != 1 else ''} could not be deleted"
         self._notify(f"Unsubscribed from {title}{note}", "success")
         return
+
+    def _keep_unsubscribed_view(self, show, feed):
+        """Retire database IDs without navigating away from the viewed podcast."""
+        podcast = replace_item(self._ui_podcast(show), show_id=0, subscribed=False, new_count=0,
+                               health='unknown', directory_result=True)
+        self._detached_podcast = podcast
+        self._stored_shows = [item for item in self._stored_shows if item.id != show.id]
+        self.discover_page.set_items([
+            replace_item(item, show_id=0, subscribed=False, new_count=0, health='unknown')
+            if item.show_id == show.id else item for item in self.discover_page.all_items
+        ], preserve_scroll=True)
+        current = self.context.current_item()
+        if getattr(current, 'show_id', 0) == show.id:
+            if feed is None:
+                self.context.show_empty()
+            else:
+                self.context.show_podcast(podcast)
+        if feed is None:
+            if self._hero_show_id == show.id and self.pages.currentWidget() is self.episode_page:
+                self._hero_show_id = 0
+                self.navigation.select(PAGE_PODCASTS)
+            return
+        if self._hero_show_id != show.id:
+            return
+        page = self.episode_page
+        saved = self._episode_navigation_entry()
+        anchor = page._scroll_anchor()
+        anchor_key = anchor[0] if anchor else page.current_key()
+        row = next((row for row in page.all_items if page._key(row) == anchor_key), None)
+        saved.update(show_id=0, preview_url=show.feed_url, episode_anchor=0,
+                     current=('preview', row.media_url or row.external_id or row.title) if row else None,
+                     filter='All')
+        self._episode_navigation_restore = saved
+        self._store_preview(show.feed_url, feed)
+        self._show_preview_episodes(show.feed_url, navigate=False, feed=feed)
+        page.hero.art.set_artwork(show.artwork_path, initials(show.title), podcast.accent)
     def _on_discard_download(self, kind, identifier, result):
         self._request_reload()
         self._reload_downloads()
@@ -9395,7 +9517,7 @@ class MainWindow(QMainWindow):
             self._preview_page_has_more = False
             self._preview_page_total = 0
             self._preview_page_requested_scope = None
-            card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
+            card = self._preview_card(feed_url)
             title = card.title if card else "Podcast"
             author = card.author if card else ""
             self.episode_page.header.set_title(title)
@@ -9442,7 +9564,7 @@ class MainWindow(QMainWindow):
                 self.episode_page.set_view(restore_query, restore_filter, restore_sort)
             else:
                 self.episode_page.set_view('', 'All', 'newest')
-        card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
+        card = self._preview_card(feed_url)
         podcast_artwork = card.artwork_path if card else ""
         podcast_accent = card.accent if card else ACCENTS[3]
         self.episode_page.header.set_title(feed.title)
@@ -9489,7 +9611,7 @@ class MainWindow(QMainWindow):
         window_offset = getattr(self, '_preview_page_window', (0, 0))[0]
         start_offset = (window_offset + len(current_items) if append else
                         max(0, window_offset - page_size) if prepend else 0)
-        card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
+        card = self._preview_card(feed_url)
         artwork_path = card.artwork_path if card else ""
         accent = card.accent if card else ACCENTS[3]
         anchor_identity = None
@@ -9573,7 +9695,7 @@ class MainWindow(QMainWindow):
                 self._request_preview_page(reset=True, anchor=anchor)
                 return
             rows, total, offset, has_more = payload
-            current_card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
+            current_card = self._preview_card(feed_url)
             current_art = current_card.artwork_path if current_card else ""
             current_accent = current_card.accent if current_card else ACCENTS[3]
             if current_art != artwork_path or current_accent != accent:
@@ -9613,6 +9735,8 @@ class MainWindow(QMainWindow):
                 feed_limit_message() if getattr(feed, "truncated", False)
                 else "Stream any episode now, or subscribe to save progress, queue and download.",
             )
+            if getattr(feed, '_saved_preview_only', False):
+                page.banner.show_state('empty', 'Your open episodes are kept here. Refresh to retrieve the full feed, or subscribe again.')
             if first_page:
                 restore_entry = getattr(self, '_preview_page_restore', None)
                 if restore_entry and restore_entry[0] == feed_url:

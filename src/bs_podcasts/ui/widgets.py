@@ -43,6 +43,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QBoxLayout,
     QButtonGroup,
     QFrame,
     QGridLayout,
@@ -839,6 +840,8 @@ class PageHeader(QFrame):
         text = QVBoxLayout()
         text.setSpacing(0)
         self._title_text = title
+        self._text_layout = text
+        self._inline_subtitle = False
         self._subtitle_text = subtitle
         self._search_allowed = True
         self.title_label = PlainTextLabel(title)
@@ -890,6 +893,44 @@ class PageHeader(QFrame):
         self.subtitle_label.setVisible(bool(text))
         self._elide_header_text()
 
+    def set_inline_subtitle(self, enabled: bool):
+        self._inline_subtitle = bool(enabled)
+        self._elide_header_text()
+
+    def _layout_inline_subtitle(self):
+        if not self._inline_subtitle:
+            return
+        layout = self.layout()
+        margins = layout.contentsMargins()
+        controls = [layout.itemAt(index).widget() for index in range(layout.count())]
+        controls = [widget for widget in controls if widget is not None and not widget.isHidden()]
+        available = (self.width() - margins.left() - margins.right()
+                     - sum(widget.width() for widget in controls) - layout.spacing() * len(controls))
+        needed = (self.title_label.fontMetrics().horizontalAdvance(self._title_text)
+                  + self.subtitle_label.fontMetrics().horizontalAdvance(self._subtitle_text) + SPACE['md'])
+        inline = available >= needed
+        if inline:
+            title_width = self.title_label.fontMetrics().horizontalAdvance(self._title_text) + 2
+            if self.title_label.minimumWidth() != title_width:
+                self.title_label.setFixedWidth(title_width)
+        if inline == getattr(self, '_subtitle_is_inline', None):
+            return
+        self._subtitle_is_inline = inline
+        self._text_layout.setDirection(QBoxLayout.Direction.LeftToRight if inline else QBoxLayout.Direction.TopToBottom)
+        self._text_layout.setSpacing(SPACE['md'] if inline else 0)
+        self.subtitle_label.setWordWrap(not inline)
+        if inline:
+            self.title_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        else:
+            self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            self.title_label.setMinimumWidth(0)
+            self.title_label.setMaximumWidth(16777215)
+        self._text_layout.setStretch(0, 0 if inline else 1)
+        self._text_layout.setStretch(1, 1)
+        self._text_layout.invalidate()
+        self.layout().invalidate()
+        QTimer.singleShot(0, self, self.layout().activate)
+
     def _elide_header_text(self):
         """Elide to the slot, with the full string in a tooltip.
 
@@ -899,6 +940,7 @@ class PageHeader(QFrame):
         outright. Eliding costs the layout nothing and leaves the text
         recoverable.
         """
+        self._layout_inline_subtitle()
         for label, full in (
             (self.title_label, getattr(self, "_title_text", "")),
             (self.subtitle_label, getattr(self, "_subtitle_text", "")),
@@ -910,7 +952,7 @@ class PageHeader(QFrame):
                 set_literal_tooltip(label, "")
                 continue
             metrics = label.fontMetrics()
-            if available <= 0 or metrics.horizontalAdvance(full) <= available:
+            if label.wordWrap() or available <= 0 or metrics.horizontalAdvance(full) <= available:
                 wanted, tip = full, ""
             else:
                 wanted = metrics.elidedText(full, Qt.TextElideMode.ElideRight, available)
@@ -1129,7 +1171,7 @@ class ChipRow(QWidget):
 
 
 class StateBanner(QFrame):
-    """Persistent page state: loading / partial / error / offline / suspended."""
+    """Page feedback: progress stays visible; completed notices expire."""
 
     retry_requested = Signal()
     state_changed = Signal(str)
@@ -1179,7 +1221,44 @@ class StateBanner(QFrame):
         self.progress.setRange(0, 0)
         self.progress.setFixedHeight(3)
         outer.addWidget(self.progress)
+        self._dismiss_ms = 10_000
+        self._dismiss_timer = QTimer(self)
+        self._dismiss_timer.setSingleShot(True)
+        self._dismiss_timer.timeout.connect(self._fade_away)
+        self._fade_effect = None
+        self._fade_animation = None
         self.hide()
+
+    def set_timeout(self, milliseconds):
+        self._dismiss_ms = milliseconds
+        self._arm_dismiss()
+
+    def _arm_dismiss(self):
+        self._dismiss_timer.stop()
+        if self.state and self.state not in {'loading', 'empty'} and not self.isHidden():
+            self._dismiss_timer.start(self._dismiss_ms)
+
+    def _fade_away(self):
+        if self.state in {'', 'loading', 'empty'}:
+            return
+        if reduced_motion():
+            self.clear()
+            return
+        if self._fade_effect is None:
+            self._fade_effect = QGraphicsOpacityEffect(self)
+            self.setGraphicsEffect(self._fade_effect)
+            self._fade_animation = QPropertyAnimation(self._fade_effect, b'opacity', self)
+            self._fade_animation.setDuration(160)
+            self._fade_animation.finished.connect(self.clear)
+        self._fade_animation.setStartValue(1.0)
+        self._fade_animation.setEndValue(0.0)
+        self._fade_animation.start()
+
+    def _stop_fade(self):
+        self._dismiss_timer.stop()
+        if self._fade_animation is not None:
+            self._fade_animation.stop()
+            self._fade_effect.setOpacity(1.0)
 
     def _paint_icon(self):
         size = scaled_px(18)
@@ -1191,6 +1270,7 @@ class StateBanner(QFrame):
             self._paint_icon()
 
     def show_state(self, state: str, message: str, retry: bool = False):
+        self._stop_fade()
         prefix, glyph, tone = self.LABELS.get(state, (state.replace("_", " ").title(), "info", "muted"))
         previous, self.state = self.state, state
         if state != previous:
@@ -1207,6 +1287,7 @@ class StateBanner(QFrame):
         self.progress.setVisible(state == "loading")
         self.setAccessibleName(f"{prefix}: {message}" if prefix else message)
         self.show()
+        self._arm_dismiss()
         if state in {"partial", "error", "offline", "suspended"} and state != previous:
             announce(self, self.accessibleName(), assertive=True)
         if state != previous:
@@ -1220,6 +1301,7 @@ class StateBanner(QFrame):
         self.layout().itemAt(0).layout().setSpacing(SPACE["sm"])
 
     def clear(self):
+        self._stop_fade()
         previous, self.state = self.state, ""
         self.hide()
         if previous:
@@ -1313,8 +1395,9 @@ class Toast(QFrame):
         self.layout().setSpacing(SPACE["md"])
 
     MAX_QUEUE = 3
-    NOTICE_MS = 3200
-    ACTION_MS = 8000
+    NOTICE_MS = 10_000
+    ACTION_MS = 10_000
+    default_duration_ms = 10_000
     TONE_WORDS = {"success": "Success", "error": "Error", "info": "Info", "loading": "Loading"}
 
     @classmethod
@@ -1345,7 +1428,7 @@ class Toast(QFrame):
         with an action (Undo is usually the only way back) stays longer than
         a plain notice unless a duration is given."""
         if duration_ms is None:
-            duration_ms = self.ACTION_MS if action else self.NOTICE_MS
+            duration_ms = self.default_duration_ms
         showing = self.isVisible() and not self._closing
         if showing and self._sticky and duration_ms > 0:
             self._sticky_entries.append(_ToastEntry(self.text.text(), self.property('tone') or 'loading', self.action.text(), self._callback, 0, self._on_close, self._owner))
@@ -1776,7 +1859,8 @@ class HeroCard(QFrame):
         self.unsubscribe.setObjectName("textButton")
         self.unsubscribe.setIcon(icons.themed_icon("trash", "muted", 16))
         self.unsubscribe.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.unsubscribe.clicked.connect(self.unsubscribe_requested)
+        self.unsubscribe.clicked.connect(lambda: self.subscribe_requested.emit() if self._subscribe_mode
+                                         else self.unsubscribe_requested.emit())
         actions.addWidget(self.settings)
         actions.addWidget(self.info)
         actions.addStretch(1)
@@ -1811,7 +1895,7 @@ class HeroCard(QFrame):
             (self.website, "Website"),
             (self.settings, "Settings"),
             (self.info, "Info"),
-            (self.unsubscribe, "Unsubscribe"),
+            (self.unsubscribe, "Subscribe" if self._subscribe_mode else "Unsubscribe"),
         ):
             button.setText("" if compact else label)
             button.setAccessibleName(label)
@@ -1838,13 +1922,16 @@ class HeroCard(QFrame):
         self.description.setText(summary[:240].rstrip() + "…" if len(summary) > 240 else summary)
         set_literal_tooltip(self.description, description)
         self.description.setVisible(bool(description))
-        self.primary.setText("Play latest" if subscribed else "Subscribe")
-        self.primary.setIcon(icons.themed_icon("play" if subscribed else "add", "on_accent", 16))
+        self.primary.setText("Play latest")
+        self.primary.setIcon(icons.themed_icon("play", "on_accent", 16))
         # Feed previews can be refreshed directly; subscribing is not required.
         self.refresh.setVisible(True)
         self.refresh.setToolTip("Refresh this podcast" if subscribed else "Refresh this feed preview")
         self.settings.setVisible(subscribed)
-        self.unsubscribe.setVisible(subscribed)
+        self.unsubscribe.setVisible(True)
+        self.unsubscribe.setIcon(icons.themed_icon('trash' if subscribed else 'add', 'muted', 16))
+        self.unsubscribe.setToolTip('Unsubscribe from this podcast' if subscribed else 'Subscribe to this podcast')
+        self._apply_compact_chrome()
         self.website.setVisible(has_website)
         self._accent = accent
         self._apply_tint()
@@ -1894,10 +1981,7 @@ class HeroCard(QFrame):
             self.primary.setIcon(icons.themed_icon("play", "on_accent", 16))
 
     def _primary(self):
-        if self._subscribe_mode:
-            self.subscribe_requested.emit()
-        else:
-            self.play_latest_requested.emit()
+        self.play_latest_requested.emit()
 
 
 class SelectionBar(QFrame):
