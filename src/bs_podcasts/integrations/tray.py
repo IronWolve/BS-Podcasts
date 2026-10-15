@@ -10,7 +10,7 @@ from ..config import APP_NAME
 from ..domain.times import format_media_time
 from ..ui import icons
 from ..ui.playback_actions import PlaybackAction
-from ..ui.theme import scaled_px
+from ..ui.theme import scaled_px, set_local_stylesheet
 
 
 _TOOLTIP_LIMIT = 127
@@ -117,7 +117,7 @@ class TrayController:
         menu = QMenu()
         menu.setObjectName("trayMenu")
         menu.setToolTipsVisible(True)
-        menu.setStyleSheet(_compact_menu_style())
+        set_local_stylesheet(menu, _compact_menu_style())
         # The now-playing header: the title, then the podcast and the progress as quieter lines.
         self.now_playing = QAction("Nothing playing", menu)
         self.now_playing.setEnabled(False)
@@ -278,8 +278,7 @@ class TrayController:
                 self.sleep_menu.setTitle(title)
         if part("_menu") is not None:
             spacing = _compact_menu_style()
-            if self._menu.styleSheet() != spacing:
-                self._menu.setStyleSheet(spacing)
+            set_local_stylesheet(self._menu, spacing)
             self._menu.ensurePolished()
         font = self._menu.font() if part("_menu") is not None else QApplication.font()
         font_key = (font.key(), scaled_px(_MENU_TEXT_WIDTH))

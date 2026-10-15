@@ -66,7 +66,7 @@ from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_a
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, SettingsPage, KeyboardMenu, _ListPageMixin
 from .shortcuts import ShortcutManager, set_literal_tooltip
 from .playback_actions import PlaybackAction
-from .theme import app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px
+from .theme import app_font, apply_app_stylesheet, apply_theme, apply_typography, resolve_theme, scaled_px, register_theme_window
 from .widgets import ContextPanel, EdgeHandle, NAV_ITEMS, NavigationRail, NowPlayingView, PlayerBar, SearchOverlay, Toast, mnemonic_safe, exec_menu, hide_hover_bubble, open_web_url, quiet_signals, show_hover_bubble
 
 
@@ -374,6 +374,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(scaled_px(760), scaled_px(600))
         self._init_state(view_state)
+        register_theme_window(self)
         self._init_bridges(view_state)
         self._build_frame()
         self._build_pages()

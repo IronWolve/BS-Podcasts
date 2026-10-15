@@ -7,7 +7,9 @@ Delegates read the same dictionaries so painted lists match styled widgets.
 import logging
 import os
 import threading
+import weakref
 
+from PySide6.QtCore import QObject, QEvent
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 
 
@@ -462,13 +464,107 @@ def app_palette() -> QPalette:
     return palette
 
 
-def apply_app_stylesheet(app) -> bool:
-    """Set the app-wide stylesheet only when it actually changed.
+class _WindowStyles(QObject):
+    """Refresh one window tree, not Qt's overlapping list of cached widgets.
 
-    A full-application setStyleSheet repolishes every widget (~150 ms), and
-    startup used to pay for it three times: defaults, saved theme, saved
-    typography. Comparing the resolved text collapses identical applies.
+    The startup application sheet remains a fallback. Window sheets have
+    precedence and keep the same rules; child dialogs inherit them. Detached
+    menus/tooltips get the current sheet before polish/show, with their local
+    overrides retained. Weak keys do not keep dismissed windows alive.
     """
+
+    def __init__(self, app, qss):
+        super().__init__(app)
+        self.qss = qss
+        self.roots = weakref.WeakKeyDictionary()
+        self.changing = False
+        app.installEventFilter(self)
+
+    def _has_styled_parent(self, widget):
+        parent = widget.parentWidget()
+        while parent is not None:
+            if parent in self.roots:
+                return True
+            parent = parent.parentWidget()
+        return False
+
+    def apply(self, widget, local=None):
+        previous = self.roots.get(widget)
+        actual = widget.styleSheet()
+        if local is None:
+            local = previous[0] if previous and actual == previous[1] else actual
+        combined = self.qss + ('\n' + local if local else '')
+        self.roots[widget] = (local, combined)
+        if actual == combined:
+            return False
+        changing, self.changing = self.changing, True
+        try:
+            widget.setStyleSheet(combined)
+        finally:
+            self.changing = changing
+        return True
+
+    def refresh(self, app, qss):
+        self.qss = qss
+        changed = False
+        for widget in app.topLevelWidgets():
+            if not self._has_styled_parent(widget):
+                changed = self.apply(widget) or changed
+        return changed
+
+    def eventFilter(self, widget, event):
+        if self.changing:
+            return False
+        kind = event.type()
+        if kind not in (QEvent.Type.Polish, QEvent.Type.Show,
+                        QEvent.Type.ParentChange, QEvent.Type.StyleChange):
+            return False
+        from PySide6.QtWidgets import QWidget
+        if not isinstance(widget, QWidget):
+            return False
+        if kind == QEvent.Type.StyleChange:
+            if widget in self.roots:
+                self.apply(widget)
+        elif self._has_styled_parent(widget):
+            previous = self.roots.pop(widget, None)
+            if previous is not None:
+                # A temporary top-level widget was attached to an owner.
+                # Drop only our inherited sheet, never its own overrides.
+                self.changing = True
+                try:
+                    if widget.styleSheet() == previous[1]:
+                        widget.setStyleSheet(previous[0])
+                finally:
+                    self.changing = False
+        elif widget.isWindow():
+            self.apply(widget)
+        return False
+
+
+def register_theme_window(widget):
+    """Register the main window before its child tree is constructed."""
+    from PySide6.QtWidgets import QApplication
+    from .icons import resolve_stylesheet
+    app = QApplication.instance()
+    controller = getattr(app, '_bs_window_styles', None)
+    if controller is None:
+        qss = app.property('_bs_applied_qss') or resolve_stylesheet(stylesheet())
+        controller = app._bs_window_styles = _WindowStyles(app, qss)
+    controller.apply(widget)
+
+
+def set_local_stylesheet(widget, qss):
+    """Set a local override without discarding a managed window's theme."""
+    from PySide6.QtWidgets import QApplication
+    controller = getattr(QApplication.instance(), '_bs_window_styles', None)
+    if controller is not None and widget in controller.roots:
+        controller.apply(widget, qss)
+    elif widget.styleSheet() != qss:
+        widget.setStyleSheet(qss)
+
+
+def apply_app_stylesheet(app) -> bool:
+    """Style startup globally, then update each window tree only once."""
     from .icons import resolve_stylesheet
 
     qss = resolve_stylesheet(stylesheet())
@@ -479,7 +575,11 @@ def apply_app_stylesheet(app) -> bool:
         changed = True
     if app.property("_bs_applied_qss") != qss:
         app.setProperty("_bs_applied_qss", qss)
-        app.setStyleSheet(qss)
+        controller = getattr(app, '_bs_window_styles', None)
+        if controller is None:
+            app.setStyleSheet(qss)
+        else:
+            controller.refresh(app, qss)
         changed = True
     return changed
 
