@@ -3,16 +3,91 @@
 from pathlib import Path
 import json
 import os
+import re
 import sys
+from datetime import datetime
 
 
 APP_NAME = "BS Podcasts"
 APP_ID = "bs-podcasts"
 APP_TAGLINE = "A desktop player for the podcasts you already have."
 # Approved public project identity; explicit environment overrides still apply.
-GITHUB_URL = os.environ.get("BS_PODCASTS_GITHUB_URL", "https://github.com/IronWolve/BS-Podcasts")
+PUBLIC_GITHUB_URL = "https://github.com/IronWolve/BS-Podcasts"
+GITHUB_URL = os.environ.get("BS_PODCASTS_GITHUB_URL", PUBLIC_GITHUB_URL)
+# Support exports use the approved public destination, never a private override.
+ISSUES_URL = PUBLIC_GITHUB_URL + "/issues/new"
 RELEASES_URL = os.environ.get("BS_PODCASTS_RELEASES_URL", "https://github.com/IronWolve/BS-Podcasts/releases")
 RELEASES_API_URL = os.environ.get("BS_PODCASTS_RELEASES_API_URL", "https://api.github.com/repos/IronWolve/BS-Podcasts/releases/latest")
+
+
+_BUILD_INFO_FIELDS = ("source_sha256", "commit", "dirty", "built_at", "platform", "python", "native_sha256")
+
+
+def _build_id(fields: dict) -> str:
+    identity = {key: fields.get(key) for key in _BUILD_INFO_FIELDS}
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    import hashlib
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_info() -> dict:
+    """Return the validated identity embedded beside this package, if present.
+
+    Runtime diagnostics never consult Git, environment overrides, or a source checkout.
+    """
+    unavailable = {
+        "status": "unavailable", "build_id": None, "source_sha256": None,
+        "commit": None, "dirty": None, "built_at": None, "platform": None,
+        "python": None, "native_sha256": None,
+    }
+    try:
+        path = Path(__file__).parent / "build-info.json"
+        if path.is_symlink():
+            return unavailable
+        with path.open("rb") as stream:
+            raw = stream.read(8193)
+        if len(raw) > 8192:
+            return unavailable
+        payload = json.loads(raw.decode("utf-8"))
+        if (not isinstance(payload, dict) or type(payload.get("format")) is not int
+                or payload.get("format") != 1
+                or set(payload) != {"format", "build_id", *_BUILD_INFO_FIELDS}):
+            return unavailable
+        source_sha = payload.get("source_sha256")
+        commit = payload.get("commit")
+        dirty = payload.get("dirty")
+        built_at = payload.get("built_at")
+        runtime_platform = payload.get("platform")
+        python_version = payload.get("python")
+        native_sha = payload.get("native_sha256")
+        if (not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", source_sha)
+                or (commit is not None and (not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit)))
+                or not isinstance(dirty, bool)
+                or not isinstance(built_at, str)
+                or not isinstance(runtime_platform, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", runtime_platform)
+                or not isinstance(python_version, str) or not re.fullmatch(r"[0-9A-Za-z.+-]{1,40}", python_version)
+                or (native_sha is not None and (not isinstance(native_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", native_sha)))):
+            return unavailable
+        try:
+            parsed_time = datetime.fromisoformat(built_at.replace("Z", "+00:00"))
+        except ValueError:
+            return unavailable
+        if parsed_time.tzinfo is None or parsed_time.utcoffset() is None:
+            return unavailable
+        fields = {key: payload.get(key) for key in _BUILD_INFO_FIELDS}
+        build_id = payload.get("build_id")
+        if not isinstance(build_id, str) or not re.fullmatch(r"[0-9a-f]{64}", build_id) or build_id != _build_id(fields):
+            return unavailable
+        return {"status": "available", "build_id": build_id, **fields}
+    except FileNotFoundError:
+        # A source checkout normally has no generated metadata. Frozen bundles
+        # should always carry it, so a missing file there is unavailable.
+        if not getattr(sys, "frozen", False):
+            return {**unavailable, "status": "development"}
+        return unavailable
+    except (OSError, UnicodeError, ValueError, TypeError):
+        # Corrupt, unreadable, or invalid metadata is unavailable in every runtime.
+        return unavailable
 
 
 def app_version() -> str:

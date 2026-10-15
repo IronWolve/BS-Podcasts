@@ -308,6 +308,8 @@ try {
         throw "Native DLL, inputs or recipe differ from the recorded build; rebuild the native library. Legacy receipts cannot be relabeled as verified."
     }
     $env:BS_PODCASTS_NATIVE_RECEIPT = $nativeReceiptPath
+    & $python -B (Join-Path $stageRoot "packaging\build_manifest.py") --write-build-info --native-sha256 $nativeHash
+    if ($LASTEXITCODE -ne 0) { throw "Build identity generation failed" }
     $spec = Join-Path $stageRoot "packaging\bs-podcasts.spec"
     $env:BS_PODCASTS_SOURCE_STAGE = $stageRoot
     $env:BS_PODCASTS_BUILD_WORK = Join-Path $buildRoot "work"

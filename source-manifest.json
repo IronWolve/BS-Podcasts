@@ -2,6 +2,7 @@
   "format": 1,
   "public_urls": [
     "https://github.com/IronWolve/BS-Podcasts",
+    "https://github.com/IronWolve/BS-Podcasts/issues/new",
     "https://github.com/IronWolve/BS-Podcasts/releases",
     "https://api.github.com/repos/IronWolve/BS-Podcasts/releases/latest"
   ],
@@ -93,6 +94,7 @@
     "src/bs_podcasts/assets/fonts/Inter-Variable.ttf",
     "src/bs_podcasts/assets/fonts/OFL.txt",
     "src/bs_podcasts/config.py",
+    "src/bs_podcasts/diagnostics.py",
     "src/bs_podcasts/data/__init__.py",
     "src/bs_podcasts/data/database.py",
     "src/bs_podcasts/data/files.py",
@@ -236,6 +238,7 @@
     "src/bs_podcasts/assets/fonts/Inter-Variable.ttf": "app/bs_podcasts/assets/fonts/Inter-Variable.ttf",
     "src/bs_podcasts/assets/fonts/OFL.txt": "app/bs_podcasts/assets/fonts/OFL.txt",
     "src/bs_podcasts/config.py": "app/bs_podcasts/config.py",
+    "src/bs_podcasts/diagnostics.py": "app/bs_podcasts/diagnostics.py",
     "src/bs_podcasts/data/__init__.py": "app/bs_podcasts/data/__init__.py",
     "src/bs_podcasts/data/database.py": "app/bs_podcasts/data/database.py",
     "src/bs_podcasts/data/files.py": "app/bs_podcasts/data/files.py",

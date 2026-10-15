@@ -15,7 +15,8 @@ IDENTITY = os.environ.get('BS_PODCASTS_SIGN_IDENTITY') or None
 analysis = Analysis(
     [str(ROOT/'packaging/windows_launcher.py')], pathex=[str(SOURCE)],
     binaries=[(os.environ['BS_PODCASTS_LIBMPV_DYLIB'], '.')],
-    datas=[(str(SOURCE/'bs_podcasts/assets'), 'bs_podcasts/assets'),
+    datas=[(str(SOURCE/'bs_podcasts/build-info.json'), 'bs_podcasts'),
+           (str(SOURCE/'bs_podcasts/assets'), 'bs_podcasts/assets'),
            (str(SOURCE/'bs_podcasts/data/migrations'), 'bs_podcasts/data/migrations'),
            (str(ROOT/'packaging/licenses'), 'licenses'),
            (str(ROOT/'packaging/THIRD-PARTY-NOTICES.txt'), '.')],

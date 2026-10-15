@@ -11,7 +11,7 @@ import fcntl
 from source_manifest import ROOT, archive_map, check, checked_version, inventory, source_digest, file_digest, stage
 from runtime_state import runtime_lock, retire_stale
 from report import Reporter, size_text
-from build_manifest import require_keys
+from build_manifest import require_keys, write_build_info
 from prune_helper import confirm_and_prune
 
 
@@ -108,7 +108,10 @@ def _deploy_staged(workspace, destination, temporary, prune, report):
     (temporary/'native').mkdir()
     for name in ('libmpv.so.2', 'native-build.json'):
         shutil.copy2(native/name, temporary/'native'/name)
-    deployed = [*runtime.values(), 'native/libmpv.so.2', 'native/native-build.json']
+    write_build_info(snapshot, receipt['sha256'],
+                     temporary/'app/bs_podcasts/build-info.json')
+    deployed = [*runtime.values(), 'app/bs_podcasts/build-info.json',
+                'native/libmpv.so.2', 'native/native-build.json']
     record = {'version':version,'built_at':datetime.now(timezone.utc).isoformat(),
               'source_sha256':source_digest(snapshot),
               'source':receipt_source(snapshot),

@@ -110,6 +110,7 @@
 !/src/bs_podcasts/assets/fonts/Inter-Variable.ttf
 !/src/bs_podcasts/assets/fonts/OFL.txt
 !/src/bs_podcasts/config.py
+!/src/bs_podcasts/diagnostics.py
 !/src/bs_podcasts/data/__init__.py
 !/src/bs_podcasts/data/database.py
 !/src/bs_podcasts/data/files.py

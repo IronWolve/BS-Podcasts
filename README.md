@@ -70,6 +70,21 @@ moving it. If several older libraries exist, choose one explicitly with
 Finding shows, refreshing feeds, loading artwork and streaming use the network.
 Downloaded episodes can be played offline.
 
+## Reporting a problem
+
+After the problem occurs, open **Settings → Storage → Export diagnostics**.
+Review the preview and exclude any log you do not want to share, then save the ZIP.
+It contains build information and redacted logs—not your library, downloads or settings.
+
+Open a ticket in this repository's **Issues** tab, describe what
+you did, what you expected, what happened and roughly when it happened, then attach
+the ZIP. The logs are already inside; you do not need to attach the original logs.
+Nothing is uploaded automatically. Public issues and attachments are public, and
+automatic redaction can miss personal text, so review before attaching.
+
+If logging was off, enable **Settings → Desktop → Write a private diagnostic log file**,
+reproduce the problem if safe, and export again. Build identification is also shown in **About**.
+
 ## Copyright
 
 BS Podcasts — **all rights reserved**. Third-party software and fonts retain

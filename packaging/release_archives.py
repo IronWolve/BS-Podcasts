@@ -296,7 +296,8 @@ def build(output, macos=None, plain=False):
     linux = ROOT.parent / 'dists/linux'
     deployment = (linux/'deployment.json').read_bytes()
     linux_record = json.loads(deployment)
-    deployed = [*runtime.values(), 'native/libmpv.so.2', 'native/native-build.json']
+    deployed = [*runtime.values(), 'app/bs_podcasts/build-info.json',
+                'native/libmpv.so.2', 'native/native-build.json']
     expected = {relative: file_digest(linux/relative) for relative in deployed}
     if linux_record['version'] != version or linux_record['source_sha256'] != fingerprint or linux_record['files'] != expected:
         raise ValueError('Linux build is stale or differs from its manifest.')

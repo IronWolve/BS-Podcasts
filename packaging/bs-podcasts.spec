@@ -50,6 +50,7 @@ VERSION_FILE.write_text(
 )
 
 datas = [
+    (str(SOURCE / "bs_podcasts" / "build-info.json"), "bs_podcasts"),
     (str(SOURCE / "bs_podcasts" / "assets"), "bs_podcasts/assets"),
     (str(SOURCE / "bs_podcasts" / "data" / "migrations"), "bs_podcasts/data/migrations"),
     (str(ROOT / "packaging" / "licenses"), "licenses"),

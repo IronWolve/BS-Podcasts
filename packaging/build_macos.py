@@ -14,7 +14,7 @@ import tomllib
 from source_manifest import ROOT, stage, source_digest, file_digest, check as check_source
 from check_dependencies import check
 from report import Reporter, size_text, tree_size
-from build_manifest import require_keys
+from build_manifest import require_keys, write_build_info
 from prune_helper import confirm_and_prune
 
 
@@ -76,6 +76,7 @@ def _finish_macos(workspace, work, prune, report):
             or receipt.get('patch_sha256')!=file_digest(snapshot/'packaging/mpv-coreaudio-only.patch')
             or receipt['recipe_sha256']!=file_digest(snapshot/'packaging/build-libmpv-macos.sh')):
         raise RuntimeError('Native receipt mismatch; rebuild the pinned LGPL player first.')
+    write_build_info(snapshot, receipt['sha256'])
     iconset=work/'BS-Podcasts.iconset'; iconset.mkdir()
     for size in (16,32,128,256,512):
         for scale in (1,2):

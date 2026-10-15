@@ -18,6 +18,8 @@ from ..domain.models import TRIM_LEVELS as TRIM_CHOICES
 
 from PySide6.QtWidgets import (
     QGridLayout,
+    QCheckBox,
+    QComboBox,
     QDialog,
     QApplication,
     QFrame,
@@ -1350,6 +1352,78 @@ class StartupErrorDialog(StyledDialog):
             super().closeEvent(event)
 
 
+class DiagnosticExportDialog(StyledDialog):
+    """Review the exact redacted snapshot, not a later reread of live logs."""
+
+    def __init__(self, snapshot, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export diagnostics")
+        self.set_card_width(scaled_px(580))
+        self.snapshot = snapshot
+        self._included = set(snapshot.files)
+        self.add_heading("Export diagnostics", "Review what you share. Nothing is uploaded automatically.")
+        self.summary = PlainTextLabel(snapshot.summary)
+        self.summary.setWordWrap(True)
+        self.card_layout.addWidget(self.summary)
+        self.files = QComboBox()
+        self.files.setAccessibleName("Diagnostic file to preview")
+        for name, text in snapshot.files.items():
+            self.files.addItem(f"{name}  ({len(text.encode('utf-8')) / 1024:.1f} KB)", name)
+        self.card_layout.addWidget(self.files)
+        self.preview = QPlainTextEdit()
+        self.preview.setObjectName("fileListing")
+        self.preview.setReadOnly(True)
+        self.preview.setAccessibleName("Redacted diagnostic file preview")
+        self.preview.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.preview.setFixedHeight(scaled_px(220))
+        self.card_layout.addWidget(self.preview)
+        self.include = QCheckBox("Include this log")
+        self.include.toggled.connect(self._include_changed)
+        self.card_layout.addWidget(self.include)
+        self.warning = PlainTextLabel(
+            "Public issues and attachments are visible to everyone. Automatic redaction can miss personal text; "
+            "review each log and exclude any you do not want to share. Your library, downloads and settings are not included.")
+        self.warning.setObjectName("muted")
+        self.warning.setWordWrap(True)
+        self.card_layout.addWidget(self.warning)
+        self.save_button = QPushButton("Save ZIP…")
+        self.save_button.setObjectName("primaryButton")
+        self.save_button.clicked.connect(self.accept)
+        self.add_buttons(self.save_button, default_primary=False)
+        self.files.currentIndexChanged.connect(self._show_file)
+        self._show_file()
+        self._update_summary()
+
+    def _show_file(self, *_args):
+        name = self.files.currentData()
+        self.preview.setPlainText(self.snapshot.files.get(name, ""))
+        from .widgets import quiet_signals
+        with quiet_signals(self.include):
+            self.include.setChecked(name in self._included)
+        self.include.setEnabled(name != 'diagnostic-info.txt')
+        self.include.setText("Build information is always included" if name == 'diagnostic-info.txt' else "Include this log")
+
+    def _include_changed(self, included):
+        name = self.files.currentData()
+        if included:
+            self._included.add(name)
+        elif name != 'diagnostic-info.txt':
+            self._included.discard(name)
+        self._update_summary()
+
+    def _update_summary(self):
+        count = len(self._included) - 1
+        size = sum(len(text.encode('utf-8')) for name, text in self.snapshot.files.items() if name in self._included)
+        note = " · See collection notes below" if self.snapshot.notes else ""
+        self.summary.setText(f"Build information + {count} log{'s' if count != 1 else ''} · {size / 1024:.1f} KB{note}")
+
+    def selected_snapshot(self):
+        from dataclasses import replace
+        from types import MappingProxyType
+        return replace(self.snapshot, files=MappingProxyType({
+            name: text for name, text in self.snapshot.files.items() if name in self._included}))
+
+
 class AboutDialog(StyledDialog):
     """About BS Podcasts: logo, version, runtime, data location, library stats, links."""
 
@@ -1376,6 +1450,7 @@ class AboutDialog(StyledDialog):
         rows = QVBoxLayout()
         rows.setSpacing(SPACE["xs"])
         details = [
+            ("Build", info.get("build", "Unavailable — rebuild to include identification")),
             ("Library", info.get("library", "—")),
             ("Storage", info.get("storage", "—")),
             ("Data folder", info.get("data_root", "—")),

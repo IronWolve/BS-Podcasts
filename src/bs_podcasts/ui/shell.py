@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
-from ..config import APP_NAME, RELEASES_URL, RELEASES_API_URL, app_version, cache_dir
+from ..config import APP_NAME, ISSUES_URL, RELEASES_URL, RELEASES_API_URL, app_version, cache_dir
 from ..logging_setup import log_path
 from ..domain import DownloadState, FeedData, FeedEpisodeData, Health
 from ..domain.times import format_hours_minutes, format_media_time
@@ -90,6 +90,7 @@ class _lazy_dialog:
 
 
 AboutDialog = _lazy_dialog("AboutDialog")
+DiagnosticExportDialog = _lazy_dialog("DiagnosticExportDialog")
 AddPodcastDialog = _lazy_dialog("AddPodcastDialog")
 ConfirmDialog = _lazy_dialog("ConfirmDialog")
 DeleteFilesDialog = _lazy_dialog("DeleteFilesDialog")
@@ -954,6 +955,7 @@ class MainWindow(QMainWindow):
         )
         self.settings_page.load_refresh_interval(self._refresh_interval())
         self.settings_page.open_log_requested.connect(lambda: self._open_location(str(log_path())))
+        self.settings_page.export_diagnostics_requested.connect(self._export_diagnostics)
         self.settings_page.load_desktop_options(
             self._background_paused(),
             self.library.setting("notifications.enabled", "1") == "1",
@@ -1945,7 +1947,11 @@ class MainWindow(QMainWindow):
             # The show aggregate (85 ms on a large library) and the disk-usage
             # call ran on the click thread before the dialog could appear
             # Both belong on a worker.
-            info = {}
+            from ..config import build_info
+            identity = build_info()
+            build = identity.get('build_id')
+            info = {'build': (build[:12] + (' · modified source' if identity.get('dirty') else '')
+                              if build else 'Not recorded in this build')}
             if library is not None:
                 shows = library.shows()
                 episodes = sum(show.episode_count for show in shows)
@@ -1963,6 +1969,64 @@ class MainWindow(QMainWindow):
             self._exec_dialog(AboutDialog(info if isinstance(info, dict) else {}, self))
 
         self._run_read(work, apply, "about")
+
+    def _diagnostics_busy(self, busy):
+        self._diagnostics_pending = busy
+        self.settings_page.export_diagnostics_button.setEnabled(not busy)
+
+    def _export_diagnostics(self):
+        if getattr(self, '_diagnostics_pending', False):
+            return
+        from ..diagnostics import prepare_diagnostics
+        from PySide6 import __version__ as toolkit_version
+        from PySide6.QtCore import qVersion
+        extra = {'logging_status': 'enabled' if self.settings_page.file_logging.isChecked() else 'disabled',
+                 'qt_version': qVersion(), 'ui_toolkit_version': toolkit_version}
+        self._diagnostics_busy(True)
+        def apply(snapshot):
+            self._diagnostics_busy(False)
+            dialog = DiagnosticExportDialog(snapshot, self)
+            if self._exec_dialog(dialog) == QDialog.DialogCode.Accepted:
+                self._save_diagnostics(dialog.selected_snapshot())
+        self._run_read(lambda: prepare_diagnostics(extra_info=extra), apply, 'diagnostics-preview')
+
+    def _save_diagnostics(self, snapshot):
+        from ..diagnostics import write_diagnostics
+        if getattr(self, '_diagnostics_pending', False):
+            return
+        path, _filter = QFileDialog.getSaveFileName(
+            self, 'Save diagnostic ZIP', str(Path.home() / snapshot.suggested_filename),
+            'ZIP archive (*.zip)', options=QFileDialog.Option.DontConfirmOverwrite)
+        if not path:
+            return
+        if not path.lower().endswith('.zip'):
+            path += '.zip'
+        self._diagnostics_busy(True)
+        def work():
+            import errno
+            try:
+                return str(write_diagnostics(snapshot, path)), ''
+            except FileExistsError:
+                return '', 'That file already exists. Choose another filename; nothing was replaced.'
+            except OSError as exc:
+                reason = {
+                    errno.ENOSPC: 'The destination is out of space.',
+                    errno.EACCES: 'The destination does not allow this app to write files.',
+                    errno.EPERM: 'The destination does not allow this app to write files.',
+                    errno.EROFS: 'The destination is read-only.',
+                    errno.ENOENT: 'The destination folder is no longer available.',
+                }.get(exc.errno, 'The destination could not be written. Try another folder.')
+                return '', 'Diagnostic ZIP was not saved. ' + reason
+        def apply(result):
+            self._diagnostics_busy(False)
+            saved, error = result
+            if error:
+                self._notify(error, 'error', 'Choose another name', lambda: self._save_diagnostics(snapshot))
+            else:
+                self._notify('Diagnostic ZIP saved. Attach it to your issue; the logs are already inside.',
+                             'success', 'Open issue',
+                             lambda: self._open_url(ISSUES_URL))
+        self._run_read(work, apply, 'diagnostics-save', coalesce=False)
 
     @staticmethod
     def _exec_dialog(dialog):
@@ -7655,6 +7719,8 @@ class MainWindow(QMainWindow):
         else:
             # The banner said "Opening…"; without this it never resolves.
             message = result.message or "The library could not be read."
+            if key in {'diagnostics-preview', 'diagnostics-save'}:
+                self._diagnostics_busy(False)
             page = owners[0] if owners else self.pages.currentWidget()
             if page is None:
                 logging.getLogger("bs_podcasts").warning("Background read %s failed: %s", key, message)
