@@ -1,5 +1,7 @@
 """Canonical feed refresh pipeline and crash-budget application."""
 
+from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import logging
 import os
@@ -18,6 +20,9 @@ from .parser import FeedParseError, parse_feed
 # A feed that answers 304 has the cover it had last time; its cover is looked at
 # again only after this long (the cover cache applies its own, shorter, limit).
 COVER_RECHECK_SECONDS = 7 * 86400
+# Keep the 304 artwork fast path useful without retaining one entry for every
+# podcast the user has ever removed from this service instance.
+MAX_CACHED_COVER_CHECKS = 1024
 
 # Failures of the library itself (full disk, busy or damaged database,
 # unreadable file). They say nothing about the feed.
@@ -59,20 +64,41 @@ class RefreshService:
         # second refresh runs after the first and its conditional fetch is a
         # cheap 304 — and its write is the newer one by construction.
         self._show_locks: dict[int, threading.Lock] = {}
+        self._show_lock_users: dict[int, int] = {}
         self._locks_guard = threading.Lock()
         # show id -> (cover URL, monotonic time) of the last successful cover
         # refresh by this service; each show is only touched under its lock.
-        self._cover_checked: dict[int, tuple[str, float]] = {}
+        self._cover_checked: OrderedDict[int, tuple[str, float]] = OrderedDict()
 
-    def _lock_for(self, show_id: int) -> threading.Lock:
+    @contextmanager
+    def _show_guard(self, show_id: int):
+        # Count callers before waiting for the lock. A waiter therefore pins
+        # the exact lock object; it cannot be removed and replaced while any
+        # caller might still acquire or hold it.
         with self._locks_guard:
             lock = self._show_locks.get(show_id)
             if lock is None:
                 lock = self._show_locks[show_id] = threading.Lock()
-            return lock
+            self._show_lock_users[show_id] = self._show_lock_users.get(show_id, 0) + 1
+        acquired = False
+        try:
+            lock.acquire()
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                lock.release()
+            with self._locks_guard:
+                users = self._show_lock_users[show_id] - 1
+                if users:
+                    self._show_lock_users[show_id] = users
+                else:
+                    del self._show_lock_users[show_id]
+                    if self._show_locks.get(show_id) is lock:
+                        del self._show_locks[show_id]
 
     def refresh(self, show_id: int) -> RefreshReport:
-        with self._lock_for(show_id):
+        with self._show_guard(show_id):
             try:
                 return self._refresh_locked(show_id)
             except Exception as exc:
@@ -81,7 +107,7 @@ class RefreshService:
 
     def retry(self, show_id: int) -> RefreshReport:
         """Explicit user retry resumes this show under the same refresh lock."""
-        with self._lock_for(show_id):
+        with self._show_guard(show_id):
             try:
                 show = self.repository.get_show(show_id)
                 if show is not None and show.suspended:
@@ -138,7 +164,11 @@ class RefreshService:
             path = str(self.artwork.fetch(url))
             if path != previous_path:
                 self.repository.set_artwork_path(show_id, path, expected_url=url)
-            self._cover_checked[show_id] = (url, time.monotonic())
+            with self._locks_guard:
+                self._cover_checked[show_id] = (url, time.monotonic())
+                self._cover_checked.move_to_end(show_id)
+                while len(self._cover_checked) > MAX_CACHED_COVER_CHECKS:
+                    self._cover_checked.popitem(last=False)
             return path if path != previous_path or stamp(path) != before else ''
         except ArtworkError as exc:
             logging.getLogger(__name__).warning('Artwork refresh failed for podcast %s: %s', show_id, redact(exc))
@@ -148,7 +178,10 @@ class RefreshService:
             return ''
 
     def _cover_current(self, show):
-        checked = self._cover_checked.get(show.id)
+        with self._locks_guard:
+            checked = self._cover_checked.get(show.id)
+            if checked is not None:
+                self._cover_checked.move_to_end(show.id)
         if checked is None or checked[0] != show.artwork_url or not show.artwork_path:
             return False
         return 0 <= time.monotonic() - checked[1] < COVER_RECHECK_SECONDS and os.path.isfile(show.artwork_path)

@@ -11,6 +11,11 @@ from ..netlimits import NetworkDeadline
 
 
 _log = logging.getLogger('bs_podcasts')
+_SLOW_QUEUE_SECONDS = 0.5
+_SLOW_EXECUTION_SECONDS = 5.0
+_SLOW_LOG_INTERVAL_SECONDS = 60.0
+_slow_log_lock = Lock()
+_last_slow_log: dict[str, float] = {}
 
 
 class JobStatus(StrEnum):
@@ -32,6 +37,28 @@ class JobResult:
     # Set when the runner refused the job because its queue was full, so the
     # request never ran and a caller may try again shortly.
     busy: bool = field(default=False, compare=False)
+    # Durations are diagnostic only and retain the old constructor/equality API.
+    queue_wait_seconds: float = field(default=0.0, repr=False, compare=False)
+    execution_seconds: float = field(default=0.0, repr=False, compare=False)
+
+
+def _log_slow_job(operation: str, queue_wait: float, execution: float, status: JobStatus) -> None:
+    slow_kind = (
+        'queue' if queue_wait >= _SLOW_QUEUE_SECONDS else
+        'execution' if execution >= _SLOW_EXECUTION_SECONDS else None
+    )
+    if slow_kind is None:
+        return
+    now = time.monotonic()
+    with _slow_log_lock:
+        previous = _last_slow_log.get(slow_kind)
+        if previous is not None and now - previous < _SLOW_LOG_INTERVAL_SECONDS:
+            return
+        _last_slow_log[slow_kind] = now
+    _log.warning(
+        'Background job slow (%s) %s: queue_wait=%.3fs execution=%.3fs status=%s',
+        slow_kind, operation, queue_wait, execution, status.value,
+    )
 
 
 class TrackedExecutor(ThreadPoolExecutor):
@@ -71,14 +98,15 @@ class JobRunner:
         `bulk` belong to CommandQueue.submit, which is why callers pick the
         call form by pool (see `_run_task` in ui/shell.py).
         """
+        submitted_at = time.monotonic()
         if self._slots is None:
-            return self._executor.submit(self._invoke, callable_, args, kwargs)
+            return self._executor.submit(self._invoke, callable_, args, kwargs, submitted_at)
         if not self._slots.acquire(blocking=False):
             result = Future()
             result.set_result(JobResult(JobStatus.ERROR, message='Background requests are busy; retry shortly.', busy=True))
             return result
         try:
-            future = self._executor.submit(self._invoke, callable_, args, kwargs)
+            future = self._executor.submit(self._invoke, callable_, args, kwargs, submitted_at)
         except BaseException:
             self._slots.release()
             raise
@@ -88,14 +116,18 @@ class JobRunner:
         return future
 
     @staticmethod
-    def _invoke(callable_: Callable, args: tuple, kwargs: dict) -> JobResult:
+    def _invoke(callable_: Callable, args: tuple, kwargs: dict, submitted_at: float) -> JobResult:
+        started_at = time.monotonic()
+        queue_wait = max(0.0, started_at - submitted_at)
         try:
             value = callable_(*args, **kwargs)
             if value is None:
-                return JobResult(JobStatus.EMPTY)
-            return JobResult(JobStatus.OK, value=value)
+                status, result = JobStatus.EMPTY, JobResult(JobStatus.EMPTY)
+            else:
+                status, result = JobStatus.OK, JobResult(JobStatus.OK, value=value)
         except (TimeoutError, NetworkDeadline) as exc:
-            return JobResult(JobStatus.TIMEOUT, message=str(exc) or "Operation timed out.")
+            status = JobStatus.TIMEOUT
+            result = JobResult(status, message=str(exc) or "Operation timed out.")
         except KeyboardInterrupt:
             raise
         except BaseException as exc:
@@ -105,7 +137,16 @@ class JobRunner:
             # becomes a result: a raised future would leave the caller's
             # completion callback without an answer.
             _log.exception('Background job %s failed', getattr(callable_, '__qualname__', type(callable_).__name__))
-            return JobResult(JobStatus.ERROR, message=str(exc) or exc.__class__.__name__, error=exc)
+            status = JobStatus.ERROR
+            result = JobResult(status, message=str(exc) or exc.__class__.__name__, error=exc)
+        execution = max(0.0, time.monotonic() - started_at)
+        operation = str(getattr(callable_, '__qualname__', type(callable_).__name__))[:160]
+        _log_slow_job(operation, queue_wait, execution, status)
+        return JobResult(
+            result.status, value=result.value, message=result.message,
+            error=result.error, busy=result.busy,
+            queue_wait_seconds=queue_wait, execution_seconds=execution,
+        )
 
     def shutdown(self, wait: bool = False, cancel_futures: bool = True):
         self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)

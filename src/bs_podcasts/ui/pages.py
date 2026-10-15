@@ -1,6 +1,7 @@
 """Pages built from reusable, model-backed components."""
 
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 import re
 import time
@@ -66,6 +67,23 @@ def fold_text(text: str) -> str:
         character for character in unicodedata.normalize("NFKD", text)
         if not unicodedata.combining(character)
     ).casefold()
+
+
+@lru_cache(maxsize=16_384)
+def _fold_filter_text_cached(text: str) -> str:
+    """Cache common-sized filter values, never row identities or long text.
+
+    The 16,384-entry bound accommodates title/show values for the current
+    10,000-row working set; the 256-code-point cutoff bounds retained text size.
+    Changed metadata naturally uses a new value key.
+    """
+    return fold_text(text)
+
+
+def _fold_filter_text(text: str) -> str:
+    if len(text) > 256:
+        return fold_text(text)
+    return _fold_filter_text_cached(text)
 
 
 def title_sort_key(title: str) -> tuple:
@@ -1613,8 +1631,8 @@ class EpisodeListPage(BasePage, _ListPageMixin):
         query = self.header.search.text().strip().lower()
         if query and query != self._catalog_query:
             # Folded like the podcast grid's filter, so "cafe" finds "Café" here too.
-            folded = fold_text(query)
-            items = [item for item in items if folded in fold_text(item.title) or folded in fold_text(item.show)]
+            folded = _fold_filter_text(query)
+            items = [item for item in items if folded in _fold_filter_text(item.title) or folded in _fold_filter_text(item.show)]
         test = self._chip_test()
         if test is not None:
             items = [item for item in items if test(item)]

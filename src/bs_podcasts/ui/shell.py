@@ -591,9 +591,10 @@ class MainWindow(QMainWindow):
         self._reload_timer = QTimer(self)
         self._reload_timer.setSingleShot(True)
         self._reload_timer.setInterval(200)
-        self._reload_timer.timeout.connect(self._reload_library_async)
+        self._reload_timer.timeout.connect(lambda: self._reload_library_async(include_detail=self._reload_include_detail))
         self._reload_in_flight = False
         self._reload_again = False
+        self._reload_include_detail = True
         self._reload_callbacks = []
         self._read_tokens = {}
         # The active and the next read per key (see `_run_read`).
@@ -1965,11 +1966,18 @@ class MainWindow(QMainWindow):
         self.toast.show_message(message, tone, action, callback)
 
     def _escape(self):
+        if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
+            return
         if self.search_overlay.isVisible():
             self.search_overlay.hide()
             return
         if self.now_playing.isVisible():
             self._hide_now_playing()
+            return
+        page = self.pages.currentWidget()
+        banner = getattr(page, "banner", None)
+        if banner is not None and banner.isVisible() and banner.dismiss_button.isVisible():
+            banner.clear()
             return
         focus = QApplication.focusWidget()
         if isinstance(focus, QLineEdit) and focus.text():
@@ -1978,7 +1986,6 @@ class MainWindow(QMainWindow):
         if self.context.isVisible() and (self._context_forced or self._last_mode == "narrow"):
             self._hide_context()
             return
-        page = self.pages.currentWidget()
         view = getattr(page, "view", None)
         if view is not None and view.selectionModel().hasSelection():
             view.clearSelection()
@@ -2890,7 +2897,7 @@ class MainWindow(QMainWindow):
         if clear_search is not None:
             clear_search()
 
-    def _read_library(self):
+    def _read_library(self, *, include_detail=True):
         """All queries and UI conversion for a reload. Artwork tints are cache
         lookups (compute=False); sampling runs in `_prime_accents` on a worker."""
         sample_accents(())  # Load saved tint metadata on this worker.
@@ -2909,7 +2916,7 @@ class MainWindow(QMainWindow):
         records = list(self.downloads.records()) if self.downloads else []
         active = self._active_downloads(records)
         episodes = self._ui_episodes(stored_episodes, records)
-        detail_show_id = self._hero_show_id
+        detail_show_id = self._hero_show_id if include_detail else 0
         detail_episodes = self._ui_episodes(self.library.episodes(show_id=detail_show_id, limit=None), records) if detail_show_id else []
         previews = {}
         if self.jobs is not None and not self._artwork_prepared:
@@ -2929,6 +2936,7 @@ class MainWindow(QMainWindow):
             'catalog_items': self._ui_episodes(self.library.search_episodes(catalog_query, catalog_limit), records) if catalog_query else [],
             'catalog_total': self.library.search_episode_count(catalog_query) if catalog_query else 0,
             "detail_show_id": detail_show_id,
+            "detail_included": include_detail,
             "detail_revision": detail_revision,
             "detail_episodes": detail_episodes,
             "stored_shows": stored_shows,
@@ -3380,15 +3388,19 @@ class MainWindow(QMainWindow):
         self.settings_page.set_database_status("Repair in progress…")
         self._run_task("database-repair", self.library.repository.database.repair)
 
-    def _reload_library_async(self):
+    def _reload_library_async(self, *, include_detail=True):
         if self.library is None or self.jobs is None or self._closed:
             return
+        self._reload_include_detail = self._reload_include_detail or include_detail
         if self._reload_in_flight:
             self._reload_again = True
             return
+        self._reload_timer.stop()
+        include_detail, self._reload_include_detail = self._reload_include_detail, False
         self._reload_in_flight = True
         self._reload_again = False
-        future = self.jobs.submit(self._read_library)
+        work = self._read_library if include_detail else lambda: self._read_library(include_detail=False)
+        future = self.jobs.submit(work)
         _track_job(self, future, "library", None)
 
     @contextmanager
@@ -3478,7 +3490,7 @@ class MainWindow(QMainWindow):
                     self.episode_page.set_items(detail, preserve_scroll=True)
                 else:
                     self._apply_all_episodes(episodes)
-            if not self._preview_episodes_url:
+            if not self._preview_episodes_url and (not self._hero_show_id or data.get("detail_included", True)):
                 self._finish_page_load(self.episode_page)
         with self._page_guard(self.home_page, "Home") as home_sections:
             resume_ids = {episode.episode_id for episode in in_progress[:3]}
@@ -3544,8 +3556,11 @@ class MainWindow(QMainWindow):
         self._run_read(lambda: prepare_saved_previews(batch, limit=32, budget_ms=40),
                        apply, 'preview-warm')
 
-    def _request_reload(self, callback=None):
+    def _request_reload(self, callback=None, *, include_detail=True):
         """Coalesce bursts (batch refresh, imports); read+convert run off the main thread."""
+        # A general mutation dominates any narrower pending read. Consume this
+        # flag only when a worker is dispatched, including the follow-up read.
+        self._reload_include_detail = self._reload_include_detail or include_detail
         if callback is not None:
             self._reload_callbacks.append(callback)
         self._reload_timer.setInterval(1500 if self._refresh_batch[0] else 200)
@@ -7552,7 +7567,7 @@ class MainWindow(QMainWindow):
             for page in (self.playlist_page, self.history_page, self.download_page):
                 self._finish_page_load(page, message)
         if self._reload_again:
-            self._request_reload()
+            self._request_reload(include_detail=self._reload_include_detail)
         elif result.status == JobStatus.OK:
             callbacks, self._reload_callbacks = self._reload_callbacks, []
             for callback in callbacks:
@@ -7704,7 +7719,7 @@ class MainWindow(QMainWindow):
             self.context.show_preview_error(identifier, message)
             if self._pending_episodes_url == identifier:
                 self._pending_episodes_url = ""
-                self.episode_page.banner.show_state("error", f"Couldn’t fetch this podcast’s episodes: {message}")
+                self.episode_page.banner.show_state("error", f"Couldn’t fetch this podcast’s episodes: {message}", retry=True)
         if newest_scan:
             self._discover_newest_pending.discard(identifier)
             self._discover_newest_done += 1
@@ -7827,7 +7842,9 @@ class MainWindow(QMainWindow):
         else:
             self._manual_refresh_in_flight.discard(identifier)
             if content_changed:
-                self._request_reload()
+                # Another show's feed cannot change this podcast's episode
+                # history. Keep its rows/status while updating other collections.
+                self._request_reload(include_detail=self._hero_show_id == identifier)
             else:
                 self._refresh_show_summaries()
         total, done, new_episodes = self._refresh_batch
