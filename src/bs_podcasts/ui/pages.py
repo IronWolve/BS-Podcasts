@@ -2193,6 +2193,71 @@ SHORTCUT_GROUPS = (
 )
 
 
+class _SettingCheckText(PlainTextLabel):
+    """Wrapped checkbox caption with the same click behavior as native text."""
+
+    def __init__(self, checkbox):
+        super().__init__(checkbox.text())
+        self.checkbox = checkbox
+        self.setWordWrap(True)
+        self.setBuddy(checkbox)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            if self.checkbox.isEnabled():
+                self.checkbox.setFocus(Qt.FocusReason.MouseFocusReason)
+                self.checkbox.click()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class _SettingsForm(QFormLayout):
+    """Settings share a label column; prose grows instead of staying at its size hint."""
+
+    def __init__(self):
+        super().__init__()
+        self.labels = []
+        self.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    def addRow(self, *args):
+        if len(args) == 2 and isinstance(args[0], str):
+            title, field = args
+            label = PlainTextLabel(title)
+            label.setWordWrap(True)
+            self.labels.append(label)
+            if isinstance(field, QCheckBox):
+                caption = _SettingCheckText(field)
+                field.setAccessibleName(field.text())
+                field.setText('')
+                wrapper = QWidget()
+                layout = QHBoxLayout(wrapper)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(SPACE['sm'])
+                layout.addWidget(field, 0, Qt.AlignmentFlag.AlignTop)
+                layout.addWidget(caption, 1)
+                label.setBuddy(field)
+                field = wrapper
+            elif isinstance(field, QPushButton):
+                label.setBuddy(field)
+                wrapper = QWidget()
+                layout = FlowLayout(wrapper, spacing=SPACE['sm'])
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.addWidget(field)
+                field = wrapper
+            elif isinstance(field, QWidget):
+                label.setBuddy(field)
+            if isinstance(field, QLabel):
+                field.setWordWrap(True)
+                field.setMinimumWidth(0)
+                field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            super().addRow(label, field)
+        else:
+            super().addRow(*args)
+
+
 class SettingsPage(BasePage):
     setting_changed = Signal(str, str)
     shortcut_changed = Signal(str, str)
@@ -2217,28 +2282,42 @@ class SettingsPage(BasePage):
     database_repair_requested = Signal()
 
     FIELD_WIDTH = 180
+    CATEGORIES = {
+        'General': ('Appearance', 'Desktop', 'App updates'),
+        'Playback': ('Playback',),
+        'Library': ('Library', 'Subscriptions & transfer', 'Listening statistics'),
+        'Downloads': ('Downloads',),
+        'Shortcuts': ('Keyboard shortcuts',),
+        'Storage': ('Files & storage', 'Library database'),
+        'Diagnostics': ('Diagnostics',),
+    }
 
     def __init__(self, parent=None):
         super().__init__("Settings", "", show_search=False, parent=parent)
         self._setting_sections = []
+        self._settings_forms = []
+        self._shortcut_forms = []
+        self._category = 'General'
         self._build_scroll_area()
         self._build_playback_section()
         self._build_library_section()
+        self._build_transfer_section()
+        self._build_statistics_section()
         self._build_downloads_section()
         self._build_appearance_section()
         self._build_desktop_section()
-        self._build_statistics_section()
         self._build_updates_section()
-        self._build_database_section()
         self._build_shortcuts_section()
         self._build_storage_section()
-        self._build_transfer_section()
+        self._build_database_section()
+        self._build_diagnostics_section()
         self.settings_content.addStretch(1)
         self._build_settings_nav()
         self.speed.valueChanged.connect(lambda value: self.setting_changed.emit("playback.default_speed", str(value)))
         self.skip_back.valueChanged.connect(lambda value: self.setting_changed.emit("playback.skip_back", str(value)))
         self.skip_forward.valueChanged.connect(lambda value: self.setting_changed.emit("playback.skip_forward", str(value)))
         self.auto_continue.toggled.connect(lambda value: self.setting_changed.emit("playback.auto_continue", "1" if value else "0"))
+        self.apply_metrics()
 
     def _build_scroll_area(self):
         self.settings_scroll = QScrollArea()
@@ -2291,11 +2370,12 @@ class SettingsPage(BasePage):
             ("50 results", "50"),
             ("100 results", "100"),
             ("150 results", "150"),
-            ("200 results · directory max", "200"),
+            ("200 results", "200"),
         ):
             self.search_depth.addItem(label, value)
         self.search_depth.setFixedWidth(scaled_px(self.FIELD_WIDTH))
-        library_form.addRow("Result depth", self.search_depth)
+        self.search_depth.setToolTip('Maximum results shown for a Discover search; the directory allows up to 200.')
+        library_form.addRow("Discover results", self.search_depth)
         self.search_depth.currentIndexChanged.connect(
             lambda index: self.setting_changed.emit("discover.search_limit", self.search_depth.itemData(index))
         )
@@ -2312,6 +2392,16 @@ class SettingsPage(BasePage):
     def _build_downloads_section(self):
         # Downloads --------------------------------------------------------------
         downloads_card, downloads_form = self._card("Downloads", "New episodes found during a refresh can be downloaded automatically.")
+        self.download_path = self._path_label()
+        self.download_usage = PlainTextLabel('Calculating…')
+        self.download_usage.setObjectName('meta')
+        self.change_folder_button = self._action('Change folder…', self.change_download_folder_requested, 'folder')
+        self.change_folder_button.setToolTip('Existing downloads stay where they are; new ones use the new folder')
+        self.change_folder_button.setAccessibleName('Change download folder')
+        downloads_form.addRow('Save episodes to', self.download_path)
+        downloads_form.addRow('Space', self.download_usage)
+        downloads_form.addRow('', self._actions(self.change_folder_button,
+                              self._action('Refresh usage', self.refresh_storage_requested, 'refresh')))
         self.auto_download = QCheckBox("Auto-download new episodes")
         self.auto_download_limit = QSpinBox()
         self.auto_download_limit.setRange(1, 10)
@@ -2323,6 +2413,11 @@ class SettingsPage(BasePage):
         downloads_form.addRow("At most", self.auto_download_limit)
         downloads_form.addRow("Playback", self.download_first)
         downloads_form.addRow("Housekeeping", self.delete_played)
+        cleanup = self._action('Delete played downloads…', self.cleanup_played_requested, danger=True)
+        cleanup.setToolTip('Shows the exact files and space first')
+        self.retry_orphans_button = self._action('Review files not deleted…', self.retry_orphans_requested)
+        self.retry_orphans_button.setToolTip('Review failed file removals. Nothing is deleted without confirmation.')
+        downloads_form.addRow(self._actions(cleanup, self.retry_orphans_button))
         self.download_first.toggled.connect(lambda value: self.setting_changed.emit("playback.download_first", "1" if value else "0"))
         self.delete_played.toggled.connect(lambda value: self.setting_changed.emit("downloads.delete_played", "1" if value else "0"))
         self.settings_content.addWidget(downloads_card)
@@ -2397,14 +2492,11 @@ class SettingsPage(BasePage):
         desktop_card, desktop_form = self._card("Desktop", "Small, optional desktop conveniences.")
         self.notifications = QCheckBox("Show system notifications (pop-ups with the system sound)")
         self.close_to_tray = QCheckBox("Keep running in the tray when the window closes")
-        self.file_logging = QCheckBox("Write a private diagnostic log file")
         desktop_form.addRow("Notifications", self.notifications)
         desktop_form.addRow("Window close", self.close_to_tray)
-        desktop_form.addRow("Diagnostics", self.file_logging)
         self.settings_content.addWidget(desktop_card)
         self.notifications.toggled.connect(lambda value: self.setting_changed.emit("notifications.enabled", "1" if value else "0"))
         self.close_to_tray.toggled.connect(lambda value: self.setting_changed.emit("ui.close_to_tray", "1" if value else "0"))
-        self.file_logging.toggled.connect(lambda value: self.setting_changed.emit("diagnostics.file_logging", "1" if value else "0"))
 
     def _build_statistics_section(self):
         # Listening statistics -------------------------------------------------
@@ -2441,7 +2533,7 @@ class SettingsPage(BasePage):
         self.database_status = PlainTextLabel("Not checked")
         self.database_status.setObjectName("meta")
         self.database_status.setWordWrap(True)
-        database_actions = QHBoxLayout()
+        database_buttons = []
         for label, signal in (
             ("Health check", self.database_health_requested),
             ("Reindex", self.database_reindex_requested),
@@ -2450,43 +2542,43 @@ class SettingsPage(BasePage):
             button = QPushButton(label)
             button.setObjectName("quietButton")
             button.clicked.connect(signal)
-            database_actions.addWidget(button)
+            database_buttons.append(button)
         self.database_repair = QPushButton("Attempt repair…")
         self.database_repair.setObjectName("dangerButton")
         self.database_repair.clicked.connect(self.database_repair_requested)
         self.database_repair.hide()
-        database_actions.addWidget(self.database_repair)
-        database_actions.addStretch(1)
+        database_buttons.append(self.database_repair)
         database_form.addRow("Status", self.database_status)
-        database_form.addRow("", database_actions)
+        database_form.addRow(self._actions(*database_buttons))
         self.settings_content.addWidget(database_card)
 
     def _build_shortcuts_section(self):
         # Shortcuts ----------------------------------------------------------
         shortcut_card = QFrame()
         shortcut_card.setObjectName("settingCard")
+        shortcut_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         shortcut_layout = QVBoxLayout(shortcut_card)
         shortcut_layout.setContentsMargins(SPACE["xl"], SPACE["lg"], SPACE["xl"], SPACE["lg"])
         shortcut_layout.setSpacing(SPACE["md"])
-        shortcut_head = QHBoxLayout()
         shortcut_title = PlainTextLabel("Keyboard shortcuts")
         shortcut_title.setObjectName("cardTitle")
-        shortcut_head.addWidget(shortcut_title, 1)
+        shortcut_title.setWordWrap(True)
         reset = QPushButton("Reset to defaults")
         reset.setObjectName("textButton")
         reset.setCursor(Qt.CursorShape.PointingHandCursor)
         reset.clicked.connect(self.reset_shortcuts_requested)
-        shortcut_head.addWidget(reset)
         self.shortcut_reset = reset  # the editors built later are chained after it in the Tab order
-        shortcut_layout.addLayout(shortcut_head)
+        shortcut_layout.addWidget(self._actions(shortcut_title, reset))
         hint = PlainTextLabel("Click a field and press the new key combination.")
         hint.setObjectName("settingHint")
+        hint.setWordWrap(True)
         shortcut_layout.addWidget(hint)
         self.shortcut_form = QVBoxLayout()
         self.shortcut_form.setSpacing(SPACE["sm"])
         shortcut_layout.addLayout(self.shortcut_form)
         self.shortcut_error = PlainTextLabel("")
         self.shortcut_error.setObjectName("errorText")
+        self.shortcut_error.setWordWrap(True)
         self.shortcut_error.hide()
         shortcut_layout.addWidget(self.shortcut_error)
         self.settings_content.addWidget(shortcut_card)
@@ -2497,26 +2589,22 @@ class SettingsPage(BasePage):
     def _build_storage_section(self):
         # Storage --------------------------------------------------------------
         storage_card, storage_layout = self._card("Files & storage", "")
-        storage_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.data_root = PlainTextLabel("—")
         self.library_path = PlainTextLabel("—")
         self.backup_path = PlainTextLabel("—")
         self.backup_usage = PlainTextLabel("Not measured")
         self.backup_usage.setObjectName('meta')
         self.backup_usage.setWordWrap(True)
-        self.download_path = PlainTextLabel("—")
-        self.download_usage = PlainTextLabel("—")
         self.artwork_path = PlainTextLabel("—")
         self.artwork_usage = PlainTextLabel("—")
         self.temp_path = PlainTextLabel("—")
-        self.log_path = PlainTextLabel("—")
-        for label in (self.data_root, self.library_path, self.backup_path, self.download_path, self.artwork_path, self.temp_path, self.log_path):
+        for label in (self.data_root, self.library_path, self.backup_path, self.artwork_path, self.temp_path):
             label.setObjectName("meta")
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+            label.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             label.setWordWrap(True)
             label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            label.setMinimumWidth(scaled_px(120))
-        self.download_usage.setObjectName("meta")
+            label.setMinimumWidth(0)
         self.artwork_usage.setObjectName("meta")
         storage_layout.addRow("Application data", self.data_root)
         storage_layout.addRow("Library database", self.library_path)
@@ -2525,65 +2613,21 @@ class SettingsPage(BasePage):
         self.library_location_warning.setWordWrap(True)
         storage_layout.addRow("", self.library_location_warning)
         self.library_location_warning.hide()
-        backup_row = QWidget()
-        backup_layout = QHBoxLayout(backup_row)
-        backup_layout.setContentsMargins(0, 0, 0, 0)
-        backup_layout.setSpacing(SPACE["sm"])
-        backup_layout.addWidget(self.backup_path, 1)
         open_backups = QPushButton("Open backups")
         open_backups.setObjectName("textButton")
         open_backups.setCursor(Qt.CursorShape.PointingHandCursor)
         open_backups.setToolTip("Open saved library backups; if none exist yet, open the data folder")
         open_backups.clicked.connect(self.open_backups_requested)
-        backup_layout.addWidget(open_backups, 0, Qt.AlignmentFlag.AlignTop)
-        storage_layout.addRow("Library backups", backup_row)
+        storage_layout.addRow("Library backups", self.backup_path)
         storage_layout.addRow("Backup usage", self.backup_usage)
-        backup_hint = PlainTextLabel("The three newest automatic backups are kept, plus the original upgrade backup and protected or unmarked legacy copies. To protect another backup, put an empty file named <backup filename>.keep beside it. Close BS Podcasts before restoring files; keep a copy of the current data first.")
+        storage_layout.addRow('', self._actions(open_backups))
+        backup_hint = PlainTextLabel("Keeps the three newest automatic backups, the original upgrade backup and protected or unmarked copies. A matching .keep file protects a backup. Close the app before restoring; preserve a copy of your current data.")
         backup_hint.setObjectName("settingHint")
         backup_hint.setWordWrap(True)
         storage_layout.addRow("", backup_hint)
-        download_row = QWidget()
-        download_row_layout = QHBoxLayout(download_row)
-        download_row_layout.setContentsMargins(0, 0, 0, 0)
-        download_row_layout.setSpacing(SPACE["sm"])
-        download_row_layout.addWidget(self.download_path, 1)
-        self.change_folder_button = QPushButton("Change…")
-        self.change_folder_button.setObjectName("textButton")
-        self.change_folder_button.setIcon(icons.themed_icon("folder", "muted", 14))
-        self.change_folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.change_folder_button.setToolTip("Existing downloads stay where they are; new ones use the new folder")
-        self.change_folder_button.setAccessibleName("Change download folder")
-        self.change_folder_button.clicked.connect(self.change_download_folder_requested)
-        download_row_layout.addWidget(self.change_folder_button, 0, Qt.AlignmentFlag.AlignTop)
-        storage_layout.addRow("Downloads folder", download_row)
-        storage_layout.addRow("Downloads usage", self.download_usage)
-        self.retry_orphans_button = QPushButton('Review files not deleted…')
-        self.retry_orphans_button.setObjectName('quietButton')
-        self.retry_orphans_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.retry_orphans_button.setToolTip('Review failed file removals. Nothing is deleted without confirmation.')
-        self.retry_orphans_button.clicked.connect(self.retry_orphans_requested)
-        storage_layout.addRow('', self.retry_orphans_button)
         storage_layout.addRow("Artwork folder", self.artwork_path)
         storage_layout.addRow("Artwork usage", self.artwork_usage)
         storage_layout.addRow("Temporary files", self.temp_path)
-        storage_layout.addRow("Log file", self.log_path)
-        storage_buttons = QWidget()
-        storage_buttons.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        storage_actions = FlowLayout(storage_buttons, spacing=SPACE["sm"])
-        storage_actions.setContentsMargins(0, 0, 0, 0)
-        destructive_actions = QHBoxLayout()
-        destructive_actions.setSpacing(SPACE["sm"])
-        open_log = QPushButton("Open log")
-        open_log.setObjectName("quietButton")
-        open_log.setIcon(icons.themed_icon("info", "text", 16))
-        open_log.setCursor(Qt.CursorShape.PointingHandCursor)
-        open_log.clicked.connect(self.open_log_requested)
-        self.export_diagnostics_button = QPushButton("Export diagnostics")
-        self.export_diagnostics_button.setObjectName("quietButton")
-        self.export_diagnostics_button.setIcon(icons.themed_icon("download", "text", 16))
-        self.export_diagnostics_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.export_diagnostics_button.setToolTip("Review redacted logs and build information, then save a ZIP. Nothing is uploaded.")
-        self.export_diagnostics_button.clicked.connect(self.export_diagnostics_requested)
         open_folder = QPushButton("Open data folder")
         open_folder.setObjectName("quietButton")
         open_folder.setIcon(icons.themed_icon("folder", "text", 16))
@@ -2599,28 +2643,59 @@ class SettingsPage(BasePage):
         clear_art.setCursor(Qt.CursorShape.PointingHandCursor)
         clear_art.setToolTip("Removes cached images no podcast or episode uses; shows the totals first")
         clear_art.clicked.connect(self.clear_artwork_requested)
-        cleanup = QPushButton("Delete played downloads…")
-        cleanup.setObjectName("dangerButton")
-        cleanup.setCursor(Qt.CursorShape.PointingHandCursor)
-        cleanup.setToolTip("Shows the exact files and space first")
-        cleanup.clicked.connect(self.cleanup_played_requested)
         reset = QPushButton("Reset library…")
         reset.setObjectName("dangerButton")
         reset.setCursor(Qt.CursorShape.PointingHandCursor)
         reset.setToolTip("Remove every subscription, episode, download and bookmark; settings are kept")
         reset.clicked.connect(self.reset_library_requested)
         # Row 1: look around. Row 2: things that delete.
-        storage_actions.addWidget(open_folder)
-        storage_actions.addWidget(open_log)
-        storage_actions.addWidget(self.export_diagnostics_button)
-        storage_actions.addWidget(refresh_usage)
-        destructive_actions.addWidget(cleanup)
-        destructive_actions.addWidget(clear_art)
-        destructive_actions.addWidget(reset)
-        destructive_actions.addStretch(1)
-        storage_layout.addRow(storage_buttons)
-        storage_layout.addRow("", destructive_actions)
+        storage_layout.addRow(self._actions(open_folder, refresh_usage))
+        storage_layout.addRow(self._actions(clear_art, reset))
         self.settings_content.addWidget(storage_card)
+
+    def _build_diagnostics_section(self):
+        card, form = self._card('Diagnostics', 'Private local logs help investigate problems. Nothing is uploaded automatically.')
+        self.file_logging = QCheckBox('Write a private diagnostic log file')
+        self.file_logging.toggled.connect(lambda value: self.setting_changed.emit('diagnostics.file_logging', '1' if value else '0'))
+        self.log_path = self._path_label()
+        form.addRow('Logging', self.file_logging)
+        form.addRow('Log file', self.log_path)
+        open_log = self._action('Open log', self.open_log_requested, 'info')
+        self.export_diagnostics_button = self._action('Export diagnostics', self.export_diagnostics_requested, 'download')
+        self.export_diagnostics_button.setToolTip('Review redacted logs and build information, then save a ZIP. Nothing is uploaded.')
+        form.addRow(self._actions(open_log, self.export_diagnostics_button))
+        self.settings_content.addWidget(card)
+
+    @staticmethod
+    def _path_label():
+        label = PlainTextLabel('—')
+        label.setObjectName('meta')
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        label.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        label.setMinimumWidth(0)
+        label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        return label
+
+    @staticmethod
+    def _action(text, signal, glyph='', *, danger=False):
+        button = QPushButton(text)
+        button.setObjectName('dangerButton' if danger else 'quietButton')
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        if glyph:
+            button.setIcon(icons.themed_icon(glyph, 'text', 16))
+        button.clicked.connect(signal)
+        return button
+
+    @staticmethod
+    def _actions(*buttons):
+        widget = QWidget()
+        widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        layout = FlowLayout(widget, spacing=SPACE['sm'])
+        layout.setContentsMargins(0, 0, 0, 0)
+        for button in buttons:
+            layout.addWidget(button)
+        return widget
 
     def _build_transfer_section(self):
         # Transfer ------------------------------------------------------------
@@ -2628,8 +2703,6 @@ class SettingsPage(BasePage):
             "Subscriptions & transfer",
             "Import subscriptions from an OPML file or export the current list for another podcast reader.",
         )
-        transfer_actions = QHBoxLayout()
-        transfer_actions.setSpacing(SPACE["sm"])
         import_opml = QPushButton("Import OPML…")
         import_opml.setObjectName("quietButton")
         import_opml.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2638,69 +2711,70 @@ class SettingsPage(BasePage):
         export_opml.setObjectName("quietButton")
         export_opml.setCursor(Qt.CursorShape.PointingHandCursor)
         export_opml.clicked.connect(self.export_opml_requested)
-        transfer_actions.addWidget(import_opml)
-        transfer_actions.addWidget(export_opml)
-        transfer_actions.addStretch(1)
-        transfer_layout.addRow(transfer_actions)
+        transfer_layout.addRow(self._actions(import_opml, export_opml))
         self.settings_content.addWidget(transfer_card)
 
     def _card(self, title: str, hint: str):
         card = QFrame()
         card.setObjectName("settingCard")
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         outer = QVBoxLayout(card)
         outer.setContentsMargins(SPACE["xl"], SPACE["lg"], SPACE["xl"], SPACE["lg"])
         outer.setSpacing(SPACE["md"])
         heading = PlainTextLabel(title)
         heading.setObjectName("cardTitle")
+        heading.setWordWrap(True)
         outer.addWidget(heading)
         if hint:
             hint_label = PlainTextLabel(hint)
             hint_label.setObjectName("settingHint")
             hint_label.setWordWrap(True)
             outer.addWidget(hint_label)
-        form = QFormLayout()
+        form = _SettingsForm()
         form.setHorizontalSpacing(SPACE["xl"])
         form.setVerticalSpacing(SPACE["md"])
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         outer.addLayout(form)
         self._setting_sections.append((title, card))
+        self._settings_forms.append(form)
         return card, form
 
     def _build_settings_nav(self):
-        labels = {
-            "Playback": "Playback",
-            "Library": "Library",
-            "Downloads": "Downloads",
-            "Appearance": "Appearance",
-            "Desktop": "Desktop",
-            "Keyboard shortcuts": "Shortcuts",
-            "Files & storage": "Storage",
-        }
-        nav = QWidget()
-        row = FlowLayout(nav, spacing=SPACE["xs"])
-        row.setContentsMargins(0, 0, 0, SPACE["sm"])
-        row.setSpacing(SPACE["xs"])
-        previous = None  # the nav is built last; the scroll area and its fields are chained after it below
-        for title, card in self._setting_sections:
-            label = labels.get(title)
-            if not label:
-                continue
-            button = QPushButton(label)
-            button.setObjectName("textButton")
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setToolTip(title)
-            button.clicked.connect(lambda _checked=False, target=card: self._scroll_to_setting(target))
-            row.addWidget(button)
+        nav = self.settings_nav = ChipRow(tuple(self.CATEGORIES))
+        self.root.insertWidget(self.root.indexOf(self.settings_scroll), nav)
+        nav.selected.connect(lambda category: self.set_category(category, persist=True))
+        previous = None
+        for button in nav.findChildren(QPushButton):
+            button.setAccessibleName('Settings category: ' + button.text())
             if previous is not None:
                 QWidget.setTabOrder(previous, button)
             previous = button
         if previous is not None:
             QWidget.setTabOrder(previous, self.settings_scroll)  # Tab: nav row first, then the fields
-        self._settings_nav_layout = row
-        self.root.insertWidget(self.root.indexOf(self.settings_scroll), nav)
+        self._settings_nav_layout = nav.layout()
+        self.set_category('General')
+
+    def category(self):
+        return self._category
+
+    def set_category(self, category, persist=False):
+        if category not in self.CATEGORIES:
+            category = 'General'
+        changed = category != self._category
+        self._category = category
+        self.settings_nav.select(category)
+        visible = self.CATEGORIES[category]
+        for title, card in self._setting_sections:
+            card.setVisible(title in visible)
+        self.settings_scroll.verticalScrollBar().setValue(0)
+        self._layout_settings_forms()
+        if persist and changed:
+            self.setting_changed.emit('ui.settings_category', category)
 
     def _scroll_to_setting(self, card: QWidget):
+        title = next((title for title, item in self._setting_sections if item is card), '')
+        category = next((name for name, titles in self.CATEGORIES.items() if title in titles), 'General')
+        self.set_category(category)
         self.settings_scroll.ensureWidgetVisible(card, 0, 24)
 
     def load_downloads(self, auto: bool, limit: int, delete_played: bool = False, download_first: bool = False):
@@ -2815,18 +2889,35 @@ class SettingsPage(BasePage):
         self._fit_field(self.ui_font, scaled_px(220))
         for editor in self._shortcut_editors.values():
             editor.setFixedWidth(width)
-            row = editor.parentWidget()
-            layout = row.layout() if row is not None else None
-            if layout is not None:
-                layout.setSpacing(SPACE["lg"])
-                label = layout.itemAt(0).widget()
-                if isinstance(label, QLabel):
-                    label.setFixedWidth(scaled_px(260))
         for path_label in (
             self.data_root, self.library_path, self.download_path,
             self.artwork_path, self.temp_path, self.log_path,
         ):
-            path_label.setMinimumWidth(scaled_px(120))
+            path_label.setMinimumWidth(0)
+        self._layout_settings_forms()
+
+    def _layout_settings_forms(self):
+        narrow = self.settings_scroll.viewport().width() < scaled_px(600)
+        for forms in (self._settings_forms, self._shortcut_forms):
+            labels = [label for form in forms for label in form.labels]
+            width = max([scaled_px(150), *(label.fontMetrics().horizontalAdvance(label.text()) + scaled_px(8)
+                                          for label in labels if label.text())])
+            for form in forms:
+                form.setHorizontalSpacing(SPACE['lg'])
+                form.setVerticalSpacing(SPACE['sm'] if narrow else SPACE['md'])
+                form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows if narrow else QFormLayout.RowWrapPolicy.DontWrapRows)
+                for label in form.labels:
+                    label.setMinimumWidth(0 if narrow else width)
+                    label.setMaximumWidth(16777215 if narrow else width)
+                    # Empty action-row labels must not consume a row when stacked.
+                    label.setVisible(bool(label.text()))
+                form.invalidate()
+        self.settings_scroll.widget().updateGeometry()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_shortcut_forms'):
+            self._layout_settings_forms()
 
     def load_values(self, speed: float, skip_back: int, skip_forward: int, auto_continue: bool):
         with quiet_signals(self.speed, self.skip_back, self.skip_forward, self.auto_continue):
@@ -2843,21 +2934,22 @@ class SettingsPage(BasePage):
             if widget is not None:
                 widget.deleteLater()
         self._shortcut_editors.clear()
+        self._shortcut_forms.clear()
         self.shortcut_error.hide()
         previous = self.shortcut_reset  # rebuilt editors would otherwise land at the end of the Tab order
         for group, entries in SHORTCUT_GROUPS:
-            heading = PlainTextLabel(group.upper())
-            heading.setObjectName("eyebrow")
+            heading = PlainTextLabel(group)
+            heading.setObjectName("sectionTitle")
             self.shortcut_form.addWidget(heading)
+            rows = QWidget()
+            row_layout = _SettingsForm()
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            rows.setLayout(row_layout)
+            self._shortcut_forms.append(row_layout)
+            self.shortcut_form.addWidget(rows)
             for name, label in entries:
                 if name not in bindings:
                     continue
-                row = QWidget()
-                row_layout = QHBoxLayout(row)
-                row_layout.setContentsMargins(0, 0, 0, 0)
-                row_layout.setSpacing(SPACE["lg"])
-                text = PlainTextLabel(label)
-                text.setFixedWidth(scaled_px(260))
                 editor = QKeySequenceEdit()
                 editor.setFixedWidth(scaled_px(self.FIELD_WIDTH))
                 # Stored bindings are portable text; a bare string would be
@@ -2867,12 +2959,10 @@ class SettingsPage(BasePage):
                 editor.editingFinished.connect(lambda key=name, ed=editor: self.shortcut_changed.emit(
                     key, ed.keySequence().toString(QKeySequence.SequenceFormat.PortableText)))
                 self._shortcut_editors[name] = editor
-                row_layout.addWidget(text)
-                row_layout.addWidget(editor)
-                row_layout.addStretch(1)
-                self.shortcut_form.addWidget(row)
+                row_layout.addRow(label, editor)
                 QWidget.setTabOrder(previous, editor)
                 previous = editor
+        self._layout_settings_forms()
 
     def show_shortcut_error(self, name: str, message: str, previous: str):
         editor = self._shortcut_editors.get(name)

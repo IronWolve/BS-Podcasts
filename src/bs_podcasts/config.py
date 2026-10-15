@@ -202,13 +202,68 @@ def _xdg_user_dir(name: str, fallback: str) -> Path:
     return Path.home() / fallback
 
 
+def _windows_known_folder(folder_id: str) -> Path:
+    """Resolve a Windows Known Folder and release the Shell-owned string."""
+    import ctypes
+    import uuid
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("data", ctypes.c_ubyte * 16)]
+
+    folder = GUID((ctypes.c_ubyte * 16).from_buffer_copy(uuid.UUID(folder_id).bytes_le))
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+    initialize = ole32.CoInitializeEx
+    initialize.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    initialize.restype = ctypes.c_long
+    uninitialize = ole32.CoUninitialize
+    uninitialize.argtypes = []
+    uninitialize.restype = None
+
+    # Known-folder APIs require COM. Balance our initialization only when we
+    # created this apartment; RPC_E_CHANGED_MODE means this thread already has
+    # a different, valid COM apartment.
+    hr = initialize(None, 0x2)  # COINIT_APARTMENTTHREADED
+    initialized_here = hr in (0, 1)  # S_OK or S_FALSE
+    changed_mode = ctypes.c_long(0x80010106).value
+    if hr < 0 and hr != changed_mode:
+        raise OSError(hr, "Could not initialize Windows Shell folder lookup")
+
+    result = ctypes.POINTER(ctypes.c_wchar)()
+    try:
+        get_path = shell32.SHGetKnownFolderPath
+        get_path.argtypes = [ctypes.POINTER(GUID), ctypes.c_uint32, ctypes.c_void_p,
+                             ctypes.POINTER(ctypes.POINTER(ctypes.c_wchar))]
+        get_path.restype = ctypes.c_long
+        # Resolve the configured location even when its redirected target is
+        # currently offline; availability is reported by the storage check.
+        hr = get_path(ctypes.byref(folder), 0x4000, None, ctypes.byref(result))  # KF_FLAG_DONT_VERIFY
+        if hr < 0:
+            raise OSError(hr, "Could not resolve the Windows Music folder")
+        value = ctypes.wstring_at(result)
+        if not value:
+            raise OSError("Windows returned an empty Music folder path")
+        return Path(value)
+    finally:
+        if result:
+            ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+            ole32.CoTaskMemFree.restype = None
+            ole32.CoTaskMemFree(ctypes.cast(result, ctypes.c_void_p))
+        if initialized_here:
+            uninitialize()
+
+
 def default_downloads_dir() -> Path:
     """Where episode files go unless the user picks another folder in Settings."""
     override = _override()
     if override:
         return override / "downloads"
     if sys.platform.startswith("win"):
-        return Path(os.environ.get("USERPROFILE") or Path.home()) / "Music" / "Podcasts" / APP_NAME
+        try:
+            music = _windows_known_folder("4BD8D571-6D19-48D3-BE97-422220080E43")
+        except (OSError, ValueError, AttributeError):
+            music = Path(os.environ.get("USERPROFILE") or Path.home()) / "Music"
+        return music / "Podcasts" / APP_NAME
     if sys.platform == "darwin":
         return Path.home() / "Music" / "Podcasts" / APP_NAME
     return _xdg_user_dir("MUSIC", "Music") / "Podcasts" / APP_NAME

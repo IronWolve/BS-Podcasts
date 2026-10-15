@@ -931,6 +931,7 @@ class MainWindow(QMainWindow):
         )
         self._apply_skip_settings()
         self.settings_page.load_theme(self.library.setting("ui.theme", "system"))
+        self.settings_page.set_category(self.library.setting('ui.settings_category', 'General'))
         self.podcast_page.set_sort(self.library.setting("ui.podcast_sort", "name"))
         self.settings_page.load_density(self.library.setting("ui.density", "comfortable"))
         item_tooltips = self.library.setting("ui.item_tooltips", "0") == "1"
@@ -2835,8 +2836,8 @@ class MainWindow(QMainWindow):
         if self.downloads is not None:
             download_path = str(self.downloads.directory)
             if include_usage:
-                used, free, _total = self.downloads.storage()
-                capacity = f"{self._format_bytes(free)} free" if free is not None else "folder unavailable"
+                used, free, _total, message = self.downloads.storage_status()
+                capacity = f"{self._format_bytes(free)} free" if free is not None else message or 'Folder unavailable'
                 download_text = f"{self._format_bytes(used)} used  ·  {capacity}"
             else:
                 download_text = "Calculating…"
@@ -6322,6 +6323,7 @@ class MainWindow(QMainWindow):
             self.downloads.directory = target
         def apply(_result):
             self._refresh_storage_settings()
+            self._refresh_download_capacity(force=True)
             self._notify(f"New downloads go to {target}", "success")
         self._run_command(work, apply)
 
@@ -6641,24 +6643,25 @@ class MainWindow(QMainWindow):
         if self.download_page.header.action:
             self.download_page.header.action.setVisible(any(record.state.value == "downloading" for record in records))
         if unavailable:
-            self.download_page.banner.show_state("partial", "Download folder unavailable. Saved records are kept; reconnect the drive to use its files.")
+            reason = capacity[3] if len(capacity) > 3 else 'The download folder could not be accessed. Check its location in Settings → Downloads.'
+            self.download_page.banner.show_state("partial", reason, retry=True)
         else:
             self.download_page.banner.clear()
 
-    def _refresh_download_capacity(self):
+    def _refresh_download_capacity(self, *, force=False):
         if self.downloads is None or self._closed:
             return
         directory = str(self.downloads.directory)
         now = time.monotonic()
         checked = self._download_capacity_checked
-        if checked[0] == directory and now - checked[1] < 30.0:
+        if not force and checked[0] == directory and now - checked[1] < 30.0:
             return
         self._download_capacity_checked = (directory, now)
         downloads = self.downloads
 
         def work():
-            _used, free, total = downloads.storage(())
-            return directory, free, total
+            _used, free, total, message = downloads.storage_status(())
+            return directory, free, total, message
 
         def apply(capacity):
             if str(self.downloads.directory) == capacity[0]:
@@ -6701,7 +6704,9 @@ class MainWindow(QMainWindow):
         self._page_errors[page] = message
 
     def _retry_page(self, page):
-        if self._page_errors.get(page) == page.banner.label.text():
+        if page is self.download_page and page.banner.state == 'partial':
+            self._refresh_download_capacity(force=True)
+        elif self._page_errors.get(page) == page.banner.label.text():
             if page is self.bookmark_page and self.listening is not None:
                 self._reload_bookmarks()
             else:

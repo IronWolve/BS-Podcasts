@@ -21,6 +21,7 @@ from collections import deque
 from threading import Condition, Event, Lock, Thread, local as thread_local
 from urllib.parse import urlparse
 import os
+import errno
 from hashlib import sha256
 import logging
 import re
@@ -39,6 +40,98 @@ from ..domain.media import BINARY_AUDIO_TYPES
 
 
 _log = logging.getLogger("bs_podcasts")
+
+
+_MOUNT_ROOTS = (Path("/mnt"), Path("/media"), Path("/run/media"), Path("/Volumes"), Path("/net"))
+
+
+class _UnmountedDownloadLocation(FileNotFoundError):
+    pass
+
+
+def _mounted_parent_or_error(directory: Path) -> None:
+    """Refuse to manufacture a local directory tree where a mount is expected."""
+    if os.name != "posix":
+        return
+    # resolve(strict=False) is called by the caller so lexical '..' and
+    # existing symlink ancestors are accounted for before comparing roots.
+    for root in _MOUNT_ROOTS:
+        try:
+            relative = directory.relative_to(root)
+        except ValueError:
+            continue
+        # A mounted volume/share below these conventional mount roots is safe
+        # to use. If absent, creating a local replacement would mask failure.
+        if os.path.ismount(root):
+            return
+        current = root
+        for part in relative.parts:
+            current = current / part
+            try:
+                current.stat()
+            except OSError:
+                continue
+            if os.path.ismount(current):
+                return
+        raise _UnmountedDownloadLocation(
+            "The download drive is not mounted. Connect or mount it, then retry; or choose another folder in Settings → Downloads."
+        )
+
+
+def _ensure_download_directory(directory: str | Path) -> Path:
+    """Create missing download folders only below an available writable parent."""
+    path = Path(directory).expanduser()
+    try:
+        path.stat()
+    except FileNotFoundError:
+        # Resolve the actual creation location so paths such as /mnt/../home
+        # and symlinks into an offline mount do not fool the mount check.
+        resolved = path.resolve(strict=False)
+        _mounted_parent_or_error(resolved)
+        anchor = resolved
+        while True:
+            try:
+                anchor.stat()
+                break
+            except FileNotFoundError:
+                parent = anchor.parent
+                if parent == anchor:
+                    raise
+                anchor = parent
+        if not anchor.is_dir():
+            raise NotADirectoryError(f"{anchor} is not a directory")
+        if not os.access(anchor, os.W_OK | os.X_OK):
+            raise PermissionError(f"{anchor} is not writable")
+        resolved.mkdir(parents=True, exist_ok=True)
+        path = resolved
+    if not path.is_dir():
+        raise NotADirectoryError(f"{path} is not a directory")
+    if not os.access(path, os.W_OK | os.X_OK):
+        raise PermissionError(f"{path} is not writable")
+    return path
+
+
+def _download_location_message(error: OSError) -> str:
+    """Turn filesystem failures into a direct, useful download-folder status."""
+    winerror = getattr(error, "winerror", None)
+    if isinstance(error, _UnmountedDownloadLocation):
+        return str(error)
+    if error.errno == errno.ENOSPC or winerror == 112:
+        return "The download drive is full. Free space or choose another folder."
+    if error.errno == errno.EROFS or winerror == 19:
+        return "The download drive is read-only. Check its write protection or choose another folder."
+    if winerror in {15, 21}:
+        return "Windows cannot access the download drive. Connect or unlock it, then retry; or choose another folder."
+    if winerror in {53, 67}:
+        return "The network download location could not be found. Check the connection and share, or choose another folder."
+    if isinstance(error, FileNotFoundError) or winerror == 3:
+        return "Part of the download path could not be found. Check the location in Settings → Downloads."
+    if isinstance(error, PermissionError) or winerror == 5:
+        return "The download folder is not writable. Check its permissions or choose another folder."
+    if isinstance(error, NotADirectoryError) or winerror == 267:
+        return "A part of the download path is a file, not a folder. Choose another folder."
+    detail = str(error).strip()
+    return f"The download folder could not be accessed{': ' + detail if detail else '.'}"
 
 
 class DownloadError(RuntimeError):
@@ -228,7 +321,8 @@ class DownloadService:
     ):
         self.library = library
         self.downloads = downloads
-        self.directory = Path(directory)
+        configured_directory = Path(directory).expanduser()
+        self.directory = configured_directory if configured_directory.is_absolute() else Path.cwd() / configured_directory
         self.session = session
         # Per thread: the settle deadlines of the automatic cleanup running on it.
         self._settling = thread_local()
@@ -491,11 +585,11 @@ class DownloadService:
             # disk_usage raising) previously leaked a permanently "active"
             # episode until restart, with the record stuck at queued.
             try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                partial.parent.mkdir(parents=True, exist_ok=True)
+                _ensure_download_directory(target.parent)
+                _ensure_download_directory(partial.parent)
                 free = shutil.disk_usage(partial.parent).free
             except OSError as exc:
-                message = f"Downloads folder is unusable: {exc}"
+                message = _download_location_message(exc)
                 self.downloads.progress(episode_id, DownloadState.ERROR, 0, 0, message)
                 self._emit(episode_id, DownloadState.ERROR, 0, 0, message)
                 raise DownloadError(message) from exc
@@ -851,8 +945,11 @@ class DownloadService:
         else:
             target = self._target(episode_id, episode.media_url)
             partial = target.with_suffix(target.suffix + ".part")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        partial.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _ensure_download_directory(target.parent)
+            _ensure_download_directory(partial.parent)
+        except OSError as exc:
+            raise DownloadError(_download_location_message(exc)) from exc
         existing = partial.stat().st_size if partial.is_file() else 0
 
         validator = ""
@@ -1247,7 +1344,7 @@ class DownloadService:
             target_path=str(target), partial_path=str(target.with_suffix(target.suffix + ".part")),
             state=state, episode_title=episode.title, show_title=episode.show_title)
 
-    def storage(self, records=None) -> tuple[int, int | None, int | None]:
+    def storage_status(self, records=None) -> tuple[int, int | None, int | None, str | None]:
         records = list(records) if records is not None else self.records()
         used_by_app = sum(
             record.bytes_done
@@ -1255,10 +1352,16 @@ class DownloadService:
             if record.state == DownloadState.COMPLETE
         )
         try:
-            usage = shutil.disk_usage(self.directory)
-        except OSError:
-            return used_by_app, None, None
-        return used_by_app, usage.free, usage.total
+            directory = _ensure_download_directory(self.directory)
+            usage = shutil.disk_usage(directory)
+        except OSError as exc:
+            return used_by_app, None, None, _download_location_message(exc)
+        return used_by_app, usage.free, usage.total, None
+
+    def storage(self, records=None) -> tuple[int, int | None, int | None]:
+        """Backward-compatible capacity tuple; use storage_status for detail."""
+        used, free, total, _message = self.storage_status(records)
+        return used, free, total
 
     def records_by_ids(self, episode_ids) -> dict:
         return self.downloads.records_by_ids(episode_ids)
