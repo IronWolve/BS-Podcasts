@@ -102,6 +102,33 @@ class _SharedExclusiveLock:
                 self._cond.notify_all()
 
     @contextmanager
+    def try_shared(self):
+        """Acquire a shared hold without waiting behind maintenance."""
+        depth = getattr(self._held, "depth", 0)
+        if depth:
+            self._held.depth = depth + 1
+            try:
+                yield True
+            finally:
+                self._held.depth -= 1
+            return
+        with self._cond:
+            acquired = not (self._exclusive or self._exclusive_waiting)
+            if acquired:
+                self._shared += 1
+        if not acquired:
+            yield False
+            return
+        self._held.depth = 1
+        try:
+            yield True
+        finally:
+            self._held.depth = 0
+            with self._cond:
+                self._shared -= 1
+                self._cond.notify_all()
+
+    @contextmanager
     def exclusive(self, timeout=None):
         if getattr(self._held, "depth", 0):
             # Waiting on exclusive while holding shared would deadlock this
@@ -140,11 +167,21 @@ class Database:
             # Only when no backup exists at all is "start empty" the safe call.
             backup = self._recovery_backup()
             if backup is not None:
+                if backup.suffix.casefold() == ".zip":
+                    recovery = ("A scheduled backup candidate exists; its contents have not been verified yet. "
+                                "Close BS Podcasts and inspect the ZIP before restoring. Preserve the current "
+                                "library.db and any matching library.db-wal and library.db-shm together. Extract "
+                                "only the ZIP's library.db to a separate location, then replace the empty library "
+                                "with that file. Never put the old WAL or SHM beside the restored database; "
+                                "they belong to the old database. Keep the old files together until the restored "
+                                "library has been checked.")
+                else:
+                    recovery = ("To recover, close the app, rename the backup to library.db in the same folder, "
+                                "and start again.")
                 raise EmptyLibraryError(
                     f"The library file is empty (0 bytes): {self.path}\n\n"
                     f"A backup exists: {backup}\n"
-                    "To recover, close the app, rename the backup to library.db in the same folder, "
-                    "and start again. To start with an empty library instead, delete the empty file."
+                    f"{recovery} To start with an empty library instead, delete the empty file."
                 )
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         private_file(self.path)
@@ -169,6 +206,7 @@ class Database:
         self._handles_lock = threading.Lock()
         self._generation = 0
         self._backup_retention_lock = threading.Lock()
+        self._scheduled_backup_lock = threading.Lock()
         self.last_repair_lost = {}
         self._preexisting = self.path.is_file() and self.path.stat().st_size > 0
 
@@ -221,9 +259,69 @@ class Database:
         return [path for _mtime, _name, path in sorted(usable, reverse=True)]
 
     def _recovery_backup(self) -> Path | None:
-        """Newest non-empty backup next to the library, if any."""
-        candidates = self._backup_candidates()
-        return candidates[0] if candidates else None
+        """Newest raw backup or cheaply recognized scheduled ZIP candidate.
+
+        ZIP contents are deliberately not read here: this path runs while
+        opening an empty library. The recovery message calls a scheduled ZIP
+        a candidate and directs the user to inspect it before restoring.
+        """
+        candidates = []
+        for path in self._backup_candidates():
+            try:
+                info = path.lstat()
+                if stat.S_ISREG(info.st_mode) and info.st_size > 0:
+                    candidates.append((info.st_mtime_ns, str(path), path))
+            except OSError:
+                continue
+        scheduled = self.path.parent / "backups" / "scheduled"
+        try:
+            for component in (reversed(self.path.parent.parents)):
+                info = component.lstat()
+                if (stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400
+                        or not stat.S_ISDIR(info.st_mode)):
+                    return max(candidates, default=(0, "", None))[2]
+            parent_info = self.path.parent.lstat()
+            if stat.S_ISLNK(parent_info.st_mode) or getattr(parent_info, "st_file_attributes", 0) & 0x400:
+                return max(candidates, default=(0, "", None))[2]
+            for component in (self.path.parent / "backups", scheduled):
+                info = component.lstat()
+                if (stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400
+                        or not stat.S_ISDIR(info.st_mode)):
+                    return max(candidates, default=(0, "", None))[2]
+            for archive in scheduled.iterdir():
+                if not re.fullmatch(r"library-auto-\d{8}-\d{6}-\d{6}\.zip", archive.name):
+                    continue
+                try:
+                    info = archive.lstat()
+                    marker = archive.with_name(archive.name + ".auto")
+                    marker_info = marker.lstat()
+                    if (not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_nlink != 1
+                            or stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400
+                            or not stat.S_ISREG(marker_info.st_mode) or marker_info.st_nlink != 1
+                            or marker_info.st_size > 256
+                            or stat.S_ISLNK(marker_info.st_mode)
+                            or getattr(marker_info, "st_file_attributes", 0) & 0x400):
+                        continue
+                    with marker.open("r", encoding="ascii") as handle:
+                        record = handle.read(257).split()
+                    if (len(record) != 4 or record[:3] != ["1", str(info.st_size), str(info.st_mtime_ns)]
+                            or not re.fullmatch(r"[0-9a-f]{64}", record[3])):
+                        continue
+                    after = archive.lstat()
+                    marker_after = marker.lstat()
+                    if ((after.st_ino, after.st_dev, after.st_size, after.st_mtime_ns)
+                            != (info.st_ino, info.st_dev, info.st_size, info.st_mtime_ns)
+                            or (marker_after.st_ino, marker_after.st_dev, marker_after.st_size,
+                                marker_after.st_mtime_ns)
+                            != (marker_info.st_ino, marker_info.st_dev, marker_info.st_size,
+                                marker_info.st_mtime_ns)):
+                        continue
+                    candidates.append((info.st_mtime_ns, str(archive), archive))
+                except (OSError, UnicodeError, ValueError):
+                    continue
+        except OSError:
+            pass
+        return max(candidates, default=(0, "", None))[2]
 
     def _new_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10.0, check_same_thread=False, factory=_Connection)
@@ -268,10 +366,12 @@ class Database:
         if cached is not None:
             if getattr(self._connections, "generation", -1) == self._generation:
                 return cached
-            try:
-                cached.close()
-            except sqlite3.Error:
-                pass
+            with self._handles_lock:
+                self._handles.discard(cached)
+                try:
+                    cached.close()
+                except sqlite3.Error:
+                    pass
         connection = self._new_connection()
         with self._handles_lock:
             self._handles.add(connection)
@@ -283,20 +383,26 @@ class Database:
         cached = getattr(self._connections, "connection", None)
         self._connections.connection = None
         if cached is not None:
-            try:
-                cached.close()
-            except sqlite3.Error:
-                pass
+            with self._handles_lock:
+                self._handles.discard(cached)
+                try:
+                    cached.close()
+                except sqlite3.Error:
+                    pass
+
+    def close_current_thread_connection(self):
+        """Close and unregister only the calling thread's cached connection."""
+        self._drop_thread_connection()
 
     def _retire_connections(self):
         # Caller holds exclusive: no thread can be using a handle here.
         with self._handles_lock:
             handles = list(self._handles)
             self._handles.clear()
-        self._generation += 1
-        self._connections.connection = None
-        for connection in handles:
-            connection.close()
+            self._generation += 1
+            self._connections.connection = None
+            for connection in handles:
+                connection.close()
 
     def close(self):
         with self._lock.exclusive():
@@ -488,6 +594,52 @@ class Database:
         finally:
             temporary.unlink(missing_ok=True)
         return target
+
+    def snapshot_to(self, target: Path, *, cancelled=None, deadline=None):
+        """Create a WAL-consistent SQLite snapshot in bounded, cooperative steps.
+
+        The caller owns `target` and its cleanup. The app's shared lock protects
+        maintenance operations; progress checks let a pending exclusive
+        operation stop this reader promptly instead of making it wait behind a
+        long snapshot. SQLite's backup API includes committed WAL pages.
+        """
+        def check():
+            if cancelled is not None and cancelled():
+                raise InterruptedError("Backup cancelled.")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("The backup exceeded its time limit.")
+            if self.maintenance_active:
+                raise InterruptedError("Database maintenance is waiting; backup paused.")
+
+        check()
+        with self._lock.try_shared() as acquired:
+            if not acquired:
+                raise InterruptedError("Database maintenance is waiting; backup paused.")
+            check()
+            source_path = self.path.resolve().as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(source_path, uri=True, timeout=10.0)) as source, \
+                    closing(sqlite3.connect(target, timeout=10.0)) as destination:
+                def progress(_status, _remaining, _total):
+                    check()
+                    time.sleep(0.01)
+                    check()
+
+                source.backup(destination, pages=128, progress=progress, sleep=0.01)
+            check()
+        return target
+
+    def snapshot_size_estimate(self):
+        """Return SQLite's current logical main-file size, including WAL state."""
+        if self.maintenance_active:
+            raise InterruptedError("Database maintenance is waiting; backup paused.")
+        with self._lock.try_shared() as acquired:
+            if not acquired:
+                raise InterruptedError("Database maintenance is waiting; backup paused.")
+            source_path = self.path.resolve().as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(source_path, uri=True, timeout=10.0)) as source:
+                pages = source.execute("PRAGMA page_count").fetchone()[0]
+                page_size = source.execute("PRAGMA page_size").fetchone()[0]
+            return max(self.path.stat().st_size, int(pages) * int(page_size))
 
     def _backup_before_migration(self):
         """Never replace the original recovery snapshot on an upgrade retry."""

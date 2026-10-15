@@ -255,7 +255,7 @@ class _ListPageMixin:
         self._sort = key
 
     def restore_filter(self, value: str):
-        self._filter = value
+        self._filter = value or 'All'
 
     def restore_discover_sort(self, value: str):
         self._discover_sort = value
@@ -2265,6 +2265,8 @@ class SettingsPage(BasePage):
     reset_shortcuts_requested = Signal()
     open_data_requested = Signal()
     open_backups_requested = Signal()
+    backup_now_requested = Signal()
+    cancel_backup_requested = Signal()
     refresh_storage_requested = Signal()
     import_opml_requested = Signal()
     export_opml_requested = Signal()
@@ -2289,7 +2291,7 @@ class SettingsPage(BasePage):
         'Library': ('Library', 'Subscriptions & transfer', 'Listening statistics'),
         'Downloads': ('Downloads',),
         'Shortcuts': ('Keyboard shortcuts',),
-        'Storage': ('Files & storage', 'Library database'),
+        'Storage': ('Library backups', 'Files & storage', 'Library database'),
         'Diagnostics': ('Diagnostics',),
     }
 
@@ -2309,6 +2311,7 @@ class SettingsPage(BasePage):
         self._build_desktop_section()
         self._build_updates_section()
         self._build_shortcuts_section()
+        self._build_backups_section()
         self._build_storage_section()
         self._build_database_section()
         self._build_diagnostics_section()
@@ -2587,15 +2590,96 @@ class SettingsPage(BasePage):
         self._shortcut_editors: dict[str, QKeySequenceEdit] = {}
         self._shortcut_bindings: dict[str, str] = {}
 
+    def _build_backups_section(self):
+        card, form = self._card('Library backups',
+            'Compressed library snapshots run quietly while the app is open. Audio and artwork are not copied.')
+        self.backups_enabled = QCheckBox('Back up my library automatically')
+        self.backup_interval = QComboBox()
+        for label, days in (('Daily', '1'), ('Weekly', '7'), ('Every 30 days', '30')):
+            self.backup_interval.addItem(label, days)
+        self.backup_interval.setCurrentIndex(1)
+        self.backup_keep = QComboBox()
+        self.backup_keep.addItem('1 backup', '1')
+        self.backup_keep.addItem('2 backups', '2')
+        self.backup_keep.setCurrentIndex(1)
+        self.backup_status = self._path_label()
+        self.backup_status.setText('Not backed up yet')
+        self.backup_path = self._path_label()
+        self.backup_usage = self._path_label()
+        self.backup_usage.setText('Not measured')
+        self.backup_now = self._action('Back up now', self.backup_now_requested)
+        self.backup_cancel = self._action('Cancel', self.cancel_backup_requested)
+        open_backups = self._action('Open backups', self.open_backups_requested, 'folder')
+        form.addRow('Automatic backups', self.backups_enabled)
+        form.addRow('Frequency', self.backup_interval)
+        form.addRow('Keep latest', self.backup_keep)
+        form.addRow('Status', self.backup_status)
+        form.addRow('Backup folder', self.backup_path)
+        form.addRow('Backup usage', self.backup_usage)
+        form.addRow(self._actions(self.backup_now, self.backup_cancel, open_backups))
+        self.backup_cancel.hide()
+        hint = PlainTextLabel('This limit also applies to Back up now. Existing upgrade, manual and protected copies are kept separately. Backups contain private library data; do not attach them to public issues. Restore instructions are inside each ZIP.')
+        hint.setObjectName('settingHint')
+        hint.setWordWrap(True)
+        form.addRow('', hint)
+        self.settings_content.addWidget(card)
+        self.backups_enabled.setChecked(True)
+        self.backups_enabled.toggled.connect(self._backup_enabled_changed)
+        self.backup_interval.currentIndexChanged.connect(lambda: self.setting_changed.emit(
+            'backups.interval_days', self.backup_interval.currentData()))
+        self.backup_keep.currentIndexChanged.connect(lambda: self.setting_changed.emit(
+            'backups.keep', self.backup_keep.currentData()))
+
+    def _backup_enabled_changed(self, enabled):
+        self.backup_interval.setEnabled(enabled)
+        self.setting_changed.emit('backups.enabled', '1' if enabled else '0')
+
+    def load_backup_options(self, enabled, interval, keep):
+        with quiet_signals(self.backups_enabled, self.backup_interval, self.backup_keep):
+            self.backups_enabled.setChecked(enabled)
+            self.backup_interval.setCurrentIndex(max(0, self.backup_interval.findData(str(interval))))
+            self.backup_keep.setCurrentIndex(max(0, self.backup_keep.findData(str(keep))))
+        self.backup_interval.setEnabled(enabled)
+
+    def set_backup_status(self, status, *, running=False, cancelling=False):
+        self.backup_now.setEnabled(not running)
+        self.backup_cancel.setVisible(running)
+        self.backup_cancel.setEnabled(not cancelling)
+        self.backup_cancel.setText('Cancelling…' if cancelling else 'Cancel')
+        if running:
+            self.backup_status.setText('Stopping safely…' if cancelling else 'Backing up in the background…')
+            return
+        def local_date(value):
+            try:
+                return datetime.fromisoformat(value).astimezone().strftime('%b %d, %Y %H:%M')
+            except (TypeError, ValueError, OverflowError):
+                return 'Unknown'
+        lines = []
+        if status.get('last_success'):
+            size = status.get('last_size') or 0
+            lines.append(f"Last verified: {local_date(status['last_success'])} · {size / (1024 * 1024):.1f} MB")
+        else:
+            lines.append('Not backed up yet')
+        if status.get('last_snapshot_missing'):
+            lines.append('The last backup is missing; a new snapshot is due.')
+        error = status.get('error') or status.get('last_error')
+        if error:
+            lines.append(str(error))
+        elif status.get('state') == 'cancelled':
+            lines.append('Cancelled. Your previous backups are unchanged.')
+        if not self.backups_enabled.isChecked():
+            lines.append('Automatic backups are off. Back up now is still available.')
+        elif status.get('next_due') and not status.get('due'):
+            lines.append(f"Next due: {local_date(status['next_due'])}, while the app is open")
+        else:
+            lines.append('Due when background work is available')
+        self.backup_status.setText('\n'.join(lines))
+
     def _build_storage_section(self):
         # Storage --------------------------------------------------------------
         storage_card, storage_layout = self._card("Files & storage", "")
         self.data_root = PlainTextLabel("—")
         self.library_path = PlainTextLabel("—")
-        self.backup_path = PlainTextLabel("—")
-        self.backup_usage = PlainTextLabel("Not measured")
-        self.backup_usage.setObjectName('meta')
-        self.backup_usage.setWordWrap(True)
         self.artwork_path = PlainTextLabel("—")
         self.artwork_usage = PlainTextLabel("—")
         self.temp_path = PlainTextLabel("—")
@@ -2614,18 +2698,6 @@ class SettingsPage(BasePage):
         self.library_location_warning.setWordWrap(True)
         storage_layout.addRow("", self.library_location_warning)
         self.library_location_warning.hide()
-        open_backups = QPushButton("Open backups")
-        open_backups.setObjectName("textButton")
-        open_backups.setCursor(Qt.CursorShape.PointingHandCursor)
-        open_backups.setToolTip("Open saved library backups; if none exist yet, open the data folder")
-        open_backups.clicked.connect(self.open_backups_requested)
-        storage_layout.addRow("Library backups", self.backup_path)
-        storage_layout.addRow("Backup usage", self.backup_usage)
-        storage_layout.addRow('', self._actions(open_backups))
-        backup_hint = PlainTextLabel("Keeps the three newest automatic backups, the original upgrade backup and protected or unmarked copies. A matching .keep file protects a backup. Close the app before restoring; preserve a copy of your current data.")
-        backup_hint.setObjectName("settingHint")
-        backup_hint.setWordWrap(True)
-        storage_layout.addRow("", backup_hint)
         storage_layout.addRow("Artwork folder", self.artwork_path)
         storage_layout.addRow("Artwork usage", self.artwork_usage)
         storage_layout.addRow("Temporary files", self.temp_path)
@@ -2884,7 +2956,7 @@ class SettingsPage(BasePage):
         for field in (
             self.speed, self.skip_back, self.skip_forward, self.refresh_interval,
             self.auto_download_limit, self.theme, self.density, self.text_size,
-            self.episode_lines, self.search_depth,
+            self.episode_lines, self.search_depth, self.backup_interval, self.backup_keep,
         ):
             self._fit_field(field, width)
         self._fit_field(self.ui_font, scaled_px(220))

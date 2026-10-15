@@ -108,6 +108,14 @@ class DownloadRepository:
             rows = connection.execute(self._select() + " ORDER BY d.updated_at DESC").fetchall()
         return [self._record(row) for row in rows]
 
+    def active_records(self) -> list[DownloadRecord]:
+        """Read every non-complete record, including failures and queued work."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                self._select() + " WHERE d.state!='complete' ORDER BY d.updated_at DESC"
+            ).fetchall()
+        return [self._record(row) for row in rows]
+
     def completed_records(self, *, after_episode_id: int = 0, limit: int | None = None) -> list[DownloadRecord]:
         """Read completed downloads in stable episode-id order.
 

@@ -183,11 +183,24 @@ _painted_episode_art = weakref.WeakKeyDictionary()
 _scroll_episode_art = weakref.WeakKeyDictionary()
 
 
+class _EpisodeFrames(OrderedDict):
+    """Small per-view LRU with an incrementally maintained image byte total."""
+
+    def __init__(self, *args, byte_total=0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.byte_total = byte_total
+
+
+def _frame_bytes(image):
+    return image.width() * image.height() * max(1, (image.depth() + 7) // 8)
+
+
 def set_artwork_scrolling(view, scrolling):
     """GUI-only presentation hold; fetching, decoding and disk caches continue."""
     if scrolling:
         if view not in _scroll_episode_art:
-            _scroll_episode_art[view] = OrderedDict(_painted_episode_art.get(view, ()))
+            recent = _painted_episode_art.get(view)
+            _scroll_episode_art[view] = _EpisodeFrames(recent or (), byte_total=recent.byte_total if recent else 0)
     else:
         _scroll_episode_art.pop(view, None)
 
@@ -203,21 +216,24 @@ def _present_episode_art(view, identity, pixmap):
         if held is not None:
             pixmap = held
             _remember_episode_frame(frozen, identity, pixmap)
-    recent = _painted_episode_art.setdefault(view, OrderedDict())
+    recent = _painted_episode_art.setdefault(view, _EpisodeFrames())
     _remember_episode_frame(recent, identity, pixmap)
     return pixmap
 
 
 def _remember_episode_frame(frames, identity, pixmap):
     previous = frames.get(identity)
+    if previous is not None and previous.cacheKey() == pixmap.cacheKey():
+        frames.move_to_end(identity)
+        return
+    if previous is not None:
+        frames.byte_total -= _frame_bytes(previous)
     frames[identity] = pixmap
     frames.move_to_end(identity)
-    if previous is not None and previous.cacheKey() == pixmap.cacheKey():
-        return
-    size = sum(image.width() * image.height() * max(1, (image.depth() + 7) // 8) for image in frames.values())
-    while frames and (len(frames) > 96 or size > 8 * 1024 * 1024):
+    frames.byte_total += _frame_bytes(pixmap)
+    while frames and (len(frames) > 96 or frames.byte_total > 8 * 1024 * 1024):
         _, image = frames.popitem(last=False)
-        size -= image.width() * image.height() * max(1, (image.depth() + 7) // 8)
+        frames.byte_total -= _frame_bytes(image)
 
 
 def protect_artwork_previews(paths):

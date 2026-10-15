@@ -13,6 +13,7 @@ import unicodedata
 from ...domain import Episode, FeedData, Health, Show
 from ...domain.models import DEFAULT_TRIM_LEVEL, TRIM_LEVELS
 from ...domain.times import MAX_MEDIA_SECONDS, media_seconds
+from ...markup import plain_snippet
 from ...privacy import redact
 from ..database import Database
 from ..files import (
@@ -102,9 +103,14 @@ _EPISODE_FROM = "FROM episodes e JOIN shows s ON s.id=e.show_id"
 _EPISODE_SELECT = "SELECT " + _EPISODE_COLUMNS + " " + _EPISODE_FROM
 # Bounded collection views need a display preview of show notes. Full notes
 # remain available through get_episode for information and copy operations.
+# At the UI's maximum of 20 lines, 130 characters per line plus headroom is
+# enough for every collection-row preview. The SQL source window is larger to
+# allow HTML tags and entities to collapse without returning full notes.
+_EPISODE_PREVIEW_LIMIT = 4096
+_EPISODE_PREVIEW_SOURCE_LIMIT = 16384
 _EPISODE_PAGE_COLUMNS = (
     "e.id, e.show_id, e.external_id, e.title, "
-    "substr(e.description,1,16384) AS description, e.media_url, e.mime_type, "
+    f"substr(e.description,1,{_EPISODE_PREVIEW_SOURCE_LIMIT}) AS description, e.media_url, e.mime_type, "
     "e.published_at, e.observed_duration_seconds, e.duration_seconds, "
     "e.position_seconds, e.played, e.is_new, e.downloaded_path, e.last_played, "
     "e.transcript_url, e.transcript_type, "
@@ -226,7 +232,7 @@ class LibraryRepository:
     def list_episodes(
         self, show_id: int | None = None, limit: int | None = 500, offset: int = 0
     ) -> list[Episode]:
-        sql = _EPISODE_SELECT
+        sql = _EPISODE_PAGE_SELECT
         params: list[object] = []
         if show_id is not None:
             sql += " WHERE e.show_id=?"
@@ -242,7 +248,7 @@ class LibraryRepository:
                 params.append(offset)
         with self.database.connect() as connection:
             rows = connection.execute(sql, params).fetchall()
-        return [self._episode(row) for row in rows]
+        return [self._episode(row, preview=True) for row in rows]
 
     @staticmethod
     def _episode_scope(connection, show_id, query, filter_name):
@@ -527,7 +533,7 @@ class LibraryRepository:
                     self._episode_row_cursor(rows[0], sort) if rows and has_previous else None
                 )
         return {
-            "episodes": [self._episode(row) for row in rows],
+            "episodes": [self._episode(row, preview=True) for row in rows],
             "total": total,
             "offset": offset,
             "show_total": show_total,
@@ -577,10 +583,10 @@ class LibraryRepository:
     def list_history(self, limit: int = 200, offset: int = 0) -> list[Episode]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                _EPISODE_SELECT + " WHERE e.last_played IS NOT NULL ORDER BY e.last_played DESC LIMIT ? OFFSET ?",
+                _EPISODE_PAGE_SELECT + " WHERE e.last_played IS NOT NULL ORDER BY e.last_played DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
-        return [self._episode(row) for row in rows]
+        return [self._episode(row, preview=True) for row in rows]
 
     def history_count(self) -> int:
         """Total played rows, so the History page can say how much it shows."""
@@ -591,18 +597,17 @@ class LibraryRepository:
         return int(row[0])
 
     def list_favorites(self, limit: int | None = None) -> list[Episode]:
-        sql = _EPISODE_SELECT + " WHERE e.favorite=1 ORDER BY e.published_at DESC, e.id DESC"
+        sql = _EPISODE_PAGE_SELECT + " WHERE e.favorite=1 ORDER BY e.published_at DESC, e.id DESC"
         parameters = ()
         if limit is not None:
             sql += " LIMIT ?"
             parameters = (max(0, int(limit)),)
         with self.database.connect() as connection:
             rows = connection.execute(sql, parameters).fetchall()
-        return [self._episode(row) for row in rows]
+        return [self._episode(row, preview=True) for row in rows]
 
     def list_in_progress(self, limit: int | None = None) -> list[Episode]:
-        select = _EPISODE_SELECT if limit is None else _EPISODE_PAGE_SELECT
-        sql = (select + " WHERE e.played=0 AND e.position_seconds>0 "
+        sql = (_EPISODE_PAGE_SELECT + " WHERE e.played=0 AND e.position_seconds>0 "
                "ORDER BY e.last_played DESC, e.id DESC")
         parameters = ()
         if limit is not None:
@@ -610,7 +615,7 @@ class LibraryRepository:
             parameters = (max(0, int(limit)),)
         with self.database.connect() as connection:
             rows = connection.execute(sql, parameters).fetchall()
-        return [self._episode(row) for row in rows]
+        return [self._episode(row, preview=True) for row in rows]
 
     def in_progress_count(self, show_id: int | None = None) -> int:
         """Count resumable episodes using the partial in-progress index."""
@@ -635,7 +640,7 @@ class LibraryRepository:
             ).fetchall()
             if not rows:
                 rows = connection.execute(base + order, (limit,)).fetchall()
-        return [self._episode(row) for row in rows]
+        return [self._episode(row, preview=True) for row in rows]
 
     def retention_candidates(
         self, show_id: int, keep_latest: int | None, older_than_days: int | None
@@ -646,8 +651,8 @@ class LibraryRepository:
             "AND EXISTS (SELECT 1 FROM downloads d WHERE d.episode_id=e.id AND d.state='complete' AND d.length_verified=1)"
         )
         newest_first = " ORDER BY e.published_at DESC, e.id DESC"
-        # The rules need only the order and the date, so the full rows, long
-        # descriptions included, are read for the candidates alone.
+        # The rules need only the order and the date; returned candidates use
+        # the same bounded notes preview as other collection views.
         with self.database.connect() as connection:
             ordered = connection.execute(
                 "SELECT e.id, e.published_at " + eligible + newest_first, (show_id,)
@@ -682,11 +687,11 @@ class LibraryRepository:
                 # The same conditions again: a row that stopped qualifying
                 # since the first read is dropped, never removed.
                 rows = connection.execute(
-                    "SELECT " + _EPISODE_COLUMNS + " "
+                    "SELECT " + _EPISODE_PAGE_COLUMNS + " "
                     + eligible + " AND e.id IN (" + ",".join("?" for _ in batch) + ")" + newest_first,
                     (show_id, *batch),
                 ).fetchall()
-                candidates.extend(self._episode(row) for row in rows)
+                candidates.extend(self._episode(row, preview=True) for row in rows)
         return candidates
 
     def import_feed(self, show_id: int, feed: FeedData, connection=None) -> int:
@@ -856,8 +861,8 @@ class LibraryRepository:
                 batch = ids[start:start + 500]
                 placeholders = ",".join("?" for _ in batch)
                 rows.extend(connection.execute(
-                    _EPISODE_SELECT + f" WHERE e.id IN ({placeholders})", batch).fetchall())
-        return {row["id"]: self._episode(row) for row in rows}
+                    _EPISODE_PAGE_SELECT + f" WHERE e.id IN ({placeholders})", batch).fetchall())
+        return {row["id"]: self._episode(row, preview=True) for row in rows}
 
     def episode_count(self) -> int:
         """Every stored episode — the page subtitle must not report the
@@ -1363,10 +1368,10 @@ class LibraryRepository:
     def list_queue(self) -> list[Episode]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT " + _EPISODE_COLUMNS + " FROM queue q JOIN episodes e ON e.id=q.episode_id "
+                "SELECT " + _EPISODE_PAGE_COLUMNS + " FROM queue q JOIN episodes e ON e.id=q.episode_id "
                 "JOIN shows s ON s.id=e.show_id ORDER BY q.position"
             ).fetchall()
-        return [self._episode(row) for row in rows]
+        return [self._episode(row, preview=True) for row in rows]
 
     def dequeue(self, episode_id: int):
         self.dequeue_many([episode_id])
@@ -1460,6 +1465,81 @@ class LibraryRepository:
             if stored < stamp:
                 return None
             return self._write_position(connection, episode_id, seconds, stored + 0.000001) or None
+
+    def complete_episode(
+        self, episode_id: int, show_id: int, end_seconds: float, stamp: float | None,
+        *, count_listening: bool = True,
+    ) -> bool | None:
+        """Save episode completion, its counters and queue removal atomically.
+
+        False means maintenance prevented the write; None means the episode
+        disappeared or no longer belongs to the expected show. A valid final
+        position keeps update_position's stale-write rule, including the
+        finish-only bump when a newer position is already stored.
+        """
+        if self.database.maintenance_active:
+            return False
+        try:
+            end = float(end_seconds)
+        except (TypeError, ValueError, OverflowError):
+            end = 0.0
+        final_position = media_seconds(0.0 if end < 0 else end) if end else None
+        stamp = time.time() if stamp is None else float(stamp)
+        now = time.time()
+
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT position_updated_at FROM episodes WHERE id=? AND show_id=?",
+                (episode_id, show_id),
+            ).fetchone()
+            if row is None:
+                return None
+
+            if final_position is not None:
+                stored = float(row["position_updated_at"] or 0.0)
+                write_stamp = stored + 0.000001 if stored > stamp else stamp
+                changed = connection.execute(
+                    "UPDATE episodes SET position_seconds=?,last_played=?,is_new=0,played=1, "
+                    "position_updated_at=MAX(unixepoch('subsec'),?+0.000001) "
+                    "WHERE id=? AND show_id=? AND position_updated_at<=?",
+                    (final_position, now, write_stamp, episode_id, show_id, write_stamp),
+                ).rowcount
+                if changed != 1:
+                    return None
+                if 0 < end <= MAX_MEDIA_SECONDS:
+                    connection.execute(
+                        "UPDATE episodes SET observed_duration_seconds=? WHERE id=? AND show_id=?",
+                        (max(1, round(end)), episode_id, show_id),
+                    )
+            else:
+                changed = connection.execute(
+                    "UPDATE episodes SET position_updated_at=MAX(unixepoch('subsec'),position_updated_at+0.000001), "
+                    "played=1,is_new=0,last_played=? WHERE id=? AND show_id=?",
+                    (now, episode_id, show_id),
+                ).rowcount
+                if changed != 1:
+                    return None
+
+            if count_listening:
+                connection.execute(
+                    "UPDATE playback_metrics SET completed_episodes=completed_episodes+1 WHERE singleton_id=1"
+                )
+                connection.execute(
+                    """INSERT INTO listening_stats(show_id, completed_episodes)
+                       SELECT id, 1 FROM shows WHERE id=? ON CONFLICT(show_id) DO UPDATE SET
+                       completed_episodes=listening_stats.completed_episodes+1""",
+                    (show_id,),
+                )
+
+            connection.execute("DELETE FROM queue WHERE episode_id=?", (episode_id,))
+            queued = connection.execute("SELECT id,position FROM queue ORDER BY position,id").fetchall()
+            connection.executemany(
+                "UPDATE queue SET position=? WHERE id=?",
+                ((position, item["id"]) for position, item in enumerate(queued, start=1)
+                 if item["position"] != position),
+            )
+        return True
 
     @staticmethod
     def _write_position(connection, episode_id: int, seconds: float, stamp: float) -> bool:
@@ -1816,12 +1896,12 @@ class LibraryRepository:
             ).fetchall()
             predicate, parameters = self._episode_search_predicate(connection, query)
             episode_rows = connection.execute(
-                _EPISODE_SELECT + " WHERE " + predicate + " ORDER BY e.published_at DESC,e.id DESC LIMIT ?",
+                _EPISODE_PAGE_SELECT + " WHERE " + predicate + " ORDER BY e.published_at DESC,e.id DESC LIMIT ?",
                 parameters + (limit,),
             ).fetchall()
         return (
             [self._show(row) for row in show_rows],
-            [self._episode(row) for row in episode_rows],
+            [self._episode(row, preview=True) for row in episode_rows],
         )
 
     def search_episodes(self, query: str, limit: int = 500, offset: int = 0, *, before=None) -> list[Episode]:
@@ -1847,20 +1927,20 @@ class LibraryRepository:
                 for start in range(0, len(cached), 500):
                     ids = cached[start:start+500]
                     placeholders = ','.join('?' for _ in ids)
-                    live.update((row['id'], self._episode(row)) for row in connection.execute(
-                        _EPISODE_SELECT + f' WHERE e.id IN ({placeholders})', ids))
+                    live.update((row['id'], self._episode(row, preview=True)) for row in connection.execute(
+                        _EPISODE_PAGE_SELECT + f' WHERE e.id IN ({placeholders})', ids))
                 return [live[identifier] for identifier in cached if identifier in live]
             predicate, parameters = self._episode_search_predicate(connection, query)
             if cursor is not None:
                 predicate = "(e.published_at, e.id) < (?, ?) AND " + predicate
                 parameters = cursor + parameters
             rows = connection.execute(
-                _EPISODE_SELECT + " WHERE " + predicate
+                _EPISODE_PAGE_SELECT + " WHERE " + predicate
                 + " ORDER BY e.published_at DESC,e.id DESC LIMIT ? OFFSET ?",
                 parameters + (limit,offset)).fetchall()
             if cacheable and len(rows) <= 5000:
                 self._cache_search(('ids', key), tuple(row['id'] for row in rows))
-        return [self._episode(row) for row in rows]
+        return [self._episode(row, preview=True) for row in rows]
 
     def search_episode_count(self, query: str) -> int:
         with self.database.connect() as connection:
@@ -1946,14 +2026,17 @@ class LibraryRepository:
         )
 
     @staticmethod
-    def _episode(row) -> Episode:
+    def _episode(row, *, preview: bool = False) -> Episode:
+        description = row["description"]
+        if preview:
+            description = plain_snippet(description, _EPISODE_PREVIEW_LIMIT)
         return Episode(
             id=row["id"],
             show_id=row["show_id"],
             external_id=row["external_id"],
             title=row["title"],
             show_title=row["show_title"],
-            description=row["description"],
+            description=description,
             media_url=row["media_url"],
             mime_type=row["mime_type"],
             published_at=row["published_at"],

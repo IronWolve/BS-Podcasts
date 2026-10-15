@@ -553,7 +553,7 @@ class MainWindow(QMainWindow):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._scheduled_refresh)
         self._cache_timer = QTimer(self)
-        self._cache_timer.setInterval(5 * 60 * 1000)
+        self._cache_timer.setInterval(60 * 60 * 1000)
         self._cache_timer.timeout.connect(self._prune_artwork_cache)
         self._cache_timer.start()
         self._cache_pruning = False
@@ -922,6 +922,7 @@ class MainWindow(QMainWindow):
         self.settings_page.reset_shortcuts_requested.connect(self._reset_shortcuts)
         self.settings_page.open_data_requested.connect(self._open_data_folder)
         self.settings_page.open_backups_requested.connect(self._open_backups_folder)
+        self._wire_backups()
         self.settings_page.retry_orphans_requested.connect(self._review_orphan_files)
         self.settings_page.refresh_storage_requested.connect(self._refresh_storage_settings)
         self.settings_page.import_opml_requested.connect(self._import_opml)
@@ -950,7 +951,7 @@ class MainWindow(QMainWindow):
         self.settings_page.load_search_depth(self.library.setting("discover.search_limit", "200"))
         self._apply_typography()
         self.settings_page.clear_artwork_requested.connect(self._clear_artwork_cache)
-        self._later(4000, self._prune_artwork_cache)
+        self._later(60_000, self._prune_artwork_cache)
         self.settings_page.load_downloads(
             self.library.setting("downloads.auto", "0") == "1", self._int_setting("downloads.auto_limit", 3, 1, 10),
             self.library.setting("downloads.delete_played", "0") == "1",
@@ -2696,6 +2697,11 @@ class MainWindow(QMainWindow):
             if key == "diagnostics.file_logging":
                 from ..logging_setup import set_file_logging
                 set_file_logging(value == "1")
+            elif key.startswith('backups.'):
+                self._backup_status_dirty = True
+                if key == 'backups.enabled' and value == '0':
+                    self._cancel_backup()
+                self._backup_status_timer.start()
             elif key in {"playback.skip_back", "playback.skip_forward"}:
                 self._apply_skip_settings()
             elif key == "refresh.interval_minutes":
@@ -2705,6 +2711,8 @@ class MainWindow(QMainWindow):
                 self.navigation.set_background_paused(value == "1")
                 self._notify("Background work paused" if value == "1" else "Background work resumed", "info")
                 if value == "1":
+                    if not getattr(self, '_backup_manual', False):
+                        self._cancel_backup()
                     self._wind_down_quiet_batch()
                 else:
                     self._resume_background_work()
@@ -2826,11 +2834,108 @@ class MainWindow(QMainWindow):
 
         self._run_read(work, apply, "reconcile-missing", coalesce=False)
 
+    def _wire_backups(self):
+        from ..services.backups import BackupService
+        self._backup_service = BackupService(self.library.repository)
+        self._backup_thread = None
+        self._backup_cancel = threading.Event()
+        self._backup_result = []
+        self._backup_status_dirty = False
+        self._backup_last_status = {}
+        self._backup_manual = False
+        self._backup_poll = QTimer(self)
+        self._backup_poll.setInterval(100)
+        self._backup_poll.timeout.connect(self._poll_backup)
+        self._backup_timer = QTimer(self)
+        self._backup_timer.setInterval(60 * 60 * 1000)
+        self._backup_timer.timeout.connect(self._start_backup)
+        self._backup_timer.start()
+        self._backup_status_timer = QTimer(self)
+        self._backup_status_timer.setSingleShot(True)
+        self._backup_status_timer.setInterval(300)
+        self._backup_status_timer.timeout.connect(lambda: self._start_backup(status_only=True))
+        enabled = self.library.setting('backups.enabled', '1') == '1'
+        interval = self.library.setting('backups.interval_days', '7')
+        keep = self.library.setting('backups.keep', '2')
+        self.settings_page.load_backup_options(enabled, interval if interval in {'1', '7', '30'} else '7',
+                                               keep if keep in {'1', '2'} else '2')
+        self.settings_page.backup_now_requested.connect(lambda: self._start_backup(force=True))
+        self.settings_page.cancel_backup_requested.connect(self._cancel_backup)
+        self._later(60_000, self._start_backup)
+
+    def _start_backup(self, *, force=False, status_only=False):
+        if self._closed or self.library is None or not hasattr(self, '_backup_service'):
+            return
+        if self._backup_thread is not None:
+            if status_only:
+                self._backup_status_dirty = True
+            return
+        if not force and not status_only:
+            if self.library.setting('background.paused', '0') == '1':
+                return
+            if self._reload_in_flight or self._refresh_batch[0] or self._cache_pruning:
+                self._later(30_000, self._start_backup)
+                return
+        service = self._backup_service
+        cancellation = self._backup_cancel = threading.Event()
+        mailbox = self._backup_result = []
+        self._backup_manual = force
+        self._backup_status_only = status_only
+        self._backup_status_dirty = False
+        def work():
+            try:
+                result = service.status() if status_only else service.run(force=force, cancelled=cancellation)
+            except Exception as exc:
+                result = {'state': 'error', 'error': redact(exc)}
+            mailbox.append(result)
+        self._backup_thread = threading.Thread(target=work, name='bs-backup', daemon=True)
+        try:
+            self._backup_thread.start()
+        except Exception as exc:
+            self._backup_thread = None
+            self.settings_page.set_backup_status({'error': f'Could not start backup: {redact(exc)}'})
+            return
+        if not status_only:
+            self.settings_page.set_backup_status(self._backup_last_status, running=True)
+        self._backup_poll.start()
+
+    def _cancel_backup(self):
+        if getattr(self, '_backup_thread', None) is None:
+            return
+        self._backup_cancel.set()
+        if not self._backup_status_only:
+            self.settings_page.set_backup_status(self._backup_last_status, running=True, cancelling=True)
+
+    def _poll_backup(self):
+        worker = self._backup_thread
+        if worker is None or worker.is_alive():
+            return
+        self._backup_poll.stop()
+        self._backup_thread = None
+        if self._closed:
+            return
+        status = self._backup_result[-1] if self._backup_result else {'error': 'The backup worker stopped unexpectedly.'}
+        self._backup_last_status = status
+        self.settings_page.set_backup_status(status)
+        error = status.get('error') or status.get('last_error')
+        if error and not self._backup_status_only:
+            logging.getLogger('bs_podcasts').warning('Library backup: %s', redact(error))
+        if self._backup_manual:
+            if status.get('created'):
+                self._notify('Library backup saved and verified', 'success')
+            elif error:
+                self._notify(f'Backup failed: {error}', 'error')
+        if status.get('created') and self.pages.currentIndex() == PAGE_SETTINGS:
+            self._refresh_storage_settings()
+        if self._backup_status_dirty:
+            self._backup_status_timer.start()
+
     def _refresh_storage_settings(self, include_usage: bool = True):
         if self.library is None or self._closed:
             return
         self.settings_page.set_storage_info(*self._storage_info(False))
         if include_usage:
+            self._start_backup(status_only=True)
             self._run_read(
                 lambda: self._storage_info(True),
                 lambda values: self.settings_page.set_storage_info(*values),
@@ -2866,6 +2971,12 @@ class MainWindow(QMainWindow):
                     if path.is_file() and not path.is_symlink():
                         total += path.stat().st_size
                         count += 1
+                scheduled = backups / 'scheduled'
+                if not scheduled.is_symlink():
+                    for path in scheduled.glob('library-auto-*.zip'):
+                        if path.is_file() and not path.is_symlink():
+                            total += path.stat().st_size
+                            count += 1
                 backups_text = f"{count} backup{'s' if count != 1 else ''} · {self._format_bytes(total)} — retained for recovery"
             except OSError:
                 backups_text = "Backup folder unavailable — recovery files retained"
@@ -2992,6 +3103,7 @@ class MainWindow(QMainWindow):
     def _read_library(self, *, include_detail=True):
         """All queries and UI conversion for a reload. Artwork tints are cache
         lookups (compute=False); sampling runs in `_prime_accents` on a worker."""
+        read_started = time.perf_counter()
         sample_accents(())  # Load saved tint metadata on this worker.
         detail_revision = self._episode_scope_revision
         catalog_query, catalog_limit = self._catalog_query, self._catalog_limit
@@ -3000,7 +3112,7 @@ class MainWindow(QMainWindow):
         in_progress = self.library.in_progress(limit=HomePage.RESUME_ROWS)
         progress_count = self.library.in_progress_count()
         home_latest = self.library.home_episodes(limit=30)
-        records = list(self.downloads.records()) if self.downloads else []
+        records = list(self.downloads.records(active_only=True)) if self.downloads else []
         active = self._active_downloads(records)
         detail_show_id = self._hero_show_id if include_detail else 0
         detail_scope, detail_window = self._podcast_scope, self._podcast_window
@@ -3022,7 +3134,9 @@ class MainWindow(QMainWindow):
                 paths.extend(episode.artwork_path for episode in in_progress[:3])
                 paths.extend(item.artwork_path for item in (detail_episodes or episodes)[:32])
             previews = prepare_saved_previews(paths, limit=32, budget_ms=100)
-        return {
+        read_seconds = time.perf_counter() - read_started
+        convert_started = time.perf_counter()
+        data = {
             "artwork_previews": previews,
             'catalog_query': catalog_query, 'catalog_limit': catalog_limit,
             'catalog_items': self._ui_episodes(self.library.search_episodes(catalog_query, catalog_limit), records) if catalog_query else [],
@@ -3047,6 +3161,31 @@ class MainWindow(QMainWindow):
             "history": self._history_items(self.library.history(limit=self._history_limit), active),
             "records": records,
         }
+        convert_seconds = time.perf_counter() - convert_started
+        initial = not self._stored_shows_ready
+        row_count = (len(data["shows"]) + len(data["episodes"]) + len(data["detail_episodes"])
+                     + len(data["in_progress"]) + len(data["home_latest"]) + len(data["queued"])
+                     + len(data["history"]) + len(data["catalog_items"]))
+        self._record_library_stage("read", read_seconds, len(stored_shows), row_count, initial=initial)
+        self._record_library_stage("convert", convert_seconds, len(stored_shows), row_count, initial=initial)
+        return data
+
+    def _record_library_stage(self, stage, elapsed, show_count, row_count, *, initial=False):
+        """Rate-limited aggregate timings; never include feed names, URLs, or paths."""
+        now = time.monotonic()
+        logged = getattr(self, "_library_stage_logged_at", None)
+        if logged is None:
+            logged = self._library_stage_logged_at = {}
+        previous = logged.get(stage)
+        if not initial and elapsed < 0.05:
+            return
+        if previous is not None and now - previous < 60:
+            return
+        logged[stage] = now
+        logging.getLogger("bs_podcasts").info(
+            "Library stage %s: %.1f ms; shows=%d rows=%d%s",
+            stage, elapsed * 1000, show_count, row_count, " initial" if initial else "",
+        )
 
     @staticmethod
     def _retinted(data: dict) -> dict:
@@ -3125,7 +3264,7 @@ class MainWindow(QMainWindow):
         offset = self._history_limit
 
         def work():
-            active = self._active_downloads(list(self.downloads.records()) if self.downloads else [])
+            active = self._active_downloads(list(self.downloads.records(active_only=True)) if self.downloads else [])
             return generation, self._history_items(self.library.history(limit=HISTORY_PAGE_SIZE, offset=offset), active)
 
         self._run_read(work, self._append_history, "history-more")
@@ -3139,7 +3278,7 @@ class MainWindow(QMainWindow):
         generation = self._history_generation
 
         def work():
-            active = self._active_downloads(list(self.downloads.records()) if self.downloads else [])
+            active = self._active_downloads(list(self.downloads.records(active_only=True)) if self.downloads else [])
             return self._history_items(self.library.history(limit=limit), active)
 
         def apply(items):
@@ -3492,14 +3631,19 @@ class MainWindow(QMainWindow):
         if self.library is None:
             return
         data = data or self._read_library()
+        apply_started = time.perf_counter()
+        initial_apply = not getattr(self, "_library_apply_logged", False)
+        history_generation = getattr(self, "_initial_history_generation", 0) + 1
+        self._initial_history_generation = history_generation
         data = dict(data)
         protect_artwork_previews(show.artwork_path for show in data['stored_shows'])
         preview_images = data.pop('artwork_previews', {})
         install_previews(preview_images)
         self._artwork_prepared = True
-        for key in ('episodes', 'detail_episodes', 'in_progress', 'home_latest', 'queued', 'history'):
-            if key in data:
-                data[key] = [self._resolved_episode_artwork(item) for item in data[key]]
+        if self._episode_artwork_resolved:
+            for key in ('episodes', 'detail_episodes', 'in_progress', 'home_latest', 'queued', 'history'):
+                if key in data:
+                    data[key] = [self._resolved_episode_artwork(item) for item in data[key]]
         self._last_library_data = data
         stored_shows = data["stored_shows"]
         self._stored_shows = list(stored_shows)
@@ -3570,10 +3714,12 @@ class MainWindow(QMainWindow):
             self._finish_page_load(self.playlist_page)
             self.context.set_queue(queued)
             self.player.set_next(self._next_title(queued, self._playing_episode_id))
-        with self._page_guard(self.history_page, "History"):
-            self.history_page.set_items(history)
-            self._finish_page_load(self.history_page)
-            self._set_history_chrome(len(history))
+        if (initial_apply and self.jobs is not None and not self.inline_work
+                and self.isVisible() and self.pages.currentWidget() is not self.history_page):
+            self._pending_initial_history = (history_generation,)
+            self._later(0, lambda: self._apply_initial_history(history_generation))
+        else:
+            self._apply_initial_history(history_generation, history)
         with self._page_guard(self.download_page, "Downloads"):
             self._reload_downloads()
         active_downloads = sum(record.state.value in {"queued", "downloading", "paused"} for record in data["records"])
@@ -3607,6 +3753,35 @@ class MainWindow(QMainWindow):
             # First successful load: the window has its data, so the heavy
             # stale-feed sweep can start without competing with first paint.
             self._later(250, self._refresh_if_stale)
+        self._record_library_stage(
+            "apply", time.perf_counter() - apply_started, len(stored_shows),
+            sum(len(data.get(key, ())) for key in ("episodes", "detail_episodes", "in_progress", "home_latest", "queued", "history")),
+            initial=not getattr(self, "_library_apply_logged", False),
+        )
+        self._library_apply_logged = True
+
+    def _apply_initial_history(self, generation, history=None):
+        """Apply the hidden History model after first paint, or before it is selected."""
+        pending = getattr(self, "_pending_initial_history", None)
+        if history is None:
+            if pending is None or pending[0] != generation:
+                return
+            history = self._history_items_shown
+        elif pending is not None and pending[0] <= generation:
+            self._pending_initial_history = None
+        if self._closed or generation != getattr(self, "_initial_history_generation", generation):
+            return
+        if pending is not None and pending[0] == generation:
+            self._pending_initial_history = None
+        apply_started = time.perf_counter()
+        with self._page_guard(self.history_page, "History"):
+            self.history_page.set_items(history)
+            self._finish_page_load(self.history_page)
+            self._set_history_chrome(len(history))
+        self._record_library_stage(
+            "history-apply", time.perf_counter() - apply_started, len(self._stored_shows), len(history),
+            initial=generation == 1,
+        )
 
     def _warm_library_artwork(self, paths):
         """Warm the bounded library cohort after first paint, in small batches."""
@@ -6508,7 +6683,7 @@ class MainWindow(QMainWindow):
         repository, downloads = self.library.repository, self.downloads
 
         def work():
-            records = list(downloads.records())
+            records = list(downloads.records(active_only=True))
             episodes = repository.episodes_by_ids(ids)
             rows = self._ui_episodes(list(episodes.values()), records)
             return {row.episode_id: row for row in rows}
@@ -7585,6 +7760,11 @@ class MainWindow(QMainWindow):
                 self._notify("Couldn’t check for updates", "error")
             return
         update = result.value
+        if getattr(update, 'error', ''):
+            self.settings_page.set_update_status(f"Installed {app_version()} · {update.error}")
+            if identifier:
+                self._notify(update.error, 'error')
+            return
         self._persist_ui_settings({"updates.last_check": str(time.time())})
         if not update.available:
             # No release has been published yet: say so calmly instead of
@@ -8397,6 +8577,10 @@ class MainWindow(QMainWindow):
         if previous >= 0 and previous != index and not self._history_navigation:
             self._push_history(self._back_stack, previous)
             self._forward_stack.clear()
+        if index == PAGE_HISTORY:
+            pending = getattr(self, "_pending_initial_history", None)
+            if pending is not None:
+                self._apply_initial_history(pending[0])
         self.pages.setCurrentIndex(index)
         if index == PAGE_EPISODES:
             if self._episode_navigation_prepared:
@@ -9148,7 +9332,7 @@ class MainWindow(QMainWindow):
     def _ui_episodes(self, stored, records=None) -> list:
         """Convert stored episodes (cached per unchanged row) and overlay download state."""
         if records is None:
-            records = self.downloads.records() if self.downloads else ()
+            records = self.downloads.records(active_only=True) if self.downloads else ()
         active_records = {record.episode_id: record for record in records if record.state.value != "complete"}
         stored = list(stored)
         with self._convert_lock:
@@ -9196,7 +9380,7 @@ class MainWindow(QMainWindow):
         as idle while a transfer is running.
         """
         if records is None:
-            records = self.downloads.records() if self.downloads else ()
+            records = self.downloads.records(active_only=True) if self.downloads else ()
         return {
             record.episode_id: record
             for record in records
@@ -9488,6 +9672,11 @@ class MainWindow(QMainWindow):
             event.ignore()
             self._minimize_to_tray()
             return
+        if hasattr(self, '_backup_cancel'):
+            self._backup_cancel.set()
+            self._backup_timer.stop()
+            self._backup_status_timer.stop()
+            self._backup_poll.stop()
         if not self._keep_services:
             if not getattr(self, "_quit_drain_started", 0):
                 self._quit_drain_started = time.monotonic()

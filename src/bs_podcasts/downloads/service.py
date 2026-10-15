@@ -1312,13 +1312,29 @@ class DownloadService:
             cancellation.set()
         return bool(events)
 
-    def records(self):
-        records = self.downloads.list()
+    def records(self, *, active_only: bool = False):
+        """Return persisted downloads, optionally omitting completed rows.
+
+        Queued tickets that have not reached SQLite are still synthesized in
+        either view. Failures remain visible in the active view so users can
+        retry them.
+        """
+        records = self.downloads.active_records() if active_only else self.downloads.list()
         with self._lock:
             queued = dict(self._queued)
         existing = {record.episode_id: record for record in records}
+        unresolved = [episode_id for episode_id in queued if episode_id not in existing]
+        queued_records = (
+            self.downloads.records_by_ids(unresolved)
+            if active_only and unresolved else {}
+        )
         episodes = self.library.episodes_by_ids(queued.keys()) if queued else {}
         for episode_id, ticket in queued.items():
+            persisted = queued_records.get(episode_id)
+            if active_only and persisted is not None and persisted.state == DownloadState.COMPLETE:
+                continue
+            if persisted is not None:
+                existing.setdefault(episode_id, persisted)
             listed = self._listed_queued(episode_id, ticket, existing.get(episode_id), episodes.get(episode_id))
             if listed is not None:
                 existing[episode_id] = listed

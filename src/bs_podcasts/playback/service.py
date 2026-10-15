@@ -1686,29 +1686,28 @@ class PlaybackService:
     def _complete_episode(self, snapshot):
         """Mark an ended episode played and take it off the queue.
 
-        The waits on storage run without the service lock; it is held only to
-        change the snapshot and to queue the saves."""
+        The atomic database write runs without the service lock; the lock is
+        held only while updating the playback snapshot."""
         episode_id = snapshot.episode_id
         if episode_id is None or snapshot.show_id in self._retiring_shows:
             return
         self._library_ready()
-        episode = self.repository.get_episode(episode_id)
-        if episode is None or episode.show_id != snapshot.show_id:
-            return  # A late outgoing EOF cannot save into an unsubscribed show.
         end = snapshot.duration or snapshot.position
+        if end:
+            self._flush_persistence()
+        with self._lock:
+            stamp = self._write_stamp() if end else None
+        saved = self.repository.complete_episode(
+            episode_id, snapshot.show_id, end, stamp,
+            count_listening=bool(self.listening),
+        )
+        if saved is False:
+            raise LibraryBusy('Library maintenance is busy; playback completion will be retried.')
+        if saved is None:
+            return  # A late outgoing EOF cannot save into a removed or changed show.
         with self._lock:
             if self.snapshot.episode_id == episode_id:
                 self.snapshot = replace(self.snapshot, position=end, buffering=None)
-            if end:
-                stamp = self._write_stamp()
-                self._submit_progress(episode_id, duration=end, position=(end, stamp, True))
-        if end:
-            self._flush_persistence()
-        self.repository.mark_played(episode_id, True)
-        if self.listening and snapshot.show_id:
-            self.listening.increment_completed(snapshot.show_id)
-        self.repository.dequeue(episode_id)
-        with self._lock:
             self._publish_completed(episode_id)
 
     def _publish_completed(self, episode_id: int):

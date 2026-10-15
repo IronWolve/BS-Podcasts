@@ -5,7 +5,8 @@ import logging
 import re
 
 from ..config import RELEASES_API_URL
-from ..net import make_session
+from ..net import make_session, describe_network_error
+from ..netlimits import NetworkDeadline
 from ..urlguard import UnsafeUrl, ensure_web_url
 
 
@@ -16,6 +17,7 @@ class UpdateResult:
     newer: bool
     notes: str
     url: str
+    error: str = ""
 
 
 def _version_key(value: str):
@@ -41,10 +43,11 @@ def _release_status_sentence(status: int) -> str:
 
 
 def check_for_update(installed: str, session=None) -> UpdateResult:
+    from requests.exceptions import RequestException
     if not RELEASES_API_URL:
         raise RuntimeError("No release service is configured for this distribution.")
     owned = session is None
-    client = session if session is not None else make_session(max_response_bytes=1024 * 1024, total_timeout=20)
+    client = session if session is not None else make_session(retries=0, max_response_bytes=1024 * 1024, total_timeout=20)
     response = None
     try:
         response = client.get(RELEASES_API_URL, timeout=(5, 12))
@@ -53,8 +56,12 @@ def check_for_update(installed: str, session=None) -> UpdateResult:
         if response.status_code >= 400:
             # The URL and the raw status line stay in the log; the user gets one sentence.
             logging.getLogger('bs_podcasts').warning('Release check failed with HTTP %s', response.status_code)
-            raise RuntimeError(_release_status_sentence(response.status_code))
+            return UpdateResult(installed, "", False, "", "", _release_status_sentence(response.status_code))
         payload = response.json()
+    except (NetworkDeadline, RequestException) as exc:
+        message = describe_network_error(exc, "the release service")
+        logging.getLogger('bs_podcasts').warning('Release check unavailable: %s', message)
+        return UpdateResult(installed, "", False, "", "", message)
     finally:
         if response is not None:
             response.close()

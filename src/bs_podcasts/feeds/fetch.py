@@ -324,7 +324,8 @@ class FeedFetcher:
         read in full is kept for a few minutes for fetch(reuse_recent=True).
         """
         try:
-            url = ensure_fetchable(url, "Feed URL")
+            # The guarded connection resolves and screens the actual peer.
+            url = ensure_fetchable(url, "Feed URL", resolve=False)
         except UnsafeUrl as exc:
             raise _url_error(exc) from exc
         headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.2"}
@@ -376,7 +377,7 @@ class FeedFetcher:
         conditional: bool = True,
     ) -> FeedResponse:
         try:
-            url = ensure_fetchable(url, "Feed URL")
+            url = ensure_fetchable(url, "Feed URL", resolve=False)
         except UnsafeUrl as exc:
             raise _url_error(exc) from exc
         headers = {

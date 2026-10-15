@@ -3,6 +3,7 @@
 from dataclasses import dataclass, replace
 import html
 import re
+from collections import OrderedDict
 
 from PySide6.QtCore import QAbstractListModel, QEvent, QMimeData, QModelIndex, QRect, QSize, Signal, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QTextLayout
@@ -620,7 +621,7 @@ class PodcastDelegate(QStyledItemDelegate):
         title_rect = QRect(card.x() + pad + 2, art.bottom() + scaled_px(10), card.width() - 2 * pad - 4, line_height * 2)
         self._report(index, "title", title_rect)
         metrics = painter.fontMetrics()
-        lines = _wrap_two_lines(metrics, item.title, title_rect.width())
+        lines = _wrap_two_lines(metrics, item.title, title_rect.width(), painter.font().toString())
         for line_index, line in enumerate(lines):
             painter.drawText(
                 QRect(title_rect.x(), title_rect.y() + line_index * line_height, title_rect.width(), line_height),
@@ -713,7 +714,42 @@ def _split_wide_token(metrics, word: str, width: int):
     return word[:low], word[low:]
 
 
-def _wrap_two_lines(metrics, text: str, width: int):
+def _wrap_two_lines(metrics, text: str, width: int, font_key: str = ""):
+    # Podcast cards repeatedly paint the same title at the same snapped card
+    # width. The caller supplies the font identity; metric values also account
+    # for a device-metric change. `font_key` stays optional for older callers.
+    key = (text, int(width), font_key, metrics.height(), metrics.ascent(),
+           metrics.descent(), metrics.leading(), metrics.horizontalAdvance("MW"))
+    cached = _wrapped_titles.get(key)
+    if cached is not None:
+        _wrapped_titles.move_to_end(key)
+        return list(cached)
+    lines = _wrap_two_lines_uncached(metrics, text, width)
+    _wrapped_titles[key] = tuple(lines)
+    if len(_wrapped_titles) > 4096:
+        _wrapped_titles.popitem(last=False)
+    return lines
+
+
+_wrapped_titles = OrderedDict()
+_font_metrics_cache = OrderedDict()
+
+
+def _font_metrics(font):
+    """Reuse device-independent font metrics for repeatedly measured controls."""
+    key = font.toString()
+    metrics = _font_metrics_cache.get(key)
+    if metrics is None:
+        metrics = QFontMetrics(font)
+        _font_metrics_cache[key] = metrics
+        if len(_font_metrics_cache) > 64:
+            _font_metrics_cache.popitem(last=False)
+    else:
+        _font_metrics_cache.move_to_end(key)
+    return metrics
+
+
+def _wrap_two_lines_uncached(metrics, text: str, width: int):
     words = text.split()
     if not words:
         return [""]
@@ -850,9 +886,9 @@ class EpisodeDelegate(QStyledItemDelegate):
             if self.can_queue(item):
                 reserve += self.play_rect(rect).width() + scaled_px(8)
             if item.state not in {"New", "Unplayed", "Played", "Preview"}:
-                reserve += QFontMetrics(app_font(11, QFont.Weight.DemiBold)).horizontalAdvance(_badge_text(item)) + scaled_px(36)
+                reserve += _font_metrics(app_font(11, QFont.Weight.DemiBold)).horizontalAdvance(_badge_text(item)) + scaled_px(36)
             text_width = min(max(40, row.right() - reserve - text_left), scaled_px(MAX_ROW_TEXT_PX))
-        width = min(text_width, QFontMetrics(app_font(12)).horizontalAdvance(item.show))
+        width = min(text_width, _font_metrics(app_font(12)).horizontalAdvance(item.show))
         top = row.y() + scaled_px(32) + scaled_px(self.SNIPPET_LINE) * max(1, self.SNIPPET_LINES) - 1 + scaled_px(3)
         return QRect(text_left, top, width, scaled_px(16))
 

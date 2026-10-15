@@ -196,12 +196,14 @@ def apply_theme(name: str):
     global _current_theme
     palette = THEMES.get(name, DARK)
     _current_theme = name if name in THEMES else "dark"
-    COLORS.clear()
-    COLORS.update(palette)
+    resolved = dict(palette)
     if high_contrast():
-        ink = COLORS['text_strong']
-        COLORS.update(text=ink, muted=ink, subtle=ink, border=ink, control_border=ink, hairline=ink)
-    _rebuild_semantic()
+        ink = resolved['text_strong']
+        resolved.update(text=ink, muted=ink, subtle=ink, border=ink, control_border=ink, hairline=ink)
+    if COLORS != resolved:
+        COLORS.clear()
+        COLORS.update(resolved)
+        _rebuild_semantic()
 
 
 HEALTH_LABELS = {
@@ -395,11 +397,16 @@ def available_ui_fonts() -> list[tuple[str, str]]:
 
 def apply_typography(size_key: str = "comfortable", font_key: str = "Inter"):
     """Update the shared type scale and UI font. Existing widgets need a stylesheet refresh."""
-    _forget_families()
     global _type_scale, _font_key
-    _type_scale = _TEXT_SIZE_SCALE.get(size_key, 1.0)
-    _font_key = font_key or "Inter"
-    _resolved_families.clear()
+    size_scale = _TEXT_SIZE_SCALE.get(size_key, 1.0)
+    family_key = font_key or "Inter"
+    if size_scale == _type_scale and family_key == _font_key:
+        return
+    family_changed = family_key != _font_key
+    _type_scale = size_scale
+    _font_key = family_key
+    if family_changed:
+        _resolved_families.clear()
     _fonts.clear()
     _rebuild_type()
     _rebuild_space()
@@ -465,12 +472,16 @@ def apply_app_stylesheet(app) -> bool:
     from .icons import resolve_stylesheet
 
     qss = resolve_stylesheet(stylesheet())
-    if app.property("_bs_applied_qss") == qss:
-        return False
-    app.setProperty("_bs_applied_qss", qss)
-    app.setPalette(app_palette())
-    app.setStyleSheet(qss)
-    return True
+    changed = False
+    palette = app_palette()
+    if app.palette() != palette:
+        app.setPalette(palette)
+        changed = True
+    if app.property("_bs_applied_qss") != qss:
+        app.setProperty("_bs_applied_qss", qss)
+        app.setStyleSheet(qss)
+        changed = True
+    return changed
 
 
 def apply_saved_appearance(app, setting) -> None:
