@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from contextlib import closing
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -38,6 +39,15 @@ _RESTORE = (
 
 class BackupCancelled(Exception):
     """Internal cooperative stop signal; cancellation is not a failure."""
+
+
+@dataclass(frozen=True)
+class BackupDeletion:
+    path: Path
+    bytes_reclaimed: int
+    signature: tuple
+    marker_signature: tuple
+    marker_record: str
 
 
 class BackupService:
@@ -363,6 +373,134 @@ class BackupService:
             except (OSError, UnicodeError, ValueError):
                 continue
         return sorted(owned, reverse=True, key=lambda entry: (entry[0], entry[1].name))
+
+    def _deletion_locations(self):
+        root = self.destination.parent.parent
+        stamp = r'\d{8}-\d{6}(?:-\d{6})?'
+        return (
+            (self.destination, _ARCHIVE_NAME),
+            (self.destination.parent, re.compile(r'library-' + stamp + r'\.db\Z')),
+            (root, re.compile(re.escape(self.database.path.name) +
+                              r'\.pre-migration(?:-' + stamp + r')?\.bak\Z')),
+        )
+
+    @staticmethod
+    def _file_signature(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def _deletion_candidate(self, path):
+        """Recognize a managed file without reading its potentially large payload."""
+        path = Path(path)
+        if not any(path.parent == folder and pattern.fullmatch(path.name)
+                   for folder, pattern in self._deletion_locations()):
+            return None
+        self._check_path_chain(path)
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return None
+        try:
+            path.with_name(path.name + '.keep').lstat()
+            return None
+        except FileNotFoundError:
+            pass
+        marker = path.with_name(path.name + '.auto')
+        self._check_path_chain(marker)
+        marked = marker.lstat()
+        if not stat.S_ISREG(marked.st_mode) or marked.st_nlink != 1 or marked.st_size > 256:
+            return None
+        with marker.open('r', encoding='ascii') as handle:
+            record = handle.read(257)
+        parts = record.split()
+        if parts[:3] != ['1', str(info.st_size), str(info.st_mtime_ns)]:
+            return None
+        if path.suffix == '.zip':
+            if len(parts) != 4 or not re.fullmatch(r'[0-9a-f]{64}', parts[3]):
+                return None
+        elif len(parts) != 3:
+            return None
+        if (self._file_signature(path.lstat()) != self._file_signature(info)
+                or self._file_signature(marker.lstat()) != self._file_signature(marked)):
+            return None
+        return BackupDeletion(path, info.st_size, self._file_signature(info),
+                              self._file_signature(marked), record)
+
+    def deletion_preview(self, cancelled=None):
+        """Exact unprotected app-created files for an explicit user confirmation."""
+        files = []
+        self._lower_current_thread_priority()
+        for folder, pattern in self._deletion_locations():
+            if self._cancelled(cancelled):
+                raise BackupCancelled()
+            try:
+                folder.lstat()
+                self._check_path_chain(folder)
+            except FileNotFoundError:
+                continue
+            for path in folder.iterdir():
+                if self._cancelled(cancelled):
+                    raise BackupCancelled()
+                if not pattern.fullmatch(path.name):
+                    continue
+                try:
+                    candidate = self._deletion_candidate(path)
+                except (OSError, UnicodeError):
+                    continue  # Protected/unmarked or concurrently removed.
+                if candidate is not None:
+                    files.append(candidate)
+        return tuple(sorted(files, key=lambda item: str(item.path)))
+
+    def delete_confirmed(self, previews, cancelled=None):
+        """Delete only the previewed files whose identities still match."""
+        result = {'deleted': 0, 'bytes': 0, 'skipped': 0, 'errors': [], 'cancelled': False}
+        scheduled = self.database._scheduled_backup_lock
+        retention = self.database._backup_retention_lock
+        if not scheduled.acquire(blocking=False):
+            raise OSError('A backup is running. Wait for it to finish, then try again.')
+        held_retention = False
+        try:
+            held_retention = retention.acquire(blocking=False)
+            if not held_retention or self.database.maintenance_active:
+                raise OSError('Library maintenance is running. Wait for it to finish, then try again.')
+            self._lower_current_thread_priority()
+            deleted_names = set()
+            for preview in dict.fromkeys(previews):
+                if self._cancelled(cancelled):
+                    result['cancelled'] = True
+                    break
+                try:
+                    current = self._deletion_candidate(preview.path)
+                    if current != preview:
+                        result['skipped'] += 1
+                        continue
+                    preview.path.unlink()
+                    result['deleted'] += 1
+                    result['bytes'] += preview.bytes_reclaimed
+                    deleted_names.add(preview.path.name)
+                    marker = preview.path.with_name(preview.path.name + '.auto')
+                    try:
+                        if self._file_signature(marker.lstat()) == preview.marker_signature:
+                            marker.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError as exc:
+                        result['errors'].append(f'{preview.path.name}: backup deleted, but its marker could not be removed: {exc}')
+                except FileNotFoundError:
+                    result['skipped'] += 1
+                except (OSError, UnicodeError) as exc:
+                    result['errors'].append(f'{preview.path.name}: {exc}')
+            try:
+                if self.repository.get_setting(_PREFIX + 'last_file', '') in deleted_names:
+                    self._save_state('idle', fields={'last_success': '', 'last_file': '', 'last_size': ''})
+                result['status'] = self.status()
+            except Exception as exc:
+                result['errors'].append(f'Could not update backup status: {exc}')
+            return result
+        finally:
+            if held_retention:
+                retention.release()
+            scheduled.release()
+            self.database.close_current_thread_connection()
 
     def _prune(self, keep, cancel_check):
         owned = self._owned_archives(cancel_check)

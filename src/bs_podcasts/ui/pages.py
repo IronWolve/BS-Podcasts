@@ -2267,6 +2267,7 @@ class SettingsPage(BasePage):
     open_backups_requested = Signal()
     backup_now_requested = Signal()
     cancel_backup_requested = Signal()
+    delete_backups_requested = Signal()
     refresh_storage_requested = Signal()
     import_opml_requested = Signal()
     export_opml_requested = Signal()
@@ -2610,13 +2611,15 @@ class SettingsPage(BasePage):
         self.backup_now = self._action('Back up now', self.backup_now_requested)
         self.backup_cancel = self._action('Cancel', self.cancel_backup_requested)
         open_backups = self._action('Open backups', self.open_backups_requested, 'folder')
+        self.backup_delete = self._action('Delete backups…', self.delete_backups_requested, danger=True)
+        self.backup_delete.setToolTip('Review app-created backups and their size before deleting. Protected copies are kept.')
         form.addRow('Automatic backups', self.backups_enabled)
         form.addRow('Frequency', self.backup_interval)
         form.addRow('Keep latest', self.backup_keep)
         form.addRow('Status', self.backup_status)
         form.addRow('Backup folder', self.backup_path)
         form.addRow('Backup usage', self.backup_usage)
-        form.addRow(self._actions(self.backup_now, self.backup_cancel, open_backups))
+        form.addRow(self._actions(self.backup_now, self.backup_cancel, open_backups, self.backup_delete))
         self.backup_cancel.hide()
         hint = PlainTextLabel('This limit also applies to Back up now. Existing upgrade, manual and protected copies are kept separately. Backups contain private library data; do not attach them to public issues. Restore instructions are inside each ZIP.')
         hint.setObjectName('settingHint')
@@ -2641,13 +2644,14 @@ class SettingsPage(BasePage):
             self.backup_keep.setCurrentIndex(max(0, self.backup_keep.findData(str(keep))))
         self.backup_interval.setEnabled(enabled)
 
-    def set_backup_status(self, status, *, running=False, cancelling=False):
+    def set_backup_status(self, status, *, running=False, cancelling=False, message=None):
         self.backup_now.setEnabled(not running)
+        self.backup_delete.setEnabled(not running)
         self.backup_cancel.setVisible(running)
         self.backup_cancel.setEnabled(not cancelling)
         self.backup_cancel.setText('Cancelling…' if cancelling else 'Cancel')
         if running:
-            self.backup_status.setText('Stopping safely…' if cancelling else 'Backing up in the background…')
+            self.backup_status.setText('Stopping safely…' if cancelling else message or 'Backing up in the background…')
             return
         def local_date(value):
             try:

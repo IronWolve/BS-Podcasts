@@ -2844,6 +2844,7 @@ class MainWindow(QMainWindow):
         self._backup_status_dirty = False
         self._backup_last_status = {}
         self._backup_manual = False
+        self._backup_delete_confirming = False
         self._backup_poll = QTimer(self)
         self._backup_poll.setInterval(100)
         self._backup_poll.timeout.connect(self._poll_backup)
@@ -2862,10 +2863,13 @@ class MainWindow(QMainWindow):
                                                keep if keep in {'1', '2'} else '2')
         self.settings_page.backup_now_requested.connect(lambda: self._start_backup(force=True))
         self.settings_page.cancel_backup_requested.connect(self._cancel_backup)
+        self.settings_page.delete_backups_requested.connect(lambda: self._start_backup(force=True, operation='preview-delete'))
         self._later(60_000, self._start_backup)
 
-    def _start_backup(self, *, force=False, status_only=False):
+    def _start_backup(self, *, force=False, status_only=False, operation='backup', previews=()):
         if self._closed or self.library is None or not hasattr(self, '_backup_service'):
+            return
+        if self._backup_delete_confirming:
             return
         if self._backup_thread is not None:
             if status_only:
@@ -2881,13 +2885,22 @@ class MainWindow(QMainWindow):
         cancellation = self._backup_cancel = threading.Event()
         mailbox = self._backup_result = []
         self._backup_manual = force
+        self._backup_operation = operation
         self._backup_status_only = status_only
         self._backup_status_dirty = False
         def work():
             try:
-                result = service.status() if status_only else service.run(force=force, cancelled=cancellation)
+                if status_only:
+                    result = service.status()
+                elif operation == 'preview-delete':
+                    result = {'previews': service.deletion_preview(cancelled=cancellation)}
+                elif operation == 'delete':
+                    result = service.delete_confirmed(previews, cancelled=cancellation)
+                else:
+                    result = service.run(force=force, cancelled=cancellation)
             except Exception as exc:
-                result = {'state': 'error', 'error': redact(exc)}
+                result = ({'state': 'cancelled', 'cancelled': True} if cancellation.is_set()
+                          else {'state': 'error', 'error': redact(exc)})
             mailbox.append(result)
         self._backup_thread = threading.Thread(target=work, name='bs-backup', daemon=True)
         try:
@@ -2897,7 +2910,9 @@ class MainWindow(QMainWindow):
             self.settings_page.set_backup_status({'error': f'Could not start backup: {redact(exc)}'})
             return
         if not status_only:
-            self.settings_page.set_backup_status(self._backup_last_status, running=True)
+            message = {'preview-delete': 'Checking backups…', 'delete': 'Deleting confirmed backups…'}.get(operation)
+            self.settings_page.set_backup_status(self._backup_last_status, running=True, message=message)
+        self.settings_page.backup_delete.setEnabled(False)
         self._backup_poll.start()
 
     def _cancel_backup(self):
@@ -2916,6 +2931,13 @@ class MainWindow(QMainWindow):
         if self._closed:
             return
         status = self._backup_result[-1] if self._backup_result else {'error': 'The backup worker stopped unexpectedly.'}
+        if self._backup_operation in {'preview-delete', 'delete'} and not self._backup_status_only:
+            try:
+                self._finish_backup_deletion(status)
+            finally:
+                if self._backup_status_dirty and not self._closed:
+                    self._backup_status_timer.start()
+            return
         self._backup_last_status = status
         self.settings_page.set_backup_status(status)
         error = status.get('error') or status.get('last_error')
@@ -2930,6 +2952,50 @@ class MainWindow(QMainWindow):
             self._refresh_storage_settings()
         if self._backup_status_dirty:
             self._backup_status_timer.start()
+
+    def _finish_backup_deletion(self, result):
+        self._backup_last_status = result.get('status', self._backup_last_status)
+        self.settings_page.set_backup_status(self._backup_last_status)
+        if result.get('error'):
+            self._notify(f"Could not {('list' if self._backup_operation == 'preview-delete' else 'delete')} backups: {result['error']}", 'error')
+            return
+        if self._backup_operation == 'preview-delete':
+            if result.get('cancelled'):
+                return
+            previews = result.get('previews', ())
+            if not previews:
+                self._notify('No removable app-created backups found. Protected and unrecognized files are kept.', 'info')
+                return
+            count = len(previews)
+            size = self._format_bytes(sum(item.bytes_reclaimed for item in previews))
+            schedule = ('Automatic backups are still on and can create new copies. Turn them off in Settings if you do not want new backups.'
+                        if self.settings_page.backups_enabled.isChecked() else 'Automatic backups are off and will stay off.')
+            dialog = ConfirmDialog('Delete backups?',
+                f'Permanently delete {count} backup{("s" if count != 1 else "")} and free about {size}? '
+                'This includes the automatic and upgrade snapshots listed below. Protected (.keep) and unrecognized files are kept. '
+                'Your current library and downloaded audio are not deleted. These backup copies cannot be recovered by the app.\n\n' + schedule,
+                'Delete backups', destructive=True, parent=self)
+            dialog.add_file_listing(f'{item.path}  ({self._format_bytes(item.bytes_reclaimed)})' for item in previews)
+            self._backup_delete_confirming = True
+            try:
+                accepted = self._exec_dialog(dialog) == QDialog.DialogCode.Accepted
+            finally:
+                self._backup_delete_confirming = False
+            if accepted:
+                self._start_backup(force=True, operation='delete', previews=previews)
+            return
+        count = result.get('deleted', 0)
+        message = f'Deleted {count} backup{("s" if count != 1 else "")} · freed {self._format_bytes(result.get("bytes", 0))}'
+        if result.get('cancelled'):
+            message += '. Stopped; remaining backups were kept.'
+        if result.get('skipped'):
+            message += f'. Skipped {result["skipped"]} files that changed, became protected or were already missing.'
+        errors = result.get('errors', ())
+        if errors:
+            message += f'. Some files could not be removed: {errors[0]}'
+            logging.getLogger('bs_podcasts').warning('Backup cleanup: %s', redact('; '.join(errors)))
+        self._notify(message, 'error' if errors else 'success' if count else 'info')
+        self._refresh_storage_settings()
 
     def _refresh_storage_settings(self, include_usage: bool = True):
         if self.library is None or self._closed:
@@ -2968,7 +3034,9 @@ class MainWindow(QMainWindow):
             backups = self.library.repository.database.path.parent / "backups"
             count = total = 0
             try:
-                for path in backups.glob("*.db"):
+                for path in (*backups.glob("*.db"),
+                             *self.library.repository.database.path.parent.glob(
+                                 self.library.repository.database.path.name + '.pre-migration*.bak')):
                     if path.is_file() and not path.is_symlink():
                         total += path.stat().st_size
                         count += 1
