@@ -25,6 +25,7 @@ _ARCHIVE_NAME = re.compile(r"library-auto-\d{8}-\d{6}-\d{6}\.zip\Z")
 _CHUNK = 256 * 1024
 _YIELD_SECONDS = 0.005
 _DEADLINE_SECONDS = 30 * 60
+_PROCESS_START = time.time()
 _RESTORE = (
     "BS Podcasts library backup\n"
     "\n"
@@ -319,6 +320,92 @@ class BackupService:
                     or metadata.get("database_size") != expected_size):
                 raise OSError("The backup archive metadata does not match its database.")
 
+    @classmethod
+    def sequence_floors(cls, archive_path):
+        """Read never-reused ID floors from a fully verified scheduled ZIP.
+
+        Repair uses this only when the library's own entity_sequences table
+        was unreadable. A matching private ownership marker authenticates the
+        complete archive bytes; the ZIP structure, metadata, SQLite integrity
+        and sequence values are checked before any floor is returned.
+        """
+        archive_path = cls._check_path_chain(archive_path)
+        if not _ARCHIVE_NAME.fullmatch(archive_path.name):
+            return {}
+        info = archive_path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or cls._is_reparse(info)
+                or info.st_nlink != 1 or info.st_size <= 0):
+            return {}
+        marker = archive_path.with_name(archive_path.name + ".auto")
+        marker_info = marker.lstat()
+        if (not stat.S_ISREG(marker_info.st_mode) or cls._is_reparse(marker_info)
+                or marker_info.st_nlink != 1 or marker_info.st_size > 256):
+            return {}
+        with marker.open("r", encoding="ascii") as handle:
+            parts = handle.read(257).split()
+        if (len(parts) != 4 or parts[:3] != ["1", str(info.st_size), str(info.st_mtime_ns)]
+                or not re.fullmatch(r"[0-9a-f]{64}", parts[3])):
+            return {}
+        digest = cls._hash_file(archive_path, lambda: None)
+        after = archive_path.lstat()
+        if ((after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+                or digest != parts[3]):
+            return {}
+
+        scratch = None
+        try:
+            descriptor, name = tempfile.mkstemp(
+                prefix=".library-auto-", suffix=".snapshot.tmp", dir=archive_path.parent)
+            scratch = Path(name)
+            with os.fdopen(descriptor, "wb") as output, zipfile.ZipFile(archive_path, "r") as zipped:
+                names = zipped.namelist()
+                if len(names) != 3 or set(names) != {"metadata.json", "RESTORE.txt", "library.db"}:
+                    return {}
+                metadata_info = zipped.getinfo("metadata.json")
+                if metadata_info.file_size > 4096:
+                    return {}
+                try:
+                    metadata = json.loads(zipped.read(metadata_info).decode("utf-8"))
+                except (ValueError, UnicodeError, zipfile.BadZipFile):
+                    return {}
+                database_info = zipped.getinfo("library.db")
+                expected_size = metadata.get("database_size") if isinstance(metadata, dict) else None
+                if (not isinstance(expected_size, int) or expected_size <= 0
+                        or metadata.get("format") != "bs-podcasts-library-backup"
+                        or metadata.get("database_file") != "library.db"
+                        or database_info.file_size != expected_size
+                        or database_info.compress_type != zipfile.ZIP_DEFLATED):
+                    return {}
+                written = 0
+                with zipped.open(database_info, "r") as source:
+                    while block := source.read(_CHUNK):
+                        output.write(block)
+                        written += len(block)
+                output.flush()
+                os.fsync(output.fileno())
+                if written != expected_size:
+                    return {}
+            if not stat.S_ISREG(scratch.lstat().st_mode) or scratch.lstat().st_nlink != 1:
+                return {}
+            with closing(sqlite3.connect(scratch.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+                result = connection.execute("PRAGMA quick_check").fetchone()
+                if not result or result[0] != "ok":
+                    return {}
+                floors = {}
+                for kind, value in connection.execute("SELECT kind,value FROM entity_sequences"):
+                    if kind in {"show", "episode"} and isinstance(value, int) and value >= 0:
+                        floors[kind] = max(floors.get(kind, 0), value)
+                return floors
+        finally:
+            if scratch is not None:
+                try:
+                    current = scratch.lstat()
+                    if stat.S_ISREG(current.st_mode) and current.st_nlink == 1:
+                        scratch.unlink()
+                except OSError:
+                    pass
+
     @staticmethod
     def _snapshot_check(snapshot, cancelled, deadline, database):
         def progress():
@@ -349,7 +436,12 @@ class BackupService:
             try:
                 info = item.lstat()
                 marker = item.with_name(item.name + ".auto")
-                marker_info = marker.lstat()
+                try:
+                    marker_info = marker.lstat()
+                except FileNotFoundError:
+                    if not self._recover_unmarked_archive(item, info, cancel_check):
+                        continue
+                    marker_info = marker.lstat()
                 pin = item.with_name(item.name + ".keep")
                 try:
                     pin.lstat()
@@ -373,6 +465,106 @@ class BackupService:
             except (OSError, UnicodeError, ValueError):
                 continue
         return sorted(owned, reverse=True, key=lambda entry: (entry[0], entry[1].name))
+
+    def _recover_unmarked_archive(self, archive_path, original_info, cancel_check):
+        """Restore the marker lost in the narrow post-rename crash window.
+
+        Only a stale generated archive with the exact backup structure, text,
+        metadata and a healthy SQLite database is claimed. Unknown files,
+        pins, links, current-process outputs and malformed markers are left
+        untouched.
+        """
+        if original_info.st_mtime >= _PROCESS_START:
+            return False
+        marker = archive_path.with_name(archive_path.name + ".auto")
+        pin = archive_path.with_name(archive_path.name + ".keep")
+        try:
+            pin.lstat()
+            return False
+        except FileNotFoundError:
+            pass
+        scratch = None
+        try:
+            self._check_path_chain(archive_path)
+            if (not stat.S_ISREG(original_info.st_mode) or self._is_reparse(original_info)
+                    or original_info.st_nlink != 1 or original_info.st_size <= 0):
+                return False
+            try:
+                marker.lstat()
+                return False
+            except FileNotFoundError:
+                pass
+            with zipfile.ZipFile(archive_path, "r") as zipped:
+                names = zipped.namelist()
+                if len(names) != 3 or set(names) != {"metadata.json", "RESTORE.txt", "library.db"}:
+                    return False
+                if zipped.read("RESTORE.txt") != _RESTORE.encode("utf-8"):
+                    return False
+                metadata_info = zipped.getinfo("metadata.json")
+                if metadata_info.file_size > 4096:
+                    return False
+                metadata = json.loads(zipped.read(metadata_info).decode("utf-8"))
+                database_info = zipped.getinfo("library.db")
+                expected_size = metadata.get("database_size") if isinstance(metadata, dict) else None
+                if (not isinstance(expected_size, int) or expected_size <= 0
+                        or metadata.get("format") != "bs-podcasts-library-backup"
+                        or metadata.get("version") != 1 or metadata.get("database_file") != "library.db"
+                        or database_info.file_size != expected_size
+                        or database_info.compress_type != zipfile.ZIP_DEFLATED):
+                    return False
+                descriptor, name = tempfile.mkstemp(
+                    prefix=".library-auto-", suffix=".snapshot.tmp", dir=self.destination)
+                scratch = Path(name)
+                with os.fdopen(descriptor, "wb") as output, zipped.open(database_info, "r") as source:
+                    written = 0
+                    while block := source.read(_CHUNK):
+                        cancel_check()
+                        output.write(block)
+                        written += len(block)
+                    output.flush()
+                    os.fsync(output.fileno())
+                if written != expected_size:
+                    return False
+            with closing(sqlite3.connect(scratch.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+                result = connection.execute("PRAGMA quick_check").fetchone()
+                if not result or result[0] != "ok":
+                    return False
+            cancel_check()
+            current = archive_path.lstat()
+            if ((current.st_dev, current.st_ino, current.st_mode, current.st_nlink,
+                    current.st_size, current.st_mtime_ns)
+                    != (original_info.st_dev, original_info.st_ino, original_info.st_mode,
+                        original_info.st_nlink, original_info.st_size, original_info.st_mtime_ns)):
+                return False
+            digest = self._hash_file(archive_path, cancel_check)
+            record = f"1 {current.st_size} {current.st_mtime_ns} {digest}".encode("ascii")
+            # O_EXCL ensures an unexpected marker that appeared during
+            # validation is never overwritten.
+            descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                 getattr(os, "O_NOFOLLOW", 0), 0o600)
+            try:
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(record)
+                    output.flush()
+                    os.fsync(output.fileno())
+            except BaseException:
+                try:
+                    marker.unlink()
+                except OSError:
+                    pass
+                raise
+            sync_directory(self.destination)
+            return True
+        except (OSError, ValueError, TypeError, UnicodeError, sqlite3.Error, zipfile.BadZipFile, RuntimeError):
+            return False
+        finally:
+            if scratch is not None:
+                try:
+                    current = scratch.lstat()
+                    if stat.S_ISREG(current.st_mode) and current.st_nlink == 1:
+                        scratch.unlink()
+                except OSError:
+                    pass
 
     def _deletion_locations(self):
         root = self.destination.parent.parent

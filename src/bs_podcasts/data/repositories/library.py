@@ -1466,6 +1466,65 @@ class LibraryRepository:
                 return None
             return self._write_position(connection, episode_id, seconds, stored + 0.000001) or None
 
+    def recover_final_position(self, episode_id: int, show_id: int, external_id: str,
+                               seconds: float, stamp: float, last_played: float | None = None):
+        """Replay a shutdown recovery record only onto the same episode row.
+
+        False means maintenance still owns the library and the caller may
+        retry. None means the row disappeared, changed identity, or already
+        has a newer position; those records are safe to retire.
+        """
+        if self.database.maintenance_active:
+            return False
+        seconds = media_seconds(0.0 if float(seconds) < 0 else float(seconds))
+        if seconds is None:
+            return None
+        stamp = float(stamp)
+        last_played = time.time() if last_played is None else float(last_played)
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT e.position_updated_at, p.episode_id, p.updated_at AS playback_updated_at "
+                "FROM episodes e CROSS JOIN playback_state p "
+                "WHERE e.id=? AND e.show_id=? AND e.external_id=? AND p.singleton_id=1",
+                (int(episode_id), int(show_id), str(external_id)),
+            ).fetchone()
+            if current is None:
+                return None
+            stored = float(current["position_updated_at"] or 0.0)
+            playback_id = current["episode_id"]
+            playback_stamp = float(current["playback_updated_at"] or 0.0)
+            if stored >= stamp or (playback_id == int(episode_id) and playback_stamp > stamp):
+                return None
+            cursor = connection.execute(
+                "UPDATE episodes SET position_seconds=?, last_played=?, is_new=0, position_updated_at=? "
+                "WHERE id=? AND show_id=? AND external_id=? AND position_updated_at<=?",
+                (seconds, last_played, stamp, int(episode_id), int(show_id), str(external_id), stamp),
+            )
+            if cursor.rowcount == 1 and playback_stamp <= stamp:
+                connection.execute(
+                    "UPDATE playback_state SET episode_id=?, state='paused', updated_at=? "
+                    "WHERE singleton_id=1 AND updated_at<=?",
+                    (int(episode_id), stamp, stamp),
+                )
+        return True if cursor.rowcount == 1 else None
+
+    def final_position_recovery_pending(self, episode_id: int, show_id: int, external_id: str,
+                                        stamp: float) -> bool:
+        """Whether a matching episode still needs this stamped recovery value."""
+        if self.database.maintenance_active:
+            return True
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT e.position_updated_at, p.episode_id, p.updated_at AS playback_updated_at "
+                "FROM episodes e CROSS JOIN playback_state p "
+                "WHERE e.id=? AND e.show_id=? AND e.external_id=? AND p.singleton_id=1",
+                (int(episode_id), int(show_id), str(external_id)),
+            ).fetchone()
+        return (row is not None
+                and float(row["position_updated_at"] or 0.0) < float(stamp)
+                and float(row["playback_updated_at"] or 0.0) <= float(stamp))
+
     def complete_episode(
         self, episode_id: int, show_id: int, end_seconds: float, stamp: float | None,
         *, count_listening: bool = True,
@@ -1631,6 +1690,39 @@ class LibraryRepository:
             else:
                 cursor = connection.execute("UPDATE episodes SET last_played=NULL WHERE id=?", (episode_id,))
             return cursor.rowcount
+
+    def clear_history_many_with_undo(self, episode_ids):
+        """Clear selected History timestamps together and return guarded Undo rows.
+
+        Snapshot and updates share one immediate transaction. IDs are handled
+        in bounded batches so large selections do not exceed SQLite's bind
+        limit, while the worker performs only a few queries per batch rather
+        than a read/write/read cycle for each episode.
+        """
+        ids = list(dict.fromkeys(int(value) for value in episode_ids if value is not None))
+        if not ids:
+            return []
+        changes = []
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                marks = ",".join("?" for _ in batch)
+                rows = connection.execute(
+                    "SELECT id,show_id,external_id,played,is_new,position_seconds,last_played "
+                    f"FROM episodes WHERE id IN ({marks}) AND last_played IS NOT NULL", batch,
+                ).fetchall()
+                if not rows:
+                    continue
+                targets = [row["id"] for row in rows]
+                target_marks = ",".join("?" for _ in targets)
+                connection.execute(
+                    f"UPDATE episodes SET last_played=NULL WHERE id IN ({target_marks}) "
+                    "AND last_played IS NOT NULL", targets,
+                )
+                changes.extend((tuple(row), (row["played"], row["is_new"],
+                                              row["position_seconds"], None)) for row in rows)
+        return changes
 
     def clear_queue(self) -> int:
         with self.database.connect() as connection:
@@ -1867,11 +1959,14 @@ class LibraryRepository:
     def _episode_search_predicate(cls, connection, query):
         # Trigram MATCH only narrows candidates (it folds case for any
         # script); the title/description comparison remains the final
-        # authority. Strings under three characters have no trigram to look up.
+        # authority. Podcast titles are indexed once per show and expanded to
+        # episode ids here, so a title edit never rewrites every description.
+        # Strings under three characters have no trigram to look up.
         text = query.strip()
-        indexed = bool(len(text) >= 3 and "\0" not in text and
-                       connection.execute("SELECT 1 FROM sqlite_master WHERE name='episode_search' AND type='table'").fetchone())
-        candidate = "e.id IN (SELECT rowid FROM episode_search WHERE episode_search MATCH ?) AND " if indexed else ""
+        available = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('episode_search','show_search')")}
+        indexed = bool(len(text) >= 3 and "\0" not in text and "episode_search" in available)
+        candidates = []
         parameters = ()
         if indexed:
             count = min(8, len(text) - 2)
@@ -1881,7 +1976,12 @@ class LibraryRepository:
             # detail-less index rejects.
             trigrams = dict.fromkeys(text[position:position + 3] for position in positions)
             terms = ' AND '.join('"' + gram.replace('"', '""') + '"' for gram in trigrams)
+            candidates.append("e.id IN (SELECT rowid FROM episode_search WHERE episode_search MATCH ?)")
             parameters = (terms,)
+            if "show_search" in available:
+                candidates.append("e.show_id IN (SELECT rowid FROM show_search WHERE show_search MATCH ?)")
+                parameters += (terms,)
+        candidate = ("(" + " OR ".join(candidates) + ") AND ") if candidates else ""
         match, match_parameters = cls._match_terms(connection, ("e.title", "e.description", "s.title"), text)
         return candidate + match, parameters + match_parameters
 

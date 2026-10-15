@@ -13,6 +13,7 @@ import weakref
 import tempfile
 import time
 import stat
+import zipfile
 from .files import atomic_write, private_file, sync_directory
 
 _log = logging.getLogger("bs_podcasts")
@@ -25,7 +26,9 @@ _MAINTENANCE_WAIT_SECONDS = 10.0
 # one of these prefixes and rename it on success. A process killed in the
 # middle leaves it behind; opening the library removes the ones older than
 # this process (the library lease keeps a second instance from running one).
-_SCRATCH_PREFIXES = (".library-backup-", ".library-repair-")
+_RAW_SCRATCH_NAME = re.compile(r"\.(?:library-backup|library-repair)-[A-Za-z0-9_-]+\.tmp\Z")
+_SCHEDULED_SCRATCH_NAME = re.compile(
+    r"\.library-auto-[A-Za-z0-9_-]+\.(?:snapshot|zip)\.tmp\Z")
 _PROCESS_START = time.time()
 
 
@@ -211,19 +214,40 @@ class Database:
         self._preexisting = self.path.is_file() and self.path.stat().st_size > 0
 
     def _sweep_interrupted_copies(self):
-        """Remove scratch copies an earlier process left when it was killed
-        in the middle of a backup or repair. A copy made since this process
-        started belongs to a live operation and stays, and so does every
-        finished backup (those never carry a scratch name)."""
-        for directory in (self.path.parent, self.path.parent / "backups"):
+        """Remove only old, private scratch files left by a dead app process.
+
+        The library lease is held before initialization, so no second app
+        process can own these paths. Names, path components, file type,
+        link count and age must all match; unknown, linked and current-process
+        files are preserved.
+        """
+        targets = (
+            (self.path.parent, _RAW_SCRATCH_NAME),
+            (self.path.parent / "backups", _RAW_SCRATCH_NAME),
+            (self.path.parent / "backups" / "scheduled", _SCHEDULED_SCRATCH_NAME),
+        )
+        for directory, name_pattern in targets:
             try:
-                found = [p for p in directory.iterdir() if p.name.startswith(_SCRATCH_PREFIXES) and ".tmp" in p.name]
+                chain = list(reversed(directory.parents)) + [directory]
+                safe = True
+                for component in chain:
+                    info = component.lstat()
+                    if (stat.S_ISLNK(info.st_mode)
+                            or getattr(info, "st_file_attributes", 0) & 0x400
+                            or not stat.S_ISDIR(info.st_mode)):
+                        safe = False
+                        break
+                if not safe:
+                    continue
+                found = [p for p in directory.iterdir() if name_pattern.fullmatch(p.name)]
             except OSError:
                 continue
             for path in found:
                 try:
                     info = path.lstat()
-                    if stat.S_ISREG(info.st_mode) and info.st_mtime < _PROCESS_START:
+                    if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                            and not (getattr(info, "st_file_attributes", 0) & 0x400)
+                            and info.st_mtime < _PROCESS_START):
                         path.unlink()
                 except OSError:
                     pass
@@ -480,7 +504,8 @@ class Database:
                         + f"\nINSERT INTO schema_migrations(version) VALUES ({version});\nCOMMIT;"
                     )
             except sqlite3.OperationalError as exc:
-                optional_search = migration.name == "025_episode_search.sql"
+                optional_search = migration.name in {
+                    "025_episode_search.sql", "035_show_search.sql"}
                 unavailable = any(text in str(exc).lower() for text in
                                   ("no such module: fts5", "no such tokenizer: trigram"))
                 if not optional_search or not unavailable:
@@ -499,7 +524,9 @@ class Database:
         # Opened on a runtime without the module, every episode write and
         # every search would fail, so refuse before any write.
         with self.connect() as connection:
-            if not connection.execute("SELECT 1 FROM sqlite_master WHERE name='episode_search'").fetchone():
+            if not connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name IN ('episode_search','show_search') "
+                    "AND type='table' LIMIT 1").fetchone():
                 return
             try:
                 connection.execute("CREATE VIRTUAL TABLE temp.fts5_probe USING fts5(x, tokenize='trigram')")
@@ -881,14 +908,15 @@ class Database:
         ).fetchall()
         if not any(name == "schema_migrations" for name, _sql in tables):
             raise DatabaseIntegrityError("The library's format record is missing; a backup is needed to recover safely.")
-        search_schema = next((sql for name, sql in tables if name == "episode_search"), None)
+        search_schemas = {name: sql for name, sql in tables
+                           if name in {"episode_search", "show_search"}}
         search_shadows = ({row[1] for row in source.execute("PRAGMA main.table_list")
-                           if row[2] == "shadow" and row[1].startswith("episode_search_")}
-                          if search_schema else set())
+                           if row[2] == "shadow" and row[1].startswith(("episode_search_", "show_search_"))}
+                          if search_schemas else set())
         for name, sql in tables:
             if name.startswith("sqlite_"):
                 continue  # statistics only; no table uses AUTOINCREMENT sequences
-            if search_schema and (name == "episode_search" or name in search_shadows):
+            if name in search_schemas or name in search_shadows:
                 continue  # derived virtual index + shadows are rebuilt, not salvaged
             destination.execute(sql)
             table = '"' + name.replace('"', '""') + '"'
@@ -914,10 +942,14 @@ class Database:
             raise DatabaseIntegrityError("The library's format record could not be recovered; a backup is needed.")
         for table, count in cls._drop_orphans(destination).items():
             lost[table] = (lost.get(table) or 0) + count
-        if search_schema:
-            destination.execute(search_schema)
-            destination.execute("INSERT INTO episode_search(rowid,title,description,show_title) "
-                                "SELECT e.id,e.title,e.description,s.title FROM episodes e JOIN shows s ON s.id=e.show_id")
+        for name, sql in search_schemas.items():
+            destination.execute(sql)
+            if name == "episode_search":
+                destination.execute("INSERT INTO episode_search(rowid,title,description,show_title) "
+                                    "SELECT e.id,e.title,e.description,s.title FROM episodes e "
+                                    "JOIN shows s ON s.id=e.show_id")
+            elif name == "show_search":
+                destination.execute("INSERT INTO show_search(rowid,title) SELECT id,title FROM shows")
         for (sql,) in source.execute(
             "SELECT sql FROM sqlite_master WHERE type IN ('index', 'trigger', 'view') AND sql NOT NULL"
         ).fetchall():
@@ -996,6 +1028,26 @@ class Database:
                             floors[kind] = max(floors.get(kind, 0), int(value))
             except (sqlite3.Error, ValueError, TypeError):
                 continue
+        # Scheduled ZIPs are the normal automatic snapshots. Trust only an
+        # app-named archive with a matching ownership marker, verified ZIP
+        # contents and a healthy SQLite snapshot; a filename alone is not a
+        # recovery source for never-reused IDs.
+        scheduled = self.path.parent / "backups" / "scheduled"
+        try:
+            archives = sorted(
+                (item for item in scheduled.iterdir()
+                 if re.fullmatch(r"library-auto-\d{8}-\d{6}-\d{6}\.zip", item.name)),
+                key=lambda item: (item.lstat().st_mtime_ns, item.name), reverse=True)
+        except OSError:
+            archives = []
+        if archives:
+            from bs_podcasts.services.backups import BackupService
+            for archive in archives[:3]:
+                try:
+                    for kind, value in BackupService.sequence_floors(archive).items():
+                        floors[kind] = max(floors.get(kind, 0), value)
+                except Exception:
+                    continue
         return floors
 
     @staticmethod

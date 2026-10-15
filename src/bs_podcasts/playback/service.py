@@ -3,11 +3,15 @@
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from threading import Event, RLock, Thread, Timer
+from threading import Event, Lock, RLock, Thread, Timer, current_thread
+import json
 import logging
 import math
+import os
+import stat
 import time
 
+from ..data.files import atomic_write
 from ..data.repositories import LibraryRepository
 from ..urlguard import UnsafeUrl, ensure_media_source, ensure_web_url, ensure_fetchable, is_web_url
 from ..privacy import redact
@@ -139,6 +143,7 @@ class PlaybackService:
         # this run (restored, still opening, or failed to open). Saving its
         # position would mark it played and not new without any listening.
         self._unstarted_id = None
+        self._episode_external_id = ""
         self._retiring_shows = set()
         self._dead = False
         # Resume target the file-loaded seek has not been seen to reach yet
@@ -154,6 +159,43 @@ class PlaybackService:
         self.snapshot = replace(self.snapshot, volume=max(0.0, min(100.0, saved_volume)))
         self._meter = ListeningMeter(self._persistence, lambda: self.listening, self._silence_saved)
         self._review = ReviewSettings()
+        self._position_recovery_path = Path(self.repository.database.path).with_name(
+            "playback-position-recovery.json"
+        )
+        self._position_recovery_lock = Lock()
+        self._position_recovery_records = self._read_position_recovery()
+        self._position_recovery_pending_at_start = set()
+        pending_records = []
+        if self._position_recovery_records:
+            self._last_write_stamp = max(
+                self._last_write_stamp,
+                max(record["stamp"] for record in self._position_recovery_records),
+            )
+            for record in self._position_recovery_records:
+                key = self._recovery_key(record)
+                try:
+                    pending = self.repository.final_position_recovery_pending(
+                        record["episode_id"], record["show_id"], record["external_id"], record["stamp"]
+                    )
+                except Exception as exc:
+                    logger.warning("Could not check a final playback recovery record: %s", redact(exc))
+                    pending = True
+                if pending:
+                    self._position_recovery_pending_at_start.add(key)
+                    pending_records.append(record)
+        self._position_recovery_restore_record = max(
+            pending_records, key=lambda record: record["stamp"], default=None
+        )
+        self._position_recovery_thread = None
+        self._final_position_thread = None
+        if self._position_recovery_records:
+            self._position_recovery_thread = Thread(
+                target=self._replay_position_recoveries,
+                args=(tuple(self._position_recovery_records),),
+                name="playback-position-recovery",
+                daemon=True,
+            )
+            self._position_recovery_thread.start()
         self._restore_snapshot()
 
     def subscribe(self, listener):
@@ -175,9 +217,14 @@ class PlaybackService:
 
     def join_persistence(self, grace_seconds=3.0):
         deadline = self._now() + max(0.0, grace_seconds)
-        busy = self._persistence.join(grace_seconds)
+        busy = self._persistence.join(max(0.0, deadline - self._now()))
         if self._event_commands is not None:
             busy += self._event_commands.join(max(0.0, deadline - self._now()))
+        for worker in (self._final_position_thread, self._position_recovery_thread):
+            if worker is None or worker is current_thread():
+                continue
+            worker.join(max(0.0, deadline - self._now()))
+            busy += int(worker.is_alive())
         return busy
 
     def unsubscribe(self, listener):
@@ -191,6 +238,8 @@ class PlaybackService:
     # Longest the exit waits on the final position save. The app's exit
     # deadline (3 s) covers this, so the save stays a small share of it.
     SHUTDOWN_SAVE_SECONDS = 1.0
+    MAX_POSITION_RECOVERY_RECORDS = 32
+    MAX_POSITION_RECOVERY_BYTES = 512 * 1024
     RESOLVE_TIMEOUT = 55.0  # HTTP resolver has its own 45-second total budget
     WEB_LOAD_TIMEOUT = 55.0  # the stream's own open (connect, headers, first bytes) can take about 50 s
     # Download-first wait: no download result may ever arrive (it was paused,
@@ -387,6 +436,7 @@ class PlaybackService:
                 artwork_path=episode.artwork_path,
                 **kept,
             )
+            self._episode_external_id = episode.external_id
             self._set_current_playback(episode.id, PlaybackState.LOADING.value)
             self._last_saved_position = start
             try:
@@ -679,10 +729,18 @@ class PlaybackService:
         # queued under the lock and awaited without it, so a stalled save does
         # not hold up native events or other commands.
         with self._lock:
+            stop_episode_id = self.snapshot.episode_id
+            stop_generation = self._load_generation
             self._persist_position(force=True)
             self._flush_listening()
         self._flush_persistence()
         with self._lock:
+            # Storage is flushed without holding the lock. If another Play
+            # committed a new session while Stop waited, leave that session
+            # alone.
+            if (self.snapshot.episode_id != stop_episode_id
+                    or self._load_generation != stop_generation):
+                return False
             # Nothing below waits on storage, so the stop is applied whole.
             self._resolve_cancel.set()
             self.intent_revision += 1
@@ -691,7 +749,11 @@ class PlaybackService:
             self._cancel_load_watchdog()
             self._resolving = False
             self._load_autoplay = False
+            # Stop clears the snapshot below. Invalidate the timer at the
+            # same time so a later Next cannot inherit an invisible deadline.
+            self.cancel_sleep_timer()
             if not self.snapshot.source:
+                self._episode_external_id = ""
                 return
             logger.info("Playback stop requested: state=%s position=%.1fs",
                         self.snapshot.state.value, self.snapshot.position)
@@ -709,6 +771,7 @@ class PlaybackService:
             self._close_silence_window()
             self._review.reset()
             self.snapshot = PlaybackSnapshot(speed=self.snapshot.speed, volume=self.snapshot.volume)
+            self._episode_external_id = ""
             if episode_id is not None:
                 self._set_current_playback(None, PlaybackState.IDLE.value)
             self._emit()
@@ -1073,9 +1136,6 @@ class PlaybackService:
         with self._lock:
             if self._dead:
                 return
-            final = self._position_due(force=True)
-            if final is not None:
-                self._submit_progress(final[0], position=(final[1], final[2], False))
             unfinished, self._unfinished_end = self._unfinished_end, None
             self._close_silence_window()
             self._meter.flush_silence()
@@ -1087,6 +1147,11 @@ class PlaybackService:
                 self._set_current_playback(
                     self.snapshot.episode_id, PlaybackState.SHUTDOWN.value
                 )
+            # The recovery position must sort after the shutdown playback-state
+            # write so replay cannot be mistaken for an older session.
+            final = self._position_due(force=True)
+            if final is not None:
+                self._submit_progress(final[0], position=(final[1], final[2], False))
             self.snapshot = replace(self.snapshot, state=PlaybackState.SHUTDOWN)
         if final is not None:
             self._save_final_position(*final)
@@ -1793,34 +1858,203 @@ class PlaybackService:
             return None
         episode_id, position = self.snapshot.episode_id, self.snapshot.position
         self._last_saved_position = position
-        return episode_id, position, self._write_stamp()
+        return (episode_id, position, self._write_stamp(), self.snapshot.show_id,
+                self._episode_external_id)
 
-    def _save_final_position(self, episode_id, position, stamp):
+    def _read_position_recovery(self):
+        path = self._position_recovery_path
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                                 | getattr(os, "O_NONBLOCK", 0))
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            logger.warning("Final playback position recovery could not be read: %s", redact(exc))
+            return []
+        try:
+            info = os.fstat(descriptor)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_size > self.MAX_POSITION_RECOVERY_BYTES):
+                raise ValueError("recovery record is not a small private regular file")
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = -1
+                value = json.loads(handle.read(self.MAX_POSITION_RECOVERY_BYTES + 1))
+        except Exception as exc:
+            logger.warning("Final playback position recovery record was ignored: %s", redact(exc))
+            return []
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        try:
+            if isinstance(value, dict) and value.get("version") == 1:
+                raw_records = [value]  # One-record file written by the previous version.
+            elif (isinstance(value, dict) and value.get("version") == 2
+                  and isinstance(value.get("records"), list)
+                  and len(value["records"]) <= self.MAX_POSITION_RECOVERY_RECORDS):
+                raw_records = value["records"]
+            else:
+                raise ValueError("invalid recovery record collection")
+            records = []
+            for item in raw_records:
+                if (not isinstance(item, dict)
+                        or type(item.get("episode_id")) is not int or item["episode_id"] <= 0
+                        or type(item.get("show_id")) is not int or item["show_id"] <= 0
+                        or not isinstance(item.get("external_id"), str)
+                        or not item["external_id"] or len(item["external_id"]) > 2048):
+                    raise ValueError("invalid episode identity")
+                position, stamp = float(item["position"]), float(item["stamp"])
+                last_played = float(item.get("last_played", stamp))
+                if (not math.isfinite(position) or position < 0 or not math.isfinite(stamp) or stamp <= 0
+                        or not math.isfinite(last_played) or last_played <= 0):
+                    raise ValueError("invalid position or write stamp")
+                records.append({"version": 1, "episode_id": item["episode_id"],
+                                "show_id": item["show_id"], "external_id": item["external_id"],
+                                "position": position, "stamp": stamp, "last_played": last_played})
+            deduplicated = {}
+            for record in records:
+                key = self._recovery_key(record)
+                if key not in deduplicated or record["stamp"] > deduplicated[key]["stamp"]:
+                    deduplicated[key] = record
+            return list(deduplicated.values())
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            logger.warning("Final playback position recovery record was ignored: %s", redact(exc))
+            return []
+
+    @staticmethod
+    def _recovery_key(record):
+        return record["episode_id"], record["show_id"], record["external_id"]
+
+    def _write_position_recovery(self, record):
+        """Merge one bounded checkpoint without replacing unresolved episodes."""
+        with self._position_recovery_lock:
+            records = self._read_position_recovery()
+            key = self._recovery_key(record)
+            matching = next((index for index, current in enumerate(records)
+                             if self._recovery_key(current) == key), None)
+            if matching is None:
+                if len(records) >= self.MAX_POSITION_RECOVERY_RECORDS:
+                    logger.warning("Final playback recovery store is full; keeping existing checkpoints and trying a direct save.")
+                    return False
+                records.append(dict(record))
+            elif records[matching]["stamp"] >= record["stamp"]:
+                return False
+            else:
+                records[matching] = dict(record)
+            payload = json.dumps({"version": 2, "records": records}, ensure_ascii=True,
+                                 separators=(",", ":")).encode("utf-8")
+            if len(payload) > self.MAX_POSITION_RECOVERY_BYTES:
+                logger.warning("Final playback recovery store is full; trying a direct save.")
+                return False
+            atomic_write(self._position_recovery_path, payload)
+            self._position_recovery_records = records
+            return True
+
+    def _clear_position_recovery(self, record):
+        with self._position_recovery_lock:
+            records = self._read_position_recovery()
+            key = self._recovery_key(record)
+            remaining = [current for current in records
+                         if not (self._recovery_key(current) == key
+                                 and current["stamp"] == record["stamp"])]
+            if len(remaining) == len(records):
+                return
+            try:
+                if remaining:
+                    payload = json.dumps({"version": 2, "records": remaining}, ensure_ascii=True,
+                                         separators=(",", ":")).encode("utf-8")
+                    atomic_write(self._position_recovery_path, payload)
+                else:
+                    self._position_recovery_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning("Final playback recovery record could not be cleared: %s", redact(exc))
+            else:
+                self._position_recovery_records = remaining
+
+    def _replay_position_recoveries(self, records):
+        deadline = time.monotonic() + 3.0
+        for record in sorted(records, key=lambda item: item["stamp"]):
+            while True:
+                try:
+                    result = self.repository.recover_final_position(
+                        record["episode_id"], record["show_id"], record["external_id"],
+                        record["position"], record["stamp"], record["last_played"],
+                    )
+                except Exception as exc:
+                    logger.warning("Final playback position recovery will retry next launch: %s", redact(exc))
+                    break
+                if result is not False:
+                    self._clear_position_recovery(record)
+                    break
+                if time.monotonic() >= deadline:
+                    logger.warning("Final playback position recovery is still waiting for library storage.")
+                    return
+                time.sleep(0.05)
+
+    def _recovery_position_for(self, episode):
+        record = self._position_recovery_restore_record
+        if (record is None or record["episode_id"] != episode.id
+                or record["show_id"] != episode.show_id
+                or record["external_id"] != episode.external_id):
+            return episode.position_seconds
+        if self._recovery_key(record) in self._position_recovery_pending_at_start:
+            return record["position"]
+        return episode.position_seconds
+
+    def _save_final_position(self, episode_id, position, stamp, show_id, external_id):
         """Write the last position during exit, waiting at most SHUTDOWN_SAVE_SECONDS.
 
-        The writer queue cannot carry this save alone: a save that library
-        maintenance refuses waits a second before its retry, and the exit join
-        may end before that. The write runs on a helper thread that retries a
-        refused write until the budget ends. A write still blocked when the
-        budget ends finishes on its own; the queued copy stays with the writer."""
+        A small atomic record survives if maintenance outlasts the bounded
+        write. The next service instance replays it on a worker before restore."""
+        recovery = {
+            "version": 1,
+            "episode_id": int(episode_id),
+            "show_id": int(show_id or 0),
+            "external_id": str(external_id or ""),
+            "position": float(position),
+            "stamp": float(stamp),
+            "last_played": time.time(),
+        }
+        can_recover = (recovery["show_id"] > 0 and bool(recovery["external_id"])
+                       and len(recovery["external_id"]) <= 2048)
+        if not can_recover:
+            logger.warning("Final playback recovery record is unavailable for this episode; trying the direct save.")
         deadline = self._now() + self.SHUTDOWN_SAVE_SECONDS
 
         def write():
+            stored = False
+            if can_recover:
+                try:
+                    stored = self._write_position_recovery(recovery)
+                except Exception as exc:
+                    logger.warning("Final playback position recovery record was not saved: %s", redact(exc))
             while True:
                 try:
-                    saved = self.repository.update_position(episode_id, position, stamp=stamp)
+                    if stored:
+                        saved = self.repository.recover_final_position(
+                            episode_id, recovery["show_id"], recovery["external_id"], position, stamp,
+                            recovery["last_played"],
+                        )
+                    else:
+                        saved = self.repository.update_position(episode_id, position, stamp=stamp)
                 except Exception as exc:
                     logger.warning("Final playback position was not saved: %s", redact(exc))
                     return
-                if saved is not False or self._now() >= deadline:
+                if saved is not False:
+                    if stored:
+                        self._clear_position_recovery(recovery)
+                    return
+                if self._now() >= deadline:
                     return
                 time.sleep(0.05)
 
         worker = Thread(target=write, name="playback-final-save", daemon=True)
+        self._final_position_thread = worker
         worker.start()
         worker.join(max(0.0, deadline - self._now()))
         if worker.is_alive():
-            logger.warning("Final playback position is still being saved after %.1f s; the queued copy stays with the writer.",
+            logger.warning("Final playback position remains in its recovery record after %.1f s.",
                            self.SHUTDOWN_SAVE_SECONDS)
 
     def _confirm_start(self, position: float):
@@ -1884,6 +2118,11 @@ class PlaybackService:
             self._sleep.fired()
             try:
                 self.pause()
+                if self.snapshot.state == PlaybackState.PLAYING:
+                    # The native pause event is queued back to this service.
+                    # Publish the accepted sleep pause together with the
+                    # expiry count so the UI can show its one-shot notice.
+                    self.snapshot = replace(self.snapshot, state=PlaybackState.PAUSED)
             except Exception as exc:
                 # The engine refused the pause, so audio may still be running:
                 # keep the cause in the log and tell the listener on the bar.
@@ -1915,12 +2154,16 @@ class PlaybackService:
 
     def _restore_snapshot(self):
         episode_id, _state = self.repository.current_playback()
+        record = self._position_recovery_restore_record
+        if record is not None and self._recovery_key(record) in self._position_recovery_pending_at_start:
+            episode_id = record["episode_id"]
         self._raise_write_floor(episode_id)
         if episode_id is None:
             return
         episode = self.repository.get_episode(episode_id)
         if episode is None:
             return
+        self._episode_external_id = episode.external_id
         show = self.repository.get_show(episode.show_id)
         self._review.trim = show.trim_level if show else "off"
         self.snapshot = PlaybackSnapshot(
@@ -1930,7 +2173,7 @@ class PlaybackService:
             title=episode.title,
             show_title=episode.show_title,
             source=episode.downloaded_path or episode.media_url,
-            position=episode.position_seconds,
+            position=self._recovery_position_for(episode),
             duration=float(episode.duration_seconds),
             speed=show.playback_speed if show else 1.0,
             volume=self.snapshot.volume,

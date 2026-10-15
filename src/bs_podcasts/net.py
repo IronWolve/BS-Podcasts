@@ -129,6 +129,10 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
+# Requests consumes each redirect body before following Location. Media callers
+# can opt out of the final-response cap, but intermediate bodies stay small.
+MAX_REDIRECT_BODY_BYTES = 64 * 1024
+
 
 def _redirect_guard(response, *args, **kwargs):
     """Re-check every hop before it is followed.
@@ -283,16 +287,32 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
             return response
         state.remaining()
         original = response.iter_content
+        redirect = bool(response.is_redirect)
+        maximum = max_response_bytes
+        if redirect:
+            maximum = MAX_REDIRECT_BODY_BYTES if maximum is None else min(maximum, MAX_REDIRECT_BODY_BYTES)
         def chunks(chunk_size=1, decode_unicode=False):
             if response._content is not False:
                 yield from original(chunk_size, decode_unicode=decode_unicode)
                 return
             try:
-                yield from bounded_chunks(response, original, state, max_response_bytes, chunk_size, decode_unicode)
+                yield from bounded_chunks(response, original, state, maximum, chunk_size, decode_unicode)
             except ResponseTooLarge as exc:
+                abort_response(response)
                 raise RequestException(str(exc), response=response) from exc
             except NetworkDeadline as exc:
+                abort_response(response)
                 raise Timeout(str(exc), response=response) from exc
+            except Exception as exc:
+                if not redirect:
+                    raise
+                # requests.resolve_redirects catches these and falls back to
+                # raw.read(), which would bypass this iterator and its cap.
+                from requests.exceptions import ChunkedEncodingError, ContentDecodingError
+                if isinstance(exc, (ChunkedEncodingError, ContentDecodingError, RuntimeError)):
+                    abort_response(response)
+                    raise RequestException("Redirect body could not be read safely.", response=response) from exc
+                raise
         response.iter_content = chunks
         return response
 

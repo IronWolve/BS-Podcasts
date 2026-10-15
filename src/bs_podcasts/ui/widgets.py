@@ -193,6 +193,36 @@ def _set_document_content(editor, text, *, rich=False):
     return True
 
 
+class _DeferredTranscript(QTextEdit):
+    """Keep hidden transcripts as data; lay out text only when revealed."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._render_pending = None
+
+    def defer_render(self, render):
+        self._render_pending = render
+        if self.isVisible():
+            self._render()
+
+    def _render(self):
+        render, self._render_pending = self._render_pending, None
+        if render is not None:
+            render()
+
+    def showEvent(self, event):
+        self._render()
+        super().showEvent(event)
+
+    def clear(self):
+        self._render_pending = None
+        super().clear()
+
+    def setPlainText(self, text):
+        self._render_pending = None
+        super().setPlainText(text)
+
+
 def _selectable_labels(*labels):
     for label in labels:
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
@@ -2551,7 +2581,7 @@ class ContextPanel(QFrame):
         transcript_layout.setSpacing(SPACE["sm"])
         self.transcript_search = SearchField("Search transcript")
         self.transcript_search.returnPressed.connect(self._search_transcript)
-        self.transcript_text = QTextEdit()
+        self.transcript_text = _DeferredTranscript()
         self.transcript_text.setReadOnly(True)
         self.transcript_text.setAccessibleName("Transcript")
         self.transcript_text.setFrameShape(QFrame.Shape.NoFrame)
@@ -2666,7 +2696,11 @@ class ContextPanel(QFrame):
         self.tabs.setTabToolTip(1, "Chapters\n" + self._tab_counts[1])
 
     def set_transcript(self, segments, query=""):
-        segments = list(segments)
+        segments = tuple(segments)
+        self._transcript_has_segments = bool(segments)
+        self.transcript_text.defer_render(lambda: self._render_transcript(segments, query))
+
+    def _render_transcript(self, segments, query):
         timed = bool(segments) and all(segment.start_seconds is not None for segment in segments)
         if timed:
             body = "\n\n".join(
@@ -2687,7 +2721,7 @@ class ContextPanel(QFrame):
             placeholder = QListWidgetItem(text)
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.chapter_list.addItem(placeholder)
-        if self.transcript_text.toPlainText() in ("", "No transcript provided"):
+        if not getattr(self, '_transcript_has_segments', False):
             self.transcript_text.setPlainText(text)
 
     def set_bookmarks(self, bookmarks):
@@ -3313,7 +3347,7 @@ class NowPlayingView(_ReturnsFocus, QFrame):
         self.chapter_list.itemClicked.connect(self._seek_item)
         self.chapter_list.itemActivated.connect(self._seek_item)
         self.tabs.addTab(self.chapter_list, "Chapters")
-        self.transcript = QTextEdit()
+        self.transcript = _DeferredTranscript()
         self.transcript.setReadOnly(True)
         self.transcript.setAccessibleName("Transcript")
         self.transcript.setFrameShape(QFrame.Shape.NoFrame)
@@ -3475,7 +3509,8 @@ class NowPlayingView(_ReturnsFocus, QFrame):
         self._segments = list(segments)
         if self._segments and all(segment.start_seconds is not None for segment in self._segments):
             self._segments.sort(key=lambda segment: segment.start_seconds)
-        self._fill_transcript(self._segments)
+        self._transcript_timed = False
+        self.transcript.defer_render(self._render_transcript)
         self.bookmark_list.clear()
         for bookmark in bookmarks:
             item = QListWidgetItem(f"{PlayerBar._time(bookmark.position_seconds)}   {bookmark.title or 'Bookmark'}")
@@ -3556,6 +3591,11 @@ class NowPlayingView(_ReturnsFocus, QFrame):
         self._ignore_transcript_scroll = False
         self._transcript_user_scrolled = False
         self.follow_transcript_button.hide()
+        self._current_segment = -1
+        self.set_position(getattr(self, '_last_position', 0), getattr(self, '_last_duration', 0))
+
+    def _render_transcript(self):
+        self._fill_transcript(self._segments)
         self._current_segment = -1
         self.set_position(getattr(self, '_last_position', 0), getattr(self, '_last_duration', 0))
 

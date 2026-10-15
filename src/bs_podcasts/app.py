@@ -760,6 +760,25 @@ def _join_playback_shutdown(commands, playback, deadline) -> int:
     return busy + playback.join_persistence(max(0.0, deadline - time.monotonic()))
 
 
+def _cancel_backup_worker(window, grace_seconds: float = 0.5, *, warn_if_busy: bool = True) -> int:
+    """Give the cancellable backup a short chance to leave library storage."""
+    if window is None:
+        return 0
+    cancellation = getattr(window, "_backup_cancel", None)
+    worker = getattr(window, "_backup_thread", None)
+    if cancellation is not None:
+        cancellation.set()
+    if worker is None or worker is threading.current_thread():
+        return 0
+    worker.join(max(0.0, grace_seconds))
+    busy = int(worker.is_alive())
+    if busy and warn_if_busy:
+        logging.getLogger("bs_podcasts").warning(
+            "Library backup is still stopping after %.1f s; shutdown will continue.", grace_seconds
+        )
+    return busy
+
+
 def _finalize_unclosed(commands, playback, grace_seconds: float = 2.0) -> int:
     """Finish playback and kept commands when the quit bypassed the window.
 
@@ -1097,6 +1116,9 @@ class _WindowController:
         app.aboutToQuit.connect(lambda: _close_local_server(server))
         app.aboutToQuit.connect(lambda: shutdown_exports(0.2))
         app.aboutToQuit.connect(lambda: self.window._save_layout() if self.window is not None else None)
+        app.aboutToQuit.connect(
+            lambda: _cancel_backup_worker(self.window, grace_seconds=0.0, warn_if_busy=False)
+        )
         # window.tray and window.mpris are None until desktop integration ran.
         # Hiding the tray here removes the icon before the drain, and before a
         # forced exit that skips the toolkit's own cleanup.
@@ -1302,6 +1324,10 @@ class _WindowController:
         busy += shutdown_exports(max(0.0, deadline - time.monotonic()))
         from .ui.pixmaps import shutdown_decodes
         busy += shutdown_decodes(max(0.0, deadline - time.monotonic()))
+        backup_thread = getattr(self.window, "_backup_thread", None) if self.window is not None else None
+        if backup_thread is not None and backup_thread is not threading.current_thread():
+            backup_thread.join(max(0.0, deadline - time.monotonic()))
+            busy += int(backup_thread.is_alive())
         if busy:
             self.logger.warning("Exiting with %d background job(s) still running.", busy)
             if not _close_busy_database(self.database, grace_seconds=0.1):

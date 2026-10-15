@@ -19,6 +19,7 @@ done
 # descriptor across exec so deployed modules cannot race publication.
 exec "$BS_RUNTIME/.venv/bin/python" -I -B -c '
 import fcntl, os, stat, sys
+import hashlib, json
 project, runner = sys.argv[1:3]
 os.makedirs(project+"/.cache", mode=0o700, exist_ok=True)
 fd = os.open(project+"/.cache/runtime.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
@@ -35,6 +36,13 @@ except BlockingIOError:
     from PySide6.QtNetwork import QLocalSocket
     sys.path.insert(0, os.path.dirname(runner)+"/app")
     from bs_podcasts.config import APP_ID
+    from bs_podcasts.config import data_dir as application_data_dir
+    incoming = [os.path.abspath(path) for path in sys.argv[3:]]
+    profile_path = os.path.normcase(os.path.abspath(str(application_data_dir() / "library.db")))
+    profile = hashlib.sha256(os.fsencode(profile_path)).hexdigest()
+    payload = (json.dumps({"kind": "file-arguments", "profile": profile, "paths": incoming},
+                          ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+               if incoming else b"raise " + profile.encode("ascii") + b"\n")
     app = QCoreApplication([])
     def endpoints():
         # The application names its endpoint (user and library), so the name
@@ -57,9 +65,13 @@ except BlockingIOError:
             socket = QLocalSocket()
             socket.connectToServer(name)
             if socket.waitForConnected(min(1000, left())):
-                socket.write(b"raise")
+                socket.write(payload)
                 socket.waitForBytesWritten(min(1000, left()))
-                if socket.waitForReadyRead(min(1500, left())) and socket.readAll().data().startswith(b"ok"):
+                reply = b""
+                if socket.waitForReadyRead(min(1500, left())):
+                    reply = socket.readAll().data()
+                accepted = reply.startswith(b"files-queued") if incoming else reply.startswith(b"ok")
+                if accepted:
                     return True
             socket.abort()
         return False

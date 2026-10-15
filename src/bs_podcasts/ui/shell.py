@@ -2132,6 +2132,7 @@ class MainWindow(QMainWindow):
         self.episode_page.header.set_title('Search results')
         with quiet_signals(self.episode_page.header.search):
             self.episode_page.header.search.setText(query)
+        self.episode_page.header._apply_search_visibility()
         self.episode_page.set_filter('All')
         if self.episode_page.header.action:
             self.episode_page.header.action.setToolTip('Refresh these search results')
@@ -2845,6 +2846,7 @@ class MainWindow(QMainWindow):
         self._backup_status_dirty = False
         self._backup_last_status = {}
         self._backup_manual = False
+        self._backup_requested = False
         self._backup_delete_confirming = False
         self._backup_poll = QTimer(self)
         self._backup_poll.setInterval(100)
@@ -2875,6 +2877,10 @@ class MainWindow(QMainWindow):
         if self._backup_thread is not None:
             if status_only:
                 self._backup_status_dirty = True
+            elif force and operation == 'backup' and self._backup_status_only:
+                self._backup_requested = True
+                self.settings_page.set_backup_status(self._backup_last_status, running=True,
+                                                   message='Backup queued after the storage check…')
             return
         if not force and not status_only:
             if self.library.setting('background.paused', '0') == '1':
@@ -2917,6 +2923,7 @@ class MainWindow(QMainWindow):
         self._backup_poll.start()
 
     def _cancel_backup(self):
+        self._backup_requested = False
         if getattr(self, '_backup_thread', None) is None:
             return
         self._backup_cancel.set()
@@ -2953,6 +2960,9 @@ class MainWindow(QMainWindow):
             self._refresh_storage_settings()
         if self._backup_status_dirty:
             self._backup_status_timer.start()
+        if self._backup_requested:
+            self._backup_requested = False
+            self._start_backup(force=True)
 
     def _finish_backup_deletion(self, result):
         self._backup_last_status = result.get('status', self._backup_last_status)
@@ -3298,7 +3308,11 @@ class MainWindow(QMainWindow):
         if self._podcast_scope:
             self._load_podcast_page()
             return
-        if self._preview_episodes_url or self.library is None:
+        if self._preview_episodes_url:
+            if self.episode_page.podcast_paging():
+                self._request_preview_page(append=True)
+            return
+        if self.library is None:
             return
         if self._catalog_query:
             if self._catalog_timer.isActive():
@@ -3749,6 +3763,14 @@ class MainWindow(QMainWindow):
             if shrunk:
                 self._history_generation += 1
         with self._page_guard(self.episode_page, "episodes"):
+            detail_skipped = (data.get('detail_scope') == self._podcast_scope and self._podcast_scope
+                              and (data.get('detail_page') or data.get('global_page'))
+                              and (self._podcast_loading or data.get('detail_revision') != self._episode_scope_revision))
+            if detail_skipped:
+                if self._podcast_loading:
+                    self._detail_reload_pending = True
+                else:
+                    self._request_reload()
             if self._catalog_query:
                 if data.get('catalog_query') == self._catalog_query and data.get('catalog_limit') == self._catalog_limit:
                     self._catalog_search_items = data['catalog_items']
@@ -4591,7 +4613,12 @@ class MainWindow(QMainWindow):
         self._podcast_chrome()
 
     def _podcast_view_changed(self):
-        if self.library is None or self._preview_episodes_url or self._catalog_query or not self.episode_page.podcast_paging():
+        if self._preview_episodes_url and self.episode_page.podcast_paging():
+            scope = self.episode_page._podcast_view_scope()
+            if scope != getattr(self, '_preview_page_requested_scope', None):
+                self._request_preview_page(reset=True, anchor=self.episode_page._scroll_anchor())
+            return
+        if self.library is None or self._catalog_query or not self.episode_page.podcast_paging():
             return
         scope = self._podcast_controls()
         changed = scope != self._podcast_scope
@@ -4628,6 +4655,9 @@ class MainWindow(QMainWindow):
                     or scope != self._podcast_controls() or self._preview_episodes_url):
                 return
             self._podcast_loading = False
+            if getattr(self, '_detail_reload_pending', False):
+                self._detail_reload_pending = False
+                self._request_reload()
             self._episode_scope_revision += 1  # Retire library snapshots taken during this read.
             show, result = payload
             if scope[0] and show is None:
@@ -4676,6 +4706,9 @@ class MainWindow(QMainWindow):
         self._run_read(work, apply, 'episodes')
 
     def _load_podcast_page(self, *, previous=False):
+        if self._preview_episodes_url and self.episode_page.podcast_paging():
+            self._request_preview_page(prepend=previous, append=not previous)
+            return
         if not self._podcast_scope or self._podcast_loading or self._podcast_controls() != self._podcast_scope:
             return
         offset, _limit, _anchor = self._podcast_window
@@ -4777,12 +4810,9 @@ class MainWindow(QMainWindow):
         self._podcast_total = self._podcast_progress_total = 0
         try:
             offset = max(0, min(int(saved.get('podcast_offset', 0)), 2**31 - 1))
-            limit = max(PODCAST_PAGE_SIZE, min(int(saved.get('podcast_limit', PODCAST_PAGE_SIZE)),
-                                             max(PODCAST_PAGE_SIZE, podcast.episode_count)))
-            if self._restoring_view:
-                limit = PODCAST_PAGE_SIZE
         except (ValueError, TypeError, OverflowError):
-            offset, limit = 0, PODCAST_PAGE_SIZE
+            offset = 0
+        limit = PODCAST_PAGE_SIZE
         self._podcast_window = (offset, limit, 0)
         def finished():
             self._finish_view_restore()
@@ -5036,10 +5066,10 @@ class MainWindow(QMainWindow):
         copy.addSeparator()
         copy.addAction(
             "All episode information",
-            lambda: self._run_read(
-                lambda: episode_information_text(episode, show, self._format_bytes),
+            lambda: self._with_full_notes(episode, lambda full: self._run_read(
+                lambda: episode_information_text(full, show, self._format_bytes),
                 lambda text: (QApplication.clipboard().setText(text), self._notify("Episode information copied")),
-                "copy-episode-information", coalesce=False),
+                "copy-episode-information", coalesce=False)),
         )
 
     def _create_episode_menu(self, episode):
@@ -5879,11 +5909,12 @@ class MainWindow(QMainWindow):
             self._run_command(lambda: self.listening.rename_bookmark(item.bookmark_id, value), apply)
 
     def _remove_history(self, episode_ids):
-        """Take rows off History in one ordered command, with Undo.
+        """Clear selected History timestamps in one bulk command, with Undo.
 
-        Only the last-played time is cleared. Undo uses the played-state
-        snapshot contract with every other field unchanged, so it puts the
-        time back only on rows nothing has played since."""
+        The repository snapshots and clears the selected rows in one
+        transaction. Undo restores timestamps only while each row still has
+        the state written by this operation.
+        """
         library = self.library
         ids = list(dict.fromkeys(episode_id for episode_id in episode_ids if episode_id))
         count = len(ids)
@@ -5894,27 +5925,11 @@ class MainWindow(QMainWindow):
         repository = library.repository
 
         def work():
-            stamps = {}
-            failure = None
             try:
-                for episode_id in ids:
-                    episode = repository.get_episode(episode_id)
-                    if episode is not None and episode.last_played is not None:
-                        stamps[episode_id] = episode.last_played
-                        repository.clear_history(episode_id)
+                return repository.clear_history_many_with_undo(ids), None
             except Exception as exc:
-                # Each clear commits on its own: keep the rows already
-                # cleared, so they are reloaded and can be undone.
-                logging.getLogger("bs_podcasts").exception("Removing episodes from History stopped early")
-                failure = exc
-            changes = []
-            for episode_id, last_played in stamps.items():
-                episode = repository.get_episode(episode_id)
-                if episode is None or episode.last_played is not None:
-                    continue
-                state = (episode.played, episode.is_new, episode.position_seconds)
-                changes.append(((episode.id, episode.show_id, episode.external_id, *state, last_played), (*state, None)))
-            return changes, failure
+                logging.getLogger("bs_podcasts").exception("Removing episodes from History failed")
+                return [], exc
 
         def apply(result):
             changes, failure = result
@@ -5926,15 +5941,13 @@ class MainWindow(QMainWindow):
 
             if failure is not None:
                 reason = str(failure) or type(failure).__name__
-                message = (f"Removed {removed} episode{'s' if removed != 1 else ''} from History, then an error stopped the rest: {reason}"
-                           if removed else f"Could not remove from History: {reason}")
-                self._notify(message, "error", "Undo" if changes else "", undo if changes else None)
+                self._notify(f"Could not remove from History: {reason}", "error")
                 return
             if not changes:
                 return
             self._notify(f"Removed {removed} episode{'s' if removed != 1 else ''} from History", "success", "Undo", undo)
 
-        self._run_command(work, apply)
+        self._run_command(work, apply, bulk=True)
 
     def _clear_history(self):
         if self.library is None:
@@ -6444,7 +6457,7 @@ class MainWindow(QMainWindow):
             self.context.queue_view.viewport().update()
 
     def _show_now_playing(self):
-        if not self._playing_episode_id or self.library is None:
+        if self.playback is None or not self.playback.snapshot.source:
             return
         if self.now_playing.isVisible():
             self._hide_now_playing()
@@ -6482,7 +6495,28 @@ class MainWindow(QMainWindow):
 
     def _populate_now_playing(self):
         snapshot = self.playback.snapshot if self.playback is not None else None
-        if snapshot is None or snapshot.episode_id is None:
+        if snapshot is None:
+            return
+        if snapshot.episode_id is None:
+            if snapshot.source:
+                feeds = tuple(self._previews.values())
+                shown = getattr(self, '_preview_page_feed', None)
+                if shown is not None and not any(feed is shown for feed in feeds):
+                    feeds = (*feeds, shown)
+                self.now_playing.set_episode(snapshot, 'Loading show notes…', (), (), (), '')
+                self.now_playing.set_stats([])
+                self.now_playing.set_position(float(snapshot.position), float(snapshot.duration))
+                def work():
+                    return next((episode for feed in feeds for episode in feed.episodes
+                                 if episode.media_url == snapshot.source), None)
+                def apply(episode):
+                    current = self.playback.snapshot if self.playback is not None else None
+                    if current is None or current.episode_id is not None or current.source != snapshot.source:
+                        return
+                    self.now_playing.set_episode(current, episode.description if episode else '', (), (), (), '')
+                    self.now_playing.set_stats(self._now_playing_stats(current, episode))
+                    self.now_playing.set_position(float(current.position), float(current.duration))
+                self._run_read(work, apply, 'now-playing-details')
             return
         library, listening = self.library, self.listening
         episode_id = snapshot.episode_id
@@ -6743,6 +6777,10 @@ class MainWindow(QMainWindow):
         change, so they are re-read on the progress flush's timer instead of
         reloading the library; changes within one tick share one read."""
         self._download_rows_pending.add(episode_id)
+        self._download_progress_revision += 1
+        if not hasattr(self, '_download_rows_revision'):
+            self._download_rows_revision = {}
+        self._download_rows_revision[episode_id] = self._download_progress_revision
         if not self._download_reload_timer.isActive():
             self._download_reload_timer.start()
 
@@ -6751,28 +6789,68 @@ class MainWindow(QMainWindow):
         if not ids or self.library is None or self.downloads is None:
             return
         repository, downloads = self.library.repository, self.downloads
+        revision = self._download_progress_revision
+        versions = {episode_id: getattr(self, '_download_rows_revision', {}).get(episode_id, 0) for episode_id in ids}
 
         def work():
             records = list(downloads.records(active_only=True))
             episodes = repository.episodes_by_ids(ids)
             rows = self._ui_episodes(list(episodes.values()), records)
-            return {row.episode_id: row for row in rows}
+            changed = {episode_id: downloads.record_for(episode_id) for episode_id in ids}
+            active = sum(record.state.value in {'queued', 'downloading', 'paused'} for record in records)
+            return {row.episode_id: row for row in rows}, changed, active
 
         # Ids stay pending until the read lands: a newer read replaces one
         # still waiting, and it carries every id the older one had.
-        self._run_read(work, lambda rows: self._apply_download_rows(ids, rows), "download-rows")
+        self._run_read(work, lambda payload: self._apply_download_rows(ids, payload, revision, versions), "download-rows")
 
-    def _apply_download_rows(self, ids, rows):
-        self._download_rows_pending.difference_update(ids)
+    def _apply_download_rows(self, ids, payload, revision=None, versions=None):
+        rows, changed, active = payload
+        pending_versions = getattr(self, '_download_rows_revision', {})
+        for episode_id in ids:
+            if versions is None or versions.get(episode_id) == pending_versions.get(episode_id, 0):
+                self._download_rows_pending.discard(episode_id)
+                pending_versions.pop(episode_id, None)
+        if self._download_rows_pending and not self._download_reload_timer.isActive():
+            self._download_reload_timer.start()
         for page in (self.episode_page, self.playlist_page, self.history_page):
             page.update_items(rows, merge=download_row)
         for model in (self.home_page.model, self.context.queue_view.model()):
             if model is not None:
                 model.apply_updates(rows, download_row)
         self._patch_episode_mirrors(rows, download_row)
-        # The Downloads page and the active-download counts come from the
-        # download records, which changed with the state.
-        self._reload_downloads()
+        self.navigation.set_badge(PAGE_DOWNLOADS, active)
+        self.home_page.summary_buttons[2].set_count(active)
+        context_id = self.context.shown_episode_id()
+        if context_id in changed:
+            record = changed[context_id]
+            self.context.update_download_state(context_id, self._record_ui_state(record) if record else '')
+        if self.pages.currentWidget() is not self.download_page:
+            self._downloads_dirty = True
+            return
+        items = {item.episode_id: item for item in self.download_page.all_items}
+        updates = {}
+        membership_changed = False
+        with self._samples_lock:
+            samples = dict(self._download_samples)
+        for episode_id, record in changed.items():
+            if revision is not None and self._download_record_revisions.get(episode_id, 0) > revision:
+                record = self._download_records_seen.get(episode_id, record)
+            if record is None or episode_id not in rows:
+                membership_changed |= episode_id in items
+                items.pop(episode_id, None)
+                self._download_records_seen.pop(episode_id, None)
+                self._download_record_revisions.pop(episode_id, None)
+                continue
+            self._download_records_seen[episode_id] = record
+            self._download_record_revisions[episode_id] = max(revision or 0, self._download_record_revisions.get(episode_id, 0))
+            membership_changed |= episode_id not in items
+            updates[episode_id] = items[episode_id] = self._download_item(rows[episode_id], record, samples)
+        if membership_changed:
+            self.download_page.set_items(list(items.values()))
+        else:
+            self.download_page.update_items(updates)
+        self._update_download_chrome()
 
     def _flush_download_progress(self):
         pending = self._download_progress_pending
@@ -6781,6 +6859,9 @@ class MainWindow(QMainWindow):
             return
         self._flush_download_rows()
         if not pending:
+            return
+        if self.pages.currentWidget() is not self.download_page:
+            self._downloads_dirty = True
             return
         updates = {}
         items = {item.episode_id: item for item in self.download_page.all_items}
@@ -6825,6 +6906,9 @@ class MainWindow(QMainWindow):
 
     def _reload_downloads(self):
         if self.downloads is None or self.library is None:
+            return
+        self._downloads_dirty = True
+        if self.pages.currentWidget() is not self.download_page:
             return
         self._run_read(self._read_download_items, self._apply_download_items, "downloads")
 
@@ -6872,6 +6956,10 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_download_items(self, payload):
+        if self.pages.currentWidget() is not self.download_page:
+            self._downloads_dirty = True
+            return
+        self._downloads_dirty = False
         items, records, revision = payload
         # A record query can finish after newer progress already reached Qt.
         previous = self._download_records_seen
@@ -6879,6 +6967,11 @@ class MainWindow(QMainWindow):
         records = [previous.get(record.episode_id, record)
                    if revisions.get(record.episode_id, 0) > revision
                    else record for record in records]
+        present = {record.episode_id for record in records}
+        extras = {episode_id: record for episode_id, record in previous.items()
+                  if episode_id not in present and revisions.get(episode_id, 0) > revision}
+        records.extend(extras.values())
+        items.extend(item for item in self.download_page.all_items if item.episode_id in extras)
         self._download_records_seen = {record.episode_id: record for record in records}
         self._download_record_revisions = {key: max(revision, revisions.get(key, 0))
                                            for key in self._download_records_seen}
@@ -7512,10 +7605,21 @@ class MainWindow(QMainWindow):
                     self.context.update_podcast_artwork(item)
                     if item.feed_url == self._preview_episodes_url:
                         self.episode_page.hero.art.set_artwork(path, initials(self.episode_page.hero.title.text()), item.accent)
-                        self.episode_page.set_items([
-                            replace_item(episode, artwork_path=path, accent=item.accent)
-                            for episode in self.episode_page.all_items
-                        ], preserve_scroll=True)
+                        updated = []
+                        artwork_changes = {}
+                        for episode in self.episode_page.all_items:
+                            # An episode-level cover remains the row's source; the directory cover only fills
+                            # rows that inherit the podcast artwork (or explicitly use the same URL).
+                            if episode.artwork_url and episode.artwork_url != url:
+                                updated.append(episode)
+                                continue
+                            row = replace_item(episode, artwork_path=path, accent=item.accent)
+                            updated.append(row)
+                            artwork_changes[(row.episode_id, row.artwork_url)] = row
+                        if artwork_changes:
+                            self.episode_page._all_items = updated
+                            self.episode_page.model.update_artwork_batch(artwork_changes)
+                            self.episode_page.view.viewport().update()
                         playing = getattr(self.playback, 'snapshot', None)
                         if playing is not None and not playing.episode_id and any(
                                 episode.media_url == playing.source for episode in self.episode_page.all_items):
@@ -8013,7 +8117,7 @@ class MainWindow(QMainWindow):
             message = result.message or "The library could not be read."
             if key in {'diagnostics-preview', 'diagnostics-save'}:
                 self._diagnostics_busy(False)
-            page = owners[0] if owners else self.pages.currentWidget()
+            page = self.episode_page if key == 'preview-page' else owners[0] if owners else self.pages.currentWidget()
             if page is None:
                 logging.getLogger("bs_podcasts").warning("Background read %s failed: %s", key, message)
                 if key == 'settings-reload':
@@ -8025,7 +8129,7 @@ class MainWindow(QMainWindow):
             if getattr(page, "banner", None) is not None:
                 # Ends the page's first-load state too, so a failed first read never leaves it loading.
                 self._finish_page_load(page, message)
-            if key not in self._PAGE_READS or page is self.pages.currentWidget():
+            if (key not in self._PAGE_READS and key != 'preview-page') or page is self.pages.currentWidget():
                 self._notify(message, "error")
             # A failed Load more must not leave its button stuck on
             # "Loading…"; recompute availability so it can be retried.
@@ -8034,6 +8138,13 @@ class MainWindow(QMainWindow):
                 self._podcast_chrome()
             elif key == "episodes-more":
                 self._set_global_episode_chrome(len(self._all_episode_items))
+            elif key == 'preview-page':
+                self._preview_page_loading = False
+                self.episode_page.set_podcast_page_state(
+                    getattr(self, '_preview_page_has_more', False),
+                    getattr(self, '_preview_page_window', (0, 0))[0] > 0, loading=False,
+                    total=getattr(self, '_preview_page_total', 0), progress_total=0,
+                )
             elif key == 'catalog-search-more':
                 self.episode_page.set_load_more_state(len(self._catalog_search_items) < self._catalog_total, noun='matching episodes')
             elif key == "history-more":
@@ -8518,6 +8629,24 @@ class MainWindow(QMainWindow):
         operation, value, requested_limit = request
         candidates = result_value or []
         podcasts = self._directory_rows(candidates)
+        partial = getattr(result_value, 'partial', False)
+        if partial:
+            if self._discover_displayed_key == cache_key:
+                # A failed continuation must not discard already visible results.
+                def result_key(item):
+                    return ((item.feed_url, item.directory_url or item.title) if item.is_episode
+                            else item.feed_url or item.directory_url or item.title)
+                combined = {result_key(item): item for item in self.discover_page.all_items}
+                combined.update({result_key(item): item for item in podcasts})
+                podcasts = list(combined.values())
+            self._discover_retry_request = request
+            self._discover_exhausted = False
+            self._discover_result_count = len(podcasts)
+            self.discover_page.set_load_more_state(False, loading=False)
+            self._show_directory_rows(podcasts, cache_key)
+            self.discover_page.banner.show_state('partial',
+                'Some podcasts could not be loaded. Your current results are kept; retry to fetch the rest.', retry=True)
+            return podcasts
         result_count = len(podcasts)
         self._discover_exhausted = requested_limit >= self._discover_maximum() or result_count <= self._discover_result_count
         self._discover_result_count = result_count
@@ -8607,16 +8736,17 @@ class MainWindow(QMainWindow):
         else:
             description = f"results for “{value}”"
         if podcasts:
-            if not cache_restore:
+            if not cache_restore and self._discover_retry_request is None:
                 self.discover_page.banner.clear()
-            ending = "Scroll for more"
+            ending = "Retry to load the remaining results" if self._discover_retry_request else "Scroll for more"
             if self._discover_exhausted:
                 ending = ("End of the list (the directory limits how many it returns)"
                           if operation in {"browse", "recommend"} else "End of available results")
             suffix = "  ·  saved while updating" if cache_restore else ""
             self.discover_page.set_discover_summary(f"{len(podcasts)} {description}  ·  {ending}{suffix}")
         else:
-            self.discover_page.banner.clear()
+            if self._discover_retry_request is None:
+                self.discover_page.banner.clear()
             # Name what came up empty: a bare "no podcasts matched" left the
             # user guessing which selection or query it was talking about.
             self.discover_page.set_discover_summary(f"No {description}.")
@@ -8652,6 +8782,8 @@ class MainWindow(QMainWindow):
             if pending is not None:
                 self._apply_initial_history(pending[0])
         self.pages.setCurrentIndex(index)
+        if index == PAGE_DOWNLOADS and getattr(self, '_downloads_dirty', True):
+            self._reload_downloads()
         if index == PAGE_EPISODES:
             if self._episode_navigation_prepared:
                 self._episode_navigation_prepared = False
@@ -8746,12 +8878,9 @@ class MainWindow(QMainWindow):
             return
         try:
             offset = max(0, min(int(saved.get('podcast_offset', 0)), 2**31 - 1))
-            limit = max(EPISODES_PAGE_SIZE, min(int(saved.get('podcast_limit', EPISODES_PAGE_SIZE)),
-                                              max(EPISODES_PAGE_SIZE, self._episode_total)))
         except (TypeError, ValueError, OverflowError):
-            offset, limit = 0, EPISODES_PAGE_SIZE
-        if self._restoring_view:
-            limit = EPISODES_PAGE_SIZE
+            offset = 0
+        limit = EPISODES_PAGE_SIZE
         current = _item_key(saved.get('current'))
         anchor_id = saved.get('episode_anchor') or (current[1] if current and len(current) == 2 and current[0] == 'episode' else 0)
         anchor_id = anchor_id if isinstance(anchor_id, int) and 0 < anchor_id < 2**63 else 0
@@ -9226,13 +9355,46 @@ class MainWindow(QMainWindow):
     def _show_preview_episodes(self, feed_url: str, navigate: bool = True, feed=None):
         if not feed_url:
             return
+        same_preview = self._preview_episodes_url == feed_url
+        restore_state = None
+        saved_navigation = getattr(self, '_episode_navigation_restore', None)
+        if saved_navigation and saved_navigation.get('show_id') == 0 and saved_navigation.get('preview_url') == feed_url:
+            restore_state = dict(saved_navigation)
+            self._episode_navigation_restore = None
+        pending_restore = getattr(self, '_pending_view_restore', None)
+        if restore_state is None and isinstance(pending_restore, dict) and pending_restore.get('preview_url') == feed_url:
+            views = pending_restore.get('views', {})
+            if isinstance(views, dict):
+                restore_state = views.pop(str(PAGE_EPISODES), None)
+        if restore_state is not None:
+            self._preview_page_restore = (feed_url, restore_state)
+        elif not same_preview:
+            self._preview_page_restore = None
+        restore_query = restore_state.get('query', '') if restore_state is not None else ''
+        if not isinstance(restore_query, str):
+            restore_query = ''
+        restore_filter = restore_state.get('filter', 'All') if restore_state is not None else 'All'
+        if not isinstance(restore_filter, str) or restore_filter not in {
+                'All', 'Favorites', 'New', 'Unplayed', 'In progress', 'Downloaded', 'Played'}:
+            restore_filter = 'All'
+        restore_sort = restore_state.get('sort', 'newest') if restore_state is not None else 'newest'
+        if not isinstance(restore_sort, str) or restore_sort not in dict(SORT_OPTIONS):
+            restore_sort = 'newest'
         self._leave_library_search()
         self._leave_podcast_paging()
         self._read_tokens["episodes"] = self._read_tokens.get("episodes", 0) + 1
+        self._preview_page_revision = getattr(self, '_preview_page_revision', 0) + 1
+        self._preview_page_loading = False
         feed = feed if feed is not None else self._previews.get(feed_url)
         if feed is None:
             self._pending_episodes_url = feed_url
             self._preview_episodes_url = feed_url
+            self._preview_page_feed = None
+            self._preview_page_feed_url = feed_url
+            self._preview_page_loaded = False
+            self._preview_page_has_more = False
+            self._preview_page_total = 0
+            self._preview_page_requested_scope = None
             card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
             title = card.title if card else "Podcast"
             author = card.author if card else ""
@@ -9245,8 +9407,14 @@ class MainWindow(QMainWindow):
                 "  ·  ".join(value for value in (author, "Loading episodes…") if value),
                 plain_snippet(card.description, 220) if card else "", False, bool(self._hero_website),
             )
-            self.episode_page.set_filter("All")
-            self.episode_page.set_items([], preserve_scroll=False)
+            if restore_state is not None or not same_preview:
+                self.episode_page.set_items([], preserve_scroll=False)
+                if restore_state is not None:
+                    self.episode_page.set_view(restore_query, restore_filter, restore_sort)
+                else:
+                    self.episode_page.set_view('', 'All', 'newest')
+            else:
+                self.episode_page.set_items([], preserve_scroll=False)
             self.episode_page.set_load_more_state(False)
             self.episode_page.banner.show_state("loading", f"Fetching episodes for {title}…")
             if navigate:
@@ -9259,50 +9427,208 @@ class MainWindow(QMainWindow):
             return
         self._pending_episodes_url = ""
         self._preview_episodes_url = feed_url
+        self._preview_page_feed = feed
+        self._preview_page_feed_url = feed_url
+        self._preview_page_loaded = False
+        self._preview_page_has_more = False
+        self._preview_page_total = len(feed.episodes)
+        self._preview_page_window = (0, 0)
+        self._preview_page_requested_scope = None
         if self.episode_page.header.action:
             self.episode_page.header.action.setToolTip("Refresh this feed preview")
-        episodes = sorted(feed.episodes, key=lambda episode: episode.published_at or "", reverse=True)
+        if restore_state is not None or not same_preview:
+            self.episode_page.set_items([], preserve_scroll=False)
+            if restore_state is not None:
+                self.episode_page.set_view(restore_query, restore_filter, restore_sort)
+            else:
+                self.episode_page.set_view('', 'All', 'newest')
         card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
         podcast_artwork = card.artwork_path if card else ""
         podcast_accent = card.accent if card else ACCENTS[3]
-        items = [
-            EpisodeRow(
-                title=episode.title, show=feed.title, published=self._display_date(episode.published_at),
-                duration=self._display_duration(episode.duration_seconds), progress=0.0, state="Preview", accent=podcast_accent,
-                description=episode.description, artwork_path=podcast_artwork,
-                duration_seconds=episode.duration_seconds, media_url=episode.media_url,
-                published_at=episode.published_at, mime_type=episode.mime_type,
-                external_id=episode.external_id, website_url=episode.website_url,
-                author=episode.author, season_number=episode.season_number,
-                episode_number=episode.episode_number, episode_type=episode.episode_type,
-                explicit=episode.explicit, enclosure_bytes=episode.enclosure_bytes,
-                transcript_url=episode.transcript_url, transcript_type=episode.transcript_type,
-                chapters_url=episode.chapters_url, artwork_url=episode.artwork_url,
-            )
-            for episode in episodes
-        ]
         self.episode_page.header.set_title(feed.title)
         self.episode_page.header.set_subtitle("")
         self._hero_show_id = 0
         self._hero_website = feed.website_url
-        latest = f"  ·  Latest {self._display_full_date(episodes[0].published_at)}" if episodes else ""
+        latest_episode = getattr(feed, '_preview_latest', None)
+        latest = f"  ·  Latest {self._display_full_date(latest_episode.published_at)}" if latest_episode else ""
         self.episode_page.hero.show_podcast(
-            feed.title, feed.author, card.artwork_path if card else "", card.accent if card else "",
-            f"{feed.author}  ·  {len(items)} episode{'s' if len(items) != 1 else ''}{latest}",
+            feed.title, feed.author, podcast_artwork, podcast_accent,
+            f"{feed.author}  ·  {len(feed.episodes)} episode{'s' if len(feed.episodes) != 1 else ''}{latest}",
             plain_snippet(feed.description, 220), False, bool(feed.website_url),
         )
-        self.episode_page.set_filter("All")
-        self.episode_page.set_items(items, preserve_scroll=False)
-        self.episode_page.set_load_more_state(False)
-        self.episode_page.banner.show_state(
-            "partial" if getattr(feed, "truncated", False) else "empty",
-            feed_limit_message()
-            if getattr(feed, "truncated", False) else "Stream any episode now, or subscribe to save progress, queue and download.")
-        self._restore_episode_navigation()
+        self.episode_page.set_podcast_paging(True)
+        self.episode_page.set_podcast_page_state(len(feed.episodes) > EPISODES_PAGE_SIZE, False,
+                                                loading=True, total=len(feed.episodes), progress_total=0)
         if navigate:
             self._episode_navigation_prepared = True
             self.navigation.select(PAGE_EPISODES)
-        self._finish_view_restore()
+        self._request_preview_page(reset=True)
+
+    def _request_preview_page(self, *, reset=False, append=False, prepend=False, anchor=None):
+        """Filter, sort and convert one 200-row feed window on a read worker."""
+        page = self.episode_page
+        feed_url = self._preview_episodes_url
+        feed = (getattr(self, '_preview_page_feed', None)
+                if feed_url and getattr(self, '_preview_page_feed_url', feed_url) == feed_url else None)
+        if feed is None and feed_url:
+            feed = self._previews.get(feed_url)
+        if feed is None or not page.podcast_paging() or self._closed:
+            return
+        scope = page._podcast_view_scope()
+        requested_scope = getattr(self, '_preview_page_requested_scope', None)
+        if self._preview_page_loading:
+            if append or prepend or scope == requested_scope:
+                return
+        if (append or prepend) and scope != getattr(self, '_preview_page_scope', scope):
+            reset, append, prepend = True, False, False
+            anchor = page._scroll_anchor()
+        if append and not getattr(self, '_preview_page_has_more', False):
+            return
+        page_size = EPISODES_PAGE_SIZE
+        current_items = page.all_items
+        window_offset = getattr(self, '_preview_page_window', (0, 0))[0]
+        start_offset = (window_offset + len(current_items) if append else
+                        max(0, window_offset - page_size) if prepend else 0)
+        card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
+        artwork_path = card.artwork_path if card else ""
+        accent = card.accent if card else ACCENTS[3]
+        anchor_identity = None
+        if anchor and anchor[0] and anchor[0][0] == 'preview':
+            anchor_identity = anchor[0][1]
+        restore_entry = getattr(self, '_preview_page_restore', None)
+        if reset and anchor_identity is None and restore_entry and restore_entry[0] == feed_url:
+            saved_current = _item_key(restore_entry[1].get('current'))
+            if saved_current and len(saved_current) == 2 and saved_current[0] == 'preview':
+                anchor_identity = saved_current[1]
+                anchor = (saved_current, 0)
+        self._preview_page_revision = getattr(self, '_preview_page_revision', 0) + 1
+        revision = self._preview_page_revision
+        feed_identity = id(feed)
+        self._preview_page_loading = True
+        self._preview_page_requested_scope = scope
+        page.set_podcast_page_state(getattr(self, '_preview_page_has_more', False), False,
+                                    loading=True, total=getattr(self, '_preview_page_total', len(feed.episodes)),
+                                    progress_total=0)
+
+        def work():
+            from .pages import _fold_filter_text
+
+            ordered = getattr(feed, '_preview_sorted_episodes', None)
+            if ordered is None:
+                ordered = tuple(sorted(feed.episodes, key=lambda episode: episode.published_at or '', reverse=True))
+                object.__setattr__(feed, '_preview_sorted_episodes', ordered)
+            query, filter_name, sort_key = scope
+            folded_query = _fold_filter_text(query) if query else ''
+            matching = []
+            for episode in ordered:
+                if folded_query and folded_query not in _fold_filter_text(episode.title) and folded_query not in _fold_filter_text(feed.title):
+                    continue
+                if filter_name in {'New', 'Favorites', 'Played', 'Downloaded', 'In progress'}:
+                    continue
+                if filter_name not in {'All', 'Unplayed', 'Preview'} and filter_name.lower() != 'preview':
+                    continue
+                matching.append(episode)
+            if sort_key == 'oldest':
+                matching.reverse()
+            elif sort_key == 'shortest':
+                matching.sort(key=lambda episode: episode.duration_seconds or 10**9)
+            elif sort_key == 'longest':
+                matching.sort(key=lambda episode: -(episode.duration_seconds or 0))
+            elif sort_key == 'unplayed':
+                matching.sort(key=lambda _episode: False)
+            total = len(matching)
+            offset = start_offset
+            if reset and anchor_identity:
+                anchor_index = next((index for index, episode in enumerate(matching)
+                                     if (episode.media_url or episode.external_id or episode.title) == anchor_identity), None)
+                if anchor_index is not None:
+                    offset = (anchor_index // page_size) * page_size
+            chunk = matching[offset:offset + page_size]
+            rows = [EpisodeRow(
+                title=episode.title, show=feed.title,
+                published=self._display_date(episode.published_at),
+                duration=self._display_duration(episode.duration_seconds), progress=0.0,
+                state="Preview", accent=accent, description=episode.description,
+                artwork_path=artwork_path, duration_seconds=episode.duration_seconds,
+                media_url=episode.media_url, published_at=episode.published_at,
+                mime_type=episode.mime_type, external_id=episode.external_id,
+                website_url=episode.website_url, author=episode.author,
+                season_number=episode.season_number, episode_number=episode.episode_number,
+                episode_type=episode.episode_type, explicit=episode.explicit,
+                enclosure_bytes=episode.enclosure_bytes, transcript_url=episode.transcript_url,
+                transcript_type=episode.transcript_type, chapters_url=episode.chapters_url,
+                artwork_url=episode.artwork_url,
+            ) for episode in chunk]
+            return rows, total, offset, offset + len(rows) < total
+
+        def apply(payload):
+            if (revision != getattr(self, '_preview_page_revision', -1)
+                    or feed_url != self._preview_episodes_url
+                    or feed_identity != id(getattr(self, '_preview_page_feed', None)
+                                           if getattr(self, '_preview_page_feed_url', feed_url) == feed_url
+                                           else self._previews.get(feed_url))):
+                return
+            if scope != page._podcast_view_scope():
+                self._preview_page_loading = False
+                self._request_preview_page(reset=True, anchor=anchor)
+                return
+            rows, total, offset, has_more = payload
+            current_card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
+            current_art = current_card.artwork_path if current_card else ""
+            current_accent = current_card.accent if current_card else ACCENTS[3]
+            if current_art != artwork_path or current_accent != accent:
+                rows = [replace_item(row, artwork_path=current_art, accent=current_accent)
+                        if not row.artwork_url or (current_card and row.artwork_url == current_card.artwork_url)
+                        else row for row in rows]
+            if append:
+                current_items = page.all_items
+                known = {page._key(item) for item in current_items}
+                rows = [item for item in rows if page._key(item) not in known]
+                items = [*current_items, *rows]
+            elif prepend:
+                current_items = page.all_items
+                known = {page._key(item) for item in current_items}
+                rows = [item for item in rows if page._key(item) not in known]
+                items = [*rows, *current_items]
+            else:
+                items = rows
+            first_page = not getattr(self, '_preview_page_loaded', False)
+            self._preview_page_loading = False
+            self._preview_page_loaded = True
+            self._preview_page_scope = scope
+            self._preview_page_total = total
+            window_start = getattr(self, '_preview_page_window', (0, 0))[0] if append else offset
+            self._preview_page_window = (window_start, len(items))
+            has_previous = window_start > 0
+            has_more = window_start + len(items) < total
+            self._preview_page_has_more = has_more
+            page.set_items(items, preserve_scroll=append or prepend or anchor is not None)
+            page.set_podcast_page_state(has_more, has_previous, loading=False, total=total, progress_total=0)
+            page.header.set_subtitle(
+                f'{len(items):,} of {total:,} matching episodes loaded'
+                + ('  ·  Scroll for more' if has_more else '')
+            )
+            page.banner.show_state(
+                "partial" if getattr(feed, "truncated", False) else "empty",
+                feed_limit_message() if getattr(feed, "truncated", False)
+                else "Stream any episode now, or subscribe to save progress, queue and download.",
+            )
+            if first_page:
+                restore_entry = getattr(self, '_preview_page_restore', None)
+                if restore_entry and restore_entry[0] == feed_url:
+                    saved = restore_entry[1]
+                    current = _item_key(saved.get('current'))
+                    selected_values = saved.get('selected', ())
+                    selected = [_item_key(value) for value in selected_values
+                                if _item_key(value) is not None] if isinstance(selected_values, (list, tuple)) else []
+                    page._restore_selection(current, False, selected)
+                    scroll = page.saved_scroll_value(saved)
+                    page.view.verticalScrollBar().setValue(max(0, scroll - window_start))
+                    self._preview_page_restore = None
+                self._restore_episode_navigation()
+                self._finish_view_restore()
+
+        self._run_read(work, apply, 'preview-page')
 
     def _preview_after_pause(self, feed_url: str):
         """Show the selected card's feed details: at once from the cache or a
@@ -9328,6 +9654,9 @@ class MainWindow(QMainWindow):
             if url != feed_url and url != self._pending_episodes_url and future.cancel():
                 self._preview_futures.pop(url, None)
                 self._preview_pending.discard(url)
+                if url in self._discover_newest_pending and url not in self._discover_newest_waiting:
+                    self._discover_newest_waiting.append(url)
+        self._pump_discover_newest_scan()
         self._preview_feed(feed_url)
 
     def _retry_busy_preview(self, feed_url: str) -> bool:
@@ -9364,40 +9693,60 @@ class MainWindow(QMainWindow):
         _track_job(self, future, "preview", feed_url, drop_cancelled=True)
 
     def _apply_preview(self, feed_url: str, feed, update_grid: bool = True):
-        # Merge before re-selecting the card; cached preview callbacks then become
-        # no-ops. Artwork can arrive even when a feed has no episodes/dates.
-        if update_grid:
-            old_items = self.discover_page.all_items
-            items = [self._with_preview(item, feed) if item.feed_url == feed_url else item for item in old_items]
-            if items != old_items:
-                self.discover_page.set_items(items, preserve_scroll=True)
-                if any(old.artwork_url != new.artwork_url for old, new in zip(old_items, items)):
-                    self._queue_directory_artwork()
-        episodes = sorted(feed.episodes, key=lambda episode: episode.published_at or "", reverse=True)
-        latest = episodes[0] if episodes else None
-        recent = [(episode.title, self._display_full_date(episode.published_at)) for episode in episodes[:5]]
         current = self.context.current_item()
         card = current if getattr(current, "feed_url", "") == feed_url else next(
             (item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
-        matched = None
-        if card is not None and card.is_episode:
-            wanted = card.title.strip().lower()
-            hit = next((e for e in episodes if e.title.strip().lower() == wanted), None) or next((e for e in episodes if wanted and wanted in e.title.lower()), None)
-            if hit is not None:
-                matched = (hit.title, self._display_full_date(hit.published_at), hit.description)
-        self.context.show_preview(
-            feed_url,
-            (feed.title or (card.author if card else "")) if matched else (feed.author or (card.author if card else "")),
-            len(feed.episodes),
-            latest.title if latest else "",
-            self._display_full_date(latest.published_at) if latest else "",
-            feed.description,
-            recent,
-            feed.website_url,
-            matched,
-        )
-        if self._pending_episodes_url == feed_url and self.pages.currentIndex() == PAGE_EPISODES:
-            self._show_preview_episodes(feed_url, navigate=False, feed=feed)
+        feed_identity = id(feed)
+
+        def work():
+            ordered = getattr(feed, '_preview_sorted_episodes', None)
+            if ordered is None:
+                ordered = tuple(sorted(feed.episodes, key=lambda episode: episode.published_at or '', reverse=True))
+                object.__setattr__(feed, '_preview_sorted_episodes', ordered)
+            if not hasattr(feed, '_preview_latest'):
+                object.__setattr__(feed, '_preview_latest', ordered[0] if ordered else None)
+            recent = [(episode.title, self._display_full_date(episode.published_at)) for episode in ordered[:5]]
+            matched = None
+            if card is not None and card.is_episode:
+                wanted = card.title.strip().lower()
+                hit = next((episode for episode in ordered if episode.title.strip().lower() == wanted), None)
+                hit = hit or next((episode for episode in ordered if wanted and wanted in episode.title.lower()), None)
+                if hit is not None:
+                    matched = (hit.title, self._display_full_date(hit.published_at), hit.description)
+            latest = ordered[0] if ordered else None
+            return latest, recent, matched
+
+        def apply(payload):
+            latest, recent, matched = payload
+            active_feed = (self._previews.get(feed_url)
+                           or (getattr(self, '_preview_page_feed', None)
+                               if getattr(self, '_preview_page_feed_url', '') == feed_url else None))
+            if active_feed is not None and id(active_feed) != feed_identity:
+                return
+            # Merge before re-selecting the card; cached preview callbacks then become
+            # no-ops. Artwork can arrive even when a feed has no episodes/dates.
+            if update_grid:
+                old_items = self.discover_page.all_items
+                items = [self._with_preview(item, feed) if item.feed_url == feed_url else item for item in old_items]
+                if items != old_items:
+                    self.discover_page.set_items(items, preserve_scroll=True)
+                    if any(old.artwork_url != new.artwork_url for old, new in zip(old_items, items)):
+                        self._queue_directory_artwork()
+            self.context.show_preview(
+                feed_url,
+                (feed.title or (card.author if card else "")) if matched else (feed.author or (card.author if card else "")),
+                len(feed.episodes),
+                latest.title if latest else "",
+                self._display_full_date(latest.published_at) if latest else "",
+                feed.description,
+                recent,
+                feed.website_url,
+                matched,
+            )
+            if self._pending_episodes_url == feed_url and self.pages.currentIndex() == PAGE_EPISODES:
+                self._show_preview_episodes(feed_url, navigate=False, feed=feed)
+
+        self._run_read(work, apply, f'visible-artwork-preview-summary:{feed_url}')
 
     def _ui_episodes(self, stored, records=None) -> list:
         """Convert stored episodes (cached per unchanged row) and overlay download state."""

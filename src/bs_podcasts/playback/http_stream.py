@@ -3,6 +3,7 @@ import logging
 import re
 import time
 import warnings
+from collections import deque
 from threading import Event, Lock, Thread
 
 from ..net import make_session
@@ -23,10 +24,12 @@ RESUME_PROGRESS = 256 * 1024
 COOLDOWN_WAIT_CAP = 15.0
 # Waits before each retry of a seek whose range request failed in transit.
 SEEK_RETRY_DELAYS = (0.25, 0.5, 1.0)
-# A block of audio (16 KB) must arrive within this long, about 270 B/s, the
-# floor the download path uses. A connection that trickles slower never trips
-# the read timeout, so it is cut and reopened at the current byte.
+# A rolling 16 KB must arrive within this long, about 270 B/s, the floor the
+# download path uses. A connection that trickles slower never trips the read
+# timeout, so it is cut and reopened at the current byte.
 STALL_SECONDS = 60.0
+STALL_MINIMUM_BYTES = 16 * 1024
+STALL_IDLE_SECONDS = 1.0
 
 logger = logging.getLogger("bs_podcasts")
 
@@ -91,10 +94,14 @@ class HttpStream:
         self._resume_failures = 0
         self._resumed_at = 0
         self._failed = False
-        # (start, response) while read() waits for a block of audio, and the
-        # response the stall watchdog cut off.
+        # Wait identities prevent the watchdog from aborting a read that just
+        # completed. Byte samples support a rolling minimum-rate check.
+        self._watch_lock = Lock()
         self._waiting = None
         self._stalled = None
+        self._watch_active_since = None
+        self._watch_last_activity = None
+        self._watch_bytes = deque()
         self._watching = False
         self._on_error = on_error or (lambda message: None)
         # A reported failure is withdrawn once a later open succeeds (a seek
@@ -168,6 +175,12 @@ class HttpStream:
                 if self.cancelled.is_set():
                     raise ValueError('Playback was cancelled.')
                 previous, self._response = self._response, response
+            with self._watch_lock:
+                self._waiting = None
+                self._stalled = None
+                self._watch_active_since = None
+                self._watch_last_activity = None
+                self._watch_bytes.clear()
             if previous is not None:
                 abort_response(previous)
             # A reply that names no validator leaves the earlier one in place.
@@ -204,11 +217,35 @@ class HttpStream:
             return b''
         while not self._buffer:
             response = self._response
-            self._waiting = (time.monotonic(), response)
+            now = time.monotonic()
+            with self._watch_lock:
+                if (self._watch_last_activity is None
+                        or now - self._watch_last_activity > STALL_IDLE_SECONDS):
+                    self._watch_active_since = now
+                    self._watch_bytes.clear()
+                self._watch_last_activity = now
+                completed = Event()
+                waiting = (self._watch_active_since, response, object(), completed)
+                self._waiting = waiting
             try:
-                self._buffer = next(self._chunks)
+                chunk = next(self._chunks)
+                completed.set()
+                self._buffer = chunk
+                if chunk:
+                    arrived = time.monotonic()
+                    with self._watch_lock:
+                        cutoff = arrived - STALL_SECONDS
+                        while self._watch_bytes and self._watch_bytes[0][0] < cutoff:
+                            self._watch_bytes.popleft()
+                        if self._watch_bytes and self._watch_bytes[-1][0] >= arrived - 1.0:
+                            start, amount = self._watch_bytes[-1]
+                            self._watch_bytes[-1] = (start, amount + len(chunk))
+                        else:
+                            self._watch_bytes.append((arrived, len(chunk)))
+                        self._watch_last_activity = arrived
                 continue
             except StopIteration:
+                completed.set()
                 if self.cancelled.is_set():
                     return b''
                 if not self._was_cut(response) and (self.size is None or self.position >= self.size):
@@ -225,14 +262,19 @@ class HttpStream:
                     return b''
                 failure = None
             except Exception as exc:
+                completed.set()
                 if self.cancelled.is_set():
                     return b''
                 failure = exc
             finally:
-                self._waiting = None
+                with self._watch_lock:
+                    if self._waiting is waiting:
+                        self._waiting = None
             if self._was_cut(response):
                 # The watchdog cut this connection off; its end is not an EOF.
-                self._stalled = None
+                with self._watch_lock:
+                    if self._stalled is response:
+                        self._stalled = None
                 failure = TimeoutError(f'no audio data for {STALL_SECONDS:.0f} s')
             try:
                 self._resume(failure)
@@ -250,21 +292,43 @@ class HttpStream:
         return data
 
     def _was_cut(self, response):
-        return response is not None and self._stalled is response
+        with self._watch_lock:
+            return response is not None and self._stalled is response
 
     def _watch(self):
-        """Cut a connection that has delivered no block of audio for
-        STALL_SECONDS. The read timeout only catches silence, and a body that
-        keeps sending a few bytes never goes quiet. Only time the reader
-        spends waiting counts: a native player that has stopped reading (a
-        full cache, a pause) is not a stall."""
+        """Cut a stream below its minimum byte rate while the player reads.
+
+        The rolling window catches slow trickles as well as a fully quiet
+        socket. Idle time outside read() is discarded, such as when mpv has
+        enough buffered audio or is paused.
+        """
         while not self.cancelled.wait(min(1.0, STALL_SECONDS / 4)):
-            waiting = self._waiting
-            if waiting is not None and time.monotonic() - waiting[0] > STALL_SECONDS:
-                self._waiting = None
-                self._stalled = waiting[1]
-                logger.warning("Audio stream stalled at byte %s: no data for %.0f s", self.position, STALL_SECONDS)
-                abort_response(waiting[1])
+            now = time.monotonic()
+            with self._watch_lock:
+                waiting = self._waiting
+                if waiting is None:
+                    if (self._watch_last_activity is None
+                            or now - self._watch_last_activity > STALL_IDLE_SECONDS):
+                        self._watch_active_since = None
+                        self._watch_last_activity = None
+                        self._watch_bytes.clear()
+                    continue
+                cutoff = now - STALL_SECONDS
+                while self._watch_bytes and self._watch_bytes[0][0] < cutoff:
+                    self._watch_bytes.popleft()
+                received = sum(size for _at, size in self._watch_bytes)
+                if (now - waiting[0] >= STALL_SECONDS
+                        and received < STALL_MINIMUM_BYTES
+                        and not waiting[3].is_set()
+                        and self._waiting is waiting):
+                    # Keep the identity check, state transition, and socket
+                    # abort together. A completed read clears/replaces this
+                    # exact tuple before the watchdog can cut it.
+                    self._stalled = waiting[1]
+                    self._waiting = None
+                    logger.warning("Audio stream stalled at byte %s: received %s bytes in %.0f s",
+                                   self.position, received, STALL_SECONDS)
+                    abort_response(waiting[1])
 
     def _more_follows(self):
         """Ask whether bytes remain after a body that has no length.

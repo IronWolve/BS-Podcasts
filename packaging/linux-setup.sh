@@ -43,7 +43,7 @@ BS_PIP_ARGS=(--disable-pip-version-check --only-binary=:all: --require-hashes)
 "$BS_RUNTIME/.venv/bin/python" -m pip check
 # State lines and the stats block come from report.py, which the release folder carries beside this script.
 bs_report() {
-    "$BS_PYTHON" -B -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from report import Reporter; Reporter().line(sys.argv[2], sys.argv[3])' "$BS_PROJECT" "$1" "$2"
+    "$BS_PYTHON" -B -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from report import Reporter; Reporter().line(sys.argv[2], sys.argv[3])' "$BS_RUNTIME" "$1" "$2"
 }
 BS_PACKAGES="$("$BS_PYTHON" -B -I -c 'import sys; print(sum("==" in line for line in open(sys.argv[1], encoding="utf-8")))' "$BS_RUNTIME/requirements-linux.lock")"
 BS_VENV_PYTHON="$("$BS_RUNTIME/.venv/bin/python" -B -c 'import sys; print(sys.version.split()[0])')"
@@ -51,4 +51,4 @@ bs_report ok "Local environment prepared. The native player is bundled; compatib
 bs_report info "Check: bash \"$BS_PROJECT/start.sh\" --check --plain"
 bs_report info "Start: bash \"$BS_PROJECT/start.sh\""
 bs_report info "After moving this application, preserve/rename the old .venv and rerun setup. No app was started."
-"$BS_PYTHON" -B -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from report import Reporter; Reporter().stats([("packages installed", sys.argv[2]), ("python", sys.argv[3])])' "$BS_PROJECT" "$BS_PACKAGES" "$BS_VENV_PYTHON"
+"$BS_PYTHON" -B -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from report import Reporter; Reporter().stats([("packages installed", sys.argv[2]), ("python", sys.argv[3])])' "$BS_RUNTIME" "$BS_PACKAGES" "$BS_VENV_PYTHON"

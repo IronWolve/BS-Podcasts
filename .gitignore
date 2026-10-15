@@ -149,6 +149,7 @@
 !/src/bs_podcasts/data/migrations/032_storage_indexes.sql
 !/src/bs_podcasts/data/migrations/033_search_revision.sql
 !/src/bs_podcasts/data/migrations/034_paged_library_indexes.sql
+!/src/bs_podcasts/data/migrations/035_show_search.sql
 !/src/bs_podcasts/data/repositories/__init__.py
 !/src/bs_podcasts/data/repositories/downloads.py
 !/src/bs_podcasts/data/repositories/library.py

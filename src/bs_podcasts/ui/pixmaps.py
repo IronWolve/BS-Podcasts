@@ -607,12 +607,23 @@ def prefetch_artwork(paths, notify):
 
 
 def _retain_preview(path, image):
+    """Install an already-sized preview image in the GUI-owned pixmap cache."""
     if image.width() == image.height() and not image.isNull():
         if image.width() < previews.SIDE and _preview_cache.find(path) is not None:
             return
-        _preview_cache.insert(path, QPixmap.fromImage(image.scaled(
-            previews.SIDE, previews.SIDE, Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.SmoothTransformation)))
+        _preview_cache.insert(path, QPixmap.fromImage(image))
+
+
+def _make_preview(image: QImage) -> QImage:
+    """Scale square decoded artwork for the preview cache on the decode worker."""
+    if image.isNull() or image.width() != image.height():
+        return QImage()
+    if image.width() == previews.SIDE:
+        return image
+    return image.scaled(
+        previews.SIDE, previews.SIDE, Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
 
 
 # --- asynchronous decode -----------------------------------------------------
@@ -684,7 +695,7 @@ def _remember_failed(key: str):
 
 
 class _DecodeBridge(QObject):
-    decoded = Signal(str, str, QImage)
+    decoded = Signal(str, str, QImage, QImage)
 
     def __init__(self):
         super().__init__()
@@ -692,7 +703,7 @@ class _DecodeBridge(QObject):
         # run on the GUI thread because it creates QPixmaps and repaints.
         self.decoded.connect(self._on_decoded, Qt.ConnectionType.QueuedConnection)
 
-    def _on_decoded(self, key: str, path: str, image: QImage):
+    def _on_decoded(self, key: str, path: str, image: QImage, preview: QImage):
         with _decode_lock:
             _inflight.discard(key)
             if not any(entry.startswith(f"src:{path}:") for entry in _inflight):
@@ -708,7 +719,9 @@ class _DecodeBridge(QObject):
                               lambda: [_repaint(widget) for widget in list(_watchers.get(path, ()))])
         if not image.isNull() and key.endswith(f':v{_revisions.get(path, -1)}'):
             _artwork_cache.insert(key, QPixmap.fromImage(image))
-            _retain_preview(path, image)
+            if not (image.width() == image.height() and image.width() < previews.SIDE
+                    and _preview_cache.find(path) is not None):
+                _retain_preview(path, preview)
         watchers = list(_watchers.get(path, ())) + list(_waiting)
         _waiting.clear()
         for widget in watchers:
@@ -736,8 +749,9 @@ def _decode_job(key: str, path: str, width: int, height: int, bridge: _DecodeBri
         if should_log:
             logging.getLogger("bs_podcasts").warning("Could not decode artwork %s", Path(path).name, exc_info=True)
         image = QImage()
+    preview = _make_preview(image)
     try:
-        bridge.decoded.emit(key, path, image)
+        bridge.decoded.emit(key, path, image, preview)
     except RuntimeError:
         pass  # application teardown has destroyed the Qt bridge
     previews.queue_save(path, image, stamp)
@@ -854,7 +868,7 @@ def _source(path: str, width: int, height: int, sync: bool = False, notify=None)
             return None
         pixmap = QPixmap.fromImage(image)
         _artwork_cache.insert(key, pixmap)
-        _retain_preview(path, image)
+        _retain_preview(path, _make_preview(image))
         return pixmap
     if width == height and width != previews.SIDE and _preview_cache.find(path) is None:
         ready = _source(path, previews.SIDE, previews.SIDE, notify=notify)

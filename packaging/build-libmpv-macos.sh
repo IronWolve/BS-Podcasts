@@ -157,8 +157,8 @@ fi
 bs_identity | cmp -s - "$BS_WORK/identity.txt" || { printf 'Native recipe, helper, pinned inputs or patch changed during the build; refusing provenance.\n' >&2; exit 1; }
 "$BS_PYTHON" -B -I "$BS_PROJECT/repo/packaging/native_sources.py" --record "$BS_WORK/out/libmpv.2.dylib"
 BS_CACHE="$BS_PROJECT/.cache/macos-build/libmpv-lgpl"
+mkdir -p "$(dirname -- "$BS_CACHE")"
 if [[ -e "$BS_CACHE" ]]; then
-    mkdir -p "$BS_PROJECT/.cache/macos-build"
     BS_PREVIOUS="$(mktemp -d "$BS_PROJECT/.cache/macos-build/previous-libmpv-lgpl-$(date -u +%Y%m%d)-XXXXXX")"
     mv -- "$BS_CACHE" "$BS_PREVIOUS/libmpv-lgpl"
 fi

@@ -2063,7 +2063,11 @@ class HomePage(BasePage, _ListPageMixin):
         """Shell-supplied label for the new/latest episodes portion."""
         self._latest_text = text
         if not self._resume_lead:
-            self.latest_title.title.setText(text)
+            self._set_home_title(text)
+
+    def _set_home_title(self, text: str):
+        self.latest_title.title.setText(text)
+        self.view.setAccessibleName(text)
 
     def set_empty_context(self, has_shows: bool):
         """Empty library and quiet library are different states."""
@@ -2094,10 +2098,10 @@ class HomePage(BasePage, _ListPageMixin):
         shown = latest[:30]
         self._replace_rows(self._resume_lead + shown)
         if self._resume_lead:
-            self.latest_title.title.setText("Continue listening")
+            self._set_home_title("Continue listening")
             self.latest_title.set_count(len(in_progress) if progress_total is None else progress_total, show_link=True)
         else:
-            self.latest_title.title.setText(self._latest_text)
+            self._set_home_title(self._latest_text)
             # "See all" opens the New filter. When nothing is flagged new, the
             # section falls back to unplayed episodes that filter does not
             # hold, so there is no list to open: hide the link and count only
@@ -2359,6 +2363,7 @@ class SettingsPage(BasePage):
         form.addRow("Skip forward", self.skip_forward)
         form.addRow("After an episode", self.auto_continue)
         self.buffer_profile = QComboBox()
+        wheel_needs_focus(self.buffer_profile)
         for label, value in (('Standard (default)', 'standard'), ('More buffering', 'more'), ('Low memory', 'low_memory')):
             self.buffer_profile.addItem(label, value)
         self.buffer_hint = PlainTextLabel('')
@@ -2632,6 +2637,7 @@ class SettingsPage(BasePage):
         self.backup_keep.addItem('1 backup', '1')
         self.backup_keep.addItem('2 backups', '2')
         self.backup_keep.setCurrentIndex(1)
+        wheel_needs_focus(self.backup_interval, self.backup_keep)
         self.backup_status = self._path_label()
         self.backup_status.setText('Not backed up yet')
         self.backup_path = self._path_label()
@@ -2872,7 +2878,8 @@ class SettingsPage(BasePage):
         visible = self.CATEGORIES[category]
         for title, card in self._setting_sections:
             card.setVisible(title in visible)
-        self.settings_scroll.verticalScrollBar().setValue(0)
+        if changed:
+            self.settings_scroll.verticalScrollBar().setValue(0)
         self._layout_settings_forms()
         if persist and changed:
             self.setting_changed.emit('ui.settings_category', category)
