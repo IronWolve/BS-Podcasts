@@ -140,21 +140,65 @@ class ListeningRepository:
         are reused once a row is gone). A bookmark whose episode no longer
         exists is skipped. One transaction: nothing is half restored.
         """
-        restored = skipped = 0
+        chosen = list({item.id: item for item in bookmarks}.values())
+        if not chosen:
+            return 0, 0
+
+        episode_ids = list(dict.fromkeys(int(item.episode_id) for item in chosen))
+        bookmark_ids = [int(item.id) for item in chosen]
+        restored_rows = []
+        generated_rows = []
         with self.database.connect() as connection:
-            for bookmark in {item.id: item for item in bookmarks}.values():
-                if connection.execute("SELECT 1 FROM episodes WHERE id=?", (bookmark.episode_id,)).fetchone() is None:
-                    skipped += 1
-                    continue
-                taken = connection.execute("SELECT 1 FROM bookmarks WHERE id=?", (bookmark.id,)).fetchone()
-                connection.execute(
-                    """INSERT INTO bookmarks(id, episode_id, position_seconds, title, created_at)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (None if taken else bookmark.id, bookmark.episode_id, max(0.0, bookmark.position_seconds),
-                     bookmark.title, bookmark.created_at),
+            # Hold the writer lock across the existence/collision snapshots and
+            # inserts so concurrent bookmark edits cannot invalidate them.
+            connection.execute("BEGIN IMMEDIATE")
+            existing_episodes = set()
+            existing_bookmarks = set()
+            for start in range(0, len(episode_ids), 500):
+                batch = episode_ids[start:start + 500]
+                marks = ",".join("?" for _ in batch)
+                existing_episodes.update(
+                    row[0] for row in connection.execute(
+                        f"SELECT id FROM episodes WHERE id IN ({marks})", batch
+                    )
                 )
-                restored += 1
-        return restored, skipped
+            for start in range(0, len(bookmark_ids), 500):
+                batch = bookmark_ids[start:start + 500]
+                marks = ",".join("?" for _ in batch)
+                existing_bookmarks.update(
+                    row[0] for row in connection.execute(
+                        f"SELECT id FROM bookmarks WHERE id IN ({marks})", batch
+                    )
+                )
+
+            for bookmark in chosen:
+                if bookmark.episode_id not in existing_episodes:
+                    continue
+                values = (
+                    bookmark.episode_id,
+                    max(0.0, bookmark.position_seconds),
+                    bookmark.title,
+                    bookmark.created_at,
+                )
+                if bookmark.id in existing_bookmarks:
+                    generated_rows.append(values)
+                else:
+                    restored_rows.append((bookmark.id, *values))
+
+            connection.executemany(
+                """INSERT INTO bookmarks(id, episode_id, position_seconds, title, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                restored_rows,
+            )
+            # Reserve all still-free saved IDs first. A generated row cannot
+            # consume an ID that a later item in this restore can retain.
+            connection.executemany(
+                """INSERT INTO bookmarks(id, episode_id, position_seconds, title, created_at)
+                   VALUES (NULL, ?, ?, ?, ?)""",
+                generated_rows,
+            )
+        restored = len(restored_rows) + len(generated_rows)
+        return restored, len(chosen) - restored
 
     def delete_bookmark(self, bookmark_id: int):
         with self.database.connect() as connection:
@@ -185,18 +229,40 @@ class ListeningRepository:
         sql += " ORDER BY b.created_at DESC"
         with self.database.connect() as connection:
             rows = connection.execute(sql, params).fetchall()
-        return [
-            Bookmark(
-                id=row["id"],
-                episode_id=row["episode_id"],
-                position_seconds=row["position_seconds"],
-                title=row["title"],
-                created_at=row["created_at"],
-                episode_title=row["episode_title"],
-                show_title=row["show_title"],
-            )
-            for row in rows
-        ]
+        return [self._bookmark(row) for row in rows]
+
+    def bookmarks_by_ids(self, bookmark_ids) -> list[Bookmark]:
+        """Fetch bookmarks by ID, preserving deduplicated input order."""
+        ids = list(dict.fromkeys(int(value) for value in bookmark_ids if value))
+        if not ids:
+            return []
+        query = (
+            "SELECT b.*, e.title AS episode_title, s.title AS show_title "
+            "FROM bookmarks b JOIN episodes e ON e.id=b.episode_id "
+            "JOIN shows s ON s.id=e.show_id WHERE b.id IN ({})"
+        )
+        found = {}
+        with self.database.connect() as connection:
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                sql = query.format(",".join("?" for _ in batch))
+                found.update(
+                    (bookmark.id, bookmark)
+                    for bookmark in (self._bookmark(row) for row in connection.execute(sql, batch))
+                )
+        return [found[bookmark_id] for bookmark_id in ids if bookmark_id in found]
+
+    @staticmethod
+    def _bookmark(row) -> Bookmark:
+        return Bookmark(
+            id=row["id"],
+            episode_id=row["episode_id"],
+            position_seconds=row["position_seconds"],
+            title=row["title"],
+            created_at=row["created_at"],
+            episode_title=row["episode_title"],
+            show_title=row["show_title"],
+        )
 
     def add_silence_saved(self, seconds: float):
         if not math.isfinite(seconds) or seconds <= 0:

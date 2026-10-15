@@ -135,25 +135,34 @@ class LibraryService:
             raise ValueError("An offset needs a limit; limit=None already returns every episode.")
         return self.repository.list_episodes(show_id, limit, offset)
 
-    def podcast_episode_page(
-        self, show_id: int, *, query: str = "", filter_name: str = "All",
+    def episode_page(
+        self, show_id: int | None = None, *, query: str = "", filter_name: str = "All",
         sort: str = "newest", limit: int = 200, offset: int = 0,
-        anchor_id: int = 0,
+        anchor_id: int = 0, after: tuple | None = None, before: tuple | None = None,
     ) -> dict:
-        """Return a filtered, ordered page from one saved podcast."""
-        return self.repository.podcast_episode_page(
+        """Return a filtered, ordered page from the library or one show."""
+        return self.repository.episode_page(
             show_id, query=query, filter_name=filter_name, sort=sort,
-            limit=limit, offset=offset, anchor_id=anchor_id,
+            limit=limit, offset=offset, anchor_id=anchor_id, after=after, before=before,
         )
 
-    def podcast_episode_ids(
-        self, show_id: int, *, query: str = "", filter_name: str = "All",
-        sort: str = "newest",
+    def episode_ids(
+        self, show_id: int | None = None, *, query: str = "", filter_name: str = "All",
+        sort: str = "newest", progress_only: bool = False,
     ) -> list[int]:
-        """Return all filtered episode IDs for actions covering the whole view."""
-        return self.repository.podcast_episode_ids(
+        """Return IDs for actions covering the whole filtered view."""
+        return self.repository.episode_ids(
             show_id, query=query, filter_name=filter_name, sort=sort,
+            progress_only=progress_only,
         )
+
+    def podcast_episode_page(self, show_id: int, **kwargs) -> dict:
+        """Compatibility wrapper for saved-podcast page callers."""
+        return self.episode_page(show_id, **kwargs)
+
+    def podcast_episode_ids(self, show_id: int, **kwargs) -> list[int]:
+        """Compatibility wrapper for saved-podcast bulk-action callers."""
+        return self.episode_ids(show_id, **kwargs)
 
     def history(self, limit: int = 200, offset: int = 0):
         return self.repository.list_history(limit, offset)
@@ -161,8 +170,17 @@ class LibraryService:
     def history_count(self) -> int:
         return self.repository.history_count()
 
-    def favorites(self):
-        return self.repository.list_favorites()
+    def favorites(self, limit: int | None = None):
+        return self.repository.list_favorites(limit)
+
+    def in_progress(self, limit: int | None = None):
+        return self.repository.list_in_progress(limit)
+
+    def in_progress_count(self, show_id: int | None = None) -> int:
+        return self.repository.in_progress_count(show_id)
+
+    def home_episodes(self, limit: int = 30):
+        return self.repository.list_home_episodes(limit)
 
     def import_feed(self, show_id: int, feed: FeedData):
         return self.repository.import_feed(show_id, feed)

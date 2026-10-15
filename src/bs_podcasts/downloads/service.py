@@ -339,9 +339,8 @@ class DownloadService:
         # Listener failures already logged, so one that fails on every
         # progress event is reported once, not once per event.
         self._listener_failures = set()
-        # Where the last limited missing-file pass stopped; the next one
-        # carries on from there.
-        self._missing_check_offset = 0
+        # Stable keyset cursor for periodic missing-file reconciliation.
+        self._missing_check_cursor = 0
         self._lock = Lock()
         # Queued tickets waiting to be recorded as rows, and the episodes whose
         # row write is in flight; `_settled` wakes callers waiting on one.
@@ -796,15 +795,20 @@ class DownloadService:
         the file was deleted until this root has held a completed file.
         """
         seen = set()
-        eligible = [
-            record for record in self.downloads.list()
-            if record.state == DownloadState.COMPLETE and record.target_path
-        ]
-        if limit is not None and eligible:
-            count = min(len(eligible), max(1, int(limit)))
-            offset = self._missing_check_offset % len(eligible)
-            eligible = (eligible[offset:] + eligible[:offset])[:count]
-            self._missing_check_offset = offset + count
+        if limit is None:
+            # Explicit full reconciliation retains its full-library behavior.
+            eligible = self.downloads.completed_records()
+        else:
+            count = max(1, int(limit))
+            eligible = self.downloads.completed_records(
+                after_episode_id=self._missing_check_cursor, limit=count
+            )
+            if not eligible and self._missing_check_cursor:
+                # Reached the end of the keyspace; wrap to the oldest IDs.
+                self._missing_check_cursor = 0
+                eligible = self.downloads.completed_records(limit=count)
+            if eligible:
+                self._missing_check_cursor = eligible[-1].episode_id
         checked = []
         for record in eligible:
             kind, _size = inspect_download_file(record.target_path, seen, completed=True)

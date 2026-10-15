@@ -230,7 +230,8 @@ class Database:
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys=ON")
-            connection.execute("PRAGMA busy_timeout=10000")
+            # sqlite3.connect(timeout=10.0) already installs this per-handle
+            # busy timeout; setting the same value again is redundant.
             # WAL + NORMAL syncs at checkpoints, not every progress update.
             connection.execute("PRAGMA synchronous=NORMAL")
         except BaseException:

@@ -100,6 +100,20 @@ _EPISODE_COLUMNS = (
 )
 _EPISODE_FROM = "FROM episodes e JOIN shows s ON s.id=e.show_id"
 _EPISODE_SELECT = "SELECT " + _EPISODE_COLUMNS + " " + _EPISODE_FROM
+# Bounded collection views need a display preview of show notes. Full notes
+# remain available through get_episode for information and copy operations.
+_EPISODE_PAGE_COLUMNS = (
+    "e.id, e.show_id, e.external_id, e.title, "
+    "substr(e.description,1,16384) AS description, e.media_url, e.mime_type, "
+    "e.published_at, e.observed_duration_seconds, e.duration_seconds, "
+    "e.position_seconds, e.played, e.is_new, e.downloaded_path, e.last_played, "
+    "e.transcript_url, e.transcript_type, "
+    "COALESCE(NULLIF(e.episode_artwork_path,''),s.artwork_path) AS artwork_path, "
+    "e.chapters_url, e.artwork_url, e.website_url, e.author, e.season_number, "
+    "e.episode_number, e.episode_type, e.explicit, e.enclosure_bytes, "
+    "e.favorite, e.episode_artwork_path, s.title AS show_title"
+)
+_EPISODE_PAGE_SELECT = "SELECT " + _EPISODE_PAGE_COLUMNS + " " + _EPISODE_FROM
 
 _PODCAST_FILTERS = {
     "All": "",
@@ -231,10 +245,13 @@ class LibraryRepository:
         return [self._episode(row) for row in rows]
 
     @staticmethod
-    def _podcast_episode_scope(connection, show_id, query, filter_name):
-        """Build the bound predicate shared by saved-podcast paging and IDs."""
-        clauses = ["e.show_id=?"]
-        parameters: list[object] = [show_id]
+    def _episode_scope(connection, show_id, query, filter_name):
+        """Build the bound predicate shared by whole-library and show paging."""
+        clauses = []
+        parameters: list[object] = []
+        if show_id is not None:
+            clauses.append("e.show_id=?")
+            parameters.append(show_id)
         filter_sql = _PODCAST_FILTERS.get(filter_name, "")
         if filter_sql:
             clauses.append(filter_sql)
@@ -251,7 +268,87 @@ class LibraryRepository:
                 "OR instr(accent_fold_text(s.title),?)>0)"
             )
             parameters.extend((folded_query, folded_query))
-        return " AND ".join(clauses), parameters
+        return (" AND ".join(clauses) if clauses else "1"), parameters
+
+    @staticmethod
+    def _after_episode_predicate(sort, after):
+        """Keyset predicate matching the corresponding whitelisted order.
+
+        Cursor shapes are ``(published_at,id)`` for newest/oldest,
+        ``(duration,published_at,id)`` for shortest/longest, and
+        ``(played,published_at,id)`` for unplayed.  The trailing published/id
+        order is descending for every sort except oldest.
+        """
+        if sort == "oldest":
+            published_at, episode_id = after
+            return "(e.published_at,e.id)>(?,?)", (published_at, episode_id)
+        if sort in {"shortest", "longest"}:
+            duration, published_at, episode_id = after
+            duration_sql = _SHORT_DURATION if sort == "shortest" else _LONG_DURATION
+            operator = ">" if sort == "shortest" else "<"
+            return (
+                f"({duration_sql} {operator} ? OR ({duration_sql}=? AND "
+                "(e.published_at,e.id)<(?,?)))",
+                (duration, duration, published_at, episode_id),
+            )
+        if sort == "unplayed":
+            played, published_at, episode_id = after
+            return (
+                "(e.played>? OR (e.played=? AND (e.published_at,e.id)<(?,?)))",
+                (played, played, published_at, episode_id),
+            )
+        published_at, episode_id = after
+        return "(e.published_at,e.id)<(?,?)", (published_at, episode_id)
+
+    @staticmethod
+    def _before_episode_predicate(sort, before):
+        """Predicate for the previous keyset window, in reverse scan order."""
+        if sort == "oldest":
+            published_at, episode_id = before
+            return "(e.published_at,e.id)<(?,?)", (published_at, episode_id)
+        if sort in {"shortest", "longest"}:
+            duration, published_at, episode_id = before
+            duration_sql = _SHORT_DURATION if sort == "shortest" else _LONG_DURATION
+            operator = "<" if sort == "shortest" else ">"
+            return (
+                f"({duration_sql} {operator} ? OR ({duration_sql}=? AND "
+                "(e.published_at,e.id)>(?,?)))",
+                (duration, duration, published_at, episode_id),
+            )
+        if sort == "unplayed":
+            played, published_at, episode_id = before
+            return (
+                "(e.played<? OR (e.played=? AND (e.published_at,e.id)>(?,?)))",
+                (played, played, published_at, episode_id),
+            )
+        published_at, episode_id = before
+        return "(e.published_at,e.id)>(?,?)", (published_at, episode_id)
+
+    @staticmethod
+    def _reverse_episode_sort_sql(sort):
+        if sort == "oldest":
+            return "e.published_at DESC,e.id DESC"
+        if sort == "shortest":
+            return f"{_SHORT_DURATION} DESC,e.published_at ASC,e.id ASC"
+        if sort == "longest":
+            return f"{_LONG_DURATION} ASC,e.published_at ASC,e.id ASC"
+        if sort == "unplayed":
+            return "e.played DESC,e.published_at ASC,e.id ASC"
+        return "e.published_at ASC,e.id ASC"
+
+    @staticmethod
+    def _episode_row_cursor(row, sort):
+        published_at, episode_id = row["published_at"], int(row["id"])
+        if sort in {"shortest", "longest"}:
+            duration = _podcast_duration_seconds(
+                row["observed_duration_seconds"], row["duration_seconds"]
+            )
+            if sort == "shortest" and not duration:
+                duration = 1_000_000_000
+            return (duration, published_at, episode_id)
+        if sort == "unplayed":
+            return (int(row["played"]), published_at, episode_id)
+        return (published_at, episode_id)
 
     @staticmethod
     def _podcast_sort_sql(connection, sort):
@@ -265,46 +362,141 @@ class LibraryRepository:
                 pass  # the callback is already registered on this thread's handle
         return _PODCAST_SORTS.get(sort, _PODCAST_SORTS["newest"])
 
-    def podcast_episode_page(
-        self, show_id: int, *, query: str = "", filter_name: str = "All",
+    def episode_page(
+        self, show_id: int | None = None, *, query: str = "", filter_name: str = "All",
         sort: str = "newest", limit: int = 200, offset: int = 0,
-        anchor_id: int = 0,
+        anchor_id: int = 0, after: tuple | None = None, before: tuple | None = None,
     ) -> dict:
-        """Read one filtered page and counts without loading the full catalogue.
+        """Read a bounded whole-library or show episode page.
 
-        If a matching anchor lies outside the requested window, the returned
-        window moves to the page containing that anchor. Rank calculation stays
-        in SQLite and carries only IDs, never episode descriptions.
+        ``after`` continues a live, keyset-paged view without scanning the
+        already-read prefix.  Its shape depends on ``sort`` (see
+        ``_after_episode_predicate``); ``offset`` remains the displayed row
+        number.  New rows before the cursor do not shift the current window;
+        later pages reflect current membership and deletions.  Without a
+        cursor, offset paging and anchor restoration retain their prior
+        behavior.  Counts and rows share one SQLite snapshot.
         """
         limit = max(1, int(limit))
         offset = max(0, int(offset))
+        if after is not None and before is not None:
+            raise ValueError("Use an after or before cursor, not both.")
         filter_name = filter_name if filter_name in _PODCAST_FILTERS else "All"
         with self.database.connect() as connection:
             with _read_savepoint(connection):
                 sort_sql = self._podcast_sort_sql(connection, sort)
-                predicate, parameters = self._podcast_episode_scope(
+                predicate, parameters = self._episode_scope(
                     connection, show_id, query, filter_name
                 )
-                counts = connection.execute(
-                    "SELECT COUNT(*),COALESCE(SUM(e.position_seconds>0),0) "
-                    + _EPISODE_FROM + " WHERE " + predicate,
-                    parameters,
-                ).fetchone()
-                total, progress_total = int(counts[0]), int(counts[1])
-                show_total = int(connection.execute(
-                    "SELECT COUNT(*) FROM episodes WHERE show_id=?", (show_id,)
+                unfiltered = not str(query or "").strip() and filter_name == "All"
+                if unfiltered:
+                    if show_id is None:
+                        show_total = int(connection.execute(
+                            "SELECT COALESCE(SUM(episode_count),0) FROM shows"
+                        ).fetchone()[0])
+                    else:
+                        row = connection.execute(
+                            "SELECT episode_count FROM shows WHERE id=?", (show_id,)
+                        ).fetchone()
+                        show_total = int(row[0]) if row else 0
+                    total = show_total
+                elif filter_name == "New" and not str(query or "").strip():
+                    if show_id is None:
+                        total = int(connection.execute(
+                            "SELECT COALESCE(SUM(new_count),0) FROM shows"
+                        ).fetchone()[0])
+                    else:
+                        row = connection.execute(
+                            "SELECT new_count FROM shows WHERE id=?", (show_id,)
+                        ).fetchone()
+                        total = int(row[0]) if row else 0
+                    if show_id is None:
+                        show_total = int(connection.execute(
+                            "SELECT COALESCE(SUM(episode_count),0) FROM shows"
+                        ).fetchone()[0])
+                    else:
+                        row = connection.execute(
+                            "SELECT episode_count FROM shows WHERE id=?", (show_id,)
+                        ).fetchone()
+                        show_total = int(row[0]) if row else 0
+                else:
+                    # A title/show search with no episode-state filter has a
+                    # revision-correct count cache. Playback/favorite/new
+                    # filters deliberately bypass it because those columns do
+                    # not participate in the FTS revision.
+                    folded_query = _accent_fold_text(str(query or "").strip())
+                    count_key = None
+                    if filter_name == "All" and folded_query:
+                        revision = tuple(connection.execute(
+                            "SELECT epoch,revision FROM episode_search_revision WHERE singleton_id=1"
+                        ).fetchone())
+                        count_key = ("episode-page-count", revision, show_id, folded_query)
+                    cached_total = self._cached_search(count_key) if count_key is not None else None
+                    if cached_total is None:
+                        total = int(connection.execute(
+                            "SELECT COUNT(*) " + _EPISODE_FROM + " WHERE " + predicate,
+                            parameters,
+                        ).fetchone()[0])
+                        if count_key is not None:
+                            self._cache_search(count_key, total)
+                    else:
+                        total = int(cached_total)
+                    if show_id is None:
+                        show_total = int(connection.execute(
+                            "SELECT COALESCE(SUM(episode_count),0) FROM shows"
+                        ).fetchone()[0])
+                    else:
+                        row = connection.execute(
+                            "SELECT episode_count FROM shows WHERE id=?", (show_id,)
+                        ).fetchone()
+                        show_total = int(row[0]) if row else 0
+                # The positive-position partial index makes this proportional
+                # to saved progress, not every episode in a large library.
+                progress_total = int(connection.execute(
+                    "SELECT COUNT(*) " + _EPISODE_FROM + " WHERE "
+                    + predicate + " AND e.position_seconds>0", parameters,
                 ).fetchone()[0])
 
-                if total == 0:
-                    offset = 0
-                elif offset >= total:
-                    offset = ((total - 1) // limit) * limit
+                if after is None and before is None:
+                    if total == 0:
+                        offset = 0
+                    elif offset >= total:
+                        offset = ((total - 1) // limit) * limit
 
                 try:
                     anchor_id = int(anchor_id or 0)
                 except (TypeError, ValueError, OverflowError):
                     anchor_id = 0
-                if anchor_id:
+                page_predicate = predicate
+                page_parameters = list(parameters)
+                page_order = sort_sql
+                if after is not None:
+                    cursor_sql, cursor_parameters = self._after_episode_predicate(sort, after)
+                    page_predicate += " AND " + cursor_sql
+                    page_parameters.extend(cursor_parameters)
+                elif before is not None:
+                    cursor_sql, cursor_parameters = self._before_episode_predicate(sort, before)
+                    page_predicate += " AND " + cursor_sql
+                    page_parameters.extend(cursor_parameters)
+                    page_order = self._reverse_episode_sort_sql(sort)
+                def read_rows():
+                    fetched = connection.execute(
+                        _EPISODE_PAGE_SELECT + " WHERE " + page_predicate
+                        + " ORDER BY " + page_order + " LIMIT ?"
+                        + ("" if after is not None or before is not None else " OFFSET ?"),
+                        (*page_parameters, limit + 1,
+                         *((offset,) if after is None and before is None else ())),
+                    ).fetchall()
+                    has_extra = len(fetched) > limit
+                    return fetched[:limit], has_extra
+
+                rows, has_extra = read_rows()
+                if anchor_id and after is None and before is None and all(
+                    int(row["id"]) != anchor_id for row in rows
+                ):
+                    # Most restoration anchors are already inside the window.
+                    # Rank only when an old navigation entry really requires a
+                    # jump, rather than ranking the whole scope on every page.
                     rank = connection.execute(
                         "WITH ranked AS ("
                         "SELECT e.id,ROW_NUMBER() OVER (ORDER BY " + sort_sql + ")-1 AS n "
@@ -316,37 +508,63 @@ class LibraryRepository:
                         anchor_rank = int(rank[0])
                         if not offset <= anchor_rank < offset + limit:
                             offset = (anchor_rank // limit) * limit
-
-                rows = connection.execute(
-                    _EPISODE_SELECT + " WHERE " + predicate
-                    + " ORDER BY " + sort_sql + " LIMIT ? OFFSET ?",
-                    (*parameters, limit, offset),
-                ).fetchall()
+                            rows, has_extra = read_rows()
+                if before is not None:
+                    rows.reverse()
+                # Availability comes from an actual one-row lookahead in the
+                # requested direction, not the caller's possibly stale UI
+                # position. A cursor provided from the other direction is a
+                # continuation boundary for that direction.
+                has_more = before is not None or has_extra
+                if after is not None:
+                    has_previous = True
+                elif before is not None:
+                    has_previous = has_extra
+                else:
+                    has_previous = offset > 0
+                next_cursor = self._episode_row_cursor(rows[-1], sort) if rows and has_more else None
+                previous_cursor = (
+                    self._episode_row_cursor(rows[0], sort) if rows and has_previous else None
+                )
         return {
             "episodes": [self._episode(row) for row in rows],
             "total": total,
             "offset": offset,
             "show_total": show_total,
             "progress_total": progress_total,
+            "next_cursor": next_cursor,
+            "previous_cursor": previous_cursor,
+            "has_more": has_more,
+            "has_previous": has_previous,
         }
 
-    def podcast_episode_ids(
-        self, show_id: int, *, query: str = "", filter_name: str = "All",
-        sort: str = "newest",
+    def episode_ids(
+        self, show_id: int | None = None, *, query: str = "", filter_name: str = "All",
+        sort: str = "newest", progress_only: bool = False,
     ) -> list[int]:
-        """Return the complete filtered scope as ordered IDs for bulk actions."""
+        """Return the ordered IDs matching a whole-library or show filter."""
         filter_name = filter_name if filter_name in _PODCAST_FILTERS else "All"
         with self.database.connect() as connection:
             sort_sql = self._podcast_sort_sql(connection, sort)
-            predicate, parameters = self._podcast_episode_scope(
+            predicate, parameters = self._episode_scope(
                 connection, show_id, query, filter_name
             )
+            if progress_only:
+                predicate += " AND e.position_seconds>0"
             rows = connection.execute(
                 "SELECT e.id " + _EPISODE_FROM + " WHERE " + predicate
                 + " ORDER BY " + sort_sql,
                 parameters,
             ).fetchall()
         return [int(row[0]) for row in rows]
+
+    def podcast_episode_page(self, show_id: int, **kwargs) -> dict:
+        """Compatibility wrapper for callers using the saved-podcast name."""
+        return self.episode_page(show_id, **kwargs)
+
+    def podcast_episode_ids(self, show_id: int, **kwargs) -> list[int]:
+        """Compatibility wrapper for callers using the saved-podcast name."""
+        return self.episode_ids(show_id, **kwargs)
 
     def get_episode(self, episode_id: int) -> Episode | None:
         with self.database.connect() as connection:
@@ -372,18 +590,51 @@ class LibraryRepository:
             ).fetchone()
         return int(row[0])
 
-    def list_favorites(self) -> list[Episode]:
+    def list_favorites(self, limit: int | None = None) -> list[Episode]:
+        sql = _EPISODE_SELECT + " WHERE e.favorite=1 ORDER BY e.published_at DESC, e.id DESC"
+        parameters = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters = (max(0, int(limit)),)
         with self.database.connect() as connection:
-            rows = connection.execute(
-                _EPISODE_SELECT + " WHERE e.favorite=1 ORDER BY e.published_at DESC, e.id DESC"
-            ).fetchall()
+            rows = connection.execute(sql, parameters).fetchall()
         return [self._episode(row) for row in rows]
 
-    def list_in_progress(self) -> list[Episode]:
+    def list_in_progress(self, limit: int | None = None) -> list[Episode]:
+        select = _EPISODE_SELECT if limit is None else _EPISODE_PAGE_SELECT
+        sql = (select + " WHERE e.played=0 AND e.position_seconds>0 "
+               "ORDER BY e.last_played DESC, e.id DESC")
+        parameters = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters = (max(0, int(limit)),)
+        with self.database.connect() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return [self._episode(row) for row in rows]
+
+    def in_progress_count(self, show_id: int | None = None) -> int:
+        """Count resumable episodes using the partial in-progress index."""
+        sql = "SELECT COUNT(*) FROM episodes WHERE played=0 AND position_seconds>0"
+        parameters = ()
+        if show_id is not None:
+            sql += " AND show_id=?"
+            parameters = (show_id,)
+        with self.database.connect() as connection:
+            return int(connection.execute(sql, parameters).fetchone()[0])
+
+    def list_home_episodes(self, limit: int = 30) -> list[Episode]:
+        """Newest Home rows: new and unplayed first, or unplayed fallback."""
+        limit = max(0, int(limit))
+        if not limit:
+            return []
+        base = _EPISODE_PAGE_SELECT + " WHERE e.played=0 AND e.position_seconds<=0 "
+        order = " ORDER BY e.published_at DESC,e.id DESC LIMIT ?"
         with self.database.connect() as connection:
             rows = connection.execute(
-                _EPISODE_SELECT + " WHERE e.played=0 AND e.position_seconds>0 "
-                "ORDER BY e.last_played DESC, e.id DESC").fetchall()
+                base + "AND e.is_new=1" + order, (limit,)
+            ).fetchall()
+            if not rows:
+                rows = connection.execute(base + order, (limit,)).fetchall()
         return [self._episode(row) for row in rows]
 
     def retention_candidates(

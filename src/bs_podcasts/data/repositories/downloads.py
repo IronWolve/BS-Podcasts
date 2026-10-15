@@ -108,6 +108,24 @@ class DownloadRepository:
             rows = connection.execute(self._select() + " ORDER BY d.updated_at DESC").fetchall()
         return [self._record(row) for row in rows]
 
+    def completed_records(self, *, after_episode_id: int = 0, limit: int | None = None) -> list[DownloadRecord]:
+        """Read completed downloads in stable episode-id order.
+
+        The optional keyset cursor lets periodic file reconciliation inspect a
+        bounded page without materializing every download row. Episode IDs are
+        stable when download state and timestamps change, unlike updated_at.
+        """
+        query = self._select() + " WHERE d.state='complete' AND d.target_path!=''"
+        params: tuple[object, ...] = ()
+        if limit is not None:
+            query += " AND d.episode_id>? ORDER BY d.episode_id LIMIT ?"
+            params = (int(after_episode_id), max(1, int(limit)))
+        else:
+            query += " ORDER BY d.episode_id"
+        with self.database.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._record(row) for row in rows]
+
     def progress(
         self,
         episode_id: int,

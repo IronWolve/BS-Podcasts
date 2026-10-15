@@ -2083,7 +2083,7 @@ class HomePage(BasePage, _ListPageMixin):
         if not self.model.rowCount():
             self.stack.setCurrentWidget(self.empty)
 
-    def set_sections(self, in_progress, latest):
+    def set_sections(self, in_progress, latest, *, progress_total=None, latest_total=None):
         self._finish_initial_load()
         key = self._current_key()
         selected = self._selected_keys()
@@ -2095,7 +2095,7 @@ class HomePage(BasePage, _ListPageMixin):
         self._replace_rows(self._resume_lead + shown)
         if self._resume_lead:
             self.latest_title.title.setText("Continue listening")
-            self.latest_title.set_count(len(in_progress), show_link=True)
+            self.latest_title.set_count(len(in_progress) if progress_total is None else progress_total, show_link=True)
         else:
             self.latest_title.title.setText(self._latest_text)
             # "See all" opens the New filter. When nothing is flagged new, the
@@ -2103,7 +2103,8 @@ class HomePage(BasePage, _ListPageMixin):
             # hold, so there is no list to open: hide the link and count only
             # the rows listed here.
             has_new = any(episode.is_new for episode in shown)
-            self.latest_title.set_count(len(latest) if has_new else len(shown), show_link=has_new)
+            total = len(latest) if latest_total is None else latest_total
+            self.latest_title.set_count(total if has_new else len(shown), show_link=has_new)
         self._restore_selection(key, True, selected, anchor)
 
     def set_playing(self, episode_id: int, active: bool, source: str = ""):
