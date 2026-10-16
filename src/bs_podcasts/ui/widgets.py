@@ -984,7 +984,9 @@ class PageHeader(QFrame):
         # never hide one that is actually filtering — that left the list cut
         # down with no visible cause and no way to clear it.
         wide_enough = self.width() >= scaled_px(COMPACT_PAGE_PX)
-        allowed = getattr(self, "_search_allowed", True)
+        # An empty result set is not permission to hide the editor that
+        # produced it, or the blank editor the user is still typing into.
+        allowed = getattr(self, "_search_allowed", True) or bool(self.search.text()) or self.search.hasFocus()
         # Focus keeps it too: hiding the field someone is typing in would be
         # worse than the crowding this trades away.
         keep = wide_enough or bool(self.search.text()) or self.search.hasFocus()

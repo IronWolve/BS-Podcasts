@@ -781,7 +781,10 @@ class _ListPageMixin:
         if previous != item:
             self._context_item = item
             self.context_updated.emit(previous, item)
-        self._update_empty()
+        # Filtering can temporarily have no rows. Keep its query in this
+        # intermediate update so the search field is never hidden mid-typing.
+        query = self.header.search.text().strip() if not getattr(self, 'discover', False) else ''
+        self._update_empty(query)
 
     def _filtered_empty_text(self):
         chip = getattr(self, "_filter", "") or ""
