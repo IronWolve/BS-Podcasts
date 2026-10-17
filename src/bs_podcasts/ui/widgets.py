@@ -4456,6 +4456,7 @@ class PlayerBar(QFrame):
         self.bookmark = icon_button("bookmark-add", "Bookmark this moment  ·  Ctrl+B")
         self.bookmark.clicked.connect(self.bookmark_requested)
         self.ab = icon_button("loop", "A–B repeat", checkable=True)
+        self.ab.setProperty('activeTone', 'blue')
         self._set_hint(self.ab, "A–B repeat: set point A  ·  Ctrl+Shift+A")
         self.ab.clicked.connect(lambda: (self.ab.setChecked(self._ab_active), self.ab_requested.emit()))
         self.trim = icon_button("trim", "Silence trim", checkable=True)
@@ -4490,14 +4491,22 @@ class PlayerBar(QFrame):
         self.tray_button.setAccessibleName("Minimize to tray")
         self.tray_button.clicked.connect(self.minimize_to_tray_requested)
         self.set_tray_available(False)
+        for button in (self.bookmark, self.ab, self.trim, self.sleep, self.queue, self.tray_button):
+            button.setProperty('glyph_px', 18)
+            refit_icon_button(button)
         tools.addStretch(1)
-        for widget in (self.speed, self.bookmark, self.ab, self.trim, self.sleep, self.queue):
+        for widget in (self.speed, self.ab, self.trim, self.sleep):
+            tools.addWidget(widget)
+        tools.addSpacing(SPACE['sm'])
+        self._library_gap = tools.itemAt(tools.count() - 1).spacerItem()
+        for widget in (self.bookmark, self.queue):
             tools.addWidget(widget)
         tools.addSpacing(SPACE["sm"])
         self._tray_gap = tools.itemAt(tools.count() - 1).spacerItem()
         tools.addWidget(self.tray_button)
         tools.setContentsMargins(0, 0, 0, 0)
         tools_wrap = QWidget()
+        tools_wrap.setObjectName('playerTools')
         tools_column = QVBoxLayout(tools_wrap)
         tools_column.setContentsMargins(0, 0, 0, 0)
         tools_column.setSpacing(SPACE["xs"])
@@ -4528,6 +4537,10 @@ class PlayerBar(QFrame):
         self._volume_metrics()
         self._sync_volume_controls()
         layout.addWidget(tools_wrap)
+        tab_order = (self.speed, self.ab, self.trim, self.sleep, self.bookmark, self.queue, self.tray_button,
+                     self.volume, self.volume_slider)
+        for previous, following in zip(tab_order, tab_order[1:]):
+            QWidget.setTabOrder(previous, following)
 
     # -- configuration -----------------------------------------------------
     @staticmethod
@@ -4841,6 +4854,7 @@ class PlayerBar(QFrame):
         for button in (self.next, self.bookmark, self.ab, self.trim, self.sleep, self.queue, self.volume, self.tray_button):
             refit_icon_button(button)
         self._tray_gap.changeSize(SPACE["sm"], 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+        self._library_gap.changeSize(SPACE['sm'], 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
         self.tools_wrap.layout().invalidate()
         self._volume_metrics()
         self.setFixedHeight(self._required_height())
