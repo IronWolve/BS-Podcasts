@@ -1274,6 +1274,7 @@ class StateBanner(QFrame):
         self._fade_effect = None
         self._fade_animation = None
         self._status_menu = None
+        self._cancel_callback = None
         if compact:
             self.setObjectName('headerStatus')
             self.setFixedHeight(scaled_px(36))
@@ -1328,6 +1329,11 @@ class StateBanner(QFrame):
             retry = QPushButton('Retry')
             retry.clicked.connect(lambda: (menu.close(), self.retry_requested.emit()))
             actions.addWidget(retry)
+        if self.state == 'loading' and self._cancel_callback is not None:
+            stop = QPushButton('Stop checking')
+            callback = self._cancel_callback
+            stop.clicked.connect(lambda: (menu.close(), callback()))
+            actions.addWidget(stop)
         dismiss = QPushButton('Dismiss')
         dismiss.clicked.connect(lambda: (menu.close(), self.clear()))
         actions.addWidget(dismiss)
@@ -1386,8 +1392,9 @@ class StateBanner(QFrame):
             self._paint_icon()
             self._compact_status()
 
-    def show_state(self, state: str, message: str, retry: bool = False):
+    def show_state(self, state: str, message: str, retry: bool = False, *, cancel=None):
         self._stop_fade()
+        self._cancel_callback = cancel if state == 'loading' else None
         prefix, glyph, tone = self.LABELS.get(state, (state.replace("_", " ").title(), "info", "muted"))
         previous, self.state = self.state, state
         if state != previous:
@@ -1426,6 +1433,7 @@ class StateBanner(QFrame):
 
     def clear(self):
         self._stop_fade()
+        self._cancel_callback = None
         if self._status_menu is not None:
             self._status_menu.close()
         previous, self.state = self.state, ""

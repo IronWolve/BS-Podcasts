@@ -49,7 +49,7 @@ from ..domain import DownloadState, FeedData, FeedEpisodeData, Health
 from ..domain.times import format_hours_minutes, format_media_time
 from ..directories.base import CandidateList
 from ..directories.catalog import CACHE_SECONDS as DIRECTORY_CACHE_SECONDS
-from ..directories.persistent import PersistentDirectoryCache
+from ..directories.persistent import PersistentDirectoryCache, PersistentFeedDates
 from ..feeds import parser as feed_parser
 from ..downloads import AutomaticCleanupSkipped
 from ..jobs import JobResult, JobRunner, JobStatus
@@ -457,6 +457,8 @@ class MainWindow(QMainWindow):
         self._directory_waiting = None
         self._directory_cancel = threading.Event()
         self._discover_snapshot_cache = PersistentDirectoryCache()
+        self._discover_date_cache = PersistentFeedDates()
+        self._discover_dates_force = False
         self._directory_artwork_waiting = []
         self._directory_artwork_active = set()
         self._directory_artwork_completed = set()
@@ -496,6 +498,7 @@ class MainWindow(QMainWindow):
         self._discover_newest_cards = {}
         self._discover_newest_total = 0
         self._discover_newest_done = 0
+        self._discover_newest_errors = []
         self._discover_newest_summary = ""
         self._discover_newest_beyond = 0
         self._newest_dates = OrderedDict()
@@ -7385,6 +7388,7 @@ class MainWindow(QMainWindow):
     NEWEST_SCAN_LIMIT = 200
 
     def _start_directory_request(self, operation: str, value, force: bool = False):
+        self._discover_dates_force = force
         key = (operation, repr(value))
         retained_limit = self._discover_limit if (
             force and self._discover_displayed_key == key and self.discover_page.all_items
@@ -7404,6 +7408,7 @@ class MainWindow(QMainWindow):
         self._discover_newest_updates.clear()
         self._discover_newest_total = 0
         self._discover_newest_done = 0
+        self._discover_newest_errors = []
         self._discover_newest_summary = ""
         self._discover_scan_cancelled = False
         if self._discover_scan_toast:
@@ -7605,6 +7610,7 @@ class MainWindow(QMainWindow):
                     request[0], request[1], getattr(self.refresh, "artwork", None)
                 )
                 if snapshot is not None and snapshot["candidates"]:
+                    snapshot['newest_dates'] = self._discover_date_cache.load_many(item[0].feed_url for item in snapshot['candidates'])
                     self._emit_completed((
                         "directory-cache", (generation, request),
                         JobResult(JobStatus.OK, value=snapshot),
@@ -7641,13 +7647,14 @@ class MainWindow(QMainWindow):
         partial = getattr(candidates, "partial", False)  # a list that lost results is never kept
         candidates = list(candidates)
         if artwork_cache is None:
-            return CandidateList([(candidate, "") for candidate in candidates], partial)
-
-        cached = artwork_cache.path_for
-        # Paths are deterministic: publish rows without decoding every cache
-        # hit. Visible-image workers and the bounded artwork pump validate them.
-        return CandidateList([(candidate, str(cached(candidate.artwork_url)) if candidate.artwork_url else '')
-                              for candidate in candidates], partial)
+            result = CandidateList([(candidate, "") for candidate in candidates], partial)
+        else:
+            cached = artwork_cache.path_for
+            # Publish deterministic paths without decoding every cover here.
+            result = CandidateList([(candidate, str(cached(candidate.artwork_url)) if candidate.artwork_url else '')
+                                    for candidate in candidates], partial)
+        result.newest_dates = self._discover_date_cache.load_many(candidate.feed_url for candidate in candidates)
+        return result
 
     def _queue_directory_artwork(self):
         seen = self._directory_artwork_completed | {
@@ -8454,10 +8461,14 @@ class MainWindow(QMainWindow):
             self._preview_pending.discard(identifier)
             self._preview_futures.pop(identifier, None)
         newest_scan = identifier in self._discover_newest_pending
+        record = getattr(result.value, '_newest_date_record', None) if result.status == JobStatus.OK else getattr(result.error, '_newest_date_record', None)
+        if record is not None:
+            self._newest_dates[identifier] = record
+            self._newest_dates.move_to_end(identifier)
         if result.status == JobStatus.OK:
             self._preview_retries.pop(identifier, None)
             peek = isinstance(result.value, PeekFeed)
-            if kind == "preview-scan" and peek and result.value.episodes:
+            if kind == "preview-scan" and peek and record is None and result.value.episodes:
                 newest = result.value.episodes[0]
                 self._newest_dates[identifier] = (time.time(), newest.title, newest.published_at)
                 self._newest_dates.move_to_end(identifier)
@@ -8483,6 +8494,13 @@ class MainWindow(QMainWindow):
                 self._pending_episodes_url = ""
                 self.episode_page.banner.show_state("error", f"Couldn’t fetch this podcast’s episodes: {message}", retry=True)
         if newest_scan:
+            if result.status != JobStatus.OK:
+                errors = getattr(self, '_discover_newest_errors', [])
+                if len(errors) < 3:
+                    errors.append(result.message or 'The feed did not respond.')
+                self._discover_newest_errors = errors
+            while len(self._newest_dates) > self.NEWEST_DATE_ENTRIES:
+                self._newest_dates.popitem(last=False)
             self._discover_newest_pending.discard(identifier)
             self._discover_newest_done += 1
             self._update_newest_scan_toast()
@@ -8758,6 +8776,14 @@ class MainWindow(QMainWindow):
             else:
                 self.discover_page.banner.show_state("error", result.message or "Directory search failed.", retry=True)
             return
+        dates = result.value.get('newest_dates', {}) if cache_restore else getattr(result.value, 'newest_dates', {})
+        for url, record in dates.items():
+            current_date = self._newest_dates.get(url)
+            if current_date is None or record[0] > current_date[0]:
+                self._newest_dates[url] = record
+                self._newest_dates.move_to_end(url)
+        while len(self._newest_dates) > self.NEWEST_DATE_ENTRIES:
+            self._newest_dates.popitem(last=False)
         if not cache_restore:
             self._discover_retry_request = None
         if cache_restore:
@@ -8869,7 +8895,14 @@ class MainWindow(QMainWindow):
                     is_episode=candidate.chart_type == "trending",
                 )
             )
-        return [self._with_preview(item, self._previews.get(item.feed_url)) for item in podcasts]
+        result = []
+        for item in podcasts:
+            known = self._newest_dates.get(item.feed_url)
+            preview = self._previews.get(item.feed_url)
+            if preview is None and known is not None:
+                preview = _newest_item_feed(*known[1:3])
+            result.append(self._with_preview(item, preview))
+        return result
 
     def _show_directory_rows(self, podcasts, cache_key):
         self.discover_page.set_items(
@@ -9339,8 +9372,9 @@ class MainWindow(QMainWindow):
         if key != "newest":
             # Leaving Newest part-way is a stop: the notice must not say the
             # scan finished for podcasts it never reached.
-            self._discover_scan_cancelled = True
-            self._finish_discover_newest_scan()
+            if self._discover_newest_pending or self._discover_newest_total:
+                self._discover_scan_cancelled = True
+                self._finish_discover_newest_scan()
             return
         current_items = {
             item.feed_url: item
@@ -9352,7 +9386,10 @@ class MainWindow(QMainWindow):
         missing = [
             feed_url
             for feed_url in current_items
-            if not current_items[feed_url].latest_sort_key and feed_url not in self._previews
+            if (getattr(self, '_discover_dates_force', False)
+                or (feed_url in getattr(self, '_newest_dates', {}) and not PersistentFeedDates.fresh(self._newest_dates[feed_url]))
+                or (not current_items[feed_url].latest_sort_key and feed_url not in self._previews
+                    and not PersistentFeedDates.fresh(getattr(self, '_newest_dates', {}).get(feed_url))))
         ]
         # Each card costs a download of its whole feed, so one scan covers a
         # bounded number of cards, in display order; the rest stay undated.
@@ -9363,12 +9400,14 @@ class MainWindow(QMainWindow):
         allowed = set(fresh[:room])
         missing = [feed_url for feed_url in missing if feed_url in pending or feed_url in allowed]
         if not missing:
-            self._finish_discover_newest_scan()
+            if self._discover_newest_pending:
+                self._finish_discover_newest_scan()
             return
         if not self._discover_newest_pending:
             self._stop_discover_newest_workers()
             self._discover_newest_cancel = threading.Event()
             self._discover_newest_summary = self.discover_page.result_summary.text()
+            self._discover_newest_errors = []
         self._discover_newest_cards = current_items
         self._discover_newest_pending.update(missing)
         queued = set(self._discover_newest_waiting) | self._discover_newest_active
@@ -9380,32 +9419,23 @@ class MainWindow(QMainWindow):
         # Cumulative: rows added mid-scan grow the total instead of
         # resetting the "N of M" count back to 1.
         self._discover_newest_total = self._discover_newest_done + len(self._discover_newest_pending)
-        beyond = self._discover_newest_beyond
-        what = (f"the first {self._discover_newest_total} podcasts; {beyond} more stay undated" if beyond
-                else f"{self._discover_newest_total} podcasts")
-        self.discover_page.set_discover_summary(f"Checking newest episode dates for {what}… Cards will update together.")
         self._update_newest_scan_toast()
         self._pump_discover_newest_scan()
 
     def _update_newest_scan_toast(self):
-        """Sticky bottom toast mirroring the scan; its X cancels the scan
-        (useful on slow connections) and keeps the dates found so far."""
+        """Progress stays in the fixed header; details offer Stop checking."""
         total = self._discover_newest_total
         if not total:
             return
         done = self._discover_newest_done
-        message = f"Scanning podcast release dates… {done} of {total}"
-        if self._discover_scan_toast and self.toast.update_message(message, owner="discover-scan"):
-            return
+        message = f"Checking podcast release dates… {done} of {total}. Cards update together."
         self._discover_scan_toast = True
-        self.toast.show_message(
-            message, "loading", duration_ms=0, on_close=self._cancel_discover_newest_scan, owner="discover-scan"
-        )
+        self.discover_page.banner.show_state('loading', message, cancel=self._cancel_discover_newest_scan)
 
     def _cancel_discover_newest_scan(self):
         if not self._discover_newest_total:
             return
-        self._discover_scan_toast = False  # the user already closed the toast
+        self._discover_scan_toast = False
         self._discover_scan_cancelled = True
         self._finish_discover_newest_scan()
 
@@ -9433,42 +9463,68 @@ class MainWindow(QMainWindow):
         generation = self._discover_newest_generation
         cancel = self._discover_newest_cancel
         identity = (generation, feed_url)
-        cached = self._previews.get(feed_url)
+        force = getattr(self, '_discover_dates_force', False)
+        cached = self._previews.get(feed_url) if not force else None
         if cached is not None:
             self._emit_completed(("preview-scan", identity, JobResult(JobStatus.OK, value=cached)))
             return
         known = self._newest_dates.get(feed_url)
-        if known is not None and time.time() - known[0] < self.NEWEST_DATE_SECONDS:
+        if not force and known is not None and PersistentFeedDates.fresh(known):
             # Read a short while ago: the same answer, with no request.
-            self._emit_completed(("preview-scan", identity, JobResult(JobStatus.OK, value=_newest_item_feed(*known[1:]))))
+            answer = _newest_item_feed(*known[1:3])
+            object.__setattr__(answer, '_newest_date_record', known)
+            self._emit_completed(("preview-scan", identity, JobResult(JobStatus.OK, value=answer)))
             return
         if self.jobs is None or self.refresh is None or feed_url in self._preview_pending:
             self._discover_newest_active.discard(feed_url)
             return
         fetcher = self.refresh.fetcher
+        date_cache = getattr(self, '_discover_date_cache', None)
 
         def work():
-            from ..feeds.fetch import FeedFetchError
-            from ..netlimits import Deadline, NetworkDeadline, request_scope
+            from ..netlimits import Deadline, request_scope
 
+            retained = date_cache.load(feed_url) if date_cache is not None else known
+            if not force and PersistentFeedDates.fresh(retained):
+                answer = _newest_item_feed(*retained[1:3])
+                object.__setattr__(answer, '_newest_date_record', retained)
+                return answer
             deadline = Deadline(60, cancel)
-            with request_scope(cancel, deadline=deadline):
-                deadline.remaining()
-                peek = None
-                try:
-                    peek = fetcher.peek_latest(feed_url)
-                except (NetworkDeadline, FeedFetchError):
-                    # The full fetch would get the same answer (an error
-                    # status, an oversized feed, a network failure): end this
-                    # card instead of asking the server a second time.
-                    raise
-                except Exception:
-                    logging.getLogger("bs_podcasts").warning(
-                        "The newest-date peek for %s failed; reading the whole feed", feed_label(feed_url), exc_info=True)
-                deadline.remaining()
-                if peek is not None:
-                    return _newest_item_feed(*peek)
-                return _fetch_feed_preview(fetcher, feed_url, deadline.remaining)
+            try:
+                with request_scope(cancel, deadline=deadline):
+                    answer = read_feed(deadline)
+                newest = _latest_episode(answer)
+                record = (time.time(), newest.title if newest else '', newest.published_at if newest else '',
+                          'ok' if newest and newest.published_at else 'empty')
+                if not cancel.is_set() and date_cache is not None:
+                    date_cache.save(feed_url, record)
+                object.__setattr__(answer, '_newest_date_record', record)
+                return answer
+            except Exception as exc:
+                if not cancel.is_set():
+                    record = (time.time(), retained[1] if retained else '', retained[2] if retained else '', 'error')
+                    if date_cache is not None:
+                        date_cache.save(feed_url, record)
+                    setattr(exc, '_newest_date_record', record)
+                raise
+
+        def read_feed(deadline):
+            from ..feeds.fetch import FeedFetchError
+            from ..netlimits import NetworkDeadline
+            deadline.remaining()
+            peek = None
+            try:
+                peek = fetcher.peek_latest(feed_url)
+            except (NetworkDeadline, FeedFetchError):
+                # A second fetch would only repeat the same failed request.
+                raise
+            except Exception:
+                logging.getLogger("bs_podcasts").warning(
+                    "The newest-date peek for %s failed; reading the whole feed", feed_label(feed_url), exc_info=True)
+            deadline.remaining()
+            if peek is not None:
+                return _newest_item_feed(*peek)
+            return _fetch_feed_preview(fetcher, feed_url, deadline.remaining)
 
         future = self.network_jobs.submit(work)
         self._discover_newest_futures[feed_url] = future
@@ -9502,17 +9558,21 @@ class MainWindow(QMainWindow):
             items.append(item)
         self._discover_newest_updates.clear()
         self._discover_newest_cards = {}
-        newest = self.discover_page.discover_sort_key() == "newest"
-        self.discover_page.set_items(items, preserve_scroll=not newest)
-        if newest:
-            self._later(0, self.discover_page.view.scrollToTop)
+        self.discover_page.set_items(items, preserve_scroll=self.discover_page.discover_sort_key() == 'newest')
         self._trim_preview_cache()
         if scanned:
             if cancelled:
-                self._notify("Scan stopped — sorted with the dates found so far", "info")
+                message = 'Date checks stopped — saved dates are kept.'
+                self.discover_page.banner.show_state('info', message)
             else:
                 left = f"; {beyond} more are listed without a date" if beyond else ""
-                self._notify(f"Release-date scan finished for {scanned} podcasts{left}", "success")
+                errors = getattr(self, '_discover_newest_errors', [])
+                if errors:
+                    self.discover_page.banner.show_state('partial', f'Could not check some podcast dates: {errors[0][:240]} Saved dates are kept.')
+                else:
+                    self.discover_page.banner.show_state('loaded', f'Podcast dates updated for {scanned} podcasts{left}.')
+        self._discover_newest_errors = []
+        self._discover_dates_force = False
 
     def _store_preview(self, feed_url: str, feed):
         self._previews.protect(self._preview_episodes_url, self._pending_episodes_url)

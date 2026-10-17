@@ -1,6 +1,7 @@
 """Small, bounded snapshots of public Discover results for fast restarts."""
 
 from hashlib import sha256
+from itertools import islice
 import json
 import logging
 import math
@@ -8,6 +9,8 @@ import os
 from pathlib import Path
 import stat
 import time
+from datetime import datetime, timezone
+from threading import Lock
 
 from ..config import cache_dir
 from ..data.files import atomic_write
@@ -34,6 +37,115 @@ _TEXT_LIMITS = {
 }
 _UNLOADED = object()  # save() was not told what load() found
 _failures_logged = set()
+
+
+class PersistentFeedDates:
+    """Bounded public feed-date metadata; call disk methods on workers only."""
+
+    MAX_ENTRIES = 2000
+    MAX_BYTES = 8 * 1024 * 1024
+    ENTRY_BYTES = 8192
+
+    def __init__(self, directory=None):
+        self.directory = Path(directory) if directory is not None else cache_dir() / 'discover-dates-v1'
+        self._writes = 0
+        self._lock = Lock()
+
+    def _path(self, url):
+        if not isinstance(url, str) or len(url) > 8192 or not is_web_url(url):
+            return None
+        return self.directory / ('date-' + sha256(url.encode('utf-8')).hexdigest() + '.json')
+
+    @staticmethod
+    def fresh(record, now=None):
+        if not record:
+            return False
+        now = time.time() if now is None else now
+        checked, _title, published, *state = record
+        age = now - checked
+        if not math.isfinite(checked) or age < -300:
+            return False
+        outcome = state[0] if state else 'ok'
+        interval = 900 if outcome == 'error' else 6 * 3600 if outcome == 'empty' else 3600
+        if outcome == 'ok' and published:
+            try:
+                stamp = datetime.fromisoformat(published.replace('Z', '+00:00'))
+                stamp = stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp
+                days = (now - stamp.timestamp()) / 86400
+                interval = 7 * 86400 if days > 180 else 86400 if days > 60 else 6 * 3600 if days > 14 else interval
+            except (ValueError, OverflowError, OSError):
+                pass
+        return age < interval
+
+    def load(self, url):
+        try:
+            path = self._path(url)
+            if path is None or path.is_symlink():
+                return None
+            flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+            with os.fdopen(os.open(path, flags), 'rb') as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    return None
+                raw = handle.read(self.ENTRY_BYTES + 1)
+            if len(raw) > self.ENTRY_BYTES:
+                return None
+            data = json.loads(raw)
+            if not isinstance(data, dict) or data.get('version') != 1:
+                return None
+            checked, title, published, outcome = (data.get(key) for key in ('checked', 'title', 'published', 'outcome'))
+            if (type(checked) not in (int, float) or not math.isfinite(checked)
+                    or not -300 <= time.time() - checked <= MAX_CACHE_AGE
+                    or not isinstance(title, str) or len(title) > 1024
+                    or not isinstance(published, str) or len(published) > 128
+                    or outcome not in {'ok', 'empty', 'error'}):
+                return None
+            return checked, title, published, outcome
+        except (OSError, ValueError, TypeError, RecursionError, UnicodeError, OverflowError):
+            return None
+
+    def load_many(self, urls):
+        return {url: record for url in dict.fromkeys(islice(urls, self.MAX_ENTRIES)) if (record := self.load(url)) is not None}
+
+    def save(self, url, record):
+        try:
+            path = self._path(url)
+            if path is None or path.is_symlink():
+                return
+            checked, title, published, outcome = record
+            raw = json.dumps(dict(version=1, checked=checked, title=title[:1024], published=published[:128], outcome=outcome),
+                             ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+            if len(raw) > self.ENTRY_BYTES:
+                return
+            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            atomic_write(path, raw)
+            with self._lock:
+                self._writes += 1
+                if self._writes % 64 == 1:
+                    self._prune()
+        except (OSError, ValueError, TypeError, UnicodeError, OverflowError):
+            _log_failure('release-date cache could not be saved')
+
+    def _prune(self):
+        entries = []
+        for path in self.directory.glob('date-*.json'):
+            if len(path.stem) != 69 or any(char not in '0123456789abcdef' for char in path.stem[5:]):
+                continue
+            try:
+                info = path.lstat()
+                if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                    entries.append((info.st_mtime, info.st_size, path))
+            except OSError:
+                continue
+        entries.sort(reverse=True)
+        total = 0
+        for index, (modified, size, path) in enumerate(entries):
+            total += size
+            if index >= self.MAX_ENTRIES or total > self.MAX_BYTES or time.time() - modified > MAX_CACHE_AGE:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
 
 
 def _log_failure(reason):
