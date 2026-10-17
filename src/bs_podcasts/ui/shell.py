@@ -671,6 +671,8 @@ class MainWindow(QMainWindow):
         self.splitter.setHandleWidth(8)
         self.pages = QStackedWidget()
         self.context = ContextPanel()
+        self.context.artwork_size_changed.connect(
+            lambda compact: self._persist_ui_settings({'ui.context_compact_artwork': '1' if compact else '0'}))
         self.context.subscribe_requested.connect(self._subscribe_url)
         self.context.play_episode_requested.connect(self._play_or_toggle)
         self.context.play_preview_requested.connect(self._play_preview_episode)
@@ -1102,6 +1104,7 @@ class MainWindow(QMainWindow):
         except ValueError:
             self._pane_user_width = 0
         self._context_user_closed = self.library.setting("ui.context_closed", "0") == "1"
+        self.context.set_compact_artwork(self.library.setting('ui.context_compact_artwork', '0') == '1')
         geometry = self.library.setting("ui.geometry", "")
         try:
             restored = isinstance(geometry, str) and bool(geometry) and self.restoreGeometry(QByteArray.fromHex(geometry.encode("ascii")))

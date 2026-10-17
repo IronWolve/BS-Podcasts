@@ -2584,6 +2584,7 @@ class ContextPanel(QFrame):
     queue_reordered = Signal(list)
     information_requested = Signal(object)
     favorite_requested = Signal(object, bool)
+    artwork_size_changed = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2595,6 +2596,7 @@ class ContextPanel(QFrame):
         self._show_id = 0
         self._preview_url = ""
         self._current_item = None
+        self._compact_artwork = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
         layout.setSpacing(SPACE["md"])
@@ -2630,6 +2632,11 @@ class ContextPanel(QFrame):
         self.selected_mode.setChecked(True)
         top.addWidget(modes)
         top.addStretch(1)
+        self.artwork_size_button = icon_button('artwork-compact', 'Switch to compact artwork', size=16, checkable=True)
+        self.artwork_size_button.setAccessibleName('Compact artwork')
+        self.artwork_size_button.setEnabled(False)
+        self.artwork_size_button.toggled.connect(self._artwork_size_toggled)
+        top.addWidget(self.artwork_size_button)
         self.info_button = icon_button("info", "Podcast or episode information")
         self.info_button.setEnabled(False)
         self.info_button.clicked.connect(self._information_clicked)
@@ -2658,6 +2665,8 @@ class ContextPanel(QFrame):
         self.selected_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.selected_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.selected_scroll.setWidget(selected)
+        self._selected_viewport = self.selected_scroll.viewport()
+        self._selected_viewport.installEventFilter(self)
         self.selected_scroll.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.selected_scroll.customContextMenuRequested.connect(self._show_information_menu)
         self.body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -2665,14 +2674,20 @@ class ContextPanel(QFrame):
         self.stack.addWidget(self.selected_scroll)
 
     def _build_selected_summary(self, selected_layout):
+        self._summary = QWidget()
+        self._summary_grid = QGridLayout(self._summary)
+        self._summary_grid.setContentsMargins(0, 0, 0, 0)
+        self._summary_grid.setSpacing(SPACE['md'])
+        selected_layout.addWidget(self._summary)
         self.art = Artwork(240, 16)
         self.art.setAccessibleName("Artwork")
         self.art.set_bounds(120, 240)
-        art_row = QHBoxLayout()
-        art_row.addStretch(1)
-        art_row.addWidget(self.art)
-        art_row.addStretch(1)
-        selected_layout.addLayout(art_row)
+        self._summary_identity = QWidget()
+        self._identity_layout = QVBoxLayout(self._summary_identity)
+        self._identity_layout.setContentsMargins(0, 0, 0, 0)
+        self._identity_layout.setSpacing(SPACE['md'])
+        self._summary_grid.addWidget(self.art, 0, 0, 1, 2, Qt.AlignmentFlag.AlignHCenter)
+        self._summary_grid.addWidget(self._summary_identity, 1, 0, 1, 2)
         self.title = PlainTextLabel("Select a podcast or episode")
         self.title.setObjectName("contextTitle")
         self.title.setWordWrap(True)
@@ -2707,10 +2722,44 @@ class ContextPanel(QFrame):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             links_layout.addWidget(button)
         self.links.hide()
-        selected_layout.addWidget(self.title)
-        selected_layout.addWidget(self.meta)
-        selected_layout.addWidget(self.show_link, alignment=Qt.AlignmentFlag.AlignLeft)
-        selected_layout.addWidget(self.links)
+        self._identity_layout.addWidget(self.title)
+        self._identity_layout.addWidget(self.meta)
+        self._identity_layout.addWidget(self.show_link, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._identity_layout.addWidget(self.links)
+
+    def set_compact_artwork(self, compact: bool):
+        compact = bool(compact)
+        if compact != self._compact_artwork:
+            self._compact_artwork = compact
+            self._summary_grid.removeWidget(self.art)
+            self._summary_grid.removeWidget(self._summary_identity)
+            self._summary_grid.setColumnStretch(1, 1 if compact else 0)
+            self._identity_layout.setSpacing(SPACE['xs'] if compact else SPACE['md'])
+            if compact:
+                self._summary_grid.addWidget(self.art, 0, 0, Qt.AlignmentFlag.AlignTop)
+                self._summary_grid.addWidget(self._summary_identity, 0, 1)
+            else:
+                self._summary_grid.addWidget(self.art, 0, 0, 1, 2, Qt.AlignmentFlag.AlignHCenter)
+                self._summary_grid.addWidget(self._summary_identity, 1, 0, 1, 2)
+        with quiet_signals(self.artwork_size_button):
+            self.artwork_size_button.setChecked(compact)
+        self.artwork_size_button.setToolTip('Switch to large artwork' if compact else 'Switch to compact artwork')
+        refit_icon_button(self.artwork_size_button, 'artwork-large' if compact else 'artwork-compact')
+        self._fit_summary_artwork()
+
+    def _artwork_size_toggled(self, compact):
+        self.set_compact_artwork(compact)
+        self.artwork_size_changed.emit(compact)
+
+    def _fit_summary_artwork(self):
+        width = max(0, self.selected_scroll.viewport().width() - SPACE['sm'])
+        side = scaled_px(80) if self._compact_artwork else min(width, scaled_px(240))
+        self.art.set_bounds(scaled_px(80 if self._compact_artwork else 120), scaled_px(80 if self._compact_artwork else 240))
+        self.art.set_side(side)
+        current = self._current_item
+        if getattr(current, 'episode_id', 0):
+            text_width = width - (side + SPACE['md'] if self._compact_artwork else 0) - scaled_px(40)
+            set_button_text_elided(self.show_link, current.show, max(0, min(scaled_px(230), text_width)))
 
     def _build_selected_actions(self, selected_layout):
         actions = QVBoxLayout()
@@ -2876,6 +2925,7 @@ class ContextPanel(QFrame):
         self.stack.setCurrentIndex(index)
         (self.selected_mode if index == 0 else self.queue_mode).setChecked(True)
         self.info_button.setEnabled(index == 0 and self._current_item is not None)
+        self.artwork_size_button.setEnabled(index == 0 and self._current_item is not None)
 
     def mode(self) -> int:
         return self.stack.currentIndex()
@@ -3115,6 +3165,7 @@ class ContextPanel(QFrame):
         self.secondary.setEnabled(bool(self._episode_id))
         self._downloadable = is_web_url(episode.media_url) or bool(episode.downloaded_path)
         self._apply_download_button(episode.state)
+        self._fit_summary_artwork()
         self._fit_tabs()
 
     def _apply_download_button(self, state: str):
@@ -3176,8 +3227,9 @@ class ContextPanel(QFrame):
         self._selected_layout.setContentsMargins(0, 0, SPACE["sm"], SPACE["sm"])
         self._queue_layout.setContentsMargins(0, 0, SPACE["sm"], SPACE["sm"])
         refit_icon_button(self.info_button)
-        self.art.set_bounds(scaled_px(120), scaled_px(240))
-        self.art.set_side(min(self.art.width() or scaled_px(240), scaled_px(240)))
+        self._summary_grid.setSpacing(SPACE['md'])
+        self._identity_layout.setSpacing(SPACE['xs'] if self._compact_artwork else SPACE['md'])
+        self.set_compact_artwork(self._compact_artwork)
         self.tabs.setMinimumHeight(scaled_px(150))
         self.queue_empty.apply_metrics()
         self._measure_tabs()
@@ -3202,7 +3254,9 @@ class ContextPanel(QFrame):
             bar.setTabVisible(index, visible)
 
     def eventFilter(self, watched, event):
-        if watched is getattr(self, 'tabs', None) and event.type() in (QEvent.Type.FontChange, QEvent.Type.Show, QEvent.Type.Resize):
+        if watched is getattr(self, '_selected_viewport', None) and event.type() == QEvent.Type.Resize:
+            self._fit_summary_artwork()
+        elif watched is getattr(self, 'tabs', None) and event.type() in (QEvent.Type.FontChange, QEvent.Type.Show, QEvent.Type.Resize):
             self._measure_tabs()
             self._fit_tabs()
         elif (watched is getattr(self, 'queue_view', None) and event.type() == QEvent.Type.KeyPress
@@ -3240,6 +3294,7 @@ class ContextPanel(QFrame):
         changed = item_key(item) != item_key(self._current_item)
         self._current_item = item
         self.info_button.setEnabled(self.mode() == 0 and item is not None)
+        self.artwork_size_button.setEnabled(self.mode() == 0 and item is not None)
         if changed:
             self.set_chapters([])
             self.set_transcript([])
@@ -3306,9 +3361,7 @@ class ContextPanel(QFrame):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Keep the artwork proportional to the space that remains for text and tabs.
-        reserved = scaled_px(520 if self.latest_card.isVisible() else 440)
-        self.art.set_side(min(self.width() - 2 * SPACE["lg"] - 12, self.height() - reserved))
+        self._fit_summary_artwork()
         self._fit_tabs()
 
     def _fit_tabs(self):

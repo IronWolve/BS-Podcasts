@@ -75,6 +75,8 @@ GLYPHS = {
     "playing": "M5 14v5M9 9v10M13 12v7M17 5v14M21 10v9",
     "warning": "M12 4l9 16H3zM12 10v4M12 17.5v.01",
     "info": "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v5M12 8v.01",
+    "artwork-compact": "M4 4l5 5M9 4v5H4M20 20l-5-5M15 20v-5h5",
+    "artwork-large": "M9 9L4 4M4 9V4h5M15 15l5 5M20 15v5h-5",
     "offline": "M3 3l18 18M8.5 8.6A9 9 0 0 0 5 12M12 20h.01M15.5 15.5a5 5 0 0 0-7 0M18.5 12a9 9 0 0 0-9.4-3.5",
     "queue-add": "M4 6h12M4 12h12M4 18h7M18 14v6M15 17h6",
     "rss": "M5 19a1 1 0 1 0 0 .01M5 11a8 8 0 0 1 8 8M5 5a14 14 0 0 1 14 14",
