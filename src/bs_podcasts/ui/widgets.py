@@ -314,7 +314,7 @@ def refit_icon_button(button, glyph: str = ""):
     if glyph:
         button.setProperty("glyph", glyph)
     size = scaled_px(button.property("glyph_px") or 20)
-    button.setIcon(icons.themed_icon(button.property("glyph"), "text", size, disabled="disabled"))
+    button.setIcon(icons.themed_icon(button.property("glyph"), button.property('glyph_role') or 'text', size, disabled="disabled"))
     button.setIconSize(QSize(size, size))
 
 
@@ -2640,15 +2640,19 @@ class ContextPanel(QFrame):
         self.selected_mode.setChecked(True)
         top.addWidget(modes)
         top.addStretch(1)
-        self.artwork_size_button = icon_button('artwork-compact', 'Switch to compact artwork', size=16, checkable=True)
+        self.artwork_size_button = icon_button('artwork-compact', 'Switch to compact artwork', size=18, checkable=True)
         self.artwork_size_button.setAccessibleName('Compact artwork')
         self.artwork_size_button.setEnabled(False)
         self.artwork_size_button.toggled.connect(self._artwork_size_toggled)
         top.addWidget(self.artwork_size_button)
-        self.info_button = icon_button("info", "Podcast or episode information")
+        self.info_button = icon_button("info", "Podcast or episode information", size=18)
         self.info_button.setEnabled(False)
         self.info_button.clicked.connect(self._information_clicked)
         top.addWidget(self.info_button)
+        for button in (self.artwork_size_button, self.info_button):
+            button.setProperty('contextTool', 'true')
+            button.setProperty('glyph_role', 'blue')
+            refit_icon_button(button)
         return top
 
     def _build_selected_page(self):

@@ -789,8 +789,9 @@ def stylesheet() -> str:
        stay distinguishable. */
     QPushButton#iconButton:checked {{ background: {c['accent_soft']}; border: 2px solid {c['accent']}; }}
     QPushButton#iconButton:checked:focus {{ border: 2px solid {c['text_strong']}; }}
-    /* Player tools reserve the ring inside their original hit boxes. */
-    QWidget#playerTools QPushButton#iconButton {{
+    /* Polished icon tools reserve the ring inside their original hit boxes. */
+    QWidget#playerTools QPushButton#iconButton,
+    QPushButton#iconButton[contextTool="true"] {{
         min-width: {icon_btn - 2}px; max-width: {icon_btn - 2}px;
         min-height: {icon_btn - 2}px; max-height: {icon_btn - 2}px;
         border: 2px solid transparent;
@@ -804,6 +805,12 @@ def stylesheet() -> str:
         background: {_rgba(c['blue'], 0.12)}; border-color: {c['blue']};
     }}
     QWidget#playerTools QPushButton#iconButton:disabled {{ background: transparent; border-color: transparent; }}
+    QPushButton#iconButton[contextTool="true"]:hover,
+    QPushButton#iconButton[contextTool="true"]:checked {{ background: {_rgba(c['blue'], 0.12)}; }}
+    QPushButton#iconButton[contextTool="true"]:focus,
+    QPushButton#iconButton[contextTool="true"]:checked,
+    QPushButton#iconButton[contextTool="true"]:checked:focus {{ border-color: {c['blue']}; }}
+    QPushButton#iconButton[contextTool="true"]:disabled {{ background: transparent; border-color: transparent; }}
     QPushButton#playButton {{
         background: {c['accent']}; border: 2px solid {c['accent']}; border-radius: {play_btn // 2}px;
         min-width: {play_btn}px; max-width: {play_btn}px; min-height: {play_btn}px; max-height: {play_btn}px; padding: 0;
