@@ -9464,11 +9464,11 @@ class MainWindow(QMainWindow):
         cancel = self._discover_newest_cancel
         identity = (generation, feed_url)
         force = getattr(self, '_discover_dates_force', False)
-        cached = self._previews.get(feed_url) if not force else None
+        known = self._newest_dates.get(feed_url)
+        cached = self._previews.get(feed_url) if not force and (known is None or PersistentFeedDates.fresh(known)) else None
         if cached is not None:
             self._emit_completed(("preview-scan", identity, JobResult(JobStatus.OK, value=cached)))
             return
-        known = self._newest_dates.get(feed_url)
         if not force and known is not None and PersistentFeedDates.fresh(known):
             # Read a short while ago: the same answer, with no request.
             answer = _newest_item_feed(*known[1:3])
