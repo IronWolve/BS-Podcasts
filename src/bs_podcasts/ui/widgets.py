@@ -2246,8 +2246,8 @@ class SeekSlider(QSlider):
 
     user_step = Signal()
 
-    TRACK_HEIGHT = 6
-    HANDLE = 14
+    TRACK_HEIGHT = 4
+    HANDLE = 8
 
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
@@ -4560,7 +4560,7 @@ class PlayerBar(QFrame):
         self._refresh_chrome()
 
     def _apply_skip_labels(self):
-        """The native skip controls paint numbers inside fixed-size loops."""
+        """Mini inline controls paint native text beside their small loops."""
         self.back.setText('')
         self.forward.setText('')
 

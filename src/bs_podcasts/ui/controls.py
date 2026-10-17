@@ -1,7 +1,7 @@
 """Native-scale transport arrows and a bounded, visibility-aware refresh spinner."""
 
 from PySide6.QtCore import QPointF, QRectF, QSize, QTimer, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QPushButton, QStyle, QStyleOptionButton
 
 from . import icons
@@ -85,38 +85,37 @@ class SkipButton(QPushButton):
         self.apply_metrics()
 
     def apply_metrics(self):
-        self.setFixedSize(scaled_px(40), scaled_px(40))
+        text_width = QFontMetrics(app_font(12)).horizontalAdvance(str(self._seconds))
+        self.setFixedSize(max(scaled_px(44), scaled_px(28) + text_width), scaled_px(40))
 
     def set_seconds(self, seconds):
         self._seconds = int(seconds)
+        self.apply_metrics()
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         _button_panel(self, painter)
-        side = scaled_px(32)
-        origin = QPointF((self.width()-side)/2, (self.height()-side)/2)
+        painter.setFont(app_font(12))
+        text = str(self._seconds)
+        text_width = painter.fontMetrics().horizontalAdvance(text)
+        side, gap = scaled_px(18), scaled_px(4)
+        origin = QPointF((self.width() - side - gap - text_width) / 2, (self.height() - side) / 2)
         color = QColor(COLORS['text'] if self.isEnabled() else COLORS['disabled'])
         painter.save()
         painter.translate(origin)
         if self._backward:
             painter.translate(side, 0)
             painter.scale(-1, 1)
-        painter.setPen(QPen(color, side * 3.8/42, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
-        painter.drawArc(QRectF(side*.11, side*.11, side*.78, side*.78), 12*16, -282*16)
+        painter.setPen(QPen(color, side / 9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawArc(QRectF(side / 9, side / 9, side * 7/9, side * 7/9), 0, -270*16)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
-        painter.drawPolygon(QPolygonF([QPointF(side*.43, -side*.05), QPointF(side*.79, side*.13), QPointF(side*.43, side*.31)]))
+        painter.drawPolygon(QPolygonF([QPointF(side * 4/9, -side / 18), QPointF(side * 7/9, side / 9), QPointF(side * 4/9, side * 5/18)]))
         painter.restore()
-        # Text never inherits the arrow's mirror transform or a raster scale.
+        # Readable amounts sit beside the arc, outside its mirror transform.
         painter.setPen(color)
-        font = app_font(12)
-        painter.setFont(font)
-        text = str(self._seconds)
-        box = QRectF(origin.x()+side*.19, origin.y()+side*.27, side*.62, side*.54)
-        if painter.fontMetrics().horizontalAdvance(text) > box.width():
-            font.setPixelSize(max(9, int(font.pixelSize()*box.width()/painter.fontMetrics().horizontalAdvance(text))))
-            painter.setFont(font)
-        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+        box = QRectF(origin.x() + side + gap, 0, text_width, self.height())
+        painter.drawText(box, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
         painter.end()
