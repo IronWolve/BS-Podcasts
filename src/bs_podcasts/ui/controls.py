@@ -85,7 +85,7 @@ class SkipButton(QPushButton):
         self.apply_metrics()
 
     def apply_metrics(self):
-        self.setFixedSize(scaled_px(48), scaled_px(48))
+        self.setFixedSize(scaled_px(40), scaled_px(40))
 
     def set_seconds(self, seconds):
         self._seconds = int(seconds)
@@ -95,7 +95,7 @@ class SkipButton(QPushButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         _button_panel(self, painter)
-        side = scaled_px(42)
+        side = scaled_px(32)
         origin = QPointF((self.width()-side)/2, (self.height()-side)/2)
         color = QColor(COLORS['text'] if self.isEnabled() else COLORS['disabled'])
         painter.save()
@@ -114,7 +114,7 @@ class SkipButton(QPushButton):
         font = app_font(12)
         painter.setFont(font)
         text = str(self._seconds)
-        box = QRectF(origin.x()+side*.16, origin.y()+side*.27, side*.68, side*.54)
+        box = QRectF(origin.x()+side*.19, origin.y()+side*.27, side*.62, side*.54)
         if painter.fontMetrics().horizontalAdvance(text) > box.width():
             font.setPixelSize(max(9, int(font.pixelSize()*box.width()/painter.fontMetrics().horizontalAdvance(text))))
             painter.setFont(font)
