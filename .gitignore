@@ -150,6 +150,7 @@
 !/src/bs_podcasts/data/migrations/033_search_revision.sql
 !/src/bs_podcasts/data/migrations/034_paged_library_indexes.sql
 !/src/bs_podcasts/data/migrations/035_show_search.sql
+!/src/bs_podcasts/data/migrations/036_refresh_attempts.sql
 !/src/bs_podcasts/data/repositories/__init__.py
 !/src/bs_podcasts/data/repositories/downloads.py
 !/src/bs_podcasts/data/repositories/library.py
@@ -174,6 +175,7 @@
 !/src/bs_podcasts/feeds/opml.py
 !/src/bs_podcasts/feeds/parser.py
 !/src/bs_podcasts/feeds/refresh.py
+!/src/bs_podcasts/feeds/schedule.py
 !/src/bs_podcasts/feeds/safety.py
 !/src/bs_podcasts/integrations/__init__.py
 !/src/bs_podcasts/integrations/mpris.py
@@ -208,6 +210,7 @@
 !/src/bs_podcasts/ui/dialogs.py
 !/src/bs_podcasts/ui/icons.py
 !/src/bs_podcasts/ui/menu_style.py
+!/src/bs_podcasts/ui/controls.py
 !/src/bs_podcasts/ui/models.py
 !/src/bs_podcasts/ui/pages.py
 !/src/bs_podcasts/ui/pixmaps.py

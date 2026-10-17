@@ -121,6 +121,11 @@ class LibraryService:
     def shows(self):
         return self.repository.list_shows()
 
+    def refresh_candidates(self, minutes, *, smart=True, manual=False, now=None):
+        from ..feeds.schedule import due_shows
+        return due_shows(self.shows(), minutes, now=now, smart=smart, manual=manual,
+                         priority=self.repository.recent_listened_show_ids())
+
     def episode_count(self) -> int:
         return self.repository.episode_count()
 

@@ -797,6 +797,8 @@ class MainWindow(QMainWindow):
         for page in pages:
             page.episode_artwork_requested.connect(lambda items, source=page: self._queue_visible_artwork(source, items))
             page.details_requested.connect(self._show_item)
+            if page.header.refresh is not page.header.action:
+                page.header.refresh.clicked.connect(lambda checked=False, source=page: self._refresh_page_view(source))
             if hasattr(page, "context_changed"):
                 # Only the visible page drives the details pane; hidden pages
                 # restoring their selection after a reload must not hijack it.
@@ -960,7 +962,8 @@ class MainWindow(QMainWindow):
             self.library.setting("downloads.delete_played", "0") == "1",
             self.library.setting("playback.download_first", "0") == "1",
         )
-        self.settings_page.load_refresh_interval(self._refresh_interval())
+        self.settings_page.load_refresh_interval(self._refresh_interval(), self.library.setting('refresh.smart', '1') == '1')
+        self.settings_page.refresh_all_requested.connect(self._refresh_all)
         self.settings_page.open_log_requested.connect(lambda: self._open_location(str(log_path())))
         self.settings_page.export_diagnostics_requested.connect(self._export_diagnostics)
         self.settings_page.load_desktop_options(
@@ -1641,7 +1644,7 @@ class MainWindow(QMainWindow):
         minutes = self._refresh_interval() if self.library else 0
         self._refresh_timer.stop()
         if minutes > 0:
-            self._refresh_timer.start(minutes * 60 * 1000)
+            self._refresh_timer.start(min(minutes, 60) * 60 * 1000)
 
     def _start_quiet_refresh(self, shows):
         """Apply a scheduler's off-thread show read unless a batch started since."""
@@ -1657,13 +1660,8 @@ class MainWindow(QMainWindow):
         minutes = self._refresh_interval()
         if minutes <= 0:
             return
-        cutoff = time.time() - minutes * 60
-
         def read_stale():
-            return [
-                show for show in self.library.shows()
-                if show.source != "local" and not show.suspended and (show.last_refresh is None or show.last_refresh < cutoff)
-            ]
+            return self.library.refresh_candidates(minutes, smart=self.library.setting('refresh.smart', '1') == '1')
 
         # On the refresh pool: this read exists to feed refreshes, and the
         # shared UI pool is busy with first-paint reads at exactly this time.
@@ -1682,10 +1680,8 @@ class MainWindow(QMainWindow):
         if self.library is None or self._refresh_batch[0] or getattr(self.refresh, "refresh", None) is None or self._background_paused():
             return
 
-        cutoff = self._refresh_cutoff(self._refresh_interval(), time.time())
         def read_all():
-            return [show for show in self.library.shows() if show.source != "local" and not show.suspended
-                    and (show.last_refresh is None or show.last_refresh < cutoff)]
+            return self.library.refresh_candidates(self._refresh_interval(), smart=self.library.setting('refresh.smart', '1') == '1')
 
         self._run_read(read_all, self._start_quiet_refresh, "scheduled-refresh")
 
@@ -2735,7 +2731,7 @@ class MainWindow(QMainWindow):
                 self._backup_status_timer.start()
             elif key in {"playback.skip_back", "playback.skip_forward"}:
                 self._apply_skip_settings()
-            elif key == "refresh.interval_minutes":
+            elif key in {"refresh.interval_minutes", 'refresh.smart'}:
                 self._arm_refresh_timer()
             elif key == "background.paused":
                 self.settings_page.set_background_paused(value == "1")
@@ -7180,6 +7176,22 @@ class MainWindow(QMainWindow):
         elif page is self.podcast_page:
             self._retry_podcast_banner()
 
+    def _refresh_page_view(self, page):
+        """Reload saved view data without refreshing every subscribed feed."""
+        if self.library is None:
+            page.banner.show_state('error', 'The library is unavailable in this session.')
+            return
+        page.banner.show_state('loading', 'Updating this view…')
+        if page is self.download_page:
+            self._downloads_dirty = True
+            self._reload_downloads()
+        elif page is self.playlist_page:
+            self._reload_queue()
+        elif page is self.bookmark_page and self.listening is not None:
+            self._reload_bookmarks()
+        else:
+            self._request_reload(lambda: page.banner.show_state('loaded', 'Updated from your saved library.'), include_detail=False)
+
     def _read_bookmark_items(self):
         items = []
         bookmarks = self.listening.bookmarks()
@@ -7776,7 +7788,19 @@ class MainWindow(QMainWindow):
             self._previews.pop(feed_url, None)
             self._show_preview_episodes(feed_url)
             return
-        self._refresh_all()
+        if self.library is None or self.refresh is None:
+            self._request_reload()
+            self.episode_page.banner.show_state('error', 'Showing saved episodes; the feed refresh service is unavailable in this session.')
+            return
+        library = self.library
+        def apply(shows):
+            if shows:
+                self._refresh_shows(shows)
+            else:
+                self._request_reload()
+                self.episode_page.banner.show_state('loaded', 'Up to date — no podcasts are due for a check.')
+        self._run_read(lambda: library.refresh_candidates(self._refresh_interval(), manual=True,
+                       smart=library.setting('refresh.smart', '1') == '1'), apply, 'manual-smart-refresh')
 
     def _retry_podcast_banner(self):
         """Retry on the Podcasts page banner refreshes the show that failed.
@@ -7796,11 +7820,16 @@ class MainWindow(QMainWindow):
         # A visible Refresh all is already running; a background one joins.
         if self.library is None or (self._refresh_batch[0] and not self._refresh_quiet):
             return
+        if self.jobs is None or getattr(self.refresh, 'refresh', None) is None:
+            self._notify('Feed refresh is unavailable in this session.', 'error')
+            return
         shows = [show for show in self._library_shows() if show.source != "local" and not show.suspended]
         if not shows:
             self.episode_page.banner.show_state("empty", "There are no podcasts to refresh.")
             return
         self._refresh_shows(shows, quiet=False)
+        if self.pages.currentIndex() == PAGE_SETTINGS:
+            self._notify('Checking all podcasts; you can keep browsing.', 'info')
 
     def _submit_refresh(self, show_id: int, batch: bool = False) -> bool:
         if self.jobs is None or self.refresh is None:
@@ -9525,6 +9554,19 @@ class MainWindow(QMainWindow):
         self._preview_page_loading = False
         feed = feed if feed is not None else self._previews.get(feed_url)
         if feed is None:
+            if same_preview and restore_state is None and self.episode_page.all_items:
+                # Refresh keeps the known artwork, hero and rows until new
+                # feed data arrives; a banner is not permission to blank them.
+                self._pending_episodes_url = feed_url
+                self.episode_page.banner.show_state('loading', 'Refreshing this feed preview…')
+                if navigate:
+                    self._episode_navigation_prepared = True
+                    self.navigation.select(PAGE_EPISODES)
+                self._preview_feed(feed_url)
+                if self.jobs is None or self.refresh is None:
+                    self._pending_episodes_url = ''
+                    self.episode_page.banner.show_state('error', 'Feed previews are unavailable in this session; showing saved episodes.')
+                return
             self._pending_episodes_url = feed_url
             self._preview_episodes_url = feed_url
             self._preview_page_feed = None

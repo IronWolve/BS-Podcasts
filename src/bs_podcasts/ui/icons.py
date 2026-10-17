@@ -84,6 +84,11 @@ GLYPHS = {
 
 def svg(name: str, color: str) -> bytes:
     path = GLYPHS[name]
+    if name in {'skip-back', 'skip-forward'}:
+        mirrored = 'transform="translate(24 0) scale(-1 1)"' if name == 'skip-back' else ''
+        return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g {mirrored}>'
+                f'<path d="M19.83 10.34A8 8 0 1 1 12 4" fill="none" stroke="{color}" stroke-width="2.2"/>'
+                f'<path d="M11 .5L17 4L11 7.5Z" fill="{color}"/></g></svg>').encode('utf-8')
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
         f'{_ATTRS.replace("currentColor", color)}><path d="{path}"/></svg>'

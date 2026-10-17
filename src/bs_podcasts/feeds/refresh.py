@@ -215,7 +215,7 @@ class RefreshService:
                 message=f'{reason} Automatic refresh is paused for this podcast. Choose Retry to fetch current details.',
                 skipped_suspended=True)
 
-        self.repository.set_health(show_id, Health.LOADING)
+        self.repository.record_refresh_attempt(show_id)
         try:
             # Legacy libraries may contain a 302 target that still returns a
             # successful but frozen copy. Follow the publisher's current

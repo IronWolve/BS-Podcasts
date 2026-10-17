@@ -229,6 +229,17 @@ class LibraryRepository:
             ).fetchall()
         return [self._show(row) for row in rows]
 
+    def recent_listened_show_ids(self):
+        """Bounded indexed history read; never scan the episode catalogue."""
+        with self.database.connect() as connection:
+            rows = connection.execute('SELECT show_id FROM episodes WHERE last_played IS NOT NULL '
+                                      'ORDER BY last_played DESC LIMIT 128').fetchall()
+        return tuple(dict.fromkeys(row[0] for row in rows))
+
+    def record_refresh_attempt(self, show_id):
+        with self.database.connect() as connection:
+            connection.execute("UPDATE shows SET last_refresh_attempt=?, health='loading' WHERE id=?", (time.time(), show_id))
+
     def list_episodes(
         self, show_id: int | None = None, limit: int | None = 500, offset: int = 0
     ) -> list[Episode]:
@@ -2108,6 +2119,7 @@ class LibraryRepository:
             etag=row["etag"],
             last_modified=row["last_modified"],
             last_refresh=row["last_refresh"],
+            last_refresh_attempt=row["last_refresh_attempt"],
             episode_count=row["episode_count"],
             new_count=row["new_count"],
             latest_episode_title=row["latest_episode_title"],

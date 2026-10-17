@@ -143,9 +143,13 @@ class BasePage(QWidget):
         self.root.setContentsMargins(SPACE["page"], SPACE["xl"], SPACE["page"], SPACE["lg"])
         self.root.setSpacing(SPACE["md"])
         self.header = PageHeader(title, subtitle, action, show_search)
-        self.banner = StateBanner()
+        self.banner = StateBanner(compact=show_search)
         self.root.addWidget(self.header)
-        self.root.addWidget(self.banner)
+        if show_search:
+            self.header.status_slot.layout().addWidget(self.banner)
+            self.banner.state_changed.connect(lambda state: self.header.refresh.set_busy(state == 'loading'))
+        else:
+            self.root.addWidget(self.banner)
 
     def apply_metrics(self):
         self.root.setContentsMargins(SPACE["page"], SPACE["xl"], SPACE["page"], SPACE["lg"])
@@ -2374,6 +2378,7 @@ class _SettingsForm(QFormLayout):
 
 
 class SettingsPage(BasePage):
+    refresh_all_requested = Signal()
     setting_changed = Signal(str, str)
     shortcut_changed = Signal(str, str)
     reset_shortcuts_requested = Signal()
@@ -2514,6 +2519,16 @@ class SettingsPage(BasePage):
         self.refresh_interval.setSpecialValueText("Manual only")
         self.refresh_interval.setFixedWidth(scaled_px(self.FIELD_WIDTH))
         library_form.addRow("Refresh every", self.refresh_interval)
+        self.smart_refresh = QCheckBox('Check inactive podcasts less often')
+        self.smart_refresh.setToolTip('Active podcasts use your chosen interval. Quiet for 2 weeks: every 6 hours; '
+                                     '2 months: daily; 6 months: weekly. Manual podcast refresh checks immediately.')
+        library_form.addRow('Smart refresh', self.smart_refresh)
+        self.smart_refresh.toggled.connect(lambda enabled: self.setting_changed.emit('refresh.smart', '1' if enabled else '0'))
+        self.refresh_all_button = QPushButton('Check all podcasts now')
+        self.refresh_all_button.setObjectName('quietButton')
+        self.refresh_all_button.setToolTip('Explicitly check every subscribed feed, including inactive podcasts.')
+        self.refresh_all_button.clicked.connect(self.refresh_all_requested)
+        library_form.addRow('', self.refresh_all_button)
         self.search_depth = QComboBox()
         for label, value in (
             ("50 results", "50"),
@@ -3017,9 +3032,10 @@ class SettingsPage(BasePage):
             self.delete_played.setChecked(delete_played)
             self.download_first.setChecked(download_first)
 
-    def load_refresh_interval(self, minutes: int):
-        with quiet_signals(self.refresh_interval):
+    def load_refresh_interval(self, minutes: int, smart: bool = True):
+        with quiet_signals(self.refresh_interval, self.smart_refresh):
             self.refresh_interval.setValue(minutes)
+            self.smart_refresh.setChecked(smart)
 
     def load_desktop_options(self, background_paused: bool, notifications: bool, close_to_tray: bool, update_checks: bool, file_logging: bool = True):
         for control, value in (

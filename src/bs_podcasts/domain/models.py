@@ -50,6 +50,7 @@ class Show:
     retention_days: int | None = None
     categories: str = ""
     last_refresh_error: str = ""
+    last_refresh_attempt: float | None = None
 
 
 @dataclass(frozen=True)

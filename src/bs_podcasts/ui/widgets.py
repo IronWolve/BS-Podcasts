@@ -8,8 +8,11 @@ from functools import lru_cache
 from html import escape as html_escape, unescape as html_unescape
 from typing import NamedTuple
 import logging
+import re
 import time
 import weakref
+from .controls import RefreshButton, SkipButton
+from .theme import set_local_stylesheet
 
 from PySide6.QtCore import (
     QEvent,
@@ -56,6 +59,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QWidgetAction,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -881,6 +885,21 @@ class PageHeader(QFrame):
         self.search.setMinimumWidth(scaled_px(150))
         self.search.setMaximumWidth(scaled_px(240))
         self.search.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.status_slot = QFrame()
+        self.status_slot.setFixedSize(scaled_px(160), scaled_px(36))
+        status_layout = QHBoxLayout(self.status_slot)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.status_slot)
+        self.refresh = RefreshButton(self)
+        self.refresh.setAccessibleName(f'Refresh {title}')
+        self.refresh.setToolTip(f'Refresh {title}')
+        layout.addWidget(self.refresh)
+        self.status_slot.setVisible(show_search)
+        self.refresh.setVisible(show_search)
+        self.search_toggle = icon_button('search', f'Show search for {title}')
+        self.search_toggle.clicked.connect(self._open_search_field)
+        layout.addWidget(self.search_toggle)
+        self.search_toggle.hide()
         layout.addWidget(self.search)
         self._show_search = show_search
         self.search.setVisible(show_search)
@@ -889,7 +908,9 @@ class PageHeader(QFrame):
         self.search.textChanged.connect(lambda _text: self._apply_search_visibility())
 
         self.action = None
-        if action:
+        if action == 'Refresh':
+            self.action = self.refresh
+        elif action:
             self.action = QPushButton(action)
             self.action.setObjectName("primaryButton")
             self.action.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1003,7 +1024,13 @@ class PageHeader(QFrame):
         # worse than the crowding this trades away.
         keep = wide_enough or bool(self.search.text()) or self.search.hasFocus()
         self.search.setVisible(allowed and keep)
+        self.search_toggle.setVisible(allowed and not keep)
         self._fit_search_width()
+
+    def _open_search_field(self):
+        self.search.show()
+        self.search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._apply_search_visibility()
 
     def _fit_search_width(self):
         """Give the title space before the filter's optional extra width."""
@@ -1027,12 +1054,16 @@ class PageHeader(QFrame):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.status_slot.setFixedWidth(scaled_px(160 if self.width() >= scaled_px(650) else 105 if self.width() >= scaled_px(470) else 72))
         self._apply_search_visibility()
         self._elide_header_text()
 
     def apply_metrics(self):
         self.layout().setSpacing(SPACE["md"])
         refit_icon_button(self.back)
+        self.refresh.apply_metrics()
+        refit_icon_button(self.search_toggle)
+        self.status_slot.setFixedHeight(scaled_px(36))
         self.search.setMinimumWidth(scaled_px(150))
         self.search.setMaximumWidth(scaled_px(240))
         self._fit_search_width()
@@ -1200,9 +1231,10 @@ class StateBanner(QFrame):
         "empty": ("", "info", "muted"),
     }
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, compact=False):
         super().__init__(parent)
         self.setObjectName("stateBanner")
+        self._compact = compact
         self.state = ""
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1241,7 +1273,77 @@ class StateBanner(QFrame):
         self._dismiss_timer.timeout.connect(self._fade_away)
         self._fade_effect = None
         self._fade_animation = None
+        self._status_menu = None
+        if compact:
+            self.setObjectName('headerStatus')
+            self.setFixedHeight(scaled_px(36))
+            self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(0)
+            self.status_button = QPushButton()
+            self.status_button.setObjectName('headerStatusButton')
+            self.status_button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+            self.status_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.status_button.clicked.connect(self._open_status)
+            outer.insertWidget(0, self.status_button)
         self.hide()
+
+    def _compact_status(self):
+        if not self._compact:
+            return
+        for widget in (self.icon, self.prefix, self.label, self.retry, self.dismiss_button, self.progress):
+            widget.hide()
+        message = self.label.text()
+        available = max(0, self.width()-4)
+        progress = re.search(r'(\d+)\s+of\s+(\d+)', message) if self.state == 'loading' else None
+        text = f'Checking {progress[1]} of {progress[2]}' if progress else message
+        if progress and self.status_button.fontMetrics().horizontalAdvance(text) > available:
+            text = f'{progress[1]}/{progress[2]}'
+        self.status_button.setText(self.status_button.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, available))
+        self.status_button.setToolTip(message)
+        self.status_button.setAccessibleName(message + ' — open details')
+        set_local_stylesheet(self.status_button, 'QPushButton#headerStatusButton { background: transparent; border: 0; padding: 0; color: '+COLORS.get(self._tone, COLORS['text'])+'; text-align: right; } QPushButton#headerStatusButton:focus { border: 1px solid '+COLORS['accent']+'; }')
+
+    def _open_status(self):
+        if not self.state:
+            return
+        menu = QMenu(self)
+        self._status_menu = menu
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(SPACE['md'], SPACE['sm'], SPACE['md'], SPACE['sm'])
+        title_row = QHBoxLayout()
+        title_row.addWidget(PlainTextLabel('Refresh details'), 1)
+        close = icon_button('close', 'Close refresh details (Esc)', size=14)
+        close.clicked.connect(menu.close)
+        title_row.addWidget(close)
+        layout.addLayout(title_row)
+        label = PlainTextLabel(self.label.text())
+        label.setWordWrap(True)
+        label.setFixedWidth(scaled_px(300))
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        layout.addWidget(label)
+        actions = QHBoxLayout()
+        if getattr(self, '_can_retry', False):
+            retry = QPushButton('Retry')
+            retry.clicked.connect(lambda: (menu.close(), self.retry_requested.emit()))
+            actions.addWidget(retry)
+        dismiss = QPushButton('Dismiss')
+        dismiss.clicked.connect(lambda: (menu.close(), self.clear()))
+        actions.addWidget(dismiss)
+        layout.addLayout(actions)
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(content)
+        menu.addAction(action)
+        try:
+            exec_menu(menu, self.mapToGlobal(QPoint(0, self.height())))
+        finally:
+            self._status_menu = None
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._compact and hasattr(self, '_tone'):
+            self._compact_status()
 
     def set_timeout(self, milliseconds):
         self._dismiss_ms = milliseconds
@@ -1282,6 +1384,7 @@ class StateBanner(QFrame):
     def retheme(self):
         if getattr(self, "_glyph", None):
             self._paint_icon()
+            self._compact_status()
 
     def show_state(self, state: str, message: str, retry: bool = False):
         self._stop_fade()
@@ -1292,6 +1395,7 @@ class StateBanner(QFrame):
             self.style().unpolish(self)
             self.style().polish(self)
         self._glyph, self._tone = glyph, tone
+        self._can_retry = retry
         self._paint_icon()
         self.prefix.setText(prefix)
         self.prefix.setVisible(bool(prefix))
@@ -1301,6 +1405,7 @@ class StateBanner(QFrame):
         self.progress.setVisible(state == "loading")
         self.setAccessibleName(f"{prefix}: {message}" if prefix else message)
         self.show()
+        self._compact_status()
         self._arm_dismiss()
         if state in {"partial", "error", "offline", "suspended"} and state != previous:
             announce(self, self.accessibleName(), assertive=True)
@@ -1311,11 +1416,18 @@ class StateBanner(QFrame):
         size = scaled_px(18)
         self.icon.setFixedSize(size, size)
         refit_icon_button(self.dismiss_button)
-        self.layout().itemAt(0).layout().setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["sm"], SPACE["sm"])
-        self.layout().itemAt(0).layout().setSpacing(SPACE["sm"])
+        if self._compact:
+            self.setFixedHeight(scaled_px(36))
+            if hasattr(self, '_tone'):
+                self._compact_status()
+        else:
+            self.layout().itemAt(0).layout().setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["sm"], SPACE["sm"])
+            self.layout().itemAt(0).layout().setSpacing(SPACE["sm"])
 
     def clear(self):
         self._stop_fade()
+        if self._status_menu is not None:
+            self._status_menu.close()
         previous, self.state = self.state, ""
         self.hide()
         if previous:
@@ -4195,7 +4307,7 @@ class PlayerBar(QFrame):
         for pad in (self._pad_left, self._pad_right):
             pad.setFixedWidth(0)
         controls.addWidget(self._pad_left)
-        self.back = QPushButton("15")
+        self.back = SkipButton(15, backward=True)
         self.back.setObjectName("textButton")
         self.back.setIcon(icons.themed_icon("skip-back", "text", scaled_px(20), disabled="disabled"))
         self.back.setIconSize(QSize(scaled_px(20), scaled_px(20)))
@@ -4211,7 +4323,7 @@ class PlayerBar(QFrame):
         self.play.setCursor(Qt.CursorShape.PointingHandCursor)
         self.play.clicked.connect(self.play_pause_requested)
         self.play.setFixedSize(play_button_size(), play_button_size())
-        self.forward = QPushButton("30")
+        self.forward = SkipButton(30)
         self.forward.setObjectName("textButton")
         self.forward.setIcon(icons.themed_icon("skip-forward", "text", scaled_px(20), disabled="disabled"))
         self.forward.setIconSize(QSize(scaled_px(20), scaled_px(20)))
@@ -4375,6 +4487,8 @@ class PlayerBar(QFrame):
     def set_skip_values(self, back: int, forward: int):
         self._skip_back = int(back)
         self._skip_forward = int(forward)
+        self.back.set_seconds(back)
+        self.forward.set_seconds(forward)
         self._apply_skip_labels()
         self.back.setToolTip(f"Back {self._skip_back} seconds  ·  Ctrl+Left")
         self.back.setAccessibleName(f"Back {self._skip_back} seconds")
@@ -4393,17 +4507,9 @@ class PlayerBar(QFrame):
         self._refresh_chrome()
 
     def _apply_skip_labels(self):
-        """Numeric skip labels only where they fit.
-
-        At the 760 px minimum window the transport was handed ~40 px less
-        than it needed and the "15"/"30" labels hard-clipped inside 41 px
-        buttons — a violation of the first product rule at the app's own
-        minimum size. In narrow (compact) mode the buttons are icon-only; the
-        seconds stay in the tooltip and accessible name, exactly as the other
-        compact-hidden controls already do."""
-        show_numbers = not getattr(self, "_compact", False)
-        self.back.setText(str(self._skip_back) if show_numbers else "")
-        self.forward.setText(str(self._skip_forward) if show_numbers else "")
+        """The native skip controls paint numbers inside fixed-size loops."""
+        self.back.setText('')
+        self.forward.setText('')
 
     def _title_metrics(self):
         """The now-playing title must fit its full font height plus the 2px
@@ -4662,6 +4768,8 @@ class PlayerBar(QFrame):
         self.now_wrap.setMinimumWidth(scaled_px(180))
         self._fit_speed_label()
         skip = scaled_px(20)
+        self.back.apply_metrics()
+        self.forward.apply_metrics()
         self.back.setIcon(icons.themed_icon("skip-back", "text", skip, disabled="disabled"))
         self.back.setIconSize(QSize(skip, skip))
         self.forward.setIcon(icons.themed_icon("skip-forward", "text", skip, disabled="disabled"))
