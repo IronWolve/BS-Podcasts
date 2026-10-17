@@ -928,9 +928,9 @@ def stylesheet() -> str:
     /* seekSlider paints its own track and handle (SeekSlider.paintEvent). */
     QSlider#seekSlider {{ background: transparent; }}
     QSlider#volumeSlider::groove:horizontal {{ height: {scaled_dim(4)}px; background: {c['border']}; border-radius: {scaled_dim(2)}px; }}
-    QSlider#volumeSlider::sub-page:horizontal {{ background: {c['text']}; border-radius: {scaled_dim(2)}px; }}
+    QSlider#volumeSlider::sub-page:horizontal {{ background: {c['accent']}; border-radius: {scaled_dim(2)}px; }}
     QSlider#volumeSlider::handle:horizontal {{
-        background: {c['text_strong']}; width: {sp(12)}px; height: {sp(12)}px; margin: -{scaled_dim(4)}px 0; border-radius: {scaled_dim(6)}px;
+        background: {c['accent']}; width: {sp(12)}px; height: {sp(12)}px; margin: -{scaled_dim(4)}px 0; border-radius: {scaled_dim(6)}px;
     }}
     QSlider#volumeSlider::handle:horizontal:focus {{ background: {c['accent']}; }}
     QPushButton#edgeToggle {{

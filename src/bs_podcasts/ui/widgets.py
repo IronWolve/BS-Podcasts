@@ -2973,9 +2973,10 @@ class ContextPanel(QFrame):
         text = f"Couldn’t load feed details: {message}\n\nYou can still subscribe; episodes are fetched after subscribing."
         _set_document_content(self.body, text)
 
-    def show_episode(self, episode):
+    def show_episode(self, episode, *, reveal=True):
         self._set_current_item(episode)
-        self.set_mode(0)
+        if reveal:
+            self.set_mode(0)
         self.art.show()
         self.primary.show()
         self.secondary.show()

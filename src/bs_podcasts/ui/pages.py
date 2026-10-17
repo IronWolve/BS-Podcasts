@@ -135,6 +135,7 @@ class BasePage(QWidget):
     context_changed = Signal(object)
     context_updated = Signal(object, object)
     episode_artwork_requested = Signal(object)
+    details_requested = Signal(object)
 
     def __init__(self, title: str, subtitle: str, action: str = "", show_search: bool = True, parent=None):
         super().__init__(parent)
@@ -323,8 +324,15 @@ class _ListPageMixin:
         self.view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem if self._row_aligned_scroll else QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.view.verticalScrollBar().setSingleStep(1 if self._row_aligned_scroll else 40)
         self.view.setResizeMode(QListView.ResizeMode.Adjust)
-        self.view.setUniformItemSizes(True)
+        delegate = self.view.itemDelegate()
+        self._inline_details = isinstance(model, EpisodeModel) and not delegate.compact and not delegate.reorder
+        self.view.setUniformItemSizes(not self._inline_details)
         self.view.setModel(self.model)
+        if self._inline_details:
+            details = QShortcut(QKeySequence('Alt+Return'), self.view)
+            details.setContext(Qt.ShortcutContext.WidgetShortcut)
+            details.activated.connect(lambda: self.details_requested.emit(self.current_row()) if self.current_row() is not None else None)
+            self._details_shortcut = details
         self._scroll_input_guard = _ScrollInputGuard(self.view, self._cancel_scroll_restore, self._begin_artwork_scroll, self._aligned_episode_wheel, self._finish_episode_scroll)
         self._install_scroll_guard()
         self.view.selectionModel().currentChanged.connect(self._selected)
@@ -401,7 +409,7 @@ class _ListPageMixin:
         if not pixels and not angle:
             return False
         if pixels:
-            size = max(1, self.view.sizeHintForRow(0))
+            size = self._episode_base_height()
             pending = getattr(self, '_episode_wheel_pixels', 0) + pixels
             rows = int(pending / size)
             self._episode_wheel_pixels = pending - rows * size
@@ -412,13 +420,32 @@ class _ListPageMixin:
         self._scroll_episode_rows(-rows)
         return True
 
+    def _episode_base_height(self):
+        return max(1, self.view.itemDelegate().base_height())
+
+    def _episode_row_offset(self, row):
+        delegate = self.view.itemDelegate()
+        expanded = delegate.expanded_row()
+        return row * self._episode_base_height() + (delegate.expanded_extra() if 0 <= expanded < row else 0)
+
+    def _episode_row_position(self, pixel):
+        delegate = self.view.itemDelegate()
+        size = self._episode_base_height()
+        expanded, extra = delegate.expanded_row(), delegate.expanded_extra()
+        start = expanded * size
+        if expanded >= 0 and pixel >= start:
+            if pixel < start + size + extra:
+                return expanded + (pixel - start) / (size + extra)
+            pixel -= extra
+        return pixel / size
+
     def _scroll_episode_rows(self, delta):
         if not delta:
             return
         bar = self.view.verticalScrollBar()
-        size = max(1, self.view.sizeHintForRow(0))
+        size = self._episode_base_height()
         pixels = self._episode_scroll_pixels
-        position = bar.value() / size if pixels else bar.value()
+        position = self._episode_row_position(bar.value()) if pixels else bar.value()
         maximum = self._episode_scroll_max_row if pixels else bar.maximum()
         # Repeated input accumulates, but reversing the wheel changes direction
         # immediately instead of working through an old queued destination.
@@ -442,13 +469,13 @@ class _ListPageMixin:
                 self.view.doItemsLayout()
                 bar.setSingleStep(size)
                 # Whole-row bottom alignment may leave a small blank tail.
-                bar.setMaximum(max(bar.maximum(), maximum * size))
-                QAbstractSlider.setValue(bar, round(position * size))
+                bar.setMaximum(max(bar.maximum(), self._episode_row_offset(maximum)))
+                QAbstractSlider.setValue(bar, self._episode_row_offset(round(position)))
             finally:
                 self._episode_scroll_switching = False
         self._episode_scroll_target = target
         animation.setStartValue(bar.value())
-        animation.setEndValue(target * size)
+        animation.setEndValue(self._episode_row_offset(target))
         animation.start()
 
     def _finish_episode_scroll(self, snap_target=True):
@@ -456,8 +483,7 @@ class _ListPageMixin:
             return
         self._episode_scroll_animation.stop()
         bar = self.view.verticalScrollBar()
-        size = max(1, self.view.sizeHintForRow(0))
-        row = self._episode_scroll_target if snap_target else round(bar.value() / size)
+        row = self._episode_scroll_target if snap_target else round(self._episode_row_position(bar.value()))
         self._episode_scroll_switching = True
         self._episode_scroll_pixels = False
         try:
@@ -480,7 +506,7 @@ class _ListPageMixin:
             self._episode_scroll_animation.stop()
             # Keep the exact painted position until release so the click's
             # episode identity cannot change when the view snaps to a row.
-            self._episode_scroll_target = round(self.view.verticalScrollBar().value() / max(1, self.view.sizeHintForRow(0)))
+            self._episode_scroll_target = round(self._episode_row_position(self.view.verticalScrollBar().value()))
         elif event.type() == QEvent.Type.MouseButtonRelease:
             QTimer.singleShot(0, self, lambda: self._finish_episode_scroll(False))
 
@@ -492,13 +518,13 @@ class _ListPageMixin:
         except (ValueError, TypeError, OverflowError):
             value = 0
         if self._row_aligned_scroll and saved.get('scroll_units') != 'items':
-            value //= max(1, self.view.sizeHintForRow(0))
+            value //= self._episode_base_height()
         return value
 
     def _request_visible_artwork(self):
         items = []
         if self.isVisible() and self.view.isVisible() and self.model.rowCount():
-            row_height = max(1, self.view.sizeHintForRow(0))
+            row_height = self._episode_base_height()
             first = self.view.indexAt(QPoint(2, 2))
             start = first.row() if first.isValid() else self.scroll_position()
             start = min(start, self.model.rowCount() - 1)
@@ -543,10 +569,28 @@ class _ListPageMixin:
     def _selected(self, current, previous):
         if getattr(self, "_replacing_rows", False):
             return
+        self._expand_episode(current)
         item = current.data(ItemRoles.ITEM) if current.isValid() else None
         if item is not None:
             self._context_item = item
             self.context_changed.emit(item)
+
+    def _expand_episode(self, index):
+        if not getattr(self, '_inline_details', False):
+            return
+        if self.view.itemDelegate().is_expanded(index):
+            return
+        self._finish_episode_scroll(False)
+        bar = self.view.verticalScrollBar()
+        top = bar.value()
+        if self.view.itemDelegate().expand(index):
+            self.view.doItemsLayout()
+            QAbstractSlider.setValue(bar, min(top, bar.maximum()))
+            self.view.viewport().update()
+
+    def set_inline_notes(self, episode_id, description):
+        if getattr(self, '_inline_details', False) and self.view.itemDelegate().set_expanded_notes(episode_id, description):
+            self.view.viewport().update(self.view.visualRect(self.view.currentIndex()))
 
     def _replace_rows(self, items):
         # Qt may briefly make a neighbouring row current during removal.
@@ -568,6 +612,7 @@ class _ListPageMixin:
         item = index.data(ItemRoles.ITEM) if index.isValid() else None
         rect = view.visualRect(index) if index.isValid() else None
         visible = delegate.controls_visible(view, index, item)
+        over_details = index.isValid() and delegate.details_rect(rect).contains(position)
         over_play = index.isValid() and delegate.play_rect(rect).contains(position)
         over_queue = visible and delegate.can_queue(item) and delegate.queue_rect(rect).contains(position)
         over_show = delegate.can_open_show(item) and delegate.show_rect(rect, item).contains(position)
@@ -577,13 +622,14 @@ class _ListPageMixin:
             self._pressed_queue_id = item.episode_id if over_queue else None
             self._pressed_show_id = item.show_id if over_show else None
             self._pressed_play_key = self._key(item) if over_play and visible else None
-            if over_queue or over_show or (over_play and visible):
+            self._pressed_details_key = self._key(item) if over_details else None
+            if over_details or over_queue or over_show or (over_play and visible):
                 hide_hover_bubble()
                 QToolTip.hideText()
             # Consume the press too: queueing must not change selection/details.
-            return over_queue or over_show or (over_play and visible)
+            return over_details or over_queue or over_show or (over_play and visible)
         if kind == QEvent.Type.MouseButtonDblClick:
-            handled = over_queue or over_show or over_play or time.monotonic() - getattr(self, '_last_inline_action', 0) < 0.4
+            handled = over_details or over_queue or over_show or over_play or time.monotonic() - getattr(self, '_last_inline_action', 0) < 0.4
             self._ignore_inline_release = handled
             return handled
         if getattr(self, '_ignore_inline_release', False):
@@ -591,6 +637,13 @@ class _ListPageMixin:
             return True
         if getattr(self, '_block_hidden_play_release', False):
             self._block_hidden_play_release = False
+            return True
+        details = getattr(self, '_pressed_details_key', None)
+        self._pressed_details_key = None
+        if details is not None:
+            if over_details and self._key(item) == details:
+                self._last_inline_action = time.monotonic()
+                self.details_requested.emit(item)
             return True
         pressed = getattr(self, "_pressed_queue_id", None)
         show = getattr(self, "_pressed_show_id", None)
@@ -776,6 +829,7 @@ class _ListPageMixin:
                             return
                 scrollbar.setValue(scroll_value)
             QTimer.singleShot(0, self, restore)
+        self._expand_episode(self.view.currentIndex())
         item = self.view.currentIndex().data(ItemRoles.ITEM)
         previous = getattr(self, "_context_item", None)
         if previous != item:
@@ -863,8 +917,9 @@ class _ListPageMixin:
         over_play = visible and delegate.play_rect(visual).contains(position)
         over_queue = visible and delegate.can_queue(item) and delegate.queue_rect(visual).contains(position)
         over_show = delegate.can_open_show(item) and delegate.show_rect(visual, item).contains(position)
+        over_details = index.isValid() and delegate.details_rect(visual).contains(position)
         over_grip = index.isValid() and getattr(self, "reorder", False) and delegate.grip_rect(visual).contains(position)
-        if over_play or over_queue or over_show:
+        if over_play or over_queue or over_show or over_details:
             cursor = Qt.CursorShape.PointingHandCursor
         elif over_grip:
             cursor = Qt.CursorShape.SizeAllCursor

@@ -5,7 +5,7 @@ import html
 import re
 from collections import OrderedDict
 
-from PySide6.QtCore import QAbstractListModel, QEvent, QMimeData, QModelIndex, QRect, QSize, Signal, Qt
+from PySide6.QtCore import QAbstractListModel, QEvent, QMimeData, QModelIndex, QPersistentModelIndex, QRect, QSize, Signal, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QTextLayout
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QToolTip
 
@@ -807,6 +807,51 @@ class EpisodeDelegate(QStyledItemDelegate):
         self.playing_active = False
         self._snippets: dict[tuple[int, str], str] = {}
         self._wrapped_snippets = {}
+        self._expanded = QPersistentModelIndex()
+        self._expanded_notes = ''
+        self.queued_ids = frozenset()
+
+    def base_height(self):
+        if self.compact:
+            return scaled_px(self.COMPACT_HEIGHT)
+        return scaled_px(self.ROW_HEIGHT + self.SNIPPET_LINE * (max(1, self.SNIPPET_LINES) - 1))
+
+    def expanded_row(self):
+        return self._expanded.row() if self._expanded.isValid() and not self.compact else -1
+
+    def is_expanded(self, index):
+        return self._expanded == index
+
+    def expanded_extra(self):
+        return scaled_px(self.SNIPPET_LINE * 4 + 42) if self.expanded_row() >= 0 else 0
+
+    def expand(self, index):
+        if self._expanded == index:
+            return False
+        previous = QModelIndex(self._expanded)
+        self._expanded = QPersistentModelIndex(index)
+        item = index.data(ItemRoles.ITEM) if index.isValid() else None
+        self._expanded_notes = plain_snippet(item.description[:16384], 800) if item else ''
+        for changed in (previous, index):
+            if changed.isValid():
+                self.sizeHintChanged.emit(changed)
+        return True
+
+    def set_expanded_notes(self, episode_id, description):
+        item = self._expanded.data(ItemRoles.ITEM) if self._expanded.isValid() else None
+        if item is not None and item.episode_id == episode_id:
+            self._expanded_notes = plain_snippet(description[:16384], 800)
+            return True
+        return False
+
+    def summary_rect(self, rect):
+        return QRect(rect.x(), rect.y(), rect.width(), self.base_height())
+
+    def details_rect(self, rect):
+        if rect.height() <= self.base_height():
+            return QRect()
+        left = rect.x() + scaled_px(86)
+        return QRect(left, rect.bottom() - scaled_px(32), max(0, rect.right() - left - scaled_px(14)), scaled_px(24))
 
     def set_playing(self, episode_id: int, active: bool, source: str = ""):
         self.playing_id = episode_id or 0
@@ -824,14 +869,11 @@ class EpisodeDelegate(QStyledItemDelegate):
 
     def controls_visible(self, view, index, item):
         return index.isValid() and (
-            self.hover_allowed(view) or view.selectionModel().isSelected(index) or self.is_playing(item)
+            not self.reorder or self.hover_allowed(view) or view.selectionModel().isSelected(index) or self.is_playing(item)
         )
 
     def sizeHint(self, option, index):
-        if self.compact:
-            return QSize(1, scaled_px(self.COMPACT_HEIGHT))
-        extra = self.SNIPPET_LINE * (max(1, self.SNIPPET_LINES) - 1)
-        return QSize(1, scaled_px(self.ROW_HEIGHT + extra))
+        return QSize(1, self.base_height() + (self.expanded_extra() if index == self._expanded else 0))
 
     def helpEvent(self, event, view, option, index):
         """Keep the episode tooltip anchored to the row that owns it."""
@@ -841,10 +883,14 @@ class EpisodeDelegate(QStyledItemDelegate):
             return True
         if event.type() == QEvent.Type.ToolTip and index.isValid():
             item = index.data(ItemRoles.ITEM)
+            if self.details_rect(option.rect).contains(event.pos()):
+                point = event.globalPos()
+                self.hoverRequested.emit('Open full details (Alt+Return)', point.x(), point.y() - 6)
+                return True
             # The row's action hints use the same rounded bubble as its preview, not the platform tooltip.
             if self.can_queue(item) and self.queue_rect(option.rect).contains(event.pos()):
                 point = event.globalPos()
-                self.hoverRequested.emit("Add to Up Next", point.x(), point.y() - 6)
+                self.hoverRequested.emit('Already in Up Next' if item.episode_id in self.queued_ids else 'Add to Up Next', point.x(), point.y() - 6)
                 return True
             if self.can_open_show(item) and self.show_rect(option.rect, item).contains(event.pos()):
                 point = event.globalPos()
@@ -860,7 +906,7 @@ class EpisodeDelegate(QStyledItemDelegate):
         return False
 
     def play_rect(self, rect: QRect) -> QRect:
-        row = rect.adjusted(2, 3, -4, -3)
+        row = self.summary_rect(rect).adjusted(2, 3, -4, -3)
         size = scaled_px(30 if self.compact else 36)
         pad = scaled_px(10)
         return QRect(row.right() - size - pad, row.center().y() - size // 2, size, size)
@@ -912,13 +958,16 @@ class EpisodeDelegate(QStyledItemDelegate):
         painter.setBrush(QColor(COLORS["surface_raised"] if selected or hovered else COLORS["surface"]))
         painter.drawRoundedRect(row, radius, radius)
         if selected:
-            painter.setPen(QPen(QColor(COLORS["accent"] if focused else COLORS["border"]), 1))
+            painter.setPen(QPen(QColor(COLORS["blue"]), 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(row, radius, radius)
         if playing:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["accent"]))
             painter.drawRoundedRect(QRect(row.x(), row.y() + 10, 3, row.height() - 20), 2, 2)
+
+        full_row = row
+        row = self.summary_rect(option.rect).adjusted(2, 3, -4, -3)
 
         scale = painter.device().devicePixelRatioF() if hasattr(painter.device(), "devicePixelRatioF") else 1.0
         left = row.x() + scaled_px(12)
@@ -1015,14 +1064,15 @@ class EpisodeDelegate(QStyledItemDelegate):
             _badge(painter, row.right() - play_zone - 4, row.center().y() - 10, _badge_text(item), state_color, filled=item.state in {"Downloading", "Error"})
 
         play = self.play_rect(option.rect)
-        if hovered or selected or playing:
+        if not self.reorder or hovered or selected or playing:
             if self.can_queue(item):
                 queue = self.queue_rect(option.rect)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(COLORS["surface_soft"]))
                 painter.drawEllipse(queue)
                 inset = scaled_px(8)
-                icons.paint(painter, "queue-add", COLORS["text"], queue.adjusted(inset, inset, -inset, -inset), scale)
+                queued = item.episode_id in self.queued_ids
+                icons.paint(painter, "check" if queued else "queue-add", COLORS["teal"] if queued else COLORS["text"], queue.adjusted(inset, inset, -inset, -inset), scale)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["accent"] if hovered else COLORS["surface_soft"]))
             painter.drawEllipse(play)
@@ -1038,6 +1088,22 @@ class EpisodeDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(track, 1, 1)
             painter.setBrush(QColor(state_color if item.state in {"Downloading", "Paused"} else COLORS["accent"]))
             painter.drawRoundedRect(QRect(track.x(), track.y(), int(track.width() * item.progress), 3), 1, 1)
+
+        if index == self._expanded and not self.compact:
+            notes_left = row.x() + scaled_px(86)
+            notes_width = max(0, min(full_row.right() - notes_left - scaled_px(14), scaled_px(MAX_ROW_TEXT_PX)))
+            top = option.rect.y() + self.base_height()
+            painter.setPen(QPen(QColor(COLORS['border']), 1))
+            painter.drawLine(notes_left, top, notes_left + notes_width, top)
+            notes = QRect(notes_left, top + scaled_px(8), notes_width, scaled_px(self.SNIPPET_LINE * 4))
+            self._report(index, 'inline-notes', notes)
+            painter.setFont(app_font(12))
+            painter.setPen(QColor(COLORS['muted']))
+            self._draw_snippet(painter, notes, self._expanded_notes or 'No show notes provided for this episode.', 4)
+            link = self.details_rect(option.rect)
+            self._report(index, 'inline-details-link', link)
+            painter.setPen(QColor(COLORS['blue']))
+            painter.drawText(link, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, 'Open full details')
 
         if focused and not selected:
             _draw_focus(painter, row, radius)
