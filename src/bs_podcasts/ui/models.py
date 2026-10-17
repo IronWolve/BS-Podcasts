@@ -845,7 +845,10 @@ class EpisodeDelegate(QStyledItemDelegate):
         return False
 
     def summary_rect(self, rect):
-        return QRect(rect.x(), rect.y(), rect.width(), self.base_height())
+        height = self.base_height()
+        if not self.compact and rect.height() > height:
+            height = scaled_px(self.ROW_HEIGHT)
+        return QRect(rect.x(), rect.y(), rect.width(), height)
 
     def details_rect(self, rect):
         if rect.height() <= self.base_height():
@@ -935,7 +938,9 @@ class EpisodeDelegate(QStyledItemDelegate):
                 reserve += _font_metrics(app_font(11, QFont.Weight.DemiBold)).horizontalAdvance(_badge_text(item)) + scaled_px(36)
             text_width = min(max(40, row.right() - reserve - text_left), scaled_px(MAX_ROW_TEXT_PX))
         width = min(text_width, _font_metrics(app_font(12)).horizontalAdvance(item.show))
-        top = row.y() + scaled_px(32) + scaled_px(self.SNIPPET_LINE) * max(1, self.SNIPPET_LINES) - 1 + scaled_px(3)
+        top = row.y() + scaled_px(32)
+        if rect.height() <= self.base_height():
+            top += scaled_px(self.SNIPPET_LINE) * max(1, self.SNIPPET_LINES) - 1 + scaled_px(3)
         return QRect(text_left, top, width, scaled_px(16))
 
     def grip_rect(self, rect: QRect) -> QRect:
@@ -967,6 +972,7 @@ class EpisodeDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(QRect(row.x(), row.y() + 10, 3, row.height() - 20), 2, 2)
 
         full_row = row
+        expanded = index == self._expanded and not self.compact
         row = self.summary_rect(option.rect).adjusted(2, 3, -4, -3)
 
         scale = painter.device().devicePixelRatioF() if hasattr(painter.device(), "devicePixelRatioF") else 1.0
@@ -1009,6 +1015,10 @@ class EpisodeDelegate(QStyledItemDelegate):
         if self.compact:
             title_rect = QRect(text_left, row.y() + scaled_px(12), text_width, scaled_px(20))
             meta_rect = QRect(text_left, row.y() + scaled_px(33), text_width, scaled_px(16))
+            snippet_rect = None
+        elif expanded:
+            title_rect = QRect(text_left, row.y() + scaled_px(11), text_width, scaled_px(20))
+            meta_rect = QRect(text_left, row.y() + scaled_px(32), text_width, scaled_px(16))
             snippet_rect = None
         else:
             lines = max(1, self.SNIPPET_LINES)
@@ -1095,7 +1105,7 @@ class EpisodeDelegate(QStyledItemDelegate):
             icons.paint(painter, glyph, COLORS["on_accent"] if hovered else COLORS["text"], play.adjusted(inset, inset, -inset, -inset), scale)
 
         if 0 < item.progress < 1:
-            track_top = row.bottom() - scaled_px(8 if not self.compact else 6)
+            track_top = full_row.bottom() - scaled_px(4) if expanded else row.bottom() - scaled_px(8 if not self.compact else 6)
             track = QRect(text_left, track_top, text_width, 3)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["border"]))
@@ -1103,17 +1113,16 @@ class EpisodeDelegate(QStyledItemDelegate):
             painter.setBrush(QColor(state_color if item.state in {"Downloading", "Paused"} else COLORS["accent"]))
             painter.drawRoundedRect(QRect(track.x(), track.y(), int(track.width() * item.progress), 3), 1, 1)
 
-        if index == self._expanded and not self.compact:
-            notes_left = row.x() + scaled_px(86)
+        if expanded:
+            notes_left = text_left
             notes_width = max(0, min(full_row.right() - notes_left - scaled_px(14), scaled_px(MAX_ROW_TEXT_PX)))
-            top = option.rect.y() + self.base_height()
-            painter.setPen(QPen(QColor(COLORS['border']), 1))
-            painter.drawLine(notes_left, top, notes_left + notes_width, top)
-            notes = QRect(notes_left, top + scaled_px(8), notes_width, scaled_px(self.SNIPPET_LINE * 4))
+            top = max(meta_rect.bottom(), play.bottom()) + scaled_px(8)
+            lines = max(1, self.SNIPPET_LINES) + 4
+            notes = QRect(notes_left, top, notes_width, scaled_px(self.SNIPPET_LINE) * lines)
             self._report(index, 'inline-notes', notes)
             painter.setFont(app_font(12))
             painter.setPen(QColor(COLORS['muted']))
-            self._draw_snippet(painter, notes, self._expanded_notes or 'No show notes provided for this episode.', 4)
+            self._draw_snippet(painter, notes, self._expanded_notes or 'No show notes provided for this episode.', lines)
             link = self.details_rect(option.rect)
             self._report(index, 'inline-details-link', link)
             painter.setPen(QColor(COLORS['blue']))
