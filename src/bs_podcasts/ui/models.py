@@ -1045,7 +1045,21 @@ class EpisodeDelegate(QStyledItemDelegate):
         compact_detail = item.detail if self.compact and item.detail else ""
         meta = compact_detail or "  ·  ".join(part for part in (item.show if not self.compact else "", item.published, remaining or item.duration) if part)
         self._report(index, "meta", meta_rect)
-        if self.can_open_show(item):
+        if self.compact and self.reorder:
+            duration = remaining or item.duration
+            duration_width = min(meta_rect.width(), painter.fontMetrics().horizontalAdvance(duration))
+            duration_rect = QRect(meta_rect.right() - duration_width + 1, meta_rect.y(), duration_width, meta_rect.height())
+            show_rect = QRect(meta_rect.x(), meta_rect.y(),
+                              max(0, meta_rect.width() - duration_width - (scaled_px(8) if duration else 0)), meta_rect.height())
+            self._report(index, 'queue-show', show_rect)
+            self._report(index, 'queue-duration', duration_rect)
+            painter.setPen(QColor(COLORS['muted']))
+            painter.drawText(show_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             painter.fontMetrics().elidedText(item.show, Qt.TextElideMode.ElideRight, show_rect.width()))
+            painter.setPen(QColor(COLORS['text']))
+            painter.drawText(duration_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                             painter.fontMetrics().elidedText(duration, Qt.TextElideMode.ElideRight, duration_rect.width()))
+        elif self.can_open_show(item):
             show_rect = self.show_rect(option.rect, item, text_width)
             painter.setPen(QColor(COLORS['blue']))
             painter.drawText(show_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
