@@ -93,6 +93,7 @@ def svg(name: str, color: str) -> bytes:
 _pixmaps: dict[tuple, QPixmap] = {}
 _icons: dict[tuple, QIcon] = {}
 _themed_icons: dict[tuple, QIcon] = {}
+_glyph_names: dict[int, str] = {}
 _renderers: dict[tuple, QSvgRenderer] = {}
 # The key space is finite today (glyph x palette x a few sizes), but nothing
 # enforced that: one caller minting per-item colours would have grown these
@@ -206,7 +207,13 @@ def themed_icon(name: str, role: str, size: int = 20, disabled: str = "") -> QIc
         cached = QIcon(_ThemedIconEngine(name, role, size, disabled))
         _themed_icons[key] = cached
         _bound(_themed_icons)
+    _glyph_names[cached.cacheKey()] = name
+    _bound(_glyph_names)
     return cached
+
+
+def glyph_name(value: QIcon) -> str:
+    return _glyph_names.get(value.cacheKey(), '')
 
 
 def paint(painter: QPainter, name: str, color: str, rect, scale: float = 1.0):

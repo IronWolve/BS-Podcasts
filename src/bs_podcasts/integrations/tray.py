@@ -213,6 +213,15 @@ class TrayController:
         if handler is not None:
             handler(*args)
 
+    def apply_metrics(self):
+        if self.tray is None:
+            return
+        set_local_stylesheet(self._menu, _compact_menu_style())
+        self._menu_font_key = None
+        snapshot = getattr(self.playback, 'snapshot', getattr(self, '_last_snapshot', None))
+        if snapshot is not None:
+            self._playback_changed(snapshot)
+
     def _set_transport_enabled(self, enabled: bool):
         for action in (self.toggle, self.back, self.forward, self.next, self.open_now_playing):
             action.setEnabled(enabled)
@@ -228,6 +237,7 @@ class TrayController:
         if revision and revision < getattr(self, "_revision", 0):
             return
         self._revision = revision
+        self._last_snapshot = snapshot
         # Every widget past the header is optional here: the lifecycle check drives this with a stand-in
         # that holds only the tray, the header and the toggle.
         part = lambda name, default=None: getattr(self, name, default)

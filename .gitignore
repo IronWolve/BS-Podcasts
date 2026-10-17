@@ -207,6 +207,7 @@
 !/src/bs_podcasts/ui/__init__.py
 !/src/bs_podcasts/ui/dialogs.py
 !/src/bs_podcasts/ui/icons.py
+!/src/bs_podcasts/ui/menu_style.py
 !/src/bs_podcasts/ui/models.py
 !/src/bs_podcasts/ui/pages.py
 !/src/bs_podcasts/ui/pixmaps.py

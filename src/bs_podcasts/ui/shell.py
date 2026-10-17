@@ -1487,6 +1487,7 @@ class MainWindow(QMainWindow):
             app.setFont(app_font())
             apply_app_stylesheet(app)
         self.navigation.apply_metrics()
+        self.context_toggle.apply_metrics()
         self.context.apply_metrics()
         self.player.apply_metrics()
         self.search_overlay.apply_metrics()
@@ -1505,6 +1506,9 @@ class MainWindow(QMainWindow):
             self.splitter.setSizes(self._context_split_sizes())
         compact = self.library is not None and self.library.setting("ui.density", "comfortable") == "compact"
         self._apply_density(compact)
+        tray = getattr(self, 'tray', None)
+        if tray is not None:
+            tray.apply_metrics()
 
     def _referenced_artwork(self) -> set:
         return self.library.repository.artwork_paths() if self.library is not None else set()
@@ -5174,6 +5178,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         self._add_episode_primary_actions(menu, context)
         self._add_episode_queue_actions(menu, context)
+        self._add_episode_favorite_action(menu, context)
         self._add_episode_download_actions(menu, context)
         added_remove_download = self._add_episode_page_actions(menu, context)
         self._add_episode_file_actions(menu, context, added_remove_download)
@@ -5186,11 +5191,11 @@ class MainWindow(QMainWindow):
         if not url:
             return None
         menu = QMenu(self)
-        self._add_episode_info_actions(menu, episode, show)
-        menu.addSeparator()
         menu.addAction(icons.themed_icon("play", "text", 16), "Play", lambda: self._play_preview_episode(episode))
         menu.addAction(icons.themed_icon("add", "text", 16), "Subscribe", lambda: self._subscribe_url(url))
         menu.addSeparator()
+        details = menu.addMenu(icons.themed_icon('info', 'blue', 16), 'Details && links')
+        self._add_episode_info_actions(details, episode, show)
         self._add_episode_copy_menu(menu, episode, show)
         return menu
 
@@ -5200,9 +5205,9 @@ class MainWindow(QMainWindow):
         menu.addAction("Episode information…", lambda: self._show_episode_information(episode, show))
         menu.addAction("Retry artwork", lambda: self._retry_artwork(episode))
         if episode.website_url:
-            menu.addAction(icons.themed_icon("external", "text", 16), "Open episode page", lambda: self._open_url(episode.website_url))
+            menu.addAction(icons.themed_icon("external", "text", 16), "Episode page", lambda: self._open_url(episode.website_url))
         if getattr(show, "website_url", ""):
-            menu.addAction(icons.themed_icon("external", "text", 16), "Open podcast website", lambda: self._open_url(show.website_url))
+            menu.addAction(icons.themed_icon("external", "text", 16), "Podcast website", lambda: self._open_url(show.website_url))
 
     def _add_episode_primary_actions(self, menu, context):
         """The selection header, or the single row's details and Play; then the favourite toggle."""
@@ -5212,12 +5217,11 @@ class MainWindow(QMainWindow):
             header.setEnabled(False)
             menu.addSeparator()
         else:
-            self._add_episode_info_actions(menu, episode, show)
-            menu.addSeparator()
             play = menu.addAction(icons.themed_icon("play", "text", 16), "Resume" if 0 < episode.progress < 1 else "Play", lambda: self._play_episode(episode.episode_id))
             play.setShortcut(QKeySequence(Qt.Key.Key_Return))
-            menu.addAction(icons.themed_icon("external", "text", 16), "Open in external player…",
-                           lambda: self._open_external_episode(episode.episode_id))
+
+    def _add_episode_favorite_action(self, menu, context):
+        episode, targets, many = context.episode, context.targets, context.many
         menu.addAction(
             icons.themed_icon("favorite", "accent" if episode.favorite else "text", 16),
             "Remove from favorites" if (not many and episode.favorite) else "Add to favorites",
@@ -5228,14 +5232,13 @@ class MainWindow(QMainWindow):
         """Up Next: remove on the queue page, add (and Play next for one row) everywhere else."""
         episode, targets, many, page = context.episode, context.targets, context.many, context.page
         if page is self.playlist_page:
-            remove = menu.addAction(icons.themed_icon("close", "text", 16), "Remove from Up Next", lambda: self._remove_many_from_queue([item.episode_id for item in targets]))
-            remove.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+            if not many:
+                menu.addAction(icons.themed_icon('next', 'accent', 16), 'Play next', lambda: self._queue_to_front(episode.episode_id))
         else:
+            if not many and episode.episode_id:
+                menu.addAction(icons.themed_icon('next', 'accent', 16), 'Play next', lambda: self._queue_to_front(episode.episode_id))
             queue = menu.addAction(icons.themed_icon("queue-add", "text", 16), "Add to Up Next", lambda: self._queue_many(targets))
             queue.setShortcut(QKeySequence(self.shortcuts.bindings().get("queue_selected", "")))
-            if not many and episode.episode_id:
-                # Front of the queue, from any row — not only from Up Next.
-                menu.addAction(icons.themed_icon("next", "text", 16), "Play next", lambda: self._queue_to_front(episode.episode_id))
 
     def _add_episode_download_actions(self, menu, context):
         """The download state actions for one row, or one Download for the selection's missing files."""
@@ -5243,11 +5246,11 @@ class MainWindow(QMainWindow):
         downloaded, status, status_pages = context.downloaded, context.status, context.status_pages
         if not many and is_web_url(episode.media_url):
             state_actions = self._download_state_actions(episode.state.lower(), episode.episode_id)
+            destination = menu.addMenu(icons.themed_icon('download', 'teal', 16), 'Download options') if state_actions else menu
             for icon, label, callback in state_actions:
-                menu.addAction(icons.themed_icon(icon, "text", 16), label, callback)
+                destination.addAction(icons.themed_icon(icon, "text", 16), label, callback)
             if not state_actions and not downloaded:
-                label = f"Download ({status})" if status_pages else "Download"
-                menu.addAction(icons.themed_icon("download", "text", 16), label, lambda: self._download_chosen(episode.episode_id))
+                menu.addAction(icons.themed_icon("download", "text", 16), 'Download', lambda: self._download_chosen(episode.episode_id))
         elif many:
             missing = sum(1 for item in targets if is_web_url(item.media_url) and not item.downloaded_path)
             if missing:
@@ -5260,6 +5263,10 @@ class MainWindow(QMainWindow):
         episode, targets, many, page = context.episode, context.targets, context.many, context.page
         downloaded, status, status_pages = context.downloaded, context.status, context.status_pages
         continue_listening = context.continue_listening
+        if page is self.playlist_page:
+            menu.addSeparator()
+            remove = menu.addAction(icons.themed_icon('close', 'text', 16), 'Remove from Up Next', lambda: self._remove_many_from_queue([item.episode_id for item in targets]))
+            remove.setShortcut(QKeySequence(Qt.Key.Key_Delete))
         if page is self.bookmark_page and not many:
             menu.addSeparator()
             menu.addAction(icons.themed_icon("play", "text", 16), f"Play from {format_media_time(episode.bookmark_position)}", lambda: self._play_bookmark(episode))
@@ -5271,7 +5278,7 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
             remove_history = menu.addAction(
                 icons.themed_icon("close", "text", 16),
-                f"Remove from history ({status})",
+                "Remove from history",
                 lambda: self._remove_history([item.episode_id for item in targets]),
             )
             remove_history.setShortcut(QKeySequence(Qt.Key.Key_Delete))
@@ -5279,21 +5286,17 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
             remove_resume = menu.addAction(
                 icons.themed_icon("close", "text", 16),
-                f"Remove from Continue listening ({status})",
+                "Remove from Continue listening",
                 lambda: self._remove_from_continue_listening(targets),
             )
             remove_resume.setShortcut(QKeySequence(Qt.Key.Key_Delete))
         if status_pages and downloaded:
             if page is self.episode_page or (page is self.home_page and not continue_listening):
                 menu.addSeparator()
-            remove_download_label = (
-                "Remove download"
-                if continue_listening or page is self.history_page
-                else f"Remove download ({status})"
-            )
+            remove_download_label = 'Delete download…'
             if many:
                 files = sum(1 for item in targets if item.downloaded_path)
-                remove_download_label = f"Remove {files} download{'' if files == 1 else 's'}"
+                remove_download_label = f"Delete {files} download{'' if files == 1 else 's'}…"
             menu.addAction(
                 icons.themed_icon("trash", "text", 16),
                 remove_download_label,
@@ -5305,8 +5308,6 @@ class MainWindow(QMainWindow):
     def _add_episode_file_actions(self, menu, context, added_remove_download):
         """Play next on the queue page, then the downloaded file: location, export and removal."""
         episode, targets, many, page = context.episode, context.targets, context.many, context.page
-        if page is self.playlist_page and not many:
-            menu.addAction(icons.themed_icon("next", "text", 16), "Play next", lambda: self._queue_to_front(episode.episode_id))
         if episode.downloaded_path or page is self.download_page:
             menu.addSeparator()
             if episode.downloaded_path:
@@ -5315,13 +5316,13 @@ class MainWindow(QMainWindow):
             if exportable:
                 menu.addAction(
                     icons.themed_icon("external", "text", 16),
-                    "Export media…" if len(exportable) == 1 else f"Export {len(exportable)} media files…",
+                    "Export audio…" if len(exportable) == 1 else f"Export {len(exportable)} audio files…",
                     lambda: self._export_downloads(exportable),
                 )
             if not added_remove_download:
                 delete_download = menu.addAction(
                     icons.themed_icon("trash", "text", 16),
-                    "Remove download" if not many else f"Remove {len(targets)} downloads",
+                    "Delete download…" if not many else f"Delete {len(targets)} downloads…",
                     lambda: self._delete_downloads(targets),
                 )
                 if page is self.download_page:
@@ -5330,17 +5331,20 @@ class MainWindow(QMainWindow):
     def _add_episode_closing_actions(self, menu, context):
         """The copy menu, played and unplayed, and the way to the podcast."""
         episode, show, targets, many = context.episode, context.show, context.targets, context.many
-        if not many:
-            menu.addSeparator()
-            self._add_episode_copy_menu(menu, episode, show)
         menu.addSeparator()
         if many or not episode.played:
             menu.addAction(icons.themed_icon("check", "text", 16), "Mark as played", lambda: self._mark_played_many(targets, True))
         if many or episode.played:
             menu.addAction("Mark as unplayed", lambda: self._mark_played_many(targets, False))
-        if not many and episode.show_id:
+        if not many:
             menu.addSeparator()
-            menu.addAction(icons.themed_icon("podcasts", "text", 16), mnemonic_safe(f"Go to {episode.show}"), lambda: self._open_episode_podcast(episode.show_id))
+            details = menu.addMenu(icons.themed_icon('info', 'blue', 16), 'Details && links')
+            self._add_episode_info_actions(details, episode, show)
+            details.addAction(icons.themed_icon('external', 'blue', 16), 'External player…', lambda: self._open_external_episode(episode.episode_id))
+            self._add_episode_copy_menu(menu, episode, show)
+        if not many and episode.show_id:
+            go = menu.addAction(icons.themed_icon('podcasts', 'blue', 16), 'Go to podcast', lambda: self._open_episode_podcast(episode.show_id))
+            go.setToolTip(mnemonic_safe(episode.show))
 
     def _remove_from_queue(self, episode_id: int):
         self._remove_many_from_queue([episode_id])

@@ -138,6 +138,9 @@ class RoundedPopups(QObject):
     shadow is turned off with it (it would be drawn for the square window)."""
 
     def eventFilter(self, watched, event):
+        if isinstance(watched, QMenu) and event.type() == QEvent.Type.Paint:
+            from .menu_style import paint_menu
+            return paint_menu(watched, event)
         if event.type() == QEvent.Type.Polish and isinstance(watched, QMenu) and not watched.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
             watched.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint, True)
             watched.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -347,10 +350,16 @@ class EdgeHandle(QPushButton):
         self.set_glyph(name, tooltip)
 
     def set_glyph(self, name: str, tooltip: str):
-        self.setIcon(icons.themed_icon(name, "text", 16, disabled="disabled"))
-        self.setIconSize(QSize(16, 16))
+        self._glyph_name = name
+        self.apply_metrics()
         self.setToolTip(tooltip)
         self.setAccessibleName(tooltip)
+
+    def apply_metrics(self):
+        self.setFixedSize(scaled_px(22), scaled_px(52))
+        side = scaled_px(16)
+        self.setIcon(icons.themed_icon(self._glyph_name, 'text', side, disabled='disabled'))
+        self.setIconSize(QSize(side, side))
 
     def enterEvent(self, event):
         self._effect.setOpacity(1.0)
@@ -695,7 +704,9 @@ class NavigationRail(QFrame):
             badge.hide()
         button = self._buttons[index][0]
         label = self._buttons[index][2]
-        button.setAccessibleName(f"{label}, {count} new" if count else label)
+        kind = NAV_ITEMS[index][0]
+        noun = {'episodes': 'new episode', 'queue': 'queued episode', 'downloads': 'active download'}.get(kind, 'item')
+        button.setAccessibleName(f"{label}, {count} {noun}{'' if count == 1 else 's'}" if count else label)
 
     def set_compact(self, compact: bool, user: bool = False):
         changed = compact != self._compact
@@ -717,6 +728,7 @@ class NavigationRail(QFrame):
 
     def apply_metrics(self):
         width = scaled_px(RAIL_COMPACT_WIDTH if self._compact else RAIL_WIDTH)
+        self.toggle.apply_metrics()
         self.setFixedWidth(width)
         self.layout().setContentsMargins(SPACE["md"], SPACE["lg"], SPACE["md"], SPACE["md"])
         self.layout().setSpacing(SPACE["xs"])
@@ -2062,8 +2074,13 @@ class HoverBubble(QFrame):
             text = html_unescape(text[4:-5].replace('<br>', '\n'))
         self.label.setText(text)
         self.label.setWordWrap("\n" in text or len(text) > 60)
-        self.setMaximumWidth(scaled_px(360))
-        self.adjustSize()
+        margins = self.layout().contentsMargins()
+        cap = scaled_px(360) - margins.left() - margins.right()
+        width = min(cap, max(scaled_px(40), self.label.fontMetrics().horizontalAdvance(max(text.splitlines() or [''], key=len))))
+        self.label.setFixedWidth(width)
+        height = self.label.heightForWidth(width) if self.label.wordWrap() else self.label.fontMetrics().height()
+        self.label.setFixedHeight(max(self.label.fontMetrics().height(), height))
+        self.setFixedSize(width + margins.left() + margins.right(), self.label.height() + margins.top() + margins.bottom())
         # The screen under the anchor, not the one this window last lived on:
         # a slider's bubble kept its first screen after the window moved.
         screen = QApplication.screenAt(QPoint(global_center_x, global_top)) or self.screen() or QApplication.primaryScreen()
@@ -3059,11 +3076,13 @@ class ContextPanel(QFrame):
         bar = self.tabs.tabBar()
         original = [(bar.tabText(index), bar.tabIcon(index), bar.isTabVisible(index)) for index in range(bar.count())]
         for index, (label, _glyph) in enumerate(self._tab_specs):
+            if not original[index][2]:
+                continue
             bar.setTabText(index, label)
             bar.setTabIcon(index, QIcon())
-            bar.setTabVisible(index, True)
         bar.ensurePolished()
         self._tabs_full_width = bar.sizeHint().width()
+        self._measured_visible_tabs = tuple(item[2] for item in original)
         for index, (text, icon, visible) in enumerate(original):
             bar.setTabText(index, text)
             bar.setTabIcon(index, icon)
@@ -3182,6 +3201,9 @@ class ContextPanel(QFrame):
     def _fit_tabs(self):
         """Full labels when they fit, icon-only tabs (label in the tooltip)
         when the strip is wider than the pane. Never a truncated label."""
+        visible = tuple(self.tabs.isTabVisible(index) for index in range(self.tabs.count()))
+        if visible != getattr(self, '_measured_visible_tabs', None):
+            self._measure_tabs()
         available = min(self.tabs.width(), self.selected_scroll.viewport().width() - SPACE["sm"]) - 2
         iconic = self._tabs_full_width > available > 0
         if iconic == self._tabs_iconic:
@@ -3822,12 +3844,13 @@ class SearchOverlay(_ReturnsFocus, QFrame):
         self.raise_()
         self.field.setFocus()
         self.field.selectAll()
-        if not self.results.count():
+        if not self.results.count() or getattr(self, '_result_query', None) != self.field.text().strip():
             query = self.field.text().strip()
             self.set_results([], [], query)
             # Hiding stopped a pending debounce, so retained text has no
             # library results until the query runs again.
             if query:
+                self._show_search_pending()
                 self._timer.start()
 
     def hideEvent(self, event):
@@ -3855,7 +3878,18 @@ class SearchOverlay(_ReturnsFocus, QFrame):
     def _debounce(self, _text):
         if not self.field.text().strip():
             self.set_results([], [], "")
+        else:
+            self._show_search_pending()
         self._timer.start()
+
+    def _show_search_pending(self):
+        self._result_query = None
+        self.results.clear()
+        placeholder = QListWidgetItem('Searching your library…')
+        placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.results.addItem(placeholder)
+        self.results.setAccessibleDescription('Searching your library')
+        self.hint.setText('Searching your library…  ·  Esc to close')
 
     def _report_count(self, podcasts, episodes, query: str):
         """Say how many results there are: on the hint line, in the list's
@@ -4223,6 +4257,16 @@ class PlayerBar(QFrame):
         layout.addWidget(center, 1)
         self.set_skip_values(15, 30)
 
+    def _fit_speed_label(self):
+        from PySide6.QtWidgets import QStyleOptionButton
+        option = QStyleOptionButton()
+        self.speed.initStyleOption(option)
+        contents = self.speed.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, option, self.speed)
+        chrome = max(0, option.rect.width() - contents.width())
+        width = max(scaled_px(52), self.speed.fontMetrics().horizontalAdvance(self.speed.text()) + chrome + 2)
+        if self.speed.width() != width:
+            self.speed.setFixedWidth(width)
+
     def _build_tools_zone(self, layout):
         tools = QHBoxLayout()
         tools.setSpacing(SPACE["xs"])
@@ -4231,7 +4275,7 @@ class PlayerBar(QFrame):
         self.speed.setToolTip("Playback speed")
         self.speed.setAccessibleName("Playback speed")
         self.speed.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.speed.setFixedWidth(scaled_px(52))
+        self._fit_speed_label()
         self.speed_popover = SpeedPopover(self)
         self.speed_popover.speed_selected.connect(self.speed_requested)
         self.speed.clicked.connect(self._show_speed)
@@ -4615,7 +4659,7 @@ class PlayerBar(QFrame):
         self.art.set_bounds(scaled_px(40), scaled_px(72))
         self.art.set_side(art)
         self.now_wrap.setMinimumWidth(scaled_px(180))
-        self.speed.setFixedWidth(scaled_px(52))
+        self._fit_speed_label()
         skip = scaled_px(20)
         self.back.setIcon(icons.themed_icon("skip-back", "text", skip, disabled="disabled"))
         self.back.setIconSize(QSize(skip, skip))
@@ -4884,6 +4928,7 @@ class PlayerBar(QFrame):
         self.remaining.setText("−" + self._time(max(0.0, self._duration - position)))
         self._speed = float(snapshot.speed)
         self.speed.setText(f"{self._speed:g}×")
+        self._fit_speed_label()
         self.speed.setAccessibleName(f"Playback speed, {self._speed:g}×")
         self.speed_popover.set_current(self._speed)
         self._ab_active = snapshot.ab_start is not None

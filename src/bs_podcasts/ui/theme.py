@@ -732,17 +732,17 @@ def stylesheet() -> str:
     /* ---------- Menus & tooltips (level 2) ---------- */
     QMenu {{
         background: {c['surface_raised']}; color: {c['text']};
-        border: 1px solid {c['border']}; border-radius: {r['md']}px;
+        border: 1px solid {c['border']}; border-radius: {sp(12)}px;
         padding: {sp(6)}px;
     }}
     QMenu::item {{
         background: transparent; color: {c['text']};
-        border-radius: {r['sm']}px; margin: 1px 3px;
-        padding: {sp(8)}px {sp(30)}px {sp(8)}px {sp(12)}px;
+        border-radius: {sp(6)}px; margin: 1px 3px;
+        padding: {sp(3)}px {sp(38)}px {sp(3)}px {sp(12)}px;
     }}
     QMenu::item:selected {{ background: {c['surface_soft']}; color: {c['text_strong']}; }}
     QMenu::item:disabled {{ color: {c['subtle']}; }}
-    QMenu::separator {{ background: {c['hairline']}; height: 1px; margin: {sp(5)}px {sp(10)}px; }}
+    QMenu::separator {{ background: {c['hairline']}; height: 1px; margin: {sp(3)}px {sp(10)}px; }}
     QMenu::icon {{ padding-left: {sp(10)}px; }}
     QMenu::indicator {{ width: {sp(16)}px; height: {sp(16)}px; margin-left: {sp(8)}px; }}
     QMenu::right-arrow {{ margin-right: {sp(8)}px; }}
@@ -828,12 +828,12 @@ def stylesheet() -> str:
     QListView::item {{ background: transparent; border: 0; }}
     QListView::drop-indicator {{ background: {c['accent']}; height: 2px; }}
     QScrollBar:vertical {{ background: transparent; width: {sp(10)}px; margin: 4px 2px; }}
-    QScrollBar::handle:vertical {{ background: {c['border']}; border-radius: 3px; min-height: {sp(34)}px; }}
+    QScrollBar::handle:vertical {{ background: {c['control_border']}; border-radius: 3px; min-height: {sp(34)}px; }}
     QScrollBar::handle:vertical:hover {{ background: {c['subtle']}; }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
     QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
     QScrollBar:horizontal {{ background: transparent; height: {sp(10)}px; margin: 2px 4px; }}
-    QScrollBar::handle:horizontal {{ background: {c['border']}; border-radius: 3px; min-width: {sp(34)}px; }}
+    QScrollBar::handle:horizontal {{ background: {c['control_border']}; border-radius: 3px; min-width: {sp(34)}px; }}
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
     QScrollArea#settingsScroll, QScrollArea#settingsScroll QWidget#qt_scrollarea_viewport,
     QWidget#settingsContent {{ background: {c['canvas']}; border: 0; }}
@@ -852,9 +852,11 @@ def stylesheet() -> str:
         border: 2px solid {c['accent']}; padding: {sp(6) - 2}px {sp(10) - 2}px;
     }}
     QPlainTextEdit#fileListing {{
-        background: transparent; border: 0; padding: 0; color: {c['subtle']}; font-size: {small}px;
+        background: transparent; border: 2px solid transparent; padding: 0; color: {c['subtle']}; font-size: {small}px;
         selection-background-color: {c['accent']}; selection-color: {c['on_accent']};
     }}
+    QPlainTextEdit#fileListing:focus {{ border-color: {c['accent']}; }}
+    QCheckBox:focus::indicator {{ border: 2px solid {c['accent']}; width: {sp(18)-2}px; height: {sp(18)-2}px; }}
     QListWidget::item {{ padding: {sp(7)}px {sp(8)}px; border-radius: 6px; }}
     QListWidget::item:hover {{ background: {c['surface_raised']}; }}
     QListWidget::item:selected {{ background: {c['surface_soft']}; color: {c['text_strong']}; }}
