@@ -437,6 +437,15 @@ class MainWindow(QMainWindow):
         self._rail_user_compact = None
         self._last_mode = None
         self._pending_jobs = set()
+        self._about_dialog = None
+        self._latest_update = None
+        self._update_checked_at = 0.0
+        self._update_error = ""
+        self._update_check_busy = False
+        self._update_check_manual = False
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(60 * 60 * 1000)
+        self._update_timer.timeout.connect(self._check_for_updates)
         self._refresh_batch = [0, 0, 0]  # total, done, new episodes
         self._refresh_generation = 0
         self._refresh_failed = []
@@ -982,6 +991,11 @@ class MainWindow(QMainWindow):
         self.navigation.set_background_paused(self._background_paused())
         self.settings_page.statistics_requested.connect(self._refresh_statistics)
         self.settings_page.update_check_requested.connect(lambda: self._check_for_updates(manual=True))
+        from ..services.updates import cached_update
+        self._latest_update = cached_update(app_version(), self.library.setting('updates.cached_release', ''))
+        self._update_checked_at = self._float_setting('updates.last_check', 0.0, 0.0, time.time())
+        self._refresh_update_views()
+        self._arm_update_timer()
         self.settings_page.database_health_requested.connect(self._database_health)
         self.settings_page.database_reindex_requested.connect(lambda: self._database_maintenance("reindex"))
         self.settings_page.database_optimize_requested.connect(lambda: self._database_maintenance("optimize"))
@@ -1961,6 +1975,8 @@ class MainWindow(QMainWindow):
         self._run_task("reset-library", stopped_work, pool=self.commands, keep=True, bulk=True)
 
     def _show_about(self):
+        if self._about_dialog is not None:
+            return
         library, downloads, playback = self.library, self.downloads, self.playback
 
         def work():
@@ -1986,7 +2002,16 @@ class MainWindow(QMainWindow):
             return info
 
         def apply(info):
-            self._exec_dialog(AboutDialog(info if isinstance(info, dict) else {}, self))
+            info = info if isinstance(info, dict) else {}
+            info['updates'] = self._update_view_state()
+            dialog = AboutDialog(info, self)
+            self._about_dialog = dialog
+            dialog.update_check_requested.connect(lambda: self._check_for_updates(manual=True))
+            dialog.update_notify_changed.connect(lambda enabled: self._save_setting('updates.notify', '1' if enabled else '0'))
+            try:
+                self._exec_dialog(dialog)
+            finally:
+                self._about_dialog = None
 
         self._run_read(work, apply, "about")
 
@@ -2730,6 +2755,14 @@ class MainWindow(QMainWindow):
                 set_file_logging(value == "1")
             elif key == 'notifications.timeout_seconds':
                 self._apply_notification_timeout()
+            elif key in {'updates.enabled', 'updates.notify'}:
+                if value == '0':
+                    self.toast.dismiss_owner('app-update')
+                self._refresh_update_views()
+                if key == 'updates.enabled':
+                    self._arm_update_timer()
+                    if value == '1':
+                        self._check_for_updates()
             elif key.startswith('backups.'):
                 self._backup_status_dirty = True
                 if key == 'backups.enabled' and value == '0':
@@ -3634,24 +3667,72 @@ class MainWindow(QMainWindow):
     def _duration_summary(seconds: float) -> str:
         return format_hours_minutes(seconds)
 
+    def _update_view_state(self):
+        update = self._latest_update
+        checked = 'Not checked'
+        if self._update_checked_at:
+            try:
+                checked = datetime.fromtimestamp(self._update_checked_at).astimezone().strftime('%b %d, %Y at %I:%M %p')
+            except (OverflowError, OSError, ValueError):
+                pass
+        status = ('Checking GitHub…' if self._update_check_busy else self._update_error
+                  or (update.status if update is not None else 'Check GitHub for the latest release. Updates are never installed automatically.'))
+        return {'available': update.available if update is not None else '',
+                'has_result': update is not None,
+                'checked': checked, 'status': status, 'busy': self._update_check_busy,
+                'url': update.url if update is not None else '',
+                'notify': self.library is not None and self.library.setting('updates.notify', '1') == '1',
+                'can_check': self.library is not None and self.jobs is not None and bool(RELEASES_API_URL)}
+
+    def _refresh_update_views(self):
+        state = self._update_view_state()
+        latest = state['available'] or ('No releases' if self._latest_update is not None else 'Not checked')
+        self.settings_page.set_update_status(
+            f"Installed {app_version()} · Latest on GitHub: {latest}\n{state['status']}", state['busy'])
+        self.settings_page.load_update_notifications(state['notify'])
+        if self._about_dialog is not None:
+            self._about_dialog.set_update_state(state)
+
+    def _arm_update_timer(self):
+        if self.library is not None and self.library.setting('updates.enabled', '1') == '1':
+            self._update_timer.start()
+        else:
+            self._update_timer.stop()
+
     def _check_for_updates(self, manual: bool = False):
-        if self.library is None:
+        if self.library is None or self._closed:
             return
         if not RELEASES_API_URL:
-            self.settings_page.set_update_status("No release service configured")
+            self._update_error = "This build has no GitHub release service configured."
+            self._refresh_update_views()
             return
         if not manual and self.library.setting("updates.enabled", "1") != "1":
+            return
+        if self._update_check_busy:
+            self._update_check_manual = self._update_check_manual or manual
             return
         if not manual:
             try:
                 last = float(self.library.setting("updates.last_check", "0"))
             except (TypeError, ValueError):
                 last = 0.0
-            if 0 <= time.time() - last < 24 * 60 * 60:
+            if self._latest_update is not None and 0 <= time.time() - last < 24 * 60 * 60:
                 return
+        if self.jobs is None:
+            self._update_error = "Update checks are unavailable in this session. Restart the app to try again."
+            self._refresh_update_views()
+            return
         from ..services.updates import check_for_update
-        self.settings_page.set_update_status("Checking…")
-        self._run_task("update-check", lambda: check_for_update(app_version()), manual)
+        self._update_check_busy = True
+        self._update_check_manual = manual
+        self._update_error = ""
+        self._refresh_update_views()
+        try:
+            self._run_task("update-check", lambda: check_for_update(app_version()), manual, pool=self.network_jobs)
+        except RuntimeError:
+            self._update_check_busy = False
+            self._update_error = "Couldn’t start the update check. Please try again."
+            self._refresh_update_views()
 
     def _database_health(self):
         if self.library is None:
@@ -8096,45 +8177,28 @@ class MainWindow(QMainWindow):
         )
         return
     def _on_update_check(self, kind, identifier, result):
+        manual = bool(identifier) or self._update_check_manual
+        self._update_check_busy = self._update_check_manual = False
         if result.status != JobStatus.OK:
-            self.settings_page.set_update_status(
-                f"Installed {app_version()} · Couldn’t check releases: {result.message}"
-            )
-            if identifier:
-                self._notify("Couldn’t check for updates", "error")
+            self._update_error = f"Couldn’t check GitHub: {result.message or 'The check did not finish. Please try again.'}"
+            self._refresh_update_views()
             return
         update = result.value
         if getattr(update, 'error', ''):
-            self.settings_page.set_update_status(f"Installed {app_version()} · {update.error}")
-            if identifier:
-                self._notify(update.error, 'error')
+            self._update_error = update.error
+            self._refresh_update_views()
             return
-        self._persist_ui_settings({"updates.last_check": str(time.time())})
-        if not update.available:
-            # No release has been published yet: say so calmly instead of
-            # rendering an HTTP error or offering a dead release page.
-            self.settings_page.set_update_status(
-                f"Installed {update.installed} · No releases published yet"
-            )
-            if identifier:
-                self._notify("No releases have been published yet", "info")
-            return
-        if update.newer:
-            note = plain_snippet(update.notes, 180)
-            self.settings_page.set_update_status(
-                f"Installed {update.installed} · Available {update.available}"
-                + (f"\n{note}" if note else "")
-            )
-            self._notify(
-                f"BS Podcasts {update.available} is available",
-                "info", "Release page", lambda: self._open_url(update.url or RELEASES_URL),
-            )
-        else:
-            self.settings_page.set_update_status(
-                f"Installed {update.installed} · You’re up to date"
-            )
-            if identifier:
-                self._notify("BS Podcasts is up to date", "success")
+        self._latest_update, self._update_checked_at, self._update_error = update, time.time(), ""
+        saved = {'updates.last_check': str(self._update_checked_at), 'updates.cached_release': update.to_cache()}
+        enabled = self.library.setting('updates.notify', '1') == '1'
+        background_enabled = manual or self.library.setting('updates.enabled', '1') == '1'
+        if update.newer and enabled and background_enabled and self.library.setting('updates.last_notified', '') != update.available:
+            saved['updates.last_notified'] = update.available
+            if self._about_dialog is None:
+                self.toast.show_message(f"BS Podcasts {update.available} is available", "info", "View release",
+                                        lambda: self._open_url(update.url or RELEASES_URL), owner='app-update')
+        self._persist_ui_settings(saved)
+        self._refresh_update_views()
         return
     def _on_remove_preview(self, kind, identifier, result):
         self.podcast_page.banner.clear()

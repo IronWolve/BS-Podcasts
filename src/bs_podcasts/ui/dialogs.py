@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -39,7 +40,7 @@ from PySide6.QtWidgets import (
 import PySide6
 
 from ..assets import logo_path
-from ..config import APP_NAME, APP_TAGLINE, GITHUB_URL, app_version
+from ..config import APP_NAME, APP_TAGLINE, GITHUB_URL, RELEASES_URL, app_version
 from . import icons
 from .pixmaps import initials
 from .theme import COLORS, SPACE, scaled_px
@@ -1436,17 +1437,21 @@ class DiagnosticExportDialog(StyledDialog):
 class AboutDialog(StyledDialog):
     """About BS Podcasts: logo, version, runtime, data location, library stats, links."""
 
+    update_check_requested = Signal()
+    update_notify_changed = Signal(bool)
+
     def __init__(self, info: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"About {APP_NAME}")
         self.set_card_width(scaled_px(560))
+        self.card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.logo = PlainTextLabel()
         self._logo_source = QPixmap(str(logo_path()))
         self._logo_ratio = 0.0
         self._paint_logo()
         self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.card_layout.addWidget(self.logo)
-        name = QLabel(f"{escape(APP_NAME)}  <span style='color:{COLORS['muted']}; font-weight:400'>v{escape(app_version())}</span>")
+        name = PlainTextLabel(APP_NAME)
         name.setObjectName("cardTitle")
         name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tagline = PlainTextLabel(APP_TAGLINE)
@@ -1456,7 +1461,45 @@ class AboutDialog(StyledDialog):
         self.card_layout.addWidget(tagline)
         self.card_layout.addSpacing(SPACE["sm"])
 
-        rows = QVBoxLayout()
+        self.latest_version = PlainTextLabel("Not checked")
+        self.update_checked = PlainTextLabel("Not checked")
+        versions = QFormLayout()
+        versions.setContentsMargins(0, 0, 0, 0)
+        versions.setSpacing(SPACE["xs"])
+        for label, value in (("Installed version", PlainTextLabel(app_version())),
+                             ("Latest on GitHub", self.latest_version),
+                             ("Last checked", self.update_checked)):
+            key = PlainTextLabel(label)
+            key.setObjectName("muted")
+            key.setFixedWidth(scaled_px(120))
+            value.setWordWrap(True)
+            _selectable_value(value)
+            versions.addRow(key, value)
+        self.card_layout.addLayout(versions)
+        self.update_status = PlainTextLabel()
+        self.update_status.setObjectName("meta")
+        self.update_status.setWordWrap(True)
+        self.card_layout.addWidget(self.update_status)
+        update_actions = QHBoxLayout()
+        update_actions.setContentsMargins(0, 0, 0, 0)
+        self.check_update = QPushButton("Check now")
+        self.check_update.setObjectName("quietButton")
+        self.check_update.clicked.connect(self.update_check_requested)
+        self.view_release = QPushButton("View release")
+        self.view_release.setObjectName("quietButton")
+        self.view_release.setIcon(icons.themed_icon('external', 'blue', 14))
+        self.view_release.clicked.connect(lambda: open_web_url(self._release_url or RELEASES_URL))
+        update_actions.addWidget(self.check_update)
+        update_actions.addWidget(self.view_release)
+        update_actions.addStretch(1)
+        self.card_layout.addLayout(update_actions)
+        self.update_notify = QCheckBox("Notify me when a new version is available")
+        self.update_notify.toggled.connect(self.update_notify_changed)
+        self.card_layout.addWidget(self.update_notify)
+        self.set_update_state(info.get('updates', {}))
+
+        rows = QFormLayout()
+        rows.setContentsMargins(0, 0, 0, 0)
         rows.setSpacing(SPACE["xs"])
         details = [
             ("Build", info.get("build", "Unavailable — rebuild to include identification")),
@@ -1468,16 +1511,17 @@ class AboutDialog(StyledDialog):
             ("System", f"{platform.system()} {platform.release()}"),
         ]
         for label, value in details:
-            row = QHBoxLayout()
             key = PlainTextLabel(label)
             key.setObjectName("muted")
             key.setFixedWidth(scaled_px(120))
-            val = PlainTextLabel(value)
+            key.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            val = PlainTextLabel(_wrap_long_value(str(value)))
             val.setWordWrap(True)
+            policy = val.sizePolicy()
+            policy.setVerticalPolicy(QSizePolicy.Policy.Minimum)
+            val.setSizePolicy(policy)
             _selectable_value(val)
-            row.addWidget(key, 0, Qt.AlignmentFlag.AlignTop)
-            row.addWidget(val, 1)
-            rows.addLayout(row)
+            rows.addRow(key, val)
         self.card_layout.addLayout(rows)
         self.card_layout.addSpacing(SPACE["sm"])
 
@@ -1503,6 +1547,17 @@ class AboutDialog(StyledDialog):
         links.addWidget(close)
         self.card_layout.addLayout(links)
         self.set_default_button(close)
+
+    def set_update_state(self, state: dict):
+        from .widgets import quiet_signals
+        self.latest_version.setText(state.get('available') or ('No releases' if state.get('has_result') else 'Not checked'))
+        self.update_checked.setText(state.get('checked', 'Not checked'))
+        self.update_status.setText(state.get('status', 'Check GitHub for the latest release. Updates are never installed automatically.'))
+        self.check_update.setEnabled(state.get('can_check', True) and not state.get('busy', False))
+        self._release_url = state.get('url', '')
+        self.view_release.setEnabled(bool(state.get('available')) and bool(RELEASES_URL))
+        with quiet_signals(self.update_notify):
+            self.update_notify.setChecked(state.get('notify', True))
 
     def _paint_logo(self):
         """The logo over 360 logical pixels, with one device pixel per image pixel."""

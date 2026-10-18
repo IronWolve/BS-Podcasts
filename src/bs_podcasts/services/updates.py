@@ -1,6 +1,7 @@
 """Small, read-only GitHub release checker. It never installs updates."""
 
 from dataclasses import dataclass
+import json
 import logging
 import re
 
@@ -19,18 +20,51 @@ class UpdateResult:
     url: str
     error: str = ""
 
+    @property
+    def status(self) -> str:
+        if self.error:
+            return self.error
+        if not self.available:
+            return "No releases published yet"
+        if self.newer:
+            return f"Version {self.available} is available"
+        if _version_key(self.installed) > _version_key(self.available):
+            return "You’re running a newer build than the latest release"
+        return "You’re up to date"
+
+    def to_cache(self) -> str:
+        return json.dumps({'version': self.available, 'url': self.url}, separators=(',', ':'))
+
+
+def cached_update(installed: str, raw: str) -> UpdateResult | None:
+    """Restore only a small release record; recompute availability for this build."""
+    try:
+        if len(raw) > 8192:
+            return None
+        value = json.loads(raw)
+        available, url = value['version'], value.get('url', '')
+        if not isinstance(available, str) or not isinstance(url, str):
+            return None
+        newer = bool(available) and _version_key(available) > _version_key(installed)
+        if url:
+            url = ensure_web_url(url, "Release page")
+        return UpdateResult(installed, available, newer, "", url)
+    except (ValueError, TypeError, KeyError, UnsafeUrl):
+        return None
+
 
 def _version_key(value: str):
-    """(major, minor, patch, release, suffix). Hyphen suffixes sort older than the same numbers."""
+    """Numeric two/three-part versions; prerelease identifiers follow release ordering."""
     text = str(value).strip()
     if text[:1] in "vV":
         text = text[1:]
-    text = text.split("+", 1)[0]
-    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?", text)
+    identifier = r"[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*"
+    match = re.fullmatch(r"(\d+)\.(\d+)(?:\.(\d+))?(?:-(" + identifier + r"))?(?:\+" + identifier + r")?", text) if len(text) <= 128 else None
     if match is None:
-        return (0, 0, 0, 1, "")
+        raise ValueError("The version number must have two or three numeric parts.")
     major, minor, patch, suffix = match.groups()
-    return (int(major), int(minor), int(patch), 0 if suffix else 1, suffix or "")
+    prerelease = tuple((0, int(part)) if part.isdigit() else (1, part) for part in (suffix or '').split('.'))
+    return (int(major), int(minor), int(patch or 0), 0 if suffix else 1, prerelease)
 
 
 def _release_status_sentence(status: int) -> str:
@@ -72,8 +106,10 @@ def check_for_update(installed: str, session=None) -> UpdateResult:
     available = str(payload.get("tag_name") or payload.get("name") or "").strip()
     if available[:1] in {"v", "V"}:
         available = available[1:]
-    if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", available):
-        raise RuntimeError("The latest release has no valid version number.")
+    try:
+        newer = _version_key(available) > _version_key(installed)
+    except ValueError:
+        raise RuntimeError("The release service returned an unreadable version number. Try again later.") from None
     notes = str(payload.get("body") or "").strip()
     url = str(payload.get("html_url") or "")
     if url:
@@ -81,4 +117,4 @@ def check_for_update(installed: str, session=None) -> UpdateResult:
             url = ensure_web_url(url, "Release page")
         except UnsafeUrl:
             url = ""
-    return UpdateResult(installed, available, _version_key(available) > _version_key(installed), notes, url)
+    return UpdateResult(installed, available, newer, notes, url)

@@ -2644,17 +2644,20 @@ class SettingsPage(BasePage):
         # Updates --------------------------------------------------------------
         update_card, update_form = self._card("App updates", "Checks the project releases page; updates are never installed automatically.")
         self.update_checks = QCheckBox("Check for updates in the background")
+        self.update_notify = QCheckBox("Notify me when a new version is available")
         self.update_status = PlainTextLabel("Not checked")
         self.update_status.setObjectName("meta")
         self.update_status.setWordWrap(True)
-        check_now = QPushButton("Check now")
-        check_now.setObjectName("quietButton")
-        check_now.clicked.connect(self.update_check_requested)
+        self.update_check_button = QPushButton("Check now")
+        self.update_check_button.setObjectName("quietButton")
+        self.update_check_button.clicked.connect(self.update_check_requested)
         update_form.addRow("Automatic checks", self.update_checks)
+        update_form.addRow("New releases", self.update_notify)
         update_form.addRow("Status", self.update_status)
-        update_form.addRow("", check_now)
+        update_form.addRow("", self.update_check_button)
         self.settings_content.addWidget(update_card)
         self.update_checks.toggled.connect(lambda value: self.setting_changed.emit("updates.enabled", "1" if value else "0"))
+        self.update_notify.toggled.connect(lambda value: self.setting_changed.emit("updates.notify", "1" if value else "0"))
 
     def _build_database_section(self):
         # Database -------------------------------------------------------------
@@ -3014,8 +3017,13 @@ class SettingsPage(BasePage):
     def set_statistics(self, text: str):
         self.statistics.setText(text)
 
-    def set_update_status(self, text: str):
+    def load_update_notifications(self, enabled: bool):
+        with quiet_signals(self.update_notify):
+            self.update_notify.setChecked(enabled)
+
+    def set_update_status(self, text: str, busy: bool = False):
         self.update_status.setText(text)
+        self.update_check_button.setEnabled(not busy)
 
     def set_database_status(self, text: str, repair_available: bool = False):
         self.database_status.setText(text)
