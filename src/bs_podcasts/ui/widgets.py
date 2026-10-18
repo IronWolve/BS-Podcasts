@@ -864,6 +864,8 @@ class PageHeader(QFrame):
     def __init__(self, title: str, subtitle: str, action: str = "", show_search: bool = True, parent=None):
         super().__init__(parent)
         self.setObjectName("pageHeader")
+        # Reserved feedback space must not prevent the page from shrinking.
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SPACE["md"])
@@ -2074,12 +2076,27 @@ class HeroCard(QFrame):
         self.title.setWordWrap(True)
         self.meta = PlainTextLabel("")
         self.meta.setObjectName("meta")
+        self.meta.setWordWrap(True)
+        self.meta.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.description = PlainTextLabel("")
         self.description.setObjectName("contextBody")
         self.description.setWordWrap(True)
+        self.description.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.description_full = QTextBrowser()
+        self.description_full.setObjectName('contextBody')
+        self.description_full.setFrameShape(QFrame.Shape.NoFrame)
+        self.description_full.setOpenLinks(False)
+        self.description_full.setOpenExternalLinks(False)
+        self.description_full.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.description_full.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.description_full.anchorClicked.connect(lambda url: open_web_url(url.toString()))
+        self.description_toggle = QPushButton('Show full description')
+        self.description_toggle.setObjectName('textButton')
+        self.description_toggle.setCheckable(True)
+        self.description_toggle.toggled.connect(self._expand_description)
         _selectable_labels(self.title, self.meta, self.description)
-        actions = QHBoxLayout()
-        actions.setSpacing(SPACE["sm"])
+        actions = FlowLayout(spacing=SPACE['sm'])
+        actions.setContentsMargins(0, 0, 0, 0)
         self.primary = QPushButton("Play latest")
         self.primary.setObjectName("primaryButton")
         self.primary.setIcon(icons.themed_icon("play", "on_accent", 16))
@@ -2118,15 +2135,18 @@ class HeroCard(QFrame):
                                          else self.unsubscribe_requested.emit())
         actions.addWidget(self.settings)
         actions.addWidget(self.info)
-        actions.addStretch(1)
         actions.addWidget(self.unsubscribe)
         text.addWidget(self.eyebrow)
         text.addWidget(self.title)
         text.addWidget(self.meta)
         text.addWidget(self.description)
+        text.addWidget(self.description_full)
+        text.addWidget(self.description_toggle, 0, Qt.AlignmentFlag.AlignLeft)
         text.addSpacing(SPACE["xs"])
         text.addLayout(actions)
         layout.addLayout(text, 1)
+        self.description_full.hide()
+        self.description_toggle.hide()
         self._subscribe_mode = False
         self.hide()
         self.apply_metrics()
@@ -2136,6 +2156,7 @@ class HeroCard(QFrame):
         self.layout().setSpacing(SPACE["lg"])
         self.art.set_bounds(scaled_px(96), scaled_px(160))
         self.art.set_side(scaled_px(128))
+        self.description_full.setFixedHeight(scaled_px(140))
         self._apply_compact_chrome()
 
     def _apply_compact_chrome(self):
@@ -2167,6 +2188,11 @@ class HeroCard(QFrame):
                 button.setMaximumSize(16777215, 16777215)
 
     def show_podcast(self, title, author, artwork_path, accent, meta, description, subscribed: bool, has_website: bool):
+        identity = (title, author)
+        if identity != getattr(self, '_description_identity', None):
+            self.description_toggle.setChecked(False)
+        self._description_identity = identity
+        self._description_source = description
         self._subscribe_mode = not subscribed
         self.eyebrow.setText("PODCAST" if subscribed else "PODCAST · NOT SUBSCRIBED")
         self.art.set_artwork(artwork_path, initials(title), accent)
@@ -2177,6 +2203,8 @@ class HeroCard(QFrame):
         self.description.setText(summary[:240].rstrip() + "…" if len(summary) > 240 else summary)
         set_literal_tooltip(self.description, description)
         self.description.setVisible(bool(description))
+        self.description_toggle.setVisible(len(summary) > 240 or len(description) > 16384)
+        self._expand_description(self.description_toggle.isChecked())
         self.primary.setText("Play latest")
         self.primary.setIcon(icons.themed_icon("play", "on_accent", 16))
         # Feed previews can be refreshed directly; subscribing is not required.
@@ -2191,6 +2219,15 @@ class HeroCard(QFrame):
         self._accent = accent
         self._apply_tint()
         self.show()
+
+    def _expand_description(self, expanded):
+        text = getattr(self, '_description_source', '')
+        if expanded:
+            _set_document_content(self.description_full, safe_feed_html(text), rich=True)
+        self.description_full.setVisible(expanded and bool(text))
+        self.description.setVisible(not expanded and bool(text))
+        self.description_toggle.setText('Show less' if expanded else 'Show full description')
+        self.description_toggle.setAccessibleName(self.description_toggle.text())
 
     def retheme(self):
         self._apply_tint()
@@ -3222,14 +3259,8 @@ class ContextPanel(QFrame):
         self._fit_tabs()
 
     def _set_latest_episode(self, title: str, date: str):
-        """The label word-wraps, so it gets the whole title whenever it is
-        sane; only a pathological one is shortened at a word boundary, and
-        the full text then stays reachable via tooltip. It used to be a
-        blind 72-character slice with no tooltip — truncation while space
-        existed."""
-        shown = title if len(title) <= 200 else title[:199].rsplit(" ", 1)[0].rstrip() + "…"
-        self.latest_episode.setText(f"{shown}\n{date}" if date else shown)
-        set_literal_tooltip(self.latest_episode, title if shown != title else "")
+        self.latest_episode.setText(f"{title}\n{date}" if date else title)
+        set_literal_tooltip(self.latest_episode, '')
 
     def preview_url(self) -> str:
         """Feed URL of the unsubscribed directory result currently shown, if any."""

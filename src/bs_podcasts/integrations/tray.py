@@ -2,15 +2,15 @@
 import time
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QFontMetrics, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QScrollArea, QSizePolicy, QSystemTrayIcon, QVBoxLayout, QWidget, QWidgetAction
 
 from ..assets import BRANDING_DIR
 from ..config import APP_NAME
 from ..domain.times import format_media_time
 from ..ui import icons
 from ..ui.playback_actions import PlaybackAction
-from ..ui.theme import scaled_px, set_local_stylesheet
+from ..ui.theme import COLORS, scaled_px, set_local_stylesheet
 
 
 _TOOLTIP_LIMIT = 127
@@ -168,9 +168,7 @@ class TrayController:
         self.open_now_playing.triggered.connect(self._open_now_playing)
         quit_action = QAction(_menu_icon("close"), "Quit", menu)
         quit_action.triggered.connect(self._quit)
-        menu.addAction(self.now_playing)
-        menu.addAction(self.now_playing_show)
-        menu.addAction(self.now_playing_progress)
+        self._build_header(menu)
         menu.addSeparator()
         menu.addAction(self.toggle)
         menu.addAction(self.back)
@@ -197,6 +195,63 @@ class TrayController:
             self._connected = True
         if playback is not None:
             self._playback_changed(playback.snapshot)
+
+    def _build_header(self, menu):
+        header = QFrame(menu)
+        header.setObjectName('trayHeader')
+        row = QHBoxLayout(header)
+        row.setContentsMargins(scaled_px(10), scaled_px(4), scaled_px(8), scaled_px(4))
+        row.setSpacing(scaled_px(6))
+        self._header_icon = QLabel(header)
+        row.addWidget(self._header_icon, 0, Qt.AlignmentFlag.AlignTop)
+        self._header_scroll = QScrollArea(header)
+        self._header_scroll.setObjectName('traySummary')
+        self._header_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._header_scroll.setWidgetResizable(True)
+        self._header_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._header_scroll.setStyleSheet('QScrollArea#traySummary, QScrollArea#traySummary > QWidget, QScrollArea#traySummary > QWidget > QWidget { background: transparent; border: 0; }')
+        content = QWidget()
+        labels = QVBoxLayout(content)
+        labels.setContentsMargins(0, 0, 0, 0)
+        labels.setSpacing(scaled_px(2))
+        labels.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._header_labels = [QLabel('Nothing playing'), QLabel(), QLabel()]
+        for label in self._header_labels:
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+            labels.addWidget(label)
+        self._header_scroll.setWidget(content)
+        row.addWidget(self._header_scroll)
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(header)
+        menu.addAction(action)
+        self._update_header(('Nothing playing', '', ''), '', menu.font())
+
+    def _update_header(self, texts, glyph, font):
+        changed_track = texts[:2] != getattr(self, '_header_identity', None)
+        self._header_identity = texts[:2]
+        width = scaled_px(_MENU_TEXT_WIDTH)
+        self._header_scroll.setFixedWidth(width)
+        height = 0
+        for index, (label, text) in enumerate(zip(self._header_labels, texts)):
+            if label.text() != text:
+                label.setText(text)
+            label.setVisible(bool(text))
+            face = QFont(font)
+            face.setBold(index == 0)
+            if label.font() != face:
+                label.setFont(face)
+            set_local_stylesheet(label, 'color: ' + COLORS['text' if index == 0 else 'muted'] + '; background: transparent;')
+            if text:
+                height += max(label.fontMetrics().height(), label.heightForWidth(width - scaled_px(16))) + scaled_px(2)
+        self._header_scroll.setFixedHeight(max(1, min(height, scaled_px(64))))
+        self._header_icon.setFixedSize(scaled_px(16), scaled_px(16))
+        self._header_icon.setPixmap(icons.themed_icon(glyph, 'accent', 16).pixmap(scaled_px(16), scaled_px(16)) if glyph else QPixmap())
+        self._header_icon.setVisible(bool(glyph))
+        if changed_track:
+            self._header_scroll.verticalScrollBar().setValue(0)
 
     @property
     def available(self):
@@ -296,18 +351,18 @@ class TrayController:
             return
         self._texts = texts
         self._menu_font_key = font_key
-        metrics = QFontMetrics(font)
-        compact = lambda text: metrics.elidedText(text, Qt.TextElideMode.ElideRight, font_key[1])
         title, show, progress, toggle_label, toggle_action, toggle_icon, back_label, forward_label = texts
-        self.now_playing.setText(compact(title))
+        self.now_playing.setText(title)
         self.now_playing.setToolTip(title)
         self.now_playing.setIcon(_menu_icon(toggle_icon) if source else QIcon())
         for name, text in (("now_playing_show", show), ("now_playing_progress", progress)):
             line = part(name)
             if line is not None:
-                line.setText(compact(text))
+                line.setText(text)
                 line.setToolTip(text)
                 line.setVisible(bool(text))
+        if hasattr(self, '_header_labels'):
+            self._update_header((title, show, progress), toggle_icon if source else '', font)
         self.toggle.setText(toggle_label)
         self.toggle.setIcon(_menu_icon(toggle_icon))
         self._toggle_action = toggle_action

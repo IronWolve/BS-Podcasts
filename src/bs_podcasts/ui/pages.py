@@ -169,6 +169,8 @@ class BasePage(QWidget):
         if view is not None:
             view.doItemsLayout()
             view.viewport().update()
+            if hasattr(self, '_episode_layout_timer'):
+                self._episode_layout_timer.start(0)
 
 
 class _ScrollInputGuard(QObject):
@@ -342,11 +344,17 @@ class _ListPageMixin:
         self._tooltip_target = None
         if isinstance(model, EpisodeModel):
             self._episode_scroll_pixels = False
+            self._episode_overflow_scroll = False
             self._episode_scroll_switching = False
             self._episode_scroll_animation = QPropertyAnimation(view.verticalScrollBar(), b'value', self)
             self._episode_scroll_animation.setDuration(120)
             self._episode_scroll_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
             self._episode_scroll_animation.finished.connect(self._finish_episode_scroll)
+            self._episode_layout_timer = QTimer(self)
+            self._episode_layout_timer.setSingleShot(True)
+            self._episode_layout_timer.timeout.connect(self._sync_episode_scroll_mode)
+            for signal in (model.modelReset, model.rowsInserted, model.rowsRemoved):
+                signal.connect(lambda *_: self._episode_layout_timer.start(0))
             model.modelAboutToBeReset.connect(lambda: self._finish_episode_scroll(False))
             self._artwork_scroll_timer = QTimer(self)
             self._artwork_scroll_timer.setSingleShot(True)
@@ -421,6 +429,53 @@ class _ListPageMixin:
     def _episode_base_height(self):
         return max(1, self.view.itemDelegate().base_height())
 
+    def _sync_episode_scroll_mode(self):
+        """Only lists with oversized rows need persistent pixel access."""
+        if not self.view.isVisible():
+            return
+        if self._episode_scroll_pixels:
+            self._episode_layout_timer.start(150)
+            return
+        viewport = self.view.viewport().height()
+        overflow = any(self.view.sizeHintForRow(row) > viewport for row in range(self.model.rowCount()))
+        if overflow == self._episode_overflow_scroll:
+            return
+        bar = self.view.verticalScrollBar()
+        position = self._episode_row_position(bar.value()) if self._episode_overflow_scroll else bar.value()
+        self._episode_overflow_scroll = overflow
+        self._episode_scroll_switching = True
+        try:
+            self.view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel if overflow
+                                            else QAbstractItemView.ScrollMode.ScrollPerItem)
+            self.view.doItemsLayout()
+            bar.setSingleStep(self._episode_base_height() if overflow else 1)
+            QAbstractSlider.setValue(bar, round(self._episode_row_offset(position)) if overflow else round(position))
+        finally:
+            self._episode_scroll_switching = False
+
+    def _overflow_destination(self, start, target, delta):
+        """Stop at a tall row, then traverse it in overlapping readable steps."""
+        if target == start:
+            return target
+        forward = target > start
+        origin, endpoint = self._episode_row_offset(start), self._episode_row_offset(target)
+        height = self.view.viewport().height()
+        step = min(abs(delta) * self._episode_base_height(), max(1, height * 0.75))
+        rows = range(int(start), int(target) + 1) if forward else range(int(start), int(target) - 1, -1)
+        for row in rows:
+            rect = self.view.visualRect(self.model.index(row, 0))
+            top = self._episode_row_offset(row)
+            bottom = top + rect.height()
+            if rect.height() <= height or (bottom <= origin if forward else top >= origin):
+                continue
+            if forward:
+                endpoint = min(endpoint, top if origin < top else min(bottom, origin + step))
+            else:
+                entry = max(top, bottom - height)
+                endpoint = max(endpoint, entry if origin > entry else max(top, origin - step))
+            break
+        return self._episode_row_position(endpoint)
+
     def _episode_row_offset(self, row):
         count = self.model.rowCount()
         if not count:
@@ -453,17 +508,27 @@ class _ListPageMixin:
         bar = self.view.verticalScrollBar()
         size = self._episode_base_height()
         pixels = self._episode_scroll_pixels
-        position = self._episode_row_position(bar.value()) if pixels else bar.value()
+        overflow = self._episode_overflow_scroll
+        position = self._episode_row_position(bar.value()) if pixels or overflow else bar.value()
         maximum = self._episode_scroll_max_row if pixels else bar.maximum()
+        if overflow and not pixels:
+            maximum = self._episode_row_position(maximum)
         # Repeated input accumulates, but reversing the wheel changes direction
         # immediately instead of working through an old queued destination.
-        base = self._episode_scroll_target if pixels and delta * (self._episode_scroll_target - position) > 0 else round(position)
+        resting = round(position)
+        if overflow and self.view.sizeHintForRow(int(position)) > self.view.viewport().height():
+            resting = position
+        continuing = pixels and delta * (self._episode_scroll_target - position) > 0
+        base = self._episode_scroll_target if continuing else resting
         target = max(0, min(maximum, base + delta))
+        if overflow:
+            target = self._overflow_destination(base, target, delta)
         if not pixels and target == position:
             return
         if reduced_motion() or not self.view.isVisible() or bar.isSliderDown():
             self._finish_episode_scroll(False)
-            QAbstractSlider.setValue(bar, max(bar.minimum(), min(bar.maximum(), target)))
+            value = round(self._episode_row_offset(target)) if overflow else target
+            QAbstractSlider.setValue(bar, max(bar.minimum(), min(bar.maximum(), value)))
             return
         animation = self._episode_scroll_animation
         animation.stop()
@@ -473,12 +538,13 @@ class _ListPageMixin:
             self._episode_scroll_max_row = maximum
             self._episode_scroll_switching = True
             try:
-                self.view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-                self.view.doItemsLayout()
+                if not overflow:
+                    self.view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+                    self.view.doItemsLayout()
                 bar.setSingleStep(size)
                 # Whole-row bottom alignment may leave a small blank tail.
-                bar.setMaximum(max(bar.maximum(), self._episode_row_offset(maximum)))
-                QAbstractSlider.setValue(bar, self._episode_row_offset(round(position)))
+                bar.setMaximum(max(bar.maximum(), round(self._episode_row_offset(maximum))))
+                QAbstractSlider.setValue(bar, round(self._episode_row_offset(position if overflow else round(position))))
             finally:
                 self._episode_scroll_switching = False
         self._episode_scroll_target = target
@@ -491,6 +557,11 @@ class _ListPageMixin:
             return
         self._episode_scroll_animation.stop()
         bar = self.view.verticalScrollBar()
+        if self._episode_overflow_scroll:
+            self._episode_scroll_pixels = False
+            if snap_target:
+                QAbstractSlider.setValue(bar, round(self._episode_row_offset(self._episode_scroll_target)))
+            return
         row = self._episode_scroll_target if snap_target else round(self._episode_row_position(bar.value()))
         self._episode_scroll_switching = True
         self._episode_scroll_pixels = False
@@ -505,6 +576,8 @@ class _ListPageMixin:
     def scroll_position(self):
         if getattr(self, '_episode_scroll_pixels', False):
             return self._episode_scroll_target
+        if getattr(self, '_episode_overflow_scroll', False):
+            return self._episode_row_position(self.view.verticalScrollBar().value())
         return self.view.verticalScrollBar().value()
 
     def _pause_scroll_for_click(self, event):
@@ -525,6 +598,8 @@ class _ListPageMixin:
             value = max(0, int(saved.get('scroll', 0)))
         except (ValueError, TypeError, OverflowError):
             value = 0
+        if getattr(self, '_episode_overflow_scroll', False):
+            return round(self._episode_row_offset(value)) if saved.get('scroll_units') == 'items' else value
         if self._row_aligned_scroll and saved.get('scroll_units') != 'items':
             value = int(self._episode_row_position(value))
         return value
@@ -546,6 +621,8 @@ class _ListPageMixin:
     def _track_item_tooltip(self, view: QListView, event):
         """Dismiss a native item tooltip as soon as its hover target is gone."""
         event_type = event.type()
+        if event_type in {QEvent.Type.Show, QEvent.Type.Resize} and hasattr(self, '_episode_layout_timer'):
+            self._episode_layout_timer.start(60)
         if event_type in {QEvent.Type.Hide, QEvent.Type.Resize}:
             self._finish_episode_scroll(False)
         if hasattr(self, '_episode_artwork_timer') and event_type in {QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.Resize}:
@@ -805,7 +882,7 @@ class _ListPageMixin:
                     for row, item in enumerate(self.model.items()):
                         if self._key(item) == anchor[0]:
                             self.view.scrollTo(self.model.index(row, 0), QAbstractItemView.ScrollHint.PositionAtTop)
-                            if not self._row_aligned_scroll:
+                            if not self._row_aligned_scroll or getattr(self, '_episode_overflow_scroll', False):
                                 scrollbar.setValue(scrollbar.value() - anchor[1])
                             return
                 scrollbar.setValue(scroll_value)
@@ -971,8 +1048,8 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.secondary_filters_widget = QWidget()
             # Filters must never raise the page's minimum width; the splitter would
             # otherwise re-balance whenever a combo is shown or hidden.
-            self.secondary_filters_widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-            secondary_filters = QHBoxLayout(self.secondary_filters_widget)
+            self.secondary_filters_widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            secondary_filters = FlowLayout(self.secondary_filters_widget, spacing=SPACE['sm'])
             secondary_filters.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
             secondary_filters.setContentsMargins(0, 0, 0, 0)
             secondary_filters.setSpacing(SPACE["sm"])
@@ -984,7 +1061,6 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.discover_sort.setAccessibleName("Sort Discover results — Chart order")
             self.discover_sort.clicked.connect(self._show_discover_sort_menu)
             self._discover_sort = "rank"
-            secondary_filters.addStretch(1)
             self.scope_label = PlainTextLabel("All Categories · Directory chart")
             self.scope_label.setObjectName("scopePill")
             self.scope_label.setVisible(False)
@@ -1416,6 +1492,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
                 self.topic.addItem("Choose a category first")
                 self.topic.setEnabled(False)
         self.topic.setVisible(getattr(self, '_discover_show_topic', True) and bool(topics))
+        fit_combo_width(self.topic, scaled_px(140), fixed=True)
         self._layout_discover_controls()
 
     def _size_discover_controls(self):
@@ -1423,10 +1500,9 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         whenever the scale changes."""
         self.root.setSpacing(SPACE['sm'])
         self.chart.setFixedHeight(scaled_px(38))
-        self.secondary_filters_widget.setFixedHeight(scaled_px(40))
+        self.secondary_filters_widget.setMinimumHeight(scaled_px(40))
         for combo in (self.category, self.topic):
-            combo.setMinimumWidth(scaled_px(140))
-            combo.setMaximumWidth(scaled_px(210))
+            fit_combo_width(combo, scaled_px(140), fixed=True)
         if self.header.action is not None:
             self.header.refresh.set_base_size(38)
         self._layout_discover_controls()
@@ -1436,7 +1512,9 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             return
         margins = self.root.contentsMargins()
         available = self.width() - margins.left() - margins.right()
-        needed = self.chart.sizeHint().width() + self.secondary_filters_widget.sizeHint().width() + SPACE['sm']
+        fields = (self.scope_label, self.category, self.topic, self.discover_sort)
+        widths = [field.sizeHint().width() for field in fields if not field.isHidden()]
+        needed = self.chart.sizeHint().width() + sum(widths) + SPACE['sm'] * len(widths)
         direction = QBoxLayout.Direction.LeftToRight if available >= needed else QBoxLayout.Direction.TopToBottom
         if self._discover_filter_layout.direction() != direction:
             self._discover_filter_layout.setDirection(direction)
