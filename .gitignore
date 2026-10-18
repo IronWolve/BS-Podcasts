@@ -1,6 +1,5 @@
-# Deny by default: application source, required release inputs, README and its images only.
-# Audit/test/capture utilities belong in the private project devtools/ directory, not Git.
-# Add only exact necessary files to source-manifest.json and this allowlist.
+# Deny by default: application source/assets, images, README and dependencies only.
+# Build tooling/manifests belong in build-support/; tests and private docs stay outside Git.
 # Private tool state (dot-directories), instruction files such as AGENTS.md, .env files, keys,
 # profiles, databases, logs, captures, caches, environments and builds stay out.
 # These rules do not scrub already-tracked files or historical Git objects.
@@ -9,9 +8,7 @@
 # Traversable source directories; their other contents remain ignored.
 !/media/
 !/media/screenshots/
-!/packaging/
-!/packaging/branding/
-!/packaging/licenses/
+!/media/branding/
 !/src/
 !/src/bs_podcasts/
 !/src/bs_podcasts/artwork/
@@ -31,66 +28,14 @@
 !/src/bs_podcasts/services/
 !/src/bs_podcasts/ui/
 
-# Approved app source, README/media, required assets/licenses and build metadata.
+# Exact approved application source/assets, images and essential root files.
 !/.gitignore
 !/.gitattributes
 !/README.md
+!/media/branding/bs-podcasts-icon-master.png
 !/media/screenshots/library.png
 !/media/screenshots/episodes.png
-!/packaging/THIRD-PARTY-NOTICES.txt
-!/packaging/branding/bs-podcasts-icon-master.png
-!/packaging/bs-podcasts.desktop
-!/packaging/bs-podcasts.iss
-!/packaging/bs-podcasts.spec
-!/packaging/build-libmpv-lgpl.sh
-!/packaging/build-libmpv-linux.sh
-!/packaging/build-libmpv-macos.sh
-!/packaging/build-macos.sh
-!/packaging/build-windows.ps1
-!/packaging/build_manifest.py
-!/packaging/check_dependencies.py
-!/packaging/check_frozen.py
-!/packaging/deploy.py
-!/packaging/install-desktop.sh
-!/packaging/linux-setup.sh
-!/packaging/licenses/Apache-2.0.txt
-!/packaging/licenses/BSD-3-Clause-idna.txt
-!/packaging/licenses/FTL.txt
-!/packaging/licenses/GPL-3.0.txt
-!/packaging/licenses/ISC-libass.txt
-!/packaging/licenses/LGPL-2.1.txt
-!/packaging/licenses/LGPL-3.0.txt
-!/packaging/licenses/MIT-HarfBuzz.txt
-!/packaging/licenses/MIT-charset-normalizer.txt
-!/packaging/licenses/MIT-urllib3.txt
-!/packaging/licenses/MPL-2.0.txt
-!/packaging/licenses/PSF.txt
-!/packaging/macos-entitlements.plist
-!/packaging/native-sources.json
-!/packaging/mpv-coreaudio-only.patch
-!/packaging/native_sources.py
-!/packaging/pe_imports.py
-!/packaging/project-build.sh
-!/packaging/project-start.sh
-!/packaging/project-stop.sh
-!/packaging/project-sync.sh
-!/packaging/prune_helper.py
-!/packaging/pyinstaller_payload.py
-!/packaging/render-desktop.py
-!/packaging/release_archives.py
-!/packaging/report.py
-!/packaging/requirements-linux.lock
-!/packaging/requirements-macos.lock
-!/packaging/requirements-windows.lock
-!/packaging/runtime_macos.py
-!/packaging/runtime_linux.py
-!/packaging/runtime_runner.py
-!/packaging/runtime_state.py
-!/packaging/runtime_windows.py
-!/packaging/source_manifest.py
-!/packaging/windows_launcher.py
 !/pyproject.toml
-!/source-manifest.json
 !/src/bs_podcasts/__init__.py
 !/src/bs_podcasts/__main__.py
 !/src/bs_podcasts/app.py
@@ -220,12 +165,3 @@
 !/src/bs_podcasts/ui/theme.py
 !/src/bs_podcasts/ui/widgets.py
 !/src/bs_podcasts/urlguard.py
-!/packaging/bs-podcasts-macos.spec
-!/packaging/build_macos.py
-!/packaging/native-sources-macos.json
-!/packaging/third-party-sources.json
-!/packaging/requirements-macos-native.lock
-!/packaging/licenses/Qt-6.11.2-third-party.txt
-!/packaging/licenses/Python-bundled-third-party.txt
-!/packaging/licenses/Native-bundled-third-party.txt
-!/packaging/licenses/LIBRARY-REPLACEMENT.txt

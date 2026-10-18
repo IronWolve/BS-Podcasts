@@ -8,6 +8,9 @@ Listen, download and organize your podcasts on **Windows, macOS and Linux**.
 Keep your subscriptions, episode details and listening queue together, with
 playback controls always within reach.
 
+**9.31:** Improved persistent caching, streaming stability and GUI responsiveness,
+with compact episode rows and selection details shown in the side panel.
+
 ## Screenshots
 
 ### Your podcast library and Up Next
@@ -46,7 +49,7 @@ Choose the latest package for your operating system from the repository's
 | --- | --- |
 | Windows x64 | Extract the ZIP and open `BS Podcasts.exe`. Keep the complete `BS Podcasts` folder together, including `_internal`. |
 | macOS — Apple Silicon | Extract the ZIP and open `BS Podcasts.app`. Requires macOS 14 or later. |
-| Linux x86-64 | Extract the archive, run `bash setup.sh`, then `bash start.sh`. Requires Python 3.14.7+, the glibc version and the desktop/audio libraries listed in INSTALL.txt in the archive. |
+| Linux x86-64 | Make the `.AppImage` executable, then open it. Python and Qt are included; no Python setup is required. This build requires glibc 2.43 or newer. |
 
 The Windows package is unsigned. The macOS package is not notarized, so your operating system may display a
 warning; the signature it carries is recorded in its manifest. Only run packages you
@@ -58,14 +61,13 @@ Your subscriptions, settings and listening progress are stored locally. You can
 choose where downloaded episodes are saved. Keep a backup of your library and
 preserve your data when updating the app.
 
-On Linux, each version unpacks into its own folder. The library lives in a
-folder named BS-Podcasts-data beside that versioned folder. Leave
-BS-Podcasts-data in place when you replace the versioned folder. If
-BS-Podcasts-data does not already contain a library and the unpacked folder
-still has data/library.db, the app keeps using that existing data folder.
-It also finds a single existing library in an older Linux version folder without
-moving it. If several older libraries exist, choose one explicitly with
-`BS_PODCASTS_DATA_DIR`; the app will not guess or start an empty library.
+On Linux, the AppImage normally stores your library under
+`~/.local/share/bs-podcasts` and artwork under `~/.cache/bs-podcasts`, respecting
+XDG directory overrides. Replacing the AppImage leaves those folders alone.
+If an earlier package's `BS-Podcasts-data/library.db` is beside the AppImage,
+it reuses that library when no standard-profile library exists; it does not move
+or delete it. You can explicitly choose an existing library folder with
+`BS_PODCASTS_DATA_DIR`.
 
 Finding shows, refreshing feeds, loading artwork and streaming use the network.
 Downloaded episodes can be played offline.
@@ -88,4 +90,4 @@ reproduce the problem if safe, and export again. Build identification is also sh
 ## Copyright
 
 BS Podcasts — **all rights reserved**. Third-party software and fonts retain
-their own licenses. See the [third-party notices](packaging/THIRD-PARTY-NOTICES.txt).
+their own licenses. Third-party notices are included in each application package.
