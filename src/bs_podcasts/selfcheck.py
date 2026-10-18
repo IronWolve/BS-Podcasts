@@ -63,6 +63,8 @@ def _inter_registers() -> bool:
 
 def _native_root():
     """The native folder next to the deployment record; the fixed package depth is the fallback."""
+    if getattr(sys, 'frozen', False):
+        return Path(sys._MEIPASS).resolve()
     here = Path(__file__).resolve()
     for folder in here.parents:
         if (folder / 'deployment.json').is_file():
