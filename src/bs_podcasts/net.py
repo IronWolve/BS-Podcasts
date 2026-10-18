@@ -100,6 +100,23 @@ def _request_host(url) -> str:
         return ""
 
 
+def _url_origin(url):
+    """A normalized HTTP origin tuple, or None for an unusable URL."""
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(str(url))
+        scheme = parts.scheme.lower()
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return None
+    if not host or scheme not in {"http", "https"}:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return scheme, host, port
+
+
 def _fail_long_retry_after(response, state, request_host: str) -> None:
     """A Retry-After past the deadline is a rate limit, not a timeout."""
     if getattr(response, "status_code", None) not in (429, 500, 502, 503, 504):
@@ -241,11 +258,21 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
 
     class BoundedSession(Session):
         supports_deadlines = True
+        supports_conditional_validators = True
 
         def request(self, method, url, **kwargs):
             streaming = kwargs.pop("stream", False)
             budget = float(kwargs.pop("total_timeout", total_timeout))
             state = Deadline(min(budget, 45), kwargs.pop("cancel_event", None), foreground=foreground or is_foreground())
+            validator_policy = kwargs.pop("conditional_validators", None)
+            if validator_policy is not None:
+                validator_url, validators = validator_policy
+                state.conditional_origin = _url_origin(validator_url)
+                state.conditional_headers = {
+                    str(name): str(value).replace("\r", "").replace("\n", "").strip()
+                    for name, value in dict(validators or {}).items()
+                    if name in {"If-None-Match", "If-Modified-Since"} and value
+                }
             host = _request_host(url)
             _refuse_while_rate_limited(url, state.foreground)
             def work():
@@ -273,6 +300,15 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
         def send(self, request, **kwargs):
             state = getattr(_request_context, "state", None)
             if state is not None:
+                if hasattr(state, "conditional_headers"):
+                    # Redirects reuse PreparedRequest headers. Strip every
+                    # previous hop's validators, then restore them only for
+                    # the response origin that owns those validators.
+                    request.headers.pop("If-None-Match", None)
+                    request.headers.pop("If-Modified-Since", None)
+                    if (state.conditional_origin is not None
+                            and _url_origin(request.url) == state.conditional_origin):
+                        request.headers.update(state.conditional_headers)
                 remaining = state.remaining()
                 # Each redirect hop passes through here; a hop whose host is
                 # cooling down is refused without sending anything to it.

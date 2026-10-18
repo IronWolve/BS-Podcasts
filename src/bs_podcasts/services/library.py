@@ -42,11 +42,6 @@ def bounded_int(raw, fallback: int, low: int, high: int) -> int:
 
 
 class LibraryService:
-    # Set once the stored feed validators were forgotten (see
-    # _forget_stale_feed_validators); not a schema change, so an older build
-    # still opens the library.
-    VALIDATORS_RESET_SETTING = "feeds.validators_reset"
-
     def __init__(self, repository: LibraryRepository):
         self.repository = repository
         self.downloads = None
@@ -55,23 +50,6 @@ class LibraryService:
         # Built once per run, before any refresh starts: a "loading" health
         # still stored now belongs to a fetch the previous run cut short.
         repository.reconcile_interrupted_refreshes()
-        self._forget_stale_feed_validators()
-
-    def _forget_stale_feed_validators(self):
-        """Forget every stored ETag and Last-Modified, once per library.
-
-        Page-URL subscriptions made before validators were kept per resource
-        hold the advertised feed's validators next to the page's URL. The page
-        answers 304 for them, so the feed was never requested again and new
-        episodes never arrived. One unconditional fetch per show re-discovers
-        the feed and stores its own validators and URL. Costs one full
-        download per show, once.
-        """
-        if self.repository.get_setting(self.VALIDATORS_RESET_SETTING, "") == "1":
-            return
-        with self.repository.database.connect() as connection:
-            connection.execute("UPDATE shows SET etag='', last_modified='' WHERE source <> 'local'")
-        self.repository.set_setting(self.VALIDATORS_RESET_SETTING, "1")
 
     # The key rule lives in urlguard; this name stays for existing callers.
     normalize_feed_url = staticmethod(_normalize_feed_url)

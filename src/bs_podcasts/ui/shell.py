@@ -60,7 +60,7 @@ from ..urlguard import is_web_url
 from ..privacy import feed_label, redact
 from ..data.database import is_corruption_error
 from . import icons
-from .models import EpisodeRow, EpisodeDelegate, EpisodeModel, EpisodeRowsIndex, ItemRoles, ShowRow, artwork_row, download_row, plain_snippet, set_item_tooltips
+from .models import EpisodeRow, EpisodeDelegate, EpisodeModel, EpisodeRowsIndex, ItemRoles, ShowRow, artwork_row, download_row, plain_snippet, preview_identity, set_item_tooltips
 from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, decode_preview_images, install_previews
 from .pixmaps import prepare_saved_previews, protect_artwork_previews, artwork_accent_token
 from .pages import EpisodeListPage, HomePage, PodcastGridPage, SORT_OPTIONS, SettingsPage, KeyboardMenu, _ListPageMixin
@@ -291,7 +291,7 @@ class _BusinessBridge(QObject):
     completed = Signal(object)
     KINDS = frozenset({'download', 'refresh', 'artwork', 'details', 'unsubscribe',
         'remove-shows', 'reset-library', 'delete-downloads', 'discard-download',
-        'opml-import', 'library-changed', 'play-prepared', 'database-repair',
+        'opml-import', 'local-import-batch', 'library-changed', 'play-prepared', 'database-repair',
         'database-maintenance', 'database-health', 'integrity', 'export-downloads',
         # Previews that open a confirmation: a theme change must not drop it.
         'unsubscribe-preview', 'remove-preview', 'reset-preview', 'played-previews',
@@ -4265,29 +4265,47 @@ class MainWindow(QMainWindow):
         def work():
             outcomes = library.import_local_audio_many(chosen, cancelled=_QUITTING.is_set)
             imported = sum(not isinstance(result, Exception) for result in outcomes)
-            failed = [f"{Path(path).name}: {result}" for path, result in zip(chosen, outcomes)
-                      if isinstance(result, Exception) and str(result) != 'Audio import cancelled.']
+            failures = [f"{Path(path).name}: {result}"[:300] for path, result in zip(chosen, outcomes)
+                        if isinstance(result, Exception) and str(result) != 'Audio import cancelled.']
             left = max(0, len(chosen) - len(outcomes)) + sum(
                 isinstance(result, Exception) and str(result) == 'Audio import cancelled.' for result in outcomes)
-            return imported, failed, left
-
-        def apply(result):
-            imported, failed, left = result
-            if self.pages.currentIndex() == started_on:  # a user who moved on stays where they are
-                self.navigation.select(PAGE_PODCASTS)
-            self._request_reload()
-            message = f"Imported {imported} of {len(chosen)} local audio files"
-            if skipped:
-                message += f" · {skipped} more were not imported (at most {self.LOCAL_IMPORT_LIMIT} at a time)"
-            if left:
-                message += f" · {left} more were not imported because the app was closing"
-            if failed:
-                self.podcast_page.banner.show_state("error", "Some files could not be imported:\n" + "\n".join(failed[:5])
-                                                    + ("\n…" if len(failed) > 5 else ""))
-            self._notify(message, "info" if failed or skipped or left else "success")
+            return imported, len(failures), failures[:5], left
 
         self._notify(f"Reading {len(chosen)} local audio files…", "info")
-        self._run_read(work, apply, "local-import-batch", coalesce=False)
+        identifier = (started_on, len(chosen), skipped)
+        if self.jobs is None:
+            self._require_inline("A background task")
+            try:
+                result = JobResult(JobStatus.OK, value=work())
+            except Exception as exc:
+                result = JobResult(JobStatus.ERROR, message=str(exc))
+            self._on_local_import_batch("local-import-batch", identifier, result)
+        else:
+            # This typed completion belongs to the application bridge, not
+            # this window. A true rebuild can replace the receiver while the
+            # independent batch continues.
+            self._run_task("local-import-batch", work, identifier)
+
+    def _on_local_import_batch(self, _kind, identifier, result):
+        if result.status != JobStatus.OK:
+            self._notify(result.message or "Could not import local audio", "error")
+            return
+        started_on, chosen_count, skipped = identifier
+        imported, failed_count, failures, left = result.value
+        if self.pages.currentIndex() == started_on:  # a user who moved on stays where they are
+            self.navigation.select(PAGE_PODCASTS)
+        self._request_reload()
+        message = f"Imported {imported} of {chosen_count} local audio files"
+        if skipped:
+            message += f" · {skipped} more were not imported (at most {self.LOCAL_IMPORT_LIMIT} at a time)"
+        if left:
+            message += f" · {left} more were not imported because the app was closing"
+        if failed_count:
+            self.podcast_page.banner.show_state(
+                "error", "Some files could not be imported:\n" + "\n".join(failures)
+                + ("\n…" if failed_count > len(failures) else ""),
+            )
+        self._notify(message, "info" if failed_count or skipped or left else "success")
 
     def _import_local_audio_path(self, path: str):
         if self.library is None or self._closed:
@@ -6179,13 +6197,14 @@ class MainWindow(QMainWindow):
                 queue = [episode.id for episode in self.library.queue()]
                 ids = [episode_id for episode_id in queue if episode_id in confirmed]
                 self.library.dequeue_many(ids)
-                return ids, len(queue) - len(ids)
+                return queue, ids, len(queue) - len(ids)
             def apply(result):
-                ids, kept = result
+                before, ids, kept = result
                 self._reload_queue()
-                def undo():
-                    self._run_command(lambda: self.library.enqueue_many(ids), lambda _: self._reload_queue())
-                self._notify("Up Next cleared" + (f" · {kept} added since kept" if kept else ""), "success", "Undo", undo)
+                self._notify(
+                    "Up Next cleared" + (f" · {kept} added since kept" if kept else ""),
+                    "success", "Undo", lambda: self._restore_queue_rows(before, ids),
+                )
             self._run_command(work, apply)
 
     def _queue_to_front(self, episode_id: int):
@@ -7507,6 +7526,21 @@ class MainWindow(QMainWindow):
             self.toast.dismiss_owner("discover-scan")
         self._discover_operation = operation
         self._discover_value = value
+        if self.discover_page.chart.currentData() == "explore":
+            if operation == "recommend":
+                scope_label = "For You"
+            elif operation == "browse":
+                scope_label = value or "All Categories"
+            elif operation == "topic" and isinstance(value, (tuple, list)) and len(value) == 2:
+                scope_label = value[1]
+            elif operation == "search":
+                scope_label = "Search results"
+            else:
+                scope_label = "current Explore results"
+            action = self.discover_page.header.action
+            if action is not None:
+                action.setToolTip(f"Refresh {scope_label}")
+                action.setAccessibleName(f"Refresh {scope_label}")
         # Search paints a fast first page, then auto-continues to the full
         # directory cap in the background (see the result apply); the limit
         # is per request, so laddering 30→60→90 just re-downloaded the list.
@@ -7638,7 +7672,12 @@ class MainWindow(QMainWindow):
         # serve the cache.
         chart_type = self.discover_page.chart.currentData()
         if chart_type == "explore":
-            self._show_for_you(force=True)
+            operation = self._discover_operation
+            value = self._discover_value
+            if operation in {"browse", "topic", "search", "recommend"}:
+                self._start_directory_request(operation, value, force=True)
+            else:
+                self._show_for_you(force=True)
         else:
             category = (
                 "" if not self.discover_page.category.isEnabled() or self.discover_page.category.currentText() == "All Categories"
@@ -8004,6 +8043,7 @@ class MainWindow(QMainWindow):
             'directory-cache': self._on_directory_cache,
             'library-changed': lambda *_: self._request_reload(),
             'opml-import': self._on_opml_import,
+            'local-import-batch': self._on_local_import_batch,
             "command": self._on_command,
             'settings-save': self._on_settings_save,
             "unsubscribe-preview": self._on_unsubscribe_preview,
@@ -8107,7 +8147,7 @@ class MainWindow(QMainWindow):
         anchor_key = anchor[0] if anchor else page.current_key()
         row = next((row for row in page.all_items if page._key(row) == anchor_key), None)
         saved.update(show_id=0, preview_url=show.feed_url, episode_anchor=0,
-                     current=('preview', row.media_url or row.external_id or row.title) if row else None,
+                     current=('preview', preview_identity(row)) if row else None,
                      filter='All')
         self._episode_navigation_restore = saved
         self._store_preview(show.feed_url, feed)
@@ -9851,7 +9891,12 @@ class MainWindow(QMainWindow):
             offset = start_offset
             if reset and anchor_identity:
                 anchor_index = next((index for index, episode in enumerate(matching)
-                                     if (episode.media_url or episode.external_id or episode.title) == anchor_identity), None)
+                                     if preview_identity(episode) == anchor_identity), None)
+                if anchor_index is None:
+                    # Older persisted view-state keyed previews by enclosure
+                    # URL before external IDs became the preferred identity.
+                    anchor_index = next((index for index, episode in enumerate(matching)
+                                         if episode.media_url == anchor_identity), None)
                 if anchor_index is not None:
                     offset = (anchor_index // page_size) * page_size
             chunk = matching[offset:offset + page_size]
@@ -9934,6 +9979,17 @@ class MainWindow(QMainWindow):
                     selected_values = saved.get('selected', ())
                     selected = [_item_key(value) for value in selected_values
                                 if _item_key(value) is not None] if isinstance(selected_values, (list, tuple)) else []
+                    # Translate older URL-keyed preview rows to the shared
+                    # external-ID-first page identity when their row is in
+                    # the restored page window.
+                    def current_preview_key(key):
+                        if key and len(key) == 2 and key[0] == 'preview':
+                            match = next((item for item in items if item.media_url == key[1]), None)
+                            if match is not None:
+                                return page._key(match)
+                        return key
+                    current = current_preview_key(current)
+                    selected = [current_preview_key(key) for key in selected]
                     page._restore_selection(current, False, selected)
                     scroll = page.saved_scroll_value(saved)
                     page.view.verticalScrollBar().setValue(max(0, scroll - window_start))

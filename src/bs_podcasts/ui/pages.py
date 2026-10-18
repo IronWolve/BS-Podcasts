@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import icons
-from .models import EpisodeDelegate, EpisodeModel, EpisodeRowsIndex, ItemRoles, PodcastDelegate, PodcastModel, artwork_row
+from .models import EpisodeDelegate, EpisodeModel, EpisodeRowsIndex, ItemRoles, PodcastDelegate, PodcastModel, artwork_row, preview_identity
 from .widgets import ChipRow, EmptyState, HeroCard, PageHeader, SectionHeader, SelectionBar, SkeletonGrid, StateBanner, connect_hover_readout, hide_hover_bubble, show_hover_bubble, COMPACT_PAGE_PX
 from .widgets import announce, fit_combo_width, quiet_signals
 from .widgets import PlainTextLabel, wheel_needs_focus, exec_menu, FlowLayout
@@ -680,7 +680,7 @@ class _ListPageMixin:
                 return ("episode", item.episode_id)
             # Unsubscribed previews all share episode_id 0; without a real
             # key, selection snaps to row 0 after every filter/refresh.
-            return ("preview", item.media_url or item.external_id or item.title)
+            return ("preview", preview_identity(item))
         if getattr(item, "is_episode", False):
             return ("directory-episode", item.feed_url, item.directory_url or item.title)
         return ("show", 0 if item.feed_url else item.show_id, item.feed_url)

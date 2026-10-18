@@ -1,0 +1,1 @@
+ALTER TABLE shows ADD COLUMN validator_url TEXT NOT NULL DEFAULT '';

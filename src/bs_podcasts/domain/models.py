@@ -51,6 +51,9 @@ class Show:
     categories: str = ""
     last_refresh_error: str = ""
     last_refresh_attempt: float | None = None
+    # Exact final URL that supplied etag/last_modified; separate from the
+    # permanent/discovered canonical URL used for subscription identity.
+    validator_url: str = ""
 
 
 @dataclass(frozen=True)

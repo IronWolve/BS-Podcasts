@@ -51,9 +51,9 @@ Choose the latest package for your operating system from the repository's
 | macOS — Apple Silicon | Extract the ZIP and open `BS Podcasts.app`. Requires macOS 14 or later. |
 | Linux x86-64 | Make the `.AppImage` executable, then open it. Python and Qt are included; no Python setup is required. This build requires glibc 2.43 or newer. |
 
-The Windows package is unsigned. The macOS package is not notarized, so your operating system may display a
-warning; the signature it carries is recorded in its manifest. Only run packages you
-trust. Close the app before replacing it during an update.
+The Windows package is unsigned. The macOS package is not notarized, so your
+operating system may display a warning. Only run packages you trust. Close the
+app before replacing it during an update.
 
 ## Your library
 

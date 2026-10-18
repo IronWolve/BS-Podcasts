@@ -157,6 +157,12 @@ def _override(name="BS_PODCASTS_DATA_DIR") -> Path | None:
     return resolved
 
 
+def _xdg_base(name: str, fallback: Path) -> Path:
+    value = os.environ.get(name)
+    path = Path(value) if value else None
+    return path if path is not None and path.is_absolute() else fallback
+
+
 def data_dir() -> Path:
     """Library database, config and logs."""
     override = _override()
@@ -167,9 +173,7 @@ def data_dir() -> Path:
         return base / APP_NAME
     if sys.platform == "darwin":
         return Path.home() / "Library/Application Support" / APP_NAME
-    xdg_home = os.environ.get("XDG_DATA_HOME")
-    base = Path(xdg_home).expanduser() if xdg_home else Path.home() / ".local/share"
-    return base / APP_ID
+    return _xdg_base("XDG_DATA_HOME", Path.home() / ".local/share") / APP_ID
 
 
 def cache_dir() -> Path:
@@ -184,19 +188,22 @@ def cache_dir() -> Path:
         return data_dir() / "cache"
     if sys.platform == "darwin":
         return Path.home() / "Library/Caches" / APP_NAME
-    xdg_cache = os.environ.get("XDG_CACHE_HOME")
-    base = Path(xdg_cache).expanduser() if xdg_cache else Path.home() / ".cache"
-    return base / APP_ID
+    return _xdg_base("XDG_CACHE_HOME", Path.home() / ".cache") / APP_ID
 
 
 def _xdg_user_dir(name: str, fallback: str) -> Path:
     """Resolve e.g. XDG_MUSIC_DIR from ~/.config/user-dirs.dirs."""
-    config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "user-dirs.dirs"
+    config = _xdg_base("XDG_CONFIG_HOME", Path.home() / ".config") / "user-dirs.dirs"
     try:
         for line in config.read_text(encoding="utf-8").splitlines():
             if line.startswith(f"XDG_{name}_DIR="):
                 value = line.split("=", 1)[1].strip().strip('"')
-                return Path(value.replace("$HOME", str(Path.home()))).expanduser()
+                try:
+                    directory = Path(value.replace("$HOME", str(Path.home()))).expanduser()
+                except (RuntimeError, ValueError):
+                    continue
+                if directory.is_absolute():
+                    return directory
     except (OSError, UnicodeDecodeError):
         pass
     return Path.home() / fallback

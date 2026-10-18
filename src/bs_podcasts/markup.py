@@ -7,7 +7,7 @@ from html.parser import HTMLParser
 import html
 import re
 
-from .urlguard import is_web_url
+from .urlguard import UnsafeUrl, ensure_web_url
 
 
 # An unclosed comment or instruction runs to the end of the text, so each
@@ -72,12 +72,14 @@ class SafeFeedHtml(HTMLParser):
             return
         if tag == "a":
             href = next((value for name, value in attrs if name.lower() == "href"), "") or ""
-            if not is_web_url(href):
+            try:
+                safe_href = ensure_web_url(href)
+            except UnsafeUrl:
                 self._anchors.append(False)
                 self.parts.append("<span>")
                 return
             self._anchors.append(True)
-            self.parts.append(f'<a href="{html_escape(href, quote=True)}">')
+            self.parts.append(f'<a href="{html_escape(safe_href, quote=True)}">')
             return
         self.parts.append(f"<{tag}>")
 
@@ -140,7 +142,12 @@ def linkify(text: str) -> str:
             continue
         href = trimmed if trimmed.lower().startswith(("http://", "https://")) else f"https://{trimmed}"
         result.append(html_escape(text[position:match.start()]))
-        result.append(f'<a href="{html_escape(href, quote=True)}">{html_escape(trimmed)}</a>')
+        try:
+            safe_href = ensure_web_url(href)
+        except UnsafeUrl:
+            result.append(html_escape(trimmed))
+        else:
+            result.append(f'<a href="{html_escape(safe_href, quote=True)}">{html_escape(trimmed)}</a>')
         result.append(html_escape(raw[len(trimmed):]))
         position = match.end()
     result.append(html_escape(text[position:]))

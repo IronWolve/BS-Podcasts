@@ -96,6 +96,7 @@
 !/src/bs_podcasts/data/migrations/034_paged_library_indexes.sql
 !/src/bs_podcasts/data/migrations/035_show_search.sql
 !/src/bs_podcasts/data/migrations/036_refresh_attempts.sql
+!/src/bs_podcasts/data/migrations/037_validator_provenance.sql
 !/src/bs_podcasts/data/repositories/__init__.py
 !/src/bs_podcasts/data/repositories/downloads.py
 !/src/bs_podcasts/data/repositories/library.py

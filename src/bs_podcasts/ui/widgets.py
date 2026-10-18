@@ -79,7 +79,7 @@ from PySide6.QtWidgets import (
 from ..assets import icon_path
 from ..domain.times import MAX_MEDIA_SECONDS, media_seconds, format_media_time
 from ..markup import SafeFeedHtml, linkify, plain_snippet
-from ..urlguard import is_web_url
+from ..urlguard import UnsafeUrl, ensure_web_url, is_web_url
 from . import icons
 from .models import ShowRow
 from .pixmaps import cover, initials
@@ -96,8 +96,12 @@ def open_web_url(url):
     value = url.toString() if isinstance(url, QUrl) else str(url or "")
     if not value:
         return
-    if not is_web_url(value):
-        logging.getLogger("bs_podcasts").warning("Refusing to open non-web URL from feed data: %s", value[:120])
+    try:
+        value = ensure_web_url(value, "Feed link")
+    except UnsafeUrl:
+        # Feed URLs may contain access tokens or userinfo; never echo them to
+        # logs when refusing an opener request.
+        logging.getLogger("bs_podcasts").warning("Refusing an unsafe or invalid web URL from feed data")
         return
     QDesktopServices.openUrl(QUrl(value))
 
@@ -661,8 +665,20 @@ class NavigationRail(QFrame):
         if not event.mimeData().hasFormat(self.IDS_MIME) or not self._over_queue(event.position().toPoint()):
             event.ignore()
             return
-        raw = bytes(event.mimeData().data(self.IDS_MIME)).decode("ascii")
-        ids = [int(part) for part in raw.split(",") if part.strip().isdigit()]
+        try:
+            payload = bytes(event.mimeData().data(self.IDS_MIME))
+            if not payload or len(payload) > 8192:
+                raise ValueError("invalid queue payload size")
+            raw = payload.decode("ascii")
+            parts = raw.split(",")
+            if any(not part or not part.isascii() or not part.isdigit() or len(part) > 19 for part in parts):
+                raise ValueError("invalid queue ID")
+            ids = [int(part) for part in parts]
+            if any(episode_id <= 0 or episode_id >= 2**63 for episode_id in ids):
+                raise ValueError("queue ID out of range")
+        except (UnicodeDecodeError, ValueError):
+            event.ignore()
+            return
         if ids:
             self.episodes_dropped.emit(ids)
             event.setDropAction(Qt.DropAction.CopyAction)

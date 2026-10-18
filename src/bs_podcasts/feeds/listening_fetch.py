@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from html import unescape
+from io import StringIO
 import json
 import logging
 import re
@@ -199,36 +200,87 @@ def _parse_json_transcript(text: str) -> list[SegmentData]:
 
 def _parse_cues(text: str) -> list[SegmentData]:
     segments = []
-    for block in re.split(r"\n\s*\n", text.strip()):
+    for block in _iter_blocks(text):
         # A NOTE or STYLE block is not a cue, whatever lines it holds.
-        if _NOTE_OR_STYLE_BLOCK.match(block.lstrip()):
+        first_text = 0
+        while first_text < len(block) and block[first_text].isspace():
+            first_text += 1
+        if _NOTE_OR_STYLE_BLOCK.match(block, first_text):
             continue
         # A timing line starts a cue; the lines after it are its words. Lines
         # before the first timing line are a cue identifier or header, and a
         # block with no blank line between cues holds more than one cue.
-        cues = []
-        for line in (line.strip() for line in block.split("\n")):
+        timing = None
+        body = None
+        start = 0
+        while start <= len(block):
+            end = block.find("\n", start)
+            if end < 0:
+                end = len(block)
+            line = block[start:end].strip()
             if _TIMING_LINE.fullmatch(line):
-                cues.append((line, []))
-            elif cues and line and not line.isdigit():
-                cues[-1][1].append(line)
-        for timing, body_lines in cues:
-            start_text, _arrow, end_text = timing.partition("-->")
-            body = unescape(_TAGS.sub("", " ".join(body_lines))).strip()
-            if body:
-                if len(segments) >= MAX_SEGMENTS:
-                    _log.warning("Transcript cues truncated at %s entries", MAX_SEGMENTS)
-                    return _merge_short(segments)
-                segments.append(SegmentData(text=body, start_seconds=_stamp(start_text), end_seconds=_stamp(end_text)))
+                if timing is not None:
+                    segment = _cue_segment(timing, body)
+                    if segment is not None and len(segments) >= MAX_SEGMENTS:
+                        _log.warning("Transcript cues truncated at %s entries", MAX_SEGMENTS)
+                        return _merge_short(segments)
+                    if segment is not None:
+                        segments.append(segment)
+                timing = line
+                body = None
+            elif timing is not None and line and not line.isdigit():
+                if body is None:
+                    body = StringIO()
+                elif body.tell():
+                    body.write(" ")
+                body.write(line)
+            if end == len(block):
+                break
+            start = end + 1
+        if timing is not None:
+            segment = _cue_segment(timing, body)
+            if segment is not None and len(segments) >= MAX_SEGMENTS:
+                _log.warning("Transcript cues truncated at %s entries", MAX_SEGMENTS)
+                return _merge_short(segments)
+            if segment is not None:
+                segments.append(segment)
     return _merge_short(segments)
 
 
+def _cue_segment(timing, body):
+    if body is None:
+        return None
+    text = unescape(_TAGS.sub("", body.getvalue())).strip()
+    if not text:
+        return None
+    start_text, _arrow, end_text = timing.partition("-->")
+    return SegmentData(text=text, start_seconds=_stamp(start_text), end_seconds=_stamp(end_text))
+
+
+def _iter_blocks(text):
+    """Yield blank-line-delimited spans without materializing a split list."""
+    start = 0
+    for match in re.finditer(r"\n\s*\n", text):
+        yield text[start:match.start()]
+        start = match.end()
+    yield text[start:]
+
+
 def _parse_plain(text: str) -> list[SegmentData]:
-    paragraphs = [para.strip() for para in re.split(r"\n\s*\n", text) if para.strip()]
-    if len(paragraphs) <= 1:
-        paragraphs = [line.strip() for line in text.split("\n") if line.strip()]
-    return [SegmentData(text=para, start_seconds=_stamp(para[:16]))
-            for para in _bounded_entries(paragraphs, MAX_SEGMENTS, "Transcript paragraphs")]
+    paragraphs = (part.strip() for part in _iter_blocks(text) if part.strip())
+    first = next(paragraphs, None)
+    second = next(paragraphs, None)
+    if second is not None:
+        from itertools import chain
+        selected = chain((first, second), paragraphs)
+    else:
+        first = None
+        # A single paragraph is treated as line-oriented text. Generate lines
+        # from spans rather than str.split(), which allocates every line before
+        # the segment cap can be applied.
+        selected = (match.group(0).strip() for match in re.finditer(r"[^\n]+", text))
+    return [SegmentData(text=part, start_seconds=_stamp(part[:16]))
+            for part in _bounded_entries((part for part in selected if part), MAX_SEGMENTS, "Transcript paragraphs")]
 
 
 def _merge_short(segments: list[SegmentData], target_chars: int = 180) -> list[SegmentData]:

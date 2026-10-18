@@ -952,16 +952,19 @@ class Database:
                                     "JOIN shows s ON s.id=e.show_id")
             elif name == "show_search":
                 destination.execute("INSERT INTO show_search(rowid,title) SELECT id,title FROM shows")
-        for (sql,) in source.execute(
-            "SELECT sql FROM sqlite_master WHERE type IN ('index', 'trigger', 'view') AND sql NOT NULL"
+        for name, sql in source.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type IN ('index', 'trigger', 'view') AND sql NOT NULL"
         ).fetchall():
+            if any(name.startswith(index + '_') and index not in search_schemas
+                   for index in ('episode_search', 'show_search')):
+                continue  # Do not retain maintenance triggers for an absent optional index.
             destination.execute(sql)
         lost = {table: count for table, count in lost.items() if count != 0}
         # Rows a migration seeds once and the code only ever updates: left
         # empty, saving the playing episode, the listening totals and the
         # never-reused ids all stop working without an error.
         for table, seed in cls._SEED_ROWS:
-            if table in lost:
+            if any(name == table for name, _sql in tables):
                 destination.execute(seed)
         if "entity_sequences" in lost:
             for kind, owner in (("show", "shows"), ("episode", "episodes")):
@@ -987,7 +990,60 @@ class Database:
                 "ORDER BY published_at DESC,id DESC LIMIT 1) "
                 "UNION ALL SELECT '', '', '' LIMIT 1)"
             )
+        cls._validate_repaired_schema(destination, applied)
         return lost
+
+    @classmethod
+    def _validate_repaired_schema(cls, destination, applied):
+        """A valid SQLite file is not necessarily a usable application library."""
+        migrations = {int(path.name.split('_', 1)[0]): path
+                      for path in Path(__file__).with_name('migrations').glob('[0-9][0-9][0-9]_*.sql')}
+        if set(applied) - migrations.keys():
+            raise DatabaseIntegrityError('The library uses an unknown format; restore a backup with a compatible app.')
+        if set(applied) != {version for version in migrations if version <= max(applied)}:
+            raise DatabaseIntegrityError('The recovered format record has gaps; restore a library backup.')
+        actual = dict(destination.execute('SELECT name,type FROM sqlite_master'))
+        optional_search = {25: 'episode_search', 35: 'show_search'}
+        with closing(sqlite3.connect(':memory:')) as expected:
+            try:
+                for version in sorted(applied):
+                    if version in optional_search and optional_search[version] not in actual:
+                        continue  # An optional search index may legitimately be absent.
+                    expected.executescript(migrations[version].read_text(encoding='utf-8'))
+            except sqlite3.Error as exc:
+                raise DatabaseIntegrityError('The recovered format record is inconsistent; restore a library backup.') from exc
+            required = expected.execute(
+                "SELECT name,type,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            known = {name for name, _kind, _sql in required} | {'schema_migrations'}
+            if any(name not in known and not name.startswith('sqlite_') for name in actual):
+                raise DatabaseIntegrityError(
+                    'The recovered schema does not match its format record; restore a library backup.')
+            for name, kind, _sql in required:
+                if kind != 'table':
+                    continue
+                quoted = '"' + name.replace('"', '""') + '"'
+                columns = {row[1] for row in expected.execute(f'PRAGMA table_info({quoted})')}
+                recovered = {row[1] for row in destination.execute(f'PRAGMA table_info({quoted})')}
+                if actual.get(name) != 'table' or columns != recovered:
+                    raise DatabaseIntegrityError(
+                        f'Required library data ({name}) could not be recovered. '
+                        'Repair stopped before replacement; restore a library backup.')
+            # Lost derived indexes/triggers can be restored from trusted shipped SQL.
+            for name, kind, sql in required:
+                if kind in {'index', 'trigger', 'view'} and name not in actual:
+                    destination.execute(sql)
+                elif name in actual and actual[name] != kind:
+                    raise DatabaseIntegrityError(f'The recovered library has an invalid {name} definition.')
+        if 'entity_sequences' in actual:
+            counters = dict(destination.execute('SELECT kind,value FROM entity_sequences'))
+            for kind, table in (('show', 'shows'), ('episode', 'episodes')):
+                value = counters.get(kind)
+                highest = destination.execute(f'SELECT COALESCE(MAX(id),0) FROM {table}').fetchone()[0]
+                if type(value) is not int or value < highest:
+                    raise DatabaseIntegrityError(
+                        'The library ID counters could not be recovered safely. '
+                        'Repair stopped before replacement; restore a library backup.')
 
     @staticmethod
     def _drop_orphans(destination) -> dict:

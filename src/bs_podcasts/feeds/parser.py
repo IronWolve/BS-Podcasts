@@ -32,7 +32,9 @@ MAX_KEPT_ELEMENTS = 20_000
 # Titles are shown in every list; one with megabytes of text would cost every
 # layout pass. Episode identity is taken from the full title before this cap.
 MAX_TITLE_CHARS = 500
+MAX_AUTHOR_CHARS = 500
 MAX_DESCRIPTION_CHARS = 128 * 1024
+_NONSPACE = re.compile(r"\S")
 # Dated episodes at the start of a feed, none newer than the one before, that
 # show it to be listed newest first. The newest-date scan stops there (see
 # newest_item).
@@ -101,6 +103,41 @@ def _bounded_text(element, limit: int) -> str:
             if len(text) > limit:
                 return text
     return "".join(parts).strip()
+
+
+def _author_text(element, *names, ordered=False) -> str:
+    """Extract a display author while retaining at most its supported prefix."""
+    child = (_preferred if ordered else _first)(element, *names)
+    if child is None:
+        return ""
+    parts = []
+    size = 0
+    started = truncated = False
+    for piece in child.itertext():
+        offset = 0
+        if not started:
+            first_content = _NONSPACE.search(piece)
+            if first_content is None:
+                continue
+            offset = first_content.start()
+            started = True
+        remaining = MAX_AUTHOR_CHARS - size
+        end = min(len(piece), offset + remaining)
+        has_more_content = _NONSPACE.search(piece, end) is not None
+        if remaining > 0:
+            retained = piece[offset:end]
+            parts.append(retained)
+            size += len(retained)
+        if has_more_content:
+            # A non-whitespace character beyond the retained prefix means
+            # it is not merely trailing padding. Stop before copying the rest
+            # of a potentially large author node.
+            truncated = True
+            break
+    text = "".join(parts).strip()
+    if truncated:
+        return text[:MAX_AUTHOR_CHARS - 1].rstrip() + "\u2026"
+    return text
 
 
 def _markup(element) -> str:
@@ -400,7 +437,7 @@ def _rss_episode(item) -> FeedEpisodeData | None:
         chapters_url=chapters_url,
         artwork_url=_artwork(item),
         website_url=_rss_link(item),
-        author=_text(item, "author", "creator", ordered=True),
+        author=_author_text(item, "author", "creator", ordered=True),
         season_number=_integer(_text(item, "season")),
         episode_number=_integer(_text(item, "episode")),
         episode_type=_text(item, "episodetype").lower(),
@@ -416,7 +453,7 @@ def _parse_rss(root, episodes, skipped_video) -> FeedData:
 
     return FeedData(
         title=_clamp_title(_text(channel, "title", limit=MAX_TITLE_CHARS) or "Untitled podcast"),
-        author=_text(channel, "author", "managingeditor", ordered=True),
+        author=_author_text(channel, "author", "managingeditor", ordered=True),
         description=_description(_text(channel, "description", "subtitle", ordered=True, limit=MAX_DESCRIPTION_CHARS)),
         website_url=_rss_link(channel),
         artwork_url=_artwork(channel),
@@ -467,7 +504,8 @@ def _atom_episode(entry) -> FeedEpisodeData | None:
         chapters_url=chapters_url,
         artwork_url=_artwork(entry),
         website_url=website_url,
-        author=(_text(author, "name") if author is not None else "") or _text(entry, "creator", "author", ordered=True),
+        author=(_author_text(author, "name") if author is not None else "") or _author_text(
+            entry, "creator", "author", ordered=True),
         season_number=_integer(_text(entry, "season")),
         episode_number=_integer(_text(entry, "episode")),
         episode_type=_text(entry, "episodetype").lower(),
@@ -481,7 +519,7 @@ def _parse_atom(root, episodes, skipped_video) -> FeedData:
     author = _first(root, "author")
     return FeedData(
         title=_clamp_title(_text(root, "title", limit=MAX_TITLE_CHARS) or "Untitled podcast"),
-        author=_text(author, "name") if author is not None else "",
+        author=_author_text(author, "name") if author is not None else "",
         description=_description(_text(root, "subtitle", limit=MAX_DESCRIPTION_CHARS)),
         website_url=website_url,
         artwork_url=_text(root, "logo", "icon"),

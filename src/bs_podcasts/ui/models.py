@@ -21,6 +21,17 @@ from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, ARTWORK_O
 MAX_ROW_TEXT_PX = 880
 
 
+def preview_identity(item) -> str:
+    """Stable fallback identity for an episode that has no library id.
+
+    Feed episode IDs are preferred over enclosure URLs because multiple
+    episodes may intentionally share one media file. Keep the URL/title
+    fallback for feeds that omit an external ID.
+    """
+    return (getattr(item, "external_id", "") or getattr(item, "media_url", "")
+            or getattr(item, "title", ""))
+
+
 def _repaint_target(option):
     """Watch the owning view, not a temporary Python wrapper for its viewport."""
     return getattr(option, "widget", None)
@@ -372,12 +383,9 @@ class EpisodeModel(QAbstractListModel):
     def _key(item):
         if item.episode_id or item.bookmark_id:
             return (item.episode_id, item.bookmark_id, item.title)
-        # Directory previews all carry episode_id 0, so keying on the title
-        # alone made two different previews at the same index look like the
-        # same row — _same_rows would then take the in-place path and leave
-        # the selection pointing at a different episode. Matches the fallback
-        # _ListPageMixin._key already used one layer up.
-        return (0, 0, getattr(item, "media_url", "") or getattr(item, "external_id", "") or item.title)
+        # Directory previews all carry episode_id 0. Their common fallback
+        # identity is also used by pages and preview paging.
+        return (0, 0, preview_identity(item))
 
     def replace(self, items):
         _replace_items(self, items, self._key)
@@ -939,7 +947,7 @@ class EpisodeDelegate(QStyledItemDelegate):
         art_size = scaled_px(44 if self.compact else 60)
         art = QRect(left, row.center().y() - art_size // 2, art_size, art_size)
         self._report(index, "art", art)
-        identity = ('episode', item.episode_id) if item.episode_id else ('preview', item.media_url or item.external_id or item.title)
+        identity = ('episode', item.episode_id) if item.episode_id else ('preview', preview_identity(item))
         painter.drawPixmap(art, cover(item.artwork_path, art_size, art_size, 8, initials(item.show), item.accent, scale,
                                     notify=_repaint_target(option), presentation_key=identity))
         if playing:
@@ -1125,7 +1133,7 @@ class EpisodeDelegate(QStyledItemDelegate):
             return memo[1]
         from hashlib import blake2b
         bounded = item.description[:16384]
-        identity = item.episode_id or item.media_url or item.external_id or item.title
+        identity = item.episode_id or preview_identity(item)
         key = (identity, limit, blake2b(bounded.encode("utf-8"), digest_size=16).digest())
         cached = self._snippets.get(key)
         if cached is None:

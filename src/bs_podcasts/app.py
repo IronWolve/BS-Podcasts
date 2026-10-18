@@ -510,6 +510,7 @@ def _instance_socket_status(name: str, connect_ms: int, bound_ms: int, files, st
     socket = QLocalSocket()
     outcome = {}
     connected = []
+    reply = bytearray()
     payload = _file_request(files) if files else b"raise " + _profile_key().encode("ascii") + b"\n"
 
     def finish(status):
@@ -521,17 +522,30 @@ def _instance_socket_status(name: str, connect_ms: int, bound_ms: int, files, st
         socket.write(payload)
 
     def on_ready():
-        reply = socket.read(32).data()
-        if reply.startswith(b'profile-mismatch'):
+        reply.extend(socket.read(max(0, 32 - len(reply))).data())
+        received = bytes(reply)
+        if received.startswith(b'profile-mismatch'):
             return finish('mismatch')
-        accepted = reply.startswith(b'files-queued') if files else reply.startswith(b'ok')
-        if accepted:
-            return finish('answered')
+        if received.startswith(b'files-queued'):
+            return finish('answered' if files else 'silent')
         # Older peers must not silently discard file arguments.
-        finish('rejected' if reply.startswith((b'err', b'ok')) else 'silent')
+        if received.startswith(b'ok'):
+            return finish('rejected' if files else 'answered')
+        if received.startswith(b'err'):
+            return finish('rejected')
+        if any(token.startswith(received) for token in (b'profile-mismatch', b'files-queued', b'err', b'ok')):
+            return  # Local sockets are streams: the rest may arrive on another readyRead.
+        finish('silent')
 
     def on_error(_error):
+        if socket.bytesAvailable():
+            on_ready()
         finish('silent' if connected else 'missing')
+
+    def on_disconnected():
+        if socket.bytesAvailable():
+            on_ready()
+        finish('silent')
 
     def on_poll():
         if stop is not None and stop():
@@ -540,7 +554,7 @@ def _instance_socket_status(name: str, connect_ms: int, bound_ms: int, files, st
     socket.connected.connect(on_connected)
     socket.readyRead.connect(on_ready)
     socket.errorOccurred.connect(on_error)
-    socket.disconnected.connect(lambda: finish('silent'))
+    socket.disconnected.connect(on_disconnected)
     connect_timer = QTimer(loop)
     connect_timer.setSingleShot(True)
     connect_timer.timeout.connect(lambda: None if connected else finish('missing'))
@@ -554,7 +568,8 @@ def _instance_socket_status(name: str, connect_ms: int, bound_ms: int, files, st
     poll.timeout.connect(on_poll)
     poll.start()
     socket.connectToServer(name)
-    loop.exec()
+    if not outcome:
+        loop.exec()
     socket.abort()
     return outcome.get('status', 'silent')
 

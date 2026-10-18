@@ -9,7 +9,7 @@ import time
 from urllib.parse import urljoin, urlsplit
 
 from ..markup import FeedLinkFound, FeedLinkParser, markup_text
-from ..net import USER_AGENT, SessionSlot, describe_network_error
+from ..net import USER_AGENT, SessionSlot, _url_origin, describe_network_error
 from ..urlguard import ensure_fetchable, UnresolvedHost, UnsafeUrl
 
 
@@ -128,11 +128,8 @@ def _comparable(url: str) -> str:
 
 
 def _answered_by(response, url: str) -> bool:
-    """True when `url` is on the request chain that produced `response`."""
-    chain = [getattr(hop, "url", "") for hop in getattr(response, "history", None) or ()]
-    chain.append(getattr(response, "url", ""))
-    wanted = _comparable(url)
-    return any(_comparable(hop) == wanted for hop in chain if hop)
+    """True when the final response is the resource that owns the validators."""
+    return _comparable(getattr(response, "url", "")) == _comparable(url)
 
 
 # A DOCTYPE that is not HTML's, such as the RSS 0.91 header naming an external
@@ -226,7 +223,7 @@ class FeedFetcher:
         url: str,
         etag: str = "",
         last_modified: str = "",
-        validator_url: str = "",
+        validator_url: str | None = None,
         reuse_recent: bool = False,
     ) -> FeedResponse:
         """Fetch a feed, or the feed an HTML page at `url` advertises.
@@ -246,7 +243,8 @@ class FeedFetcher:
                 kept = self._recent.pop(url.strip(), None) if reuse_recent and not (etag or last_modified) else None
             if kept is not None:
                 return kept[1]
-        return self._fetch(url, etag, last_modified, allow_discovery=True, validator_url=validator_url or url)
+        return self._fetch(url, etag, last_modified, allow_discovery=True,
+                           validator_url=url if validator_url is None else validator_url)
 
     def _drop_stale_feeds(self, now: float):
         """Forget feeds kept longer than RECENT_SECONDS. The caller holds the lock."""
@@ -266,7 +264,8 @@ class FeedFetcher:
                 _url, (_when, dropped) = self._recent.popitem(last=False)
                 total -= len(dropped.content)
 
-    def _open_body(self, url, headers, timeout, want_body, probe=None):
+    def _open_body(self, url, headers, timeout, want_body, probe=None,
+                   validator_url: str | None = None, validators=None):
         """The guarded streamed GET and bounded body read that peek_latest and _fetch share.
 
         A 4xx or 5xx answer raises the mapped feed error before any of its body
@@ -282,7 +281,18 @@ class FeedFetcher:
         response = None
         try:
             try:
-                response = self.session.get(url, headers=headers, timeout=timeout, allow_redirects=True, stream=True)
+                request_headers = dict(headers)
+                request_options = {}
+                if validator_url is not None and validators is not None:
+                    if getattr(self.session, "supports_conditional_validators", False):
+                        request_options["conditional_validators"] = (validator_url, validators)
+                    elif (_url_origin(validator_url) is not None
+                            and _url_origin(url) == _url_origin(validator_url)):
+                        # Injected sessions lack the per-redirect send hook;
+                        # never attach validators to a different first hop.
+                        request_headers.update(validators)
+                response = self.session.get(url, headers=request_headers, timeout=timeout,
+                                            allow_redirects=True, stream=True, **request_options)
                 if response.status_code >= 400:
                     raise _http_feed_error(response)
                 if not want_body(response.status_code):
@@ -373,7 +383,7 @@ class FeedFetcher:
         etag: str = "",
         last_modified: str = "",
         allow_discovery: bool = True,
-        validator_url: str = "",
+        validator_url: str | None = None,
         conditional: bool = True,
     ) -> FeedResponse:
         try:
@@ -387,25 +397,31 @@ class FeedFetcher:
                 "text/xml;q=0.9, text/html;q=0.5, */*;q=0.2"
             ),
         }
-        # Both values were stored from an earlier response; scrub CR/LF so a
-        # hostile server cannot smuggle extra header lines into the next
-        # request through its own ETag/Last-Modified.
+        # Values came from an earlier response. Bound them to their exact
+        # validator origin inside BoundedSession.send on every redirect hop.
+        validators = {}
         if etag and conditional:
-            headers["If-None-Match"] = etag.replace("\r", "").replace("\n", "").strip()
+            value = etag.replace("\r", "").replace("\n", "").strip()
+            if value:
+                validators["If-None-Match"] = value
         if last_modified and conditional:
-            headers["If-Modified-Since"] = last_modified.replace("\r", "").replace("\n", "").strip()
+            value = last_modified.replace("\r", "").replace("\n", "").strip()
+            if value:
+                validators["If-Modified-Since"] = value
         response = None
         try:
-            response, body, _ = self._open_body(url, headers, (8, 20), lambda status: status != 304)
+            response, body, _ = self._open_body(
+                url, headers, (8, 20), lambda status: status != 304,
+                validator_url=validator_url, validators=validators)
             if response.status_code == 304:
-                if conditional and validator_url and not _answered_by(response, validator_url):
+                if not validators or not validator_url:
+                    raise FeedWrongAnswerError("Feed server returned not-modified without a known conditional request.")
+                if conditional and not _answered_by(response, validator_url):
                     # Another resource answered for the feed's validators;
                     # trusting it would hide new episodes indefinitely.
                     response.close()
                     response = None
                     return self._fetch(url, etag, last_modified, allow_discovery, validator_url, conditional=False)
-                if not any(headers.get(name) for name in ("If-None-Match", "If-Modified-Since")):
-                    raise FeedWrongAnswerError("Feed server returned not-modified without a conditional request.")
                 return FeedResponse(
                     final_url=response.url,
                     etag=response.headers.get("ETag", etag),

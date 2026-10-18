@@ -208,12 +208,19 @@ def inspect_download_file(path, seen: set | None = None, *, completed: bool = Fa
     """
     path = Path(path)
     try:
-        info = path.stat()
+        # Inspect the managed directory entry, not a link's referent. The
+        # preview and delete path must agree on what unlink() will remove.
+        info = path.lstat()
     except FileNotFoundError:
         return _absent_download(path, seen), 0
     except OSError:
         return FILE_UNAVAILABLE, 0
-    if not stat.S_ISREG(info.st_mode):
+    # Windows junctions and other reparse points can present a regular-looking
+    # mode while still redirecting a path lookup. Preserve user-selected
+    # folders (including a linked parent); refuse only a reparse final entry.
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    is_reparse = bool(getattr(info, "st_file_attributes", 0) & reparse_flag)
+    if is_reparse or not stat.S_ISREG(info.st_mode):
         return FILE_IRREGULAR, 0
     if completed:
         if seen is not None:

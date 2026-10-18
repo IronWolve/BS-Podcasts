@@ -1225,22 +1225,28 @@ class LibraryRepository:
         self,
         show_id: int,
         health: Health,
-        etag: str = "",
-        last_modified: str = "",
+        etag: str | None = None,
+        last_modified: str | None = None,
         canonical_url: str = "",
+        validator_url: str | None = None,
     ):
         with self.database.connect() as connection:
             connection.execute(
                 """UPDATE shows SET health=?, fail_count=0, suspended=0, last_refresh_error='',
-                   etag=COALESCE(NULLIF(?, ''), etag),
-                   last_modified=COALESCE(NULLIF(?, ''), last_modified),
+                   etag=CASE WHEN ? IS NULL THEN etag ELSE ? END,
+                   last_modified=CASE WHEN ? IS NULL THEN last_modified ELSE ? END,
                    canonical_url=COALESCE(NULLIF(?, ''), canonical_url),
+                   validator_url=CASE WHEN ? IS NULL THEN validator_url ELSE ? END,
                    last_refresh=? WHERE id=?""",
                 (
                     health.value,
                     etag,
+                    etag,
+                    last_modified,
                     last_modified,
                     canonical_url,
+                    validator_url,
+                    validator_url,
                     time.time(),
                     show_id,
                 ),
@@ -2135,6 +2141,7 @@ class LibraryRepository:
             retention_days=row["retention_days"],
             categories=row["categories"],
             last_refresh_error=row["last_refresh_error"],
+            validator_url=row["validator_url"],
         )
 
     @staticmethod

@@ -217,15 +217,20 @@ class RefreshService:
 
         self.repository.record_refresh_attempt(show_id)
         try:
-            # Legacy libraries may contain a 302 target that still returns a
-            # successful but frozen copy. Follow the publisher's current
-            # redirect chain, not a target learned from an earlier refresh.
-            # The stored validators came from the canonical URL; a page-URL
-            # subscription keeps its advertised feed there.
-            extra = {}
-            if show.canonical_url and show.canonical_url != show.feed_url:
-                extra["validator_url"] = show.canonical_url
-            response = self.fetcher.fetch(show.feed_url, show.etag, show.last_modified, **extra)
+            # Follow the publisher's current redirect chain, not a target
+            # learned from an earlier refresh. Validators belong to the exact
+            # final URL that supplied them, not canonical_url (which records
+            # permanent/discovered subscription identity). Legacy rows have
+            # unknown provenance and are refreshed unconditionally once.
+            validator_url = getattr(show, "validator_url", "")
+            if validator_url:
+                response = self.fetcher.fetch(show.feed_url, show.etag, show.last_modified,
+                                              validator_url=validator_url)
+            else:
+                # Empty provenance means old validators cannot safely be
+                # associated with any response. Pass no validators at all;
+                # the new response records its exact final URL on success.
+                response = self.fetcher.fetch(show.feed_url, "", "")
             stored = response.canonical_url or show.feed_url
             if response.not_modified:
                 health = Health.OK if show.episode_count else Health.PARTIAL
@@ -235,6 +240,7 @@ class RefreshService:
                     response.etag,
                     response.last_modified,
                     stored,
+                    validator_url=response.final_url or None,
                 )
                 # An unchanged feed keeps its cover: do not ask for it again
                 # (a full download) until the last successful check is a week old.
@@ -254,6 +260,7 @@ class RefreshService:
                     response.etag,
                     response.last_modified,
                     stored,
+                    validator_url=response.final_url or None,
                 )
             except LOCAL_STORAGE_ERRORS as exc:
                 # The episodes are in; only the bookkeeping failed. The report
