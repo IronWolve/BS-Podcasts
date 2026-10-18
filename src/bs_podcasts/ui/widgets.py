@@ -4471,6 +4471,7 @@ class PlayerBar(QFrame):
         self.sleep_popover.sleep_selected.connect(self.sleep_requested)
         self.sleep.clicked.connect(lambda: (self.sleep.setChecked(self._sleep_active), self.sleep_popover.show_above(self.sleep)))
         self.queue = icon_button("panel", "Up Next panel", checkable=True)
+        self.queue.setProperty('neutralChecked', 'true')
         self._set_hint(self.queue, "Show Up Next")
         self.queue.clicked.connect(self.context_requested)
         self.volume = icon_button("volume", "Mute", checkable=True)

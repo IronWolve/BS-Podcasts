@@ -805,6 +805,11 @@ def stylesheet() -> str:
     QWidget#playerTools QPushButton#iconButton[activeTone="blue"]:checked {{
         background: {_rgba(c['blue'], 0.12)}; border-color: {c['blue']};
     }}
+    QWidget#playerTools QPushButton#iconButton[neutralChecked="true"]:checked {{
+        background: transparent; border-color: transparent;
+    }}
+    QWidget#playerTools QPushButton#iconButton[neutralChecked="true"]:checked:hover {{ background: {c['surface_raised']}; }}
+    QWidget#playerTools QPushButton#iconButton[neutralChecked="true"]:checked:focus {{ border-color: {c['blue']}; }}
     QWidget#playerTools QPushButton#iconButton:disabled {{ background: transparent; border-color: transparent; }}
     QPushButton#iconButton[contextTool="true"]:hover,
     QPushButton#iconButton[contextTool="true"]:checked {{ background: {_rgba(c['blue'], 0.12)}; }}

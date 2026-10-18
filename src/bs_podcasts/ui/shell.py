@@ -8978,8 +8978,6 @@ class MainWindow(QMainWindow):
             if pending is not None:
                 self._apply_initial_history(pending[0])
         self.pages.setCurrentIndex(index)
-        if getattr(self.pages.currentWidget(), '_inline_details', False) and not self._restoring_view:
-            self.context.set_mode(1)
         if index == PAGE_DOWNLOADS and getattr(self, '_downloads_dirty', True):
             self._reload_downloads()
         if index == PAGE_EPISODES:
@@ -9317,9 +9315,9 @@ class MainWindow(QMainWindow):
         pending, self._context_pending = self._context_pending, None
         if pending is not None and self.pages.currentWidget() is pending[1]:
             # The row can change while the selection settles (a cover arrives), so the pane shows it as it is now.
-            self._show_item(pending[1].current_row(), reveal_details=not getattr(pending[1], '_inline_details', False))
+            self._show_item(pending[1].current_row())
 
-    def _show_item(self, item, *, reveal_details=True):
+    def _show_item(self, item):
         # An explicit show supersedes a selection still waiting to settle.
         self._context_timer.stop()
         self._context_pending = None
@@ -9334,20 +9332,15 @@ class MainWindow(QMainWindow):
             if item.feed_url and not item.show_id:
                 self._preview_after_pause(item.feed_url)
         elif isinstance(item, EpisodeRow):
-            self.context.show_episode(item, reveal=reveal_details)
-            if not reveal_details:
-                self.context.set_mode(1)
+            self.context.show_episode(item)
             self.context.set_playing(self._playing_episode_id, self._playing_state == "playing", self._playing_state == "loading")
             self._load_listening_details(item.episode_id)
             if item.episode_id and self.library is not None:
                 library = self.library
-                page = self.pages.currentWidget()
                 def apply(data):
                     stored = data[0]
                     if stored is not None and self.context.shown_episode_id() == item.episode_id:
                         self.context.set_notes(item.episode_id, stored.description)
-                        if hasattr(page, 'set_inline_notes'):
-                            page.set_inline_notes(item.episode_id, stored.description)
                         self._ensure_listening_details(stored)
                         self._ensure_episode_artwork(stored)
                 self._run_read(lambda: (library.episode(item.episode_id),), apply, "selected-metadata")
