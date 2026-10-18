@@ -24,9 +24,11 @@ _MAINTENANCE_WAIT_SECONDS = 10.0
 
 # backup(), _backup_before_migration() and repair() write a scratch copy with
 # one of these prefixes and rename it on success. A process killed in the
-# middle leaves it behind; opening the library removes the ones older than
-# this process (the library lease keeps a second instance from running one).
-_RAW_SCRATCH_NAME = re.compile(r"\.(?:library-backup|library-repair)-[A-Za-z0-9_-]+\.tmp\Z")
+# middle leaves it and SQLite sidecars behind; opening the library removes
+# the ones older than this process (the library lease keeps a second instance
+# from running one).
+_RAW_SCRATCH_NAME = re.compile(
+    r"\.(?:library-backup|library-repair)-[A-Za-z0-9_-]+\.tmp(?:-(?:journal|wal|shm))?\Z")
 _SCHEDULED_SCRATCH_NAME = re.compile(
     r"\.library-auto-[A-Za-z0-9_-]+\.(?:snapshot|zip)\.tmp\Z")
 _PROCESS_START = time.time()
@@ -849,7 +851,7 @@ class Database:
             except Exception as exc:
                 replace_error = exc
             finally:
-                for suffix in ("-wal", "-shm"):
+                for suffix in ("-journal", "-wal", "-shm"):
                     try:
                         Path(str(temporary) + suffix).unlink(missing_ok=True)
                     except OSError:

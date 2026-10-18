@@ -2108,7 +2108,7 @@ class MainWindow(QMainWindow):
             return
         page = self.pages.currentWidget()
         banner = getattr(page, "banner", None)
-        if banner is not None and banner.isVisible() and banner.dismiss_button.isVisible():
+        if banner is not None and banner.isVisible() and banner.state not in {'', 'loading', 'empty'}:
             banner.clear()
             return
         focus = QApplication.focusWidget()
@@ -4965,6 +4965,7 @@ class MainWindow(QMainWindow):
         self.episode_page.banner.show_state("loading", f"Opening {podcast.title}…")
         self._show_hero(podcast, episode_count=podcast.episode_count)
         saved = self._episode_navigation_restore
+        restore_window = isinstance(saved, dict) and saved.get('show_id') == podcast.show_id
         if not saved or saved.get('show_id') != podcast.show_id:
             state = self._pending_view_restore or {}
             views = state.get('views', {})
@@ -4986,6 +4987,13 @@ class MainWindow(QMainWindow):
         except (ValueError, TypeError, OverflowError):
             offset = 0
         limit = PODCAST_PAGE_SIZE
+        if restore_window:
+            # Back/Forward keeps its loaded window; startup still reads one
+            # page. Bound a retained or restored history entry before I/O.
+            try:
+                limit = max(PODCAST_PAGE_SIZE, min(10_000, int(saved.get('podcast_limit', limit))))
+            except (ValueError, TypeError, OverflowError):
+                pass
         self._podcast_window = (offset, limit, 0)
         def finished():
             self._finish_view_restore()
@@ -7809,7 +7817,7 @@ class MainWindow(QMainWindow):
                             updated.append(row)
                             artwork_changes[(row.episode_id, row.artwork_url)] = row
                         if artwork_changes:
-                            self.episode_page._all_items = updated
+                            self.episode_page.replace_all_items(updated)
                             self.episode_page.model.update_artwork_batch(artwork_changes)
                             self.episode_page.view.viewport().update()
                         playing = getattr(self.playback, 'snapshot', None)
@@ -8974,6 +8982,9 @@ class MainWindow(QMainWindow):
             preserve_scroll=self._discover_displayed_key == cache_key,
         )
         self._discover_displayed_key = cache_key
+        view = self.discover_page.view
+        if self.discover_page.model.rowCount() and not view.currentIndex().isValid():
+            view.setCurrentIndex(self.discover_page.model.index(0, 0))
         self._queue_directory_artwork()
 
     def _show_directory_summary(self, operation, value, podcasts, *, cache_restore):
@@ -9127,6 +9138,7 @@ class MainWindow(QMainWindow):
             'All', 'Favorites', 'New', 'Unplayed', 'In progress', 'Downloaded', 'Played'} else 'All'
         sort = sort if isinstance(sort, str) and sort in dict(SORT_OPTIONS) else 'newest'
         page.set_podcast_paging(True)
+        page.set_items([], preserve_scroll=False)
         with quiet_signals(page):
             page.set_view(query, selected_filter, sort)
         self._podcast_scope = self._podcast_controls()
@@ -9146,7 +9158,6 @@ class MainWindow(QMainWindow):
         anchor_id = anchor_id if isinstance(anchor_id, int) and 0 < anchor_id < 2**63 else 0
         self._podcast_window = (offset, limit, 0)
         self._podcast_total = self._podcast_progress_total = 0
-        page.set_items([], preserve_scroll=False)
         page.banner.show_state('loading', 'Reading saved episodes from your library…')
         self._pages_loading.add(page)
         def finished():

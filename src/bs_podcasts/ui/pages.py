@@ -1401,7 +1401,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             combo.setMinimumWidth(scaled_px(140))
             combo.setMaximumWidth(scaled_px(210))
         if self.header.action is not None:
-            self.header.action.setFixedSize(scaled_px(38), scaled_px(38))
+            self.header.refresh.set_base_size(38)
         self._layout_discover_controls()
 
     def _layout_discover_controls(self):

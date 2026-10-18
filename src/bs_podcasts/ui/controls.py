@@ -1,6 +1,6 @@
 """Native-scale transport arrows and a bounded, visibility-aware refresh spinner."""
 
-from PySide6.QtCore import QPointF, QRectF, QSize, QTimer, Qt
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, QTimer, Qt
 from PySide6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QPushButton, QStyle, QStyleOptionButton
 
@@ -23,13 +23,36 @@ class RefreshButton(QPushButton):
         self.setToolTip('Refresh current view')
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._busy, self._phase = False, 0
+        self._base_size = 36
         self._timer = QTimer(self)
         self._timer.setInterval(40)
         self._timer.timeout.connect(self._tick)
         self.apply_metrics()
+        self.objectNameChanged.connect(self._style_identity_changed)
 
     def apply_metrics(self):
-        self.setFixedSize(scaled_px(36), scaled_px(36))
+        side = scaled_px(self._base_size)
+        self.setFixedSize(side, side)
+
+    def set_base_size(self, size):
+        self._base_size = int(size)
+        self.apply_metrics()
+
+    def _style_identity_changed(self, _name):
+        # The page chooses its button role after construction. Qt otherwise
+        # keeps the constructor's icon-button style until the next theme swap.
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.apply_metrics()
+        self.update()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.StyleChange and hasattr(self, '_base_size'):
+            # Qt's stylesheet polish writes the icon-button min/max limits
+            # again. Restore this control's metrics after that write so a
+            # live theme change keeps the same size as a fresh window.
+            self.apply_metrics()
 
     def set_busy(self, busy):
         self._busy = bool(busy)

@@ -955,6 +955,8 @@ def stylesheet() -> str:
     QLabel#timeLabel {{ color: {c['muted']}; font-size: {small}px; min-width: {sp(44)}px; }}
     /* seekSlider paints its own track and handle (SeekSlider.paintEvent). */
     QSlider#seekSlider {{ background: transparent; }}
+    QSlider#volumeSlider {{ border: 1px solid transparent; border-radius: {scaled_dim(6)}px; }}
+    QSlider#volumeSlider:focus {{ border-color: {c['blue']}; }}
     QSlider#volumeSlider::groove:horizontal {{ height: {scaled_dim(4)}px; background: {c['border']}; border-radius: {scaled_dim(2)}px; }}
     QSlider#volumeSlider::sub-page:horizontal {{ background: {c['accent']}; border-radius: {scaled_dim(2)}px; }}
     QSlider#volumeSlider::handle:horizontal {{
