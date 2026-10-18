@@ -7,7 +7,7 @@ import re
 import time
 import unicodedata
 
-from PySide6.QtCore import QEasingCurve, QEvent, QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint, QPropertyAnimation, QTimer, Signal, Qt
+from PySide6.QtCore import QEasingCurve, QEvent, QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint, QPropertyAnimation, QSize, QTimer, Signal, Qt
 from PySide6.QtGui import QContextMenuEvent, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -329,7 +329,7 @@ class _ListPageMixin:
         self.view.verticalScrollBar().setSingleStep(1 if self._row_aligned_scroll else 40)
         self.view.setResizeMode(QListView.ResizeMode.Adjust)
         delegate = self.view.itemDelegate()
-        self.view.setUniformItemSizes(True)
+        self.view.setUniformItemSizes(False)
         self.view.setModel(self.model)
         self._scroll_input_guard = _ScrollInputGuard(self.view, self._cancel_scroll_restore, self._begin_artwork_scroll, self._aligned_episode_wheel, self._finish_episode_scroll)
         self._install_scroll_guard()
@@ -422,10 +422,30 @@ class _ListPageMixin:
         return max(1, self.view.itemDelegate().base_height())
 
     def _episode_row_offset(self, row):
-        return row * self._episode_base_height()
+        count = self.model.rowCount()
+        if not count:
+            return 0
+        index = max(0, min(count - 1, int(row)))
+        first = self.view.visualRect(self.model.index(0, 0))
+        rect = self.view.visualRect(self.model.index(index, 0))
+        return rect.top() - first.top() + (row - index) * max(1, rect.height())
 
     def _episode_row_position(self, pixel):
-        return pixel / self._episode_base_height()
+        count = self.model.rowCount()
+        if not count:
+            return 0
+        first = self.view.visualRect(self.model.index(0, 0)).top()
+        low, high = 0, count
+        while low < high:
+            middle = (low + high) // 2
+            top = self.view.visualRect(self.model.index(middle, 0)).top() - first
+            if top <= pixel:
+                low = middle + 1
+            else:
+                high = middle
+        row = max(0, low - 1)
+        rect = self.view.visualRect(self.model.index(row, 0))
+        return row + (pixel - (rect.top() - first)) / max(1, rect.height())
 
     def _scroll_episode_rows(self, delta):
         if not delta:
@@ -506,7 +526,7 @@ class _ListPageMixin:
         except (ValueError, TypeError, OverflowError):
             value = 0
         if self._row_aligned_scroll and saved.get('scroll_units') != 'items':
-            value //= self._episode_base_height()
+            value = int(self._episode_row_position(value))
         return value
 
     def _request_visible_artwork(self):
@@ -925,7 +945,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             self.chart.setAccessibleName("Discover view")
             self.chart.setExpanding(False)
             self.chart.setUsesScrollButtons(True)
-            self.chart.setElideMode(Qt.TextElideMode.ElideRight)
+            self.chart.setElideMode(Qt.TextElideMode.ElideNone)
             self.chart.setCursor(Qt.CursorShape.PointingHandCursor)
             for label, value in (
                 ("For You", "explore"),
@@ -1073,7 +1093,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         self._update_empty()
 
     def _anchor_x(self):
-        return max(2, self.view.gridSize().width() // 2)
+        return max(2, self.delegate.card_width // 2)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1103,7 +1123,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
             return  # same grid: every resize step re-laid out all cards
         self._card_grid = grid
         self.delegate.set_card_width(width)
-        self.view.setGridSize(self.delegate.sizeHint(None, None))
+        self.view.setGridSize(QSize())
         self.view.doItemsLayout()
         self._artwork_prefetch_timer.start(0)
 
@@ -1111,11 +1131,18 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         if not self.isVisible() or not self.model.rowCount():
             return
         from .pixmaps import prefetch_artwork
-        grid = self.view.gridSize()
-        columns = max(1, self.view.viewport().width() // max(1, grid.width()))
-        first = self.view.verticalScrollBar().value() // max(1, grid.height()) * columns
-        rows = self.view.viewport().height() // max(1, grid.height()) + 3
-        start, end = max(0, first - columns), min(self.model.rowCount(), first + rows * columns)
+        columns = max(1, self.view.viewport().width() // max(1, self.delegate.card_width))
+        def boundary(y):
+            low, high = 0, self.model.rowCount()
+            while low < high:
+                middle = (low + high) // 2
+                if self.view.visualRect(self.model.index(middle, 0)).top() < y:
+                    low = middle + 1
+                else:
+                    high = middle
+            return low
+        start = max(0, boundary(0) - columns)
+        end = min(self.model.rowCount(), boundary(self.view.viewport().height()) + columns)
         prefetch_artwork((item.artwork_path for item in self.model.items()[start:end]), self.view)
 
     def set_items(self, items, preserve_scroll: bool = False):

@@ -32,6 +32,7 @@ from PySide6.QtGui import (
     QAccessible,
     QAccessibleAnnouncementEvent,
     QColor,
+    QFontMetrics,
     QDesktopServices,
     QFont,
     QIcon,
@@ -41,6 +42,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QShortcut,
+    QTextOption,
     QTextCursor,
 )
 from PySide6.QtWidgets import (
@@ -69,6 +71,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QStyleOption,
+    QStyleOptionButton,
     QTabWidget,
     QTextBrowser,
     QTextEdit,
@@ -81,7 +84,7 @@ from ..domain.times import MAX_MEDIA_SECONDS, media_seconds, format_media_time
 from ..markup import SafeFeedHtml, linkify, plain_snippet
 from ..urlguard import UnsafeUrl, ensure_web_url, is_web_url
 from . import icons
-from .models import ShowRow
+from .models import ShowRow, wrapped_text, paint_text_lines
 from .pixmaps import cover, initials
 from .shortcuts import set_literal_tooltip
 from .theme import COLORS, HEALTH_LABELS, SPACE, app_font, play_button_size, reduced_motion, scaled_dim, scaled_px, theme_name
@@ -879,14 +882,13 @@ class PageHeader(QFrame):
         self._search_allowed = True
         self.title_label = PlainTextLabel(title)
         self.title_label.setObjectName("pageTitle")
-        # A long title must clip inside its own stretch slot instead of
-        # forcing its full text width as a layout minimum — that minimum is
-        # what shoved the search field underneath the action button when the
-        # header got tight.
+        # Wrap in the available title column without pushing search/actions out.
         self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.title_label.setWordWrap(True)
         self.subtitle_label = PlainTextLabel(subtitle)
         self.subtitle_label.setObjectName("pageSubtitle")
         self.subtitle_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.subtitle_label.setWordWrap(True)
         text.addWidget(self.title_label)
         text.addWidget(self.subtitle_label)
         layout.addLayout(text, 1)
@@ -982,34 +984,16 @@ class PageHeader(QFrame):
         QTimer.singleShot(0, self, self.layout().activate)
 
     def _elide_header_text(self):
-        """Elide to the slot, with the full string in a tooltip.
-
-        The Ignored size policy keeps a long title from dictating the header's
-        minimum width, but on its own it also hard-clipped the text
-        mid-character with no way to read the rest — which design.md forbids
-        outright. Eliding costs the layout nothing and leaves the text
-        recoverable.
-        """
+        """Keep complete headings; wrapping, not missing words, handles width."""
         self._layout_inline_subtitle()
         for label, full in (
             (self.title_label, getattr(self, "_title_text", "")),
             (self.subtitle_label, getattr(self, "_subtitle_text", "")),
         ):
-            available = label.width()
-            if not full:
-                if label.text():
-                    label.setText("")
-                set_literal_tooltip(label, "")
-                continue
-            metrics = label.fontMetrics()
-            if label.wordWrap() or available <= 0 or metrics.horizontalAdvance(full) <= available:
-                wanted, tip = full, ""
-            else:
-                wanted = metrics.elidedText(full, Qt.TextElideMode.ElideRight, available)
-                tip = full
-            if label.text() != wanted:
-                label.setText(wanted)
-            set_literal_tooltip(label, tip)
+            label.setWordWrap(True)
+            if label.text() != full:
+                label.setText(full)
+            set_literal_tooltip(label, '')
 
     def eventFilter(self, watched, event):
         if watched in (self.title_label, self.subtitle_label) and event.type() in {
@@ -1071,9 +1055,18 @@ class PageHeader(QFrame):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.status_slot.setFixedWidth(scaled_px(160 if self.width() >= scaled_px(650) else 105 if self.width() >= scaled_px(470) else 72))
         self._apply_search_visibility()
+        self._fit_status_width()
         self._elide_header_text()
+
+    def _fit_status_width(self):
+        layout = self.layout()
+        controls = [layout.itemAt(i).widget() for i in range(layout.count())]
+        controls = [w for w in controls if w is not None and w is not self.status_slot and not w.isHidden()]
+        used = sum(max(w.minimumWidth(), min(w.sizeHint().width(), w.maximumWidth())) for w in controls)
+        reserve_title = min(scaled_px(180), self.title_label.fontMetrics().horizontalAdvance(self._title_text))
+        available = self.width() - used - layout.spacing() * (len(controls) + 1) - reserve_title
+        self.status_slot.setFixedWidth(max(0, min(scaled_px(320), available)))
 
     def apply_metrics(self):
         self.layout().setSpacing(SPACE["md"])
@@ -1083,6 +1076,7 @@ class PageHeader(QFrame):
         self.status_slot.setFixedHeight(scaled_px(36))
         self.search.setMinimumWidth(scaled_px(150))
         self.search.setMaximumWidth(scaled_px(240))
+        self._fit_status_width()
         self._fit_search_width()
 
 
@@ -1291,6 +1285,8 @@ class StateBanner(QFrame):
         self._fade_effect = None
         self._fade_animation = None
         self._status_menu = None
+        self._readout = None
+        self._readout_suppressed = False
         self._cancel_callback = None
         if compact:
             self.setObjectName('headerStatus')
@@ -1298,7 +1294,8 @@ class StateBanner(QFrame):
             self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(0)
-            self.status_button = QPushButton()
+            self.status_button = WrappedTextButton()
+            self.status_button._alignment = Qt.AlignmentFlag.AlignRight
             self.status_button.setObjectName('headerStatusButton')
             self.status_button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
             self.status_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1312,15 +1309,112 @@ class StateBanner(QFrame):
         for widget in (self.icon, self.prefix, self.label, self.retry, self.dismiss_button, self.progress):
             widget.hide()
         message = self.label.text()
-        available = max(0, self.width()-4)
-        progress = re.search(r'(\d+)\s+of\s+(\d+)', message) if self.state == 'loading' else None
-        text = f'Checking {progress[1]} of {progress[2]}' if progress else message
-        if progress and self.status_button.fontMetrics().horizontalAdvance(text) > available:
-            text = f'{progress[1]}/{progress[2]}'
-        self.status_button.setText(self.status_button.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, available))
+        available = max(0, self.width() - 4)
+        self.status_button.setText(mnemonic_safe('Checking' if self._readout_suppressed and self.state == 'loading' else message))
         self.status_button.setToolTip(message)
         self.status_button.setAccessibleName(message + ' — open details')
         set_local_stylesheet(self.status_button, 'QPushButton#headerStatusButton { background: transparent; border: 0; padding: 0; color: '+COLORS.get(self._tone, COLORS['text'])+'; text-align: right; } QPushButton#headerStatusButton:focus { border: 1px solid '+COLORS['accent']+'; }')
+        overflow = self.status_button.heightForWidth(available) > self.height()
+        self.status_button.setVisible(not overflow or self._readout_suppressed)
+        if overflow and not self._readout_suppressed and self.isVisible():
+            self._show_readout()
+        elif self._readout is not None:
+            self._readout.hide()
+
+    def _show_readout(self):
+        """Complete feedback outside the header layout; never grabs typing focus."""
+        host = self.window()
+        if host is self:
+            self.status_button.show()
+            return
+        if self._readout is None:
+            panel = QFrame(host)
+            self.destroyed.connect(panel.deleteLater)
+            panel.setObjectName('headerStatusReadout')
+            panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            panel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            layout = QVBoxLayout(panel)
+            layout.setContentsMargins(SPACE['md'], SPACE['sm'], SPACE['sm'], SPACE['sm'])
+            layout.setSpacing(SPACE['sm'])
+            line = QHBoxLayout()
+            self._readout_text = QTextBrowser(panel)
+            self._readout_text.setFrameShape(QFrame.Shape.NoFrame)
+            self._readout_text.setOpenLinks(False)
+            self._readout_text.setOpenExternalLinks(False)
+            self._readout_text.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+            self._readout_text.document().setDocumentMargin(0)
+            self._readout_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self._readout_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self._readout_text.setStyleSheet('QTextBrowser { background: transparent; border: none; padding: 0; }')
+            line.addWidget(self._readout_text, 1)
+            close = icon_button('close', 'Dismiss refresh feedback  ·  Esc', size=14)
+            close.clicked.connect(self.dismiss_readout)
+            line.addWidget(close, 0, Qt.AlignmentFlag.AlignTop)
+            layout.addLayout(line)
+            self._readout_retry = QPushButton('Retry', panel)
+            self._readout_retry.setObjectName('quietButton')
+            self._readout_retry.clicked.connect(self.retry_requested)
+            layout.addWidget(self._readout_retry, 0, Qt.AlignmentFlag.AlignLeft)
+            panel._opacity = QGraphicsOpacityEffect(panel)
+            panel.setGraphicsEffect(panel._opacity)
+            self._readout = panel
+            host.installEventFilter(self)
+        panel = self._readout
+        color = COLORS.get(self._tone, COLORS['text'])
+        set_local_stylesheet(panel, 'QFrame#headerStatusReadout { background: '+COLORS['surface']+
+                             '; border: 1px solid '+COLORS['border']+'; border-radius: 8px; }')
+        self._readout_text.setStyleSheet('QTextBrowser { background: transparent; border: none; padding: 0; color: '+color+'; }')
+        _set_document_content(self._readout_text, self.label.text())
+        self._readout_retry.setVisible(bool(getattr(self, '_can_retry', False)))
+        header = self.parentWidget()
+        while header is not None and not isinstance(header, PageHeader):
+            header = header.parentWidget()
+        header = header or host
+        bounds = QRect(header.mapTo(host, QPoint(0, 0)), QSize(header.width(), host.height()))
+        width = max(1, min(scaled_px(520), bounds.width()))
+        panel.setFixedWidth(width)
+        text_width = max(1, width - 2 * SPACE['md'] - scaled_px(36))
+        self._readout_text.document().setTextWidth(text_width)
+        text_height = round(self._readout_text.document().size().height()) + 4
+        self._readout_text.setFixedHeight(max(self._readout_text.fontMetrics().height(),
+                                             min(text_height, max(scaled_px(72), host.height() // 3))))
+        panel.adjustSize()
+        anchor = self.mapTo(host, QPoint(self.width(), self.height()))
+        header_bottom = header.mapTo(host, QPoint(0, header.height())).y()
+        x = max(bounds.left(), min(anchor.x() - width, bounds.right() - width + 1))
+        y = min(max(anchor.y(), header_bottom) + SPACE['xs'],
+                max(SPACE['md'], host.height() - panel.height() - SPACE['md']))
+        panel.move(x, y)
+        panel._opacity.setOpacity(1.0)
+        panel.show()
+        panel.raise_()
+
+    def dismiss_readout(self):
+        if self._readout is None or not self._readout.isVisible():
+            return False
+        if self.state == 'loading':
+            self._readout_suppressed = True
+            self._readout.hide()
+            self._compact_status()
+        else:
+            self.clear()
+        return True
+
+    def eventFilter(self, watched, event):
+        if watched is self.window() and event.type() in {QEvent.Type.Resize, QEvent.Type.Move}:
+            if self.isVisible() and self.state:
+                self._compact_status()
+        return super().eventFilter(watched, event)
+
+    def hideEvent(self, event):
+        if self._readout is not None:
+            self._readout.hide()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._compact and hasattr(self, '_tone'):
+            self._compact_status()
 
     def _open_status(self):
         if not self.state:
@@ -1389,9 +1483,14 @@ class StateBanner(QFrame):
             self._fade_animation = QPropertyAnimation(self._fade_effect, b'opacity', self)
             self._fade_animation.setDuration(160)
             self._fade_animation.finished.connect(self.clear)
+            self._fade_animation.valueChanged.connect(self._fade_readout)
         self._fade_animation.setStartValue(1.0)
         self._fade_animation.setEndValue(0.0)
         self._fade_animation.start()
+
+    def _fade_readout(self, value):
+        if self._readout is not None:
+            self._readout._opacity.setOpacity(float(value))
 
     def _stop_fade(self):
         self._dismiss_timer.stop()
@@ -1414,6 +1513,8 @@ class StateBanner(QFrame):
         self._cancel_callback = cancel if state == 'loading' else None
         prefix, glyph, tone = self.LABELS.get(state, (state.replace("_", " ").title(), "info", "muted"))
         previous, self.state = self.state, state
+        if state != previous or state != 'loading' and message != self.label.text():
+            self._readout_suppressed = False
         if state != previous:
             self.setProperty("state", state)
             self.style().unpolish(self)
@@ -1451,6 +1552,9 @@ class StateBanner(QFrame):
     def clear(self):
         self._stop_fade()
         self._cancel_callback = None
+        self._readout_suppressed = False
+        if self._readout is not None:
+            self._readout.hide()
         if self._status_menu is not None:
             self._status_menu.close()
         previous, self.state = self.state, ""
@@ -2737,7 +2841,7 @@ class ContextPanel(QFrame):
         self.meta = PlainTextLabel("")
         self.meta.setObjectName("meta")
         self.meta.setWordWrap(True)
-        self.show_link = QPushButton()
+        self.show_link = WrappedTextButton()
         self.show_link.setObjectName("textButton")
         self.show_link.setCursor(Qt.CursorShape.PointingHandCursor)
         self.show_link.setIcon(icons.themed_icon("episodes", "muted", 16))
@@ -2928,7 +3032,7 @@ class ContextPanel(QFrame):
         self.queue_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.queue_view.setDragDropMode(QListView.DragDropMode.InternalMove)
         self.queue_view.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.queue_view.setUniformItemSizes(True)
+        self.queue_view.setUniformItemSizes(False)
         self.queue_view.setMouseTracking(True)
         self.queue_view.viewport().setMouseTracking(True)
         self.queue_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -3507,23 +3611,75 @@ def mnemonic_safe(text: str) -> str:
     return (text or "").replace("&", "&&")
 
 
+class WrappedTextButton(QPushButton):
+    """A normal clickable text button with full Unicode wrapping."""
+
+    def __init__(self, text='', parent=None):
+        super().__init__(text, parent)
+        policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def _content_geometry(self, width, height=100):
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.rect = QRect(0, 0, width, height)
+        rect = self.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, option, self).adjusted(2, 2, -2, -2)
+        icon_width = option.iconSize.width() + scaled_px(6) if not option.icon.isNull() else 0
+        return rect, icon_width
+
+    def heightForWidth(self, width):
+        rect, icon_width = self._content_geometry(width)
+        lines = wrapped_text(self.text().replace('&&', '&'), self.font(), max(1, rect.width() - icon_width))
+        text_height = len(lines) * max(self.fontMetrics().height(), self.fontMetrics().lineSpacing())
+        return max(text_height, self.iconSize().height() if icon_width else 0) + 100 - rect.height()
+
+    def sizeHint(self):
+        rect, icon_width = self._content_geometry(100)
+        width = min(scaled_px(360), self.fontMetrics().horizontalAdvance(self.text().replace('&&', '&'))
+                    + 2 + 100 - rect.width() + icon_width)
+        return QSize(width, self.heightForWidth(width))
+
+    def minimumSizeHint(self):
+        return QSize(0, self.fontMetrics().height() + 8)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        icon = QIcon(option.icon)
+        rect, icon_width = self._content_geometry(self.width(), self.height())
+        option.text = ''
+        option.icon = QIcon()
+        self.style().drawControl(QStyle.ControlElement.CE_PushButton, option, painter, self)
+        if not icon.isNull():
+            icon.paint(painter, QRect(rect.x(), rect.y(), self.iconSize().width(), self.iconSize().height()),
+                       Qt.AlignmentFlag.AlignCenter, QIcon.Mode.Normal if self.isEnabled() else QIcon.Mode.Disabled)
+            rect.adjust(icon_width, 0, 0, 0)
+        painter.setFont(self.font())
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        lines = wrapped_text(self.text().replace('&&', '&'), self.font(), max(1, rect.width()))
+        paint_text_lines(painter, rect, lines, max(self.fontMetrics().height(), self.fontMetrics().lineSpacing()),
+                         getattr(self, '_alignment', Qt.AlignmentFlag.AlignLeft))
+
+
 def set_button_text_elided(button: QPushButton, text: str, cap_px: int):
-    """Buttons size to their full label, so a long dynamic name (a show
-    title) forces every ancestor wider than its pane and the content clips
-    at the window edge. Elide to a hard cap; the full name moves to the
-    tooltip."""
-    elided = button.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, cap_px)
-    button.setText(mnemonic_safe(elided))
-    set_literal_tooltip(button, plain_tooltip(text) if elided != text else "")
+    """Keep the complete link text and let its wrapped button fit the pane."""
+    button.setMaximumWidth(max(1, cap_px))
+    button.setText(mnemonic_safe(text))
+    button.setAccessibleName(text)
+    set_literal_tooltip(button, '')
+    button.updateGeometry()
 
 
 class ElidedValueLabel(PlainTextLabel):
-    """Middle-elided, selectable label that never forces its layout wider."""
+    """Complete, selectable wrapped value; name retained for private callers."""
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
         self._full = text
         self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setWordWrap(True)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._refresh()
 
@@ -3532,11 +3688,8 @@ class ElidedValueLabel(PlainTextLabel):
         self._refresh()
 
     def _refresh(self):
-        shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideMiddle, max(40, self.width()))
-        QLabel.setText(self, shown)
-        # Elided text must keep its full value reachable (product rule:
-        # ellipsis + tooltip, never a dead end).
-        set_literal_tooltip(self, self._full if shown != self._full else "")
+        QLabel.setText(self, self._full)
+        set_literal_tooltip(self, '')
 
 
 class _ReturnsFocus:
@@ -3615,7 +3768,7 @@ class NowPlayingView(_ReturnsFocus, QFrame):
         self.title.setObjectName("contextTitle")
         self.title.setWordWrap(True)
         self.title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.show_link = QPushButton("")
+        self.show_link = WrappedTextButton("")
         self.show_link.setObjectName("textButton")
         self.show_link.setCursor(Qt.CursorShape.PointingHandCursor)
         self.show_link.clicked.connect(lambda: self.show_requested.emit(self._show_id))
@@ -3639,7 +3792,14 @@ class NowPlayingView(_ReturnsFocus, QFrame):
         self.left_wrap = QWidget()
         self.left_wrap.setLayout(left)
         self.left_wrap.setMaximumWidth(scaled_px(460))
-        layout.addWidget(self.left_wrap, 0)
+        self.left_scroll = QScrollArea(self)
+        self.left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.left_scroll.setWidgetResizable(True)
+        self.left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.left_scroll.setStyleSheet('QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget { background: transparent; border: 0; }')
+        self.left_scroll.setWidget(self.left_wrap)
+        self.left_scroll.setMaximumWidth(scaled_px(460))
+        layout.addWidget(self.left_scroll, 0)
 
     def _build_right_column(self, layout):
         self.tabs = QTabWidget()
@@ -3710,7 +3870,9 @@ class NowPlayingView(_ReturnsFocus, QFrame):
         # The artwork column may not starve the tabs panel: cap it to a share
         # of the view so tab titles stay readable at every width.
         share = int(self.width() * 0.42)
-        self.left_wrap.setMaximumWidth(max(scaled_px(280), min(scaled_px(460), share)))
+        maximum = max(scaled_px(280), min(scaled_px(460), share))
+        self.left_wrap.setMaximumWidth(maximum)
+        self.left_scroll.setMaximumWidth(maximum)
         self._fit_artwork()
 
     def _fit_artwork(self):
@@ -3719,29 +3881,24 @@ class NowPlayingView(_ReturnsFocus, QFrame):
         At large text sizes the title/meta/info card grow; with a fixed art
         side they overflowed onto the artwork and pushed the card off-view."""
         margins = self.left_wrap.layout().contentsMargins()
-        column = max(1, self.left_wrap.maximumWidth() - margins.left() - margins.right())
+        column = max(1, self.left_scroll.viewport().width() - margins.left() - margins.right())
         used = SPACE["xl"] * 2 + margins.top() + margins.bottom()
         used += max(self.info_button.sizeHint().height(), scaled_px(24))
         used += self.title.heightForWidth(max(1, column)) if self.title.text() else 0
-        used += self.show_link.sizeHint().height() if self.show_link.isVisible() else 0
+        used += self.show_link.heightForWidth(column) if self.show_link.isVisible() else 0
         used += self.meta.sizeHint().height()
         has_stats = self._stats_grid.count() > 0
         stats_height = self.stats.sizeHint().height() if has_stats else 0
         used += SPACE["md"] * 6
         if has_stats:
             used += stats_height
-        available = self.height() - used - scaled_px(16)
+        available = self.left_scroll.viewport().height() - used - scaled_px(16)
         floor = scaled_px(160)
-        if has_stats and available < floor:
-            without_stats = available + stats_height + SPACE["md"]
-            if without_stats >= floor or available < scaled_px(64):
-                has_stats = False
-                available = without_stats
         if self.stats.isVisible() != has_stats:
             self.stats.setVisible(has_stats)
         cap = scaled_px(420)
-        side = min(cap, column, max(1, int(available)))
-        lower = floor if available >= floor else 1
+        side = min(cap, column, max(floor, int(available)))
+        lower = min(floor, side)
         self.art.set_bounds(min(lower, max(1, side)), cap)
         self.art.set_side(side)
 
@@ -3997,7 +4154,7 @@ class SearchOverlay(_ReturnsFocus, QFrame):
         self.results.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.results.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.results.verticalScrollBar().setSingleStep(40)
-        self.results.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.results.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.results.itemActivated.connect(self._activate)
         self.results.itemClicked.connect(self._activate)
         self.results.setMinimumHeight(scaled_px(240))
@@ -4027,12 +4184,15 @@ class SearchOverlay(_ReturnsFocus, QFrame):
         self.card.layout().setSpacing(SPACE["md"])
         self.results.setMinimumHeight(scaled_px(240))
         self._fit_card()
-        heights = {"podcast": 54, "episode": 62, "directory": 42}
+        self._fit_results()
+
+    def _fit_results(self):
+        width = max(1, self.results.viewport().width() - scaled_px(56))
+        line_height = self.results.fontMetrics().lineSpacing()
         for row in range(self.results.count()):
             item = self.results.item(row)
-            payload = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-            if payload and payload[0] in heights:
-                item.setSizeHint(QSize(0, scaled_px(heights[payload[0]])))
+            lines = sum(len(wrapped_text(part, self.results.font(), width)) for part in item.text().split('\n'))
+            item.setSizeHint(QSize(0, lines * line_height + scaled_px(16)))
 
     def _fit_card(self):
         """Card width for the overlay's current size and text scale; the
@@ -4047,6 +4207,7 @@ class SearchOverlay(_ReturnsFocus, QFrame):
         self._fit_card()
         self.results.setMinimumHeight(0)
         self.results.setMaximumHeight(max(40, self.height() - scaled_px(170)))
+        self._fit_results()
 
     def open(self):
         self.show()
@@ -4166,6 +4327,7 @@ class SearchOverlay(_ReturnsFocus, QFrame):
                       selectable[0] if selectable else None)
         if target is not None:
             self.results.setCurrentRow(target)
+        self._fit_results()
 
     @staticmethod
     def _result_key(item):
@@ -4353,7 +4515,7 @@ class PlayerBar(QFrame):
         now = QVBoxLayout()
         now.setContentsMargins(0, 0, 0, 0)
         now.setSpacing(1)
-        self.title = QPushButton("Nothing playing")
+        self.title = WrappedTextButton("Nothing playing")
         self.title.setObjectName("textButton")
         # Vertical padding keeps descenders visible when hover/focus grows the
         # 1px transparent border to the 2px ring; _title_metrics sizes to font.
@@ -4361,6 +4523,8 @@ class PlayerBar(QFrame):
         self.title.clicked.connect(self._open_now_playing)
         self._title_metrics()
         self.show_label = PlainTextLabel("Choose an episode to begin")
+        self.show_label.setWordWrap(True)
+        self.show_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.show_label.setObjectName("playerShow")
         # The show name is a link to that podcast's episode list (the title
         # opens Now Playing). Click or Enter/Space when focused; cursor,
@@ -4371,6 +4535,8 @@ class PlayerBar(QFrame):
         self.show_label.setProperty("linked", "false")
         self.show_label.installEventFilter(self)
         self.next_label = PlainTextLabel("")
+        self.next_label.setWordWrap(True)
+        self.next_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.next_label.setObjectName("playerNext")
         now.addWidget(self.title)
         now.addWidget(self.show_label)
@@ -4378,12 +4544,21 @@ class PlayerBar(QFrame):
         now_wrap = QWidget()
         now_wrap.setLayout(now)
         now.setContentsMargins(0, 0, 0, 0)
-        now_wrap.setMinimumWidth(scaled_px(180))
+        now_wrap.setMinimumWidth(0)
         # Ignored width: the title fills its column but never demands more,
         # which would widen the column and unbalance the sides.
         now_wrap.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.now_wrap = now_wrap
-        left_row.addWidget(now_wrap, 1)
+        self.now_scroll = QScrollArea(left)
+        self.now_scroll.setObjectName('playerTextScroll')
+        self.now_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.now_scroll.setWidgetResizable(True)
+        self.now_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.now_scroll.setStyleSheet('QScrollArea#playerTextScroll, QScrollArea#playerTextScroll > QWidget, QScrollArea#playerTextScroll > QWidget > QWidget { background: transparent; border: 0; }')
+        self.now_scroll.setWidget(now_wrap)
+        self.now_scroll.setMinimumWidth(0)
+        self.now_scroll.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        left_row.addWidget(self.now_scroll, 1)
         layout.addWidget(left)
 
     def _build_transport_zone(self, layout):
@@ -4683,7 +4858,7 @@ class PlayerBar(QFrame):
                 self._elide_now_labels()
                 return True
             return False
-        floor = max(self.tools_wrap.sizeHint().width(), self.art.width() + self.now_wrap.minimumWidth())
+        floor = max(self.tools_wrap.sizeHint().width(), self.art.width() + scaled_px(180))
         side = max(floor, int(available * self.SIDE_SHARE))
         # Clamp against the transport's PREFERRED width, not its minimum. Using
         # the minimum let the side zones keep space the transport actually
@@ -4825,28 +5000,19 @@ class PlayerBar(QFrame):
         return max(60, width)
 
     def _elide_now_labels(self):
-        """Title/show are a plain button and label: without eliding, a long
-        title hard-clips mid-letter at the column edge."""
-        avail = self._now_text_width()
-        title = self.title.fontMetrics().elidedText(self._now_title, Qt.TextElideMode.ElideRight, avail)
-        self.title.setText(mnemonic_safe(title))
-        set_literal_tooltip(
-            self.title, plain_tooltip(self._now_title) if title != self._now_title else "Show now playing"
-        )
-        self._elide_show_label(avail)
+        """Keep complete text inside the scrollable, fixed-height player zone."""
+        self.title.setText(mnemonic_safe(self._now_title))
+        self.title.setAccessibleName(self._now_title)
+        self.title.updateGeometry()
+        set_literal_tooltip(self.title, 'Show now playing')
+        self._elide_show_label(self._now_text_width())
 
     def _elide_show_label(self, avail: int):
         # A playback notice ("Reconnecting…") borrows the show line until the
         # service clears it; the show name comes straight back afterwards.
         line = getattr(self, "_now_notice", "") or self._now_show
-        show = self.show_label.fontMetrics().elidedText(line, Qt.TextElideMode.ElideRight, avail)
-        self.show_label.setText(show)
-        # Elided: the full name wins the tooltip (text-is-never-cut-off rule).
-        # Whole: say what a click does, when it does something.
-        if show != line:
-            set_literal_tooltip(self.show_label, line)
-        else:
-            set_literal_tooltip(self.show_label, "Open this podcast's episodes" if self._now_show_id else "")
+        self.show_label.setText(line)
+        set_literal_tooltip(self.show_label, "Open this podcast's episodes" if self._now_show_id else "")
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -4875,7 +5041,7 @@ class PlayerBar(QFrame):
         art = scaled_px(56)
         self.art.set_bounds(scaled_px(40), scaled_px(72))
         self.art.set_side(art)
-        self.now_wrap.setMinimumWidth(scaled_px(180))
+        self.now_wrap.setMinimumWidth(0)
         self._fit_speed_label()
         skip = scaled_px(20)
         self.back.apply_metrics()
@@ -4950,10 +5116,9 @@ class PlayerBar(QFrame):
         if shown == getattr(self, "_status_shown", None):
             return  # the position tick calls this ten times a second; the text rarely changes
         self._status_shown = shown
-        elided = self.next_label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, avail)
-        if self.next_label.text() != elided:
-            self.next_label.setText(elided)
-            set_literal_tooltip(self.next_label, text if elided != text else "")
+        if self.next_label.text() != text:
+            self.next_label.setText(text)
+            set_literal_tooltip(self.next_label, '')
 
     def retheme(self):
         self.set_tint(getattr(self, "_tint_color", ""))

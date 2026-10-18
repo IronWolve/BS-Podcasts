@@ -2108,6 +2108,8 @@ class MainWindow(QMainWindow):
             return
         page = self.pages.currentWidget()
         banner = getattr(page, "banner", None)
+        if banner is not None and banner.dismiss_readout():
+            return
         if banner is not None and banner.isVisible() and banner.state not in {'', 'loading', 'empty'}:
             banner.clear()
             return

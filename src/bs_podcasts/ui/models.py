@@ -6,7 +6,7 @@ import re
 from collections import OrderedDict
 
 from PySide6.QtCore import QAbstractListModel, QEvent, QMimeData, QModelIndex, QRect, QSize, Signal, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QTextLayout
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QTextLayout, QTextOption
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QToolTip
 
 from ..domain.times import format_media_time
@@ -19,6 +19,45 @@ from .theme import COLORS, HEALTH_COLORS, HEALTH_LABELS, STATE_COLORS, ARTWORK_O
 # full pane, so without a cap a title on a maximised window trails off across
 # empty space away from its own metadata.
 MAX_ROW_TEXT_PX = 880
+
+_text_lines = OrderedDict()
+
+
+def wrapped_text(text, font, width, maximum=None):
+    """Wrap complete Unicode text; a caller may explicitly request a preview."""
+    width = max(1, int(width))
+    key = (text, font.toString(), width, maximum)
+    found = _text_lines.get(key)
+    if found is not None:
+        _text_lines.move_to_end(key)
+        return found
+    layout_text = text.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '\u2028')
+    layout = QTextLayout(layout_text, font)
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    layout.setTextOption(option)
+    units = layout_text.encode('utf-16-le', 'surrogatepass')
+    lines = []
+    layout.beginLayout()
+    while maximum is None or len(lines) < maximum:
+        line = layout.createLine()
+        if not line.isValid():
+            break
+        line.setLineWidth(width)
+        start, length = line.textStart(), line.textLength()
+        lines.append(units[2 * start:2 * (start + length)].decode('utf-16-le', 'surrogatepass').rstrip())
+    layout.endLayout()
+    result = tuple(lines) or ('',)
+    _text_lines[key] = result
+    if len(_text_lines) > 4096:
+        _text_lines.popitem(last=False)
+    return result
+
+
+def paint_text_lines(painter, rect, lines, line_height, alignment=Qt.AlignmentFlag.AlignLeft):
+    for index, line in enumerate(lines):
+        painter.drawText(QRect(rect.x(), rect.y() + index * line_height, rect.width(), line_height),
+                         alignment | Qt.AlignmentFlag.AlignVCenter, line)
 
 
 def preview_identity(item) -> str:
@@ -581,7 +620,35 @@ class PodcastDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         art = self.card_width - 2 * self.CARD_PAD
-        return QSize(self.card_width, art + scaled_px(self.TEXT_BLOCK) + 8)
+        item = index.data(ItemRoles.ITEM) if index is not None and index.isValid() else None
+        height = art + scaled_px(self.TEXT_BLOCK) + 8
+        if item is not None:
+            text_width = max(1, self.card_width - 2 * self.CARD_PAD - 12)
+            title_lines = wrapped_text(item.title, app_font(13, QFont.Weight.DemiBold), text_width)
+            meta, _tone = self._metadata(item)
+            meta_lines = wrapped_text(meta, app_font(12), max(1, text_width - scaled_px(14)))
+            text_height = len(title_lines) * max(scaled_px(18), _font_metrics(app_font(13)).height())
+            text_height += scaled_px(4) + len(meta_lines) * max(scaled_px(16), _font_metrics(app_font(12)).height())
+            date = item.latest_episode_date
+            if not item.is_episode and date and date != 'Unknown date' and not meta.startswith('Latest '):
+                text_height += scaled_px(1) + len(wrapped_text(f'Latest {date}', app_font(11),
+                                         max(1, text_width - scaled_px(14)))) * max(scaled_px(14), _font_metrics(app_font(11)).height())
+            height = max(height, art + scaled_px(24) + text_height)
+        return QSize(self.card_width, height)
+
+    @staticmethod
+    def _metadata(item):
+        meta, tone = item.display_meta or f'{item.episode_count} episodes', 'muted'
+        if item.show_id and item.health in {'error', 'suspended'}:
+            meta = 'Couldn’t reach feed' if item.health == 'error' else 'Unreachable — refresh paused'
+            tone = 'danger'
+        elif item.show_id and item.health == 'partial':
+            meta, tone = 'No playable episodes', 'warning'
+        if item.is_episode:
+            meta = item.author
+        elif item.directory_result and item.latest_episode_date and item.latest_episode_date != 'Unknown date':
+            meta = f'Latest {item.latest_episode_date}'
+        return meta, tone
 
     def action_rect(self, rect: QRect) -> QRect:
         """Hover action button over the artwork's bottom-right corner."""
@@ -625,35 +692,22 @@ class PodcastDelegate(QStyledItemDelegate):
         title_font = app_font(13, QFont.Weight.DemiBold)
         painter.setFont(title_font)
         painter.setPen(QColor(COLORS["text"]))
-        line_height = scaled_px(18)
-        title_rect = QRect(card.x() + pad + 2, art.bottom() + scaled_px(10), card.width() - 2 * pad - 4, line_height * 2)
+        line_height = max(scaled_px(18), painter.fontMetrics().height())
+        title_width = max(1, card.width() - 2 * pad - 4)
+        lines = wrapped_text(item.title, title_font, title_width)
+        title_rect = QRect(card.x() + pad + 2, art.bottom() + scaled_px(10), title_width, line_height * len(lines))
         self._report(index, "title", title_rect)
-        metrics = painter.fontMetrics()
-        lines = _wrap_two_lines(metrics, item.title, title_rect.width(), painter.font().toString())
-        for line_index, line in enumerate(lines):
-            painter.drawText(
-                QRect(title_rect.x(), title_rect.y() + line_index * line_height, title_rect.width(), line_height),
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                line,
-            )
+        paint_text_lines(painter, title_rect, lines, line_height)
 
         painter.setFont(app_font(12))
-        meta_rect = QRect(title_rect.x(), title_rect.bottom() + scaled_px(4), title_rect.width() - scaled_px(14), scaled_px(16))
+        meta, meta_color = self._metadata(item)
+        meta_width = max(1, title_rect.width() - scaled_px(14))
+        meta_lines = wrapped_text(meta, painter.font(), meta_width)
+        meta_line_height = max(scaled_px(16), painter.fontMetrics().height())
+        meta_rect = QRect(title_rect.x(), title_rect.bottom() + scaled_px(4), meta_width, meta_line_height * len(meta_lines))
         self._report(index, "meta", meta_rect)
-        meta = item.display_meta or f"{item.episode_count} episodes"
-        meta_color = COLORS["muted"]
-        if item.show_id and item.health in {"error", "suspended"}:
-            meta = "Couldn’t reach feed" if item.health == "error" else "Unreachable — refresh paused"
-            meta_color = COLORS["danger"]
-        elif item.show_id and item.health == "partial":
-            meta = "No playable episodes"
-            meta_color = COLORS["warning"]
-        if item.is_episode:
-            meta = item.author
-        elif item.directory_result and item.latest_episode_date and item.latest_episode_date != "Unknown date":
-            meta = f"Latest {item.latest_episode_date}"
-        painter.setPen(QColor(meta_color))
-        painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, meta_rect.width()))
+        painter.setPen(QColor(COLORS[meta_color]))
+        paint_text_lines(painter, meta_rect, meta_lines, meta_line_height)
 
         # Freshness line: when a card already leads with its latest date
         # (directory results) or is an episode card, there is nothing to add.
@@ -661,13 +715,11 @@ class PodcastDelegate(QStyledItemDelegate):
         if not item.is_episode and date and date != "Unknown date" and not meta.startswith("Latest "):
             painter.setFont(app_font(11))
             painter.setPen(QColor(COLORS["subtle"]))
-            date_rect = QRect(meta_rect.x(), meta_rect.bottom() + scaled_px(1), meta_rect.width(), scaled_px(14))
+            date_lines = wrapped_text(f'Latest {date}', painter.font(), meta_rect.width())
+            date_height = max(scaled_px(14), painter.fontMetrics().height())
+            date_rect = QRect(meta_rect.x(), meta_rect.bottom() + scaled_px(1), meta_rect.width(), date_height * len(date_lines))
             self._report(index, "date", date_rect)
-            painter.drawText(
-                date_rect,
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                painter.fontMetrics().elidedText(f"Latest {date}", Qt.TextElideMode.ElideRight, date_rect.width()),
-            )
+            paint_text_lines(painter, date_rect, date_lines, date_height)
 
         if item.rank:
             painter.setFont(app_font(11, QFont.Weight.DemiBold))
@@ -758,31 +810,20 @@ def _font_metrics(font):
 
 
 def _wrap_two_lines_uncached(metrics, text: str, width: int):
-    words = text.split()
-    if not words:
-        return [""]
-    if metrics.horizontalAdvance(words[0]) > width:
-        # A single token wider than the whole line: CJK/Thai titles carry no
-        # spaces, so split() hands the entire title over as one "word" and
-        # the word loop below would draw it unelided and hard-clipped —
-        # which design.md forbids. The second line exists; use it, breaking
-        # by characters instead of words.
-        head, tail = _split_wide_token(metrics, words[0], width)
-        remainder = " ".join([tail, *words[1:]]).strip()
-        if not remainder:
-            return [head]
-        return [head, metrics.elidedText(remainder, Qt.TextElideMode.ElideRight, width)]
-    first, rest = "", words
-    for index, word in enumerate(words):
-        candidate = (first + " " + word).strip()
-        if metrics.horizontalAdvance(candidate) > width and first:
-            rest = words[index:]
-            break
-        first = candidate
-        rest = words[index + 1:]
-    if not rest:
-        return [first]
-    return [first, metrics.elidedText(" ".join(rest), Qt.TextElideMode.ElideRight, width)]
+    # Compatibility for older private callers; complete titles now wrap.
+    lines, current = [], ''
+    for word in text.split():
+        candidate = (current + ' ' + word).strip()
+        if current and metrics.horizontalAdvance(candidate) > width:
+            lines.append(current)
+            current = ''
+        while metrics.horizontalAdvance(word) > width:
+            head, word = _split_wide_token(metrics, word, width)
+            lines.append(head)
+        current = (current + ' ' + word).strip()
+    if current:
+        lines.append(current)
+    return lines or ['']
 
 
 class EpisodeDelegate(QStyledItemDelegate):
@@ -815,6 +856,8 @@ class EpisodeDelegate(QStyledItemDelegate):
         self.playing_active = False
         self._snippets: dict[tuple[int, str], str] = {}
         self._wrapped_snippets = {}
+        self._text_layouts = OrderedDict()
+        self._height_floors = OrderedDict()
         self.queued_ids = frozenset()
 
     def base_height(self):
@@ -823,7 +866,7 @@ class EpisodeDelegate(QStyledItemDelegate):
         return scaled_px(self.ROW_HEIGHT + self.SNIPPET_LINE * (max(1, self.SNIPPET_LINES) - 1))
 
     def summary_rect(self, rect):
-        return QRect(rect.x(), rect.y(), rect.width(), self.base_height())
+        return QRect(rect)
 
     def set_playing(self, episode_id: int, active: bool, source: str = ""):
         self.playing_id = episode_id or 0
@@ -845,7 +888,89 @@ class EpisodeDelegate(QStyledItemDelegate):
         )
 
     def sizeHint(self, option, index):
-        return QSize(1, self.base_height())
+        item = index.data(ItemRoles.ITEM) if index is not None and index.isValid() else None
+        if item is None:
+            return QSize(1, self.base_height())
+        view = self.parent()
+        width = view.viewport().width() if hasattr(view, 'viewport') else 640
+        if option is not None and option.rect.width() > 0:
+            width = option.rect.width()
+        return QSize(1, self._text_layout(item, width)['height'])
+
+    def _text_layout(self, item, width):
+        title_font, meta_font = app_font(14, QFont.Weight.DemiBold), app_font(12)
+        remaining = _remaining_text(item)
+        key = (width, title_font.toString(), meta_font.toString(), self.compact, self.reorder,
+               self.SNIPPET_LINES, item.title, item.show, item.published, item.duration, remaining,
+               item.detail if self.compact else '', item.state, bool(item.downloaded_path), item.favorite,
+               self.can_queue(item), self.can_open_show(item))
+        floor_key = (item.episode_id, item.bookmark_id, preview_identity(item), width,
+                     title_font.toString(), meta_font.toString(), self.compact, self.reorder, self.SNIPPET_LINES)
+        found = self._text_layouts.get(key)
+        if found is not None:
+            return dict(found, height=max(found['height'], self._height_floors.get(floor_key, 0)))
+        art = scaled_px(44 if self.compact else 60)
+        left = 2 + scaled_px(26 if self.reorder else 12) + art - 1 + scaled_px(14)
+        reserve = scaled_px(self.PLAY_ZONE + 8)
+        if self.can_queue(item):
+            reserve += scaled_px(30 if self.compact else 36) + scaled_px(8)
+        if item.state not in {'New', 'Unplayed', 'Played', 'Preview'} or item.downloaded_path:
+            reserve += _font_metrics(app_font(11, QFont.Weight.DemiBold)).horizontalAdvance(_badge_text(item)) + scaled_px(36)
+        text_width = min(max(40, width - 5 - reserve - left), scaled_px(MAX_ROW_TEXT_PX))
+        indent = (scaled_px(13) if item.state == 'New' else 0) + (scaled_px(19) if item.favorite else 0)
+        title_lines = wrapped_text(item.title, title_font, max(1, text_width - indent))
+        title_line = max(scaled_px(20), _font_metrics(title_font).height())
+        meta_line = max(scaled_px(16), _font_metrics(meta_font).height())
+        title_top = 3 + scaled_px(12 if self.compact else 11)
+        title_height = title_line * len(title_lines)
+        snippet_top = title_top + title_height + scaled_px(1)
+        snippet_height = 0 if self.compact else scaled_px(self.SNIPPET_LINE) * max(1, self.SNIPPET_LINES)
+        meta_top = (title_top + title_height + scaled_px(1) if self.compact
+                    else snippet_top + snippet_height + scaled_px(2))
+        show_lines, tail_lines, same_line, tail_left = (), (), False, 0
+        if self.compact and self.reorder:
+            tail = remaining or item.duration
+            tail_width = min(text_width, _font_metrics(meta_font).horizontalAdvance(tail))
+            show_width = max(1, text_width - tail_width - (scaled_px(8) if tail else 0))
+            show_lines = wrapped_text(item.show, meta_font, show_width)
+            tail_lines = wrapped_text(tail, meta_font, max(1, tail_width)) if tail else ()
+            tail_left = text_width - tail_width
+            meta_lines = ()
+            meta_height = max(len(show_lines), len(tail_lines)) * meta_line
+        elif self.can_open_show(item):
+            # Integer metrics round down; leave room for fractional glyph advances.
+            show_width = min(text_width, _font_metrics(meta_font).horizontalAdvance(item.show) + 2)
+            show_lines = wrapped_text(item.show, meta_font, max(1, show_width))
+            suffix = '  ·  '.join(part for part in (item.published, remaining or item.duration) if part)
+            decorated = '  ·  ' + suffix if suffix else ''
+            same_line = len(show_lines) == 1 and show_width + _font_metrics(meta_font).horizontalAdvance(decorated) <= text_width
+            tail_left = show_width if same_line else 0
+            tail_lines = wrapped_text(decorated if same_line else suffix, meta_font,
+                                      max(1, text_width - tail_left)) if suffix else ()
+            meta_lines = ()
+            meta_height = (max(len(show_lines), len(tail_lines)) if same_line
+                           else len(show_lines) + len(tail_lines)) * meta_line
+        else:
+            show_width = 0
+            meta = item.detail if self.compact and item.detail else '  ·  '.join(
+                part for part in (item.show if not self.compact else '', item.published, remaining or item.duration) if part)
+            meta_lines = wrapped_text(meta, meta_font, text_width)
+            meta_height = len(meta_lines) * meta_line
+        height = max(self.base_height(), meta_top + meta_height + scaled_px(14))
+        height = max(height, self._height_floors.get(floor_key, 0))
+        self._height_floors[floor_key] = height
+        result = dict(height=height, left=left, width=text_width, indent=indent,
+                      title_top=title_top, title_height=title_height, title_line=title_line, title_lines=title_lines,
+                      snippet_top=snippet_top, snippet_height=snippet_height, meta_top=meta_top,
+                      meta_height=meta_height, meta_line=meta_line, meta_lines=meta_lines,
+                      show_lines=show_lines, show_width=show_width, tail_lines=tail_lines,
+                      same_line=same_line, tail_left=tail_left)
+        self._text_layouts[key] = result
+        if len(self._text_layouts) > 4096:
+            self._text_layouts.popitem(last=False)
+        if len(self._height_floors) > 4096:
+            self._height_floors.popitem(last=False)
+        return result
 
     def helpEvent(self, event, view, option, index):
         """Keep the episode tooltip anchored to the row that owns it."""
@@ -892,21 +1017,9 @@ class EpisodeDelegate(QStyledItemDelegate):
     def show_rect(self, rect, item, text_width=None):
         if not self.can_open_show(item):
             return QRect()
-        row = rect.adjusted(2, 3, -4, -3)
-        left = row.x() + scaled_px(26 if self.reorder else 12)
-        text_left = left + scaled_px(60) - 1 + scaled_px(14)
-        if text_width is None:
-            reserve = scaled_px(self.PLAY_ZONE + 8)
-            if self.can_queue(item):
-                reserve += self.play_rect(rect).width() + scaled_px(8)
-            if item.state not in {"New", "Unplayed", "Played", "Preview"}:
-                reserve += _font_metrics(app_font(11, QFont.Weight.DemiBold)).horizontalAdvance(_badge_text(item)) + scaled_px(36)
-            text_width = min(max(40, row.right() - reserve - text_left), scaled_px(MAX_ROW_TEXT_PX))
-        width = min(text_width, _font_metrics(app_font(12)).horizontalAdvance(item.show))
-        top = row.y() + scaled_px(32)
-        if rect.height() <= self.base_height():
-            top += scaled_px(self.SNIPPET_LINE) * max(1, self.SNIPPET_LINES) - 1 + scaled_px(3)
-        return QRect(text_left, top, width, scaled_px(16))
+        layout = self._text_layout(item, rect.width())
+        return QRect(rect.x() + layout['left'], rect.y() + layout['meta_top'], layout['show_width'],
+                     len(layout['show_lines']) * layout['meta_line'])
 
     def grip_rect(self, rect: QRect) -> QRect:
         row = rect.adjusted(2, 3, -4, -3)
@@ -956,49 +1069,39 @@ class EpisodeDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(art, 8, 8)
             icons.paint(painter, "playing" if self.playing_active else "pause", ARTWORK_LIGHT_INK, art.adjusted(art_size // 4, art_size // 4, -art_size // 4, -art_size // 4), scale)
 
-        text_left = art.right() + scaled_px(14)
+        text_layout = self._text_layout(item, option.rect.width())
+        text_left = option.rect.x() + text_layout['left']
         play_zone = scaled_px(self.PLAY_ZONE + 8)
         if self.can_queue(item):
             play_zone += self.play_rect(option.rect).width() + scaled_px(8)
-        badge_reserve = 0
         state_color = STATE_COLORS.get("Downloaded" if item.downloaded_path else item.state, item.accent)
         show_badge = item.state not in {"New", "Unplayed", "Played", "Preview"} or bool(item.downloaded_path)
-        if show_badge:
-            painter.setFont(app_font(11, QFont.Weight.DemiBold))
-            badge_reserve = painter.fontMetrics().horizontalAdvance(_badge_text(item)) + scaled_px(36)
-        text_right = row.right() - play_zone - badge_reserve
         # Cap the reading column. On a wide window an episode title used a
         # fraction of a very long row and the eye had to track across
         # whitespace to the meta; cards already bound themselves to a column.
-        text_width = min(max(40, text_right - text_left), scaled_px(MAX_ROW_TEXT_PX))
+        text_width = text_layout['width']
 
         title_font = app_font(14, QFont.Weight.DemiBold)
         painter.setFont(title_font)
         painter.setPen(QColor(COLORS["text_strong"] if playing else COLORS["text"]))
-        if self.compact:
-            title_rect = QRect(text_left, row.y() + scaled_px(12), text_width, scaled_px(20))
-            meta_rect = QRect(text_left, row.y() + scaled_px(33), text_width, scaled_px(16))
-            snippet_rect = None
-        else:
-            lines = max(1, self.SNIPPET_LINES)
-            snippet_height = scaled_px(self.SNIPPET_LINE) * lines
-            title_rect = QRect(text_left, row.y() + scaled_px(11), text_width, scaled_px(20))
-            snippet_rect = QRect(text_left, row.y() + scaled_px(32), text_width, snippet_height)
-            meta_rect = QRect(text_left, snippet_rect.bottom() + scaled_px(3), text_width, scaled_px(16))
+        title_rect = QRect(text_left, option.rect.y() + text_layout['title_top'], text_width, text_layout['title_height'])
+        meta_rect = QRect(text_left, option.rect.y() + text_layout['meta_top'], text_width, text_layout['meta_height'])
+        snippet_rect = (None if self.compact else QRect(text_left, option.rect.y() + text_layout['snippet_top'],
+                                                       text_width, text_layout['snippet_height']))
         if item.state == "New":
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["accent"]))
             dot = scaled_px(7)
-            painter.drawEllipse(QRect(title_rect.x(), title_rect.center().y() - dot // 2, dot, dot))
+            painter.drawEllipse(QRect(title_rect.x(), title_rect.y() + text_layout['title_line'] // 2 - dot // 2, dot, dot))
             title_rect.adjust(scaled_px(13), 0, 0, 0)
             painter.setPen(QColor(COLORS["text_strong"] if playing else COLORS["text"]))
         if item.favorite:
             star_side = scaled_px(14)
-            star = QRect(title_rect.x(), title_rect.center().y() - star_side // 2, star_side, star_side)
+            star = QRect(title_rect.x(), title_rect.y() + text_layout['title_line'] // 2 - star_side // 2, star_side, star_side)
             icons.paint(painter, "favorite", COLORS["accent"], star, scale)
             title_rect.adjust(scaled_px(19), 0, 0, 0)
         self._report(index, "title", title_rect)
-        painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(item.title, Qt.TextElideMode.ElideRight, title_rect.width()))
+        paint_text_lines(painter, title_rect, text_layout['title_lines'], text_layout['title_line'])
 
         if snippet_rect is not None:
             self._report(index, "snippet", snippet_rect)
@@ -1010,38 +1113,31 @@ class EpisodeDelegate(QStyledItemDelegate):
 
         painter.setFont(app_font(12))
         painter.setPen(QColor(COLORS["subtle"]))
-        remaining = _remaining_text(item)
-        compact_detail = item.detail if self.compact and item.detail else ""
-        meta = compact_detail or "  ·  ".join(part for part in (item.show if not self.compact else "", item.published, remaining or item.duration) if part)
         self._report(index, "meta", meta_rect)
         if self.compact and self.reorder:
-            duration = remaining or item.duration
-            duration_width = min(meta_rect.width(), painter.fontMetrics().horizontalAdvance(duration))
+            duration_width = max(0, text_width - text_layout['tail_left'])
             duration_rect = QRect(meta_rect.right() - duration_width + 1, meta_rect.y(), duration_width, meta_rect.height())
             show_rect = QRect(meta_rect.x(), meta_rect.y(),
-                              max(0, meta_rect.width() - duration_width - (scaled_px(8) if duration else 0)), meta_rect.height())
+                              text_layout['show_width'], meta_rect.height())
             self._report(index, 'queue-show', show_rect)
             self._report(index, 'queue-duration', duration_rect)
             painter.setPen(QColor(COLORS['muted']))
-            painter.drawText(show_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                             painter.fontMetrics().elidedText(item.show, Qt.TextElideMode.ElideRight, show_rect.width()))
+            paint_text_lines(painter, show_rect, text_layout['show_lines'], text_layout['meta_line'])
             painter.setPen(QColor(COLORS['text']))
-            painter.drawText(duration_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                             painter.fontMetrics().elidedText(duration, Qt.TextElideMode.ElideRight, duration_rect.width()))
+            paint_text_lines(painter, duration_rect, text_layout['tail_lines'], text_layout['meta_line'], Qt.AlignmentFlag.AlignRight)
         elif self.can_open_show(item):
             show_rect = self.show_rect(option.rect, item, text_width)
             painter.setPen(QColor(COLORS['blue']))
-            painter.drawText(show_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                             painter.fontMetrics().elidedText(item.show, Qt.TextElideMode.ElideRight, show_rect.width()))
+            paint_text_lines(painter, show_rect, text_layout['show_lines'], text_layout['meta_line'])
             if hovered:
                 painter.drawLine(show_rect.left(), show_rect.bottom(), show_rect.right(), show_rect.bottom())
-            suffix = '  ·  ' + '  ·  '.join(part for part in (item.published, remaining or item.duration) if part)
-            tail = QRect(show_rect.right() + 1, meta_rect.y(), max(0, text_width - show_rect.width()), meta_rect.height())
+            tail_top = meta_rect.y() + (0 if text_layout['same_line'] else show_rect.height())
+            tail = QRect(meta_rect.x() + text_layout['tail_left'], tail_top,
+                         text_width - text_layout['tail_left'], len(text_layout['tail_lines']) * text_layout['meta_line'])
             painter.setPen(QColor(COLORS['subtle']))
-            painter.drawText(tail, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                             painter.fontMetrics().elidedText(suffix, Qt.TextElideMode.ElideRight, tail.width()))
+            paint_text_lines(painter, tail, text_layout['tail_lines'], text_layout['meta_line'])
         else:
-            painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, text_width))
+            paint_text_lines(painter, meta_rect, text_layout['meta_lines'], text_layout['meta_line'])
 
         if show_badge:
             _badge(painter, row.right() - play_zone - 4, row.center().y() - 10, _badge_text(item), state_color, filled=item.state in {"Downloading", "Error"})
@@ -1077,29 +1173,9 @@ class EpisodeDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _draw_snippet(self, painter: QPainter, rect: QRect, text: str, max_lines: int):
-        """Wrap the description to at most max_lines, eliding the last line."""
-        if max_lines == 1:
-            painter.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                             painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, rect.width()))
-            return
-        metrics = painter.fontMetrics()
-        line_height = scaled_px(self.SNIPPET_LINE)
-        key = (text, painter.font().toString(), rect.width(), max_lines)
-        wrapped = self._wrapped_snippets.get(key)
-        if wrapped is None:
-            wrapped = self._wrap_snippet(text, painter.font(), rect.width(), max_lines)
-            # _snippet gives up to 130 characters a line, which passes 2048 at 16 lines.
-            if len(text) <= max(2048, max_lines * 130):
-                self._wrapped_snippets[key] = wrapped
-                if len(self._wrapped_snippets) > 512:
-                    del self._wrapped_snippets[next(iter(self._wrapped_snippets))]
-        pieces, more = wrapped
-        for row, piece in enumerate(pieces):
-            last = row == len(pieces) - 1
-            if last and more:
-                piece = metrics.elidedText(piece + "…", Qt.TextElideMode.ElideRight, rect.width())
-            line_rect = QRect(rect.x(), rect.y() + row * line_height, rect.width(), line_height)
-            painter.drawText(line_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, piece)
+        """Honor the user's preview line count without shortening each line again."""
+        pieces = wrapped_text(text, painter.font(), rect.width(), max_lines)
+        paint_text_lines(painter, rect, pieces, scaled_px(self.SNIPPET_LINE))
 
     @staticmethod
     def _wrap_snippet(text: str, font, width: int, max_lines: int) -> tuple[list[str], bool]:
@@ -1125,7 +1201,7 @@ class EpisodeDelegate(QStyledItemDelegate):
         # Enough plain text to fill the configured line count; the limit is
         # part of the cache key so a settings change doesn't serve stale
         # short snippets.
-        limit = max(240, self.SNIPPET_LINES * 130)
+        limit = 16384
         # A row is frozen, so its snippet for one limit never changes: keep it
         # on the row and later paints skip the description digest below.
         memo = getattr(item, "_snippet_memo", None)
