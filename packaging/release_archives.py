@@ -268,8 +268,8 @@ def build(output, macos=None, plain=False):
         raise ValueError('Release source inventory must exactly match Git tracking.')
     commit = git('rev-parse', 'HEAD')
     version = tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']['version']
-    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
-        raise ValueError('Release version must be numeric major.minor.patch.')
+    if not re.fullmatch(r'\d+\.\d+(?:\.\d+)?', version):
+        raise ValueError('Release version must be numeric major.minor or major.minor.patch.')
     output = (output or ROOT.parent / 'dists/releases' / version).resolve()
     if output.exists() or output.is_relative_to(ROOT):
         raise ValueError('Use a new release directory outside the source checkout.')

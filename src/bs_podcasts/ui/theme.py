@@ -662,7 +662,7 @@ def stylesheet() -> str:
     }}
     QLineEdit#searchField:hover {{ border-color: {c['muted']}; }}
     QLineEdit {{ placeholder-text-color: {c['subtle']}; }}
-    QLineEdit#searchField:focus {{ border: 1px solid {c['accent']}; background: {c['surface_raised']}; }}
+    QLineEdit#searchField:focus {{ border: 1px solid {c['blue']}; background: {c['surface_raised']}; }}
     QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QKeySequenceEdit {{
         background: {c['surface']}; color: {c['text']};
         border: 1px solid {c['control_border']}; border-radius: {r['sm']}px;
@@ -763,13 +763,14 @@ def stylesheet() -> str:
         color: {c['subtle']}; background: {c['surface']}; border-color: {c['surface']};
     }}
     QPushButton#quietButton {{
-        background: {c['surface_raised']}; border: 1px solid {c['hairline']};
-        border-radius: {r['sm']}px; padding: {sp(7)}px {sp(12)}px; font-weight: 500;
+        background: {c['surface_raised']}; border: 2px solid {c['hairline']};
+        border-radius: {r['sm']}px; padding: {sp(7) - 1}px {sp(12) - 1}px; font-weight: 500;
     }}
     QPushButton#quietButton:hover {{ background: {c['surface_soft']}; border-color: {c['border']}; }}
     QPushButton#quietButton:pressed {{ background: {c['surface']}; }}
-    QPushButton#quietButton:focus {{ border: {focus_ring}; }}
+    QPushButton#quietButton:focus {{ border-color: {c['blue']}; }}
     QPushButton#quietButton:checked {{ color: {c['accent']}; border-color: {c['accent']}; }}
+    QPushButton#quietButton:checked:focus {{ border-color: {c['blue']}; }}
     QPushButton#dangerButton {{
         background: transparent; color: {c['danger']}; border: 1px solid {c['danger']};
         border-radius: {r['sm']}px; padding: {sp(7)}px {sp(12)}px; font-weight: 500;
