@@ -68,6 +68,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStackedWidget,
     QStyle,
+    QStyleOption,
     QTabWidget,
     QTextBrowser,
     QTextEdit,
@@ -2187,6 +2188,12 @@ class HoverBubble(QFrame):
         self.label.setObjectName("seekBubbleText")
         layout.addWidget(self.label)
 
+    def paintEvent(self, _event):
+        option = QStyleOption()
+        option.initFrom(self)
+        painter = QPainter(self)
+        self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, option, painter, self)
+
     def show_at(self, text: str, global_center_x: int, global_top: int):
         # QToolTip needs the escaped wrapper for metadata, while this label
         # always displays plain text. Decode only that exact wrapper.
@@ -2451,13 +2458,21 @@ class SeekSlider(QSlider):
 
 
 class Popover(QFrame):
-    """Small level-2 surface anchored above a button."""
+    """Rounded surface above a button, explicitly painted on the translucent window."""
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
         self.setObjectName("popover")
+        # Drop transient constructor styling so this window inherits its owner.
+        set_local_stylesheet(self, "")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)  # rounded corners, not a square window
+
+    def paintEvent(self, _event):
+        option = QStyleOption()
+        option.initFrom(self)
+        painter = QPainter(self)
+        self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, option, painter, self)
 
     def show_above(self, anchor: QWidget):
         self.adjustSize()

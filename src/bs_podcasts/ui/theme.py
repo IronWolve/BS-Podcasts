@@ -1004,7 +1004,7 @@ def stylesheet() -> str:
     QLabel#toastText {{ color: {c['text_strong']}; }}
     QFrame#seekBubble {{
         background: {c['surface_raised']}; border: 1px solid {c['border']};
-        border-radius: {r['md']}px;
+        border-radius: {r['sm']}px;
     }}
     QLabel#seekBubbleText {{ color: {c['text_strong']}; font-weight: 600; font-size: {small}px; }}
     QLabel#emptyTitle {{ font-size: {TYPE['h2']}px; font-weight: 600; color: {c['text_strong']}; }}
