@@ -1500,7 +1500,7 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         whenever the scale changes."""
         self.root.setSpacing(SPACE['sm'])
         self.chart.setFixedHeight(scaled_px(38))
-        self.secondary_filters_widget.setMinimumHeight(scaled_px(40))
+        self.secondary_filters_widget.layout().setSpacing(SPACE['sm'])
         for combo in (self.category, self.topic):
             fit_combo_width(combo, scaled_px(140), fixed=True)
         if self.header.action is not None:
@@ -1518,6 +1518,10 @@ class PodcastGridPage(BasePage, _ListPageMixin):
         direction = QBoxLayout.Direction.LeftToRight if available >= needed else QBoxLayout.Direction.TopToBottom
         if self._discover_filter_layout.direction() != direction:
             self._discover_filter_layout.setDirection(direction)
+        width = available if direction == QBoxLayout.Direction.TopToBottom else available - self.chart.sizeHint().width() - SPACE['sm']
+        height = self.secondary_filters_widget.layout().heightForWidth(max(1, width))
+        self.secondary_filters_widget.setFixedHeight(max(scaled_px(40), height))
+        self.discover_toolbar.updateGeometry()
 
     def apply_metrics(self):
         super().apply_metrics()

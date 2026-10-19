@@ -931,12 +931,13 @@ class EpisodeDelegate(QStyledItemDelegate):
         if self.compact and self.reorder:
             tail = remaining or item.duration
             tail_width = min(text_width, _font_metrics(meta_font).horizontalAdvance(tail))
-            show_width = max(1, text_width - tail_width - (scaled_px(8) if tail else 0))
+            same_line = not tail or text_width - tail_width - scaled_px(8) >= scaled_px(48)
+            show_width = max(1, text_width - tail_width - (scaled_px(8) if tail else 0)) if same_line else text_width
             show_lines = wrapped_text(item.show, meta_font, show_width)
-            tail_lines = wrapped_text(tail, meta_font, max(1, tail_width)) if tail else ()
-            tail_left = text_width - tail_width
+            tail_lines = wrapped_text(tail, meta_font, max(1, tail_width if same_line else text_width)) if tail else ()
+            tail_left = text_width - tail_width if same_line else 0
             meta_lines = ()
-            meta_height = max(len(show_lines), len(tail_lines)) * meta_line
+            meta_height = (max(len(show_lines), len(tail_lines)) if same_line else len(show_lines) + len(tail_lines)) * meta_line
         elif self.can_open_show(item):
             # Integer metrics round down; leave room for fractional glyph advances.
             show_width = min(text_width, _font_metrics(meta_font).horizontalAdvance(item.show) + 2)
@@ -1116,9 +1117,12 @@ class EpisodeDelegate(QStyledItemDelegate):
         self._report(index, "meta", meta_rect)
         if self.compact and self.reorder:
             duration_width = max(0, text_width - text_layout['tail_left'])
-            duration_rect = QRect(meta_rect.right() - duration_width + 1, meta_rect.y(), duration_width, meta_rect.height())
+            show_height = len(text_layout['show_lines']) * text_layout['meta_line']
+            duration_top = meta_rect.y() + (0 if text_layout['same_line'] else show_height)
+            duration_rect = QRect(meta_rect.right() - duration_width + 1, duration_top, duration_width,
+                                  len(text_layout['tail_lines']) * text_layout['meta_line'])
             show_rect = QRect(meta_rect.x(), meta_rect.y(),
-                              text_layout['show_width'], meta_rect.height())
+                              text_layout['show_width'], show_height)
             self._report(index, 'queue-show', show_rect)
             self._report(index, 'queue-duration', duration_rect)
             painter.setPen(QColor(COLORS['muted']))

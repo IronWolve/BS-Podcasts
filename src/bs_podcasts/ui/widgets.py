@@ -1046,7 +1046,10 @@ class PageHeader(QFrame):
         for index in range(layout.count()):
             widget = layout.itemAt(index).widget()
             if widget is not None and widget is not self.search and not widget.isHidden():
-                available -= max(widget.minimumWidth(), widget.sizeHint().width())
+                # Measure against the same status budget after cold start,
+                # resize and theme changes, not its previous fitted width.
+                available -= (scaled_px(320) if widget is self.status_slot else
+                              max(widget.minimumWidth(), widget.sizeHint().width()))
                 visible += 1
         available -= layout.spacing() * (visible - 1)
         title_width = self.title_label.fontMetrics().horizontalAdvance(self._title_text)
@@ -1078,8 +1081,8 @@ class PageHeader(QFrame):
         self.status_slot.setFixedHeight(scaled_px(36))
         self.search.setMinimumWidth(scaled_px(150))
         self.search.setMaximumWidth(scaled_px(240))
-        self._fit_status_width()
         self._fit_search_width()
+        self._fit_status_width()
 
 
 class FlowLayout(QLayout):
