@@ -1,3 +1,3 @@
 """BS Podcasts desktop application."""
 
-__version__ = "9.31"
+__version__ = "9.32"

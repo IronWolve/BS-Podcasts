@@ -8,8 +8,8 @@ Listen, download and organize your podcasts on **Windows, macOS and Linux**.
 Keep your subscriptions, episode details and listening queue together, with
 playback controls always within reach.
 
-**9.31:** Improved persistent caching, streaming stability and GUI responsiveness,
-with compact episode rows and selection details shown in the side panel.
+**9.32:** More readable titles and refresh messages, smoother scrolling through
+long episodes, and clearer podcast details and tray controls.
 
 ## Screenshots
 
