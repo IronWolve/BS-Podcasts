@@ -203,6 +203,22 @@ def _application_modules(checks, errors):
         errors[name] = _exception_text(exc)
 
 
+def _decode_audio(engine, root):
+    """Exercise demux/decoding with a tiny generated clip and null audio only."""
+    samples = b'\x00\x01' * 2400
+    header = (b'RIFF' + struct.pack('<I', 36 + len(samples)) + b'WAVEfmt '
+              + struct.pack('<IHHIIHH', 16, 1, 1, 12000, 24000, 2, 16)
+              + b'data' + struct.pack('<I', len(samples)))
+    codecs_seen = []
+    engine._player.observe_property('audio-codec', lambda name, value: codecs_seen.append(value) if value else None)
+    with TemporaryDirectory(prefix='decode-', dir=root) as folder:
+        clip = Path(folder) / 'probe.wav'
+        clip.write_bytes(header + samples)
+        with engine._player.prepare_and_wait_for_event('end-file', timeout=15):
+            engine._player.loadfile(str(clip), 'replace', pause='no')
+    return bool(codecs_seen)
+
+
 def main() -> int:
     started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -213,7 +229,8 @@ def main() -> int:
     from .config import cache_dir
     workspace_tmp = args.self_check_dir or Path(os.environ.get("TMPDIR") or cache_dir()/'selfcheck')
     workspace_tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
-    checks = {"Python >=3.14.7": sys.version_info[:3] >= (3,14,7)}
+    minimum_python = (3,13,15) if sys.platform == 'linux' else (3,14,7)
+    checks = {'Supported Python version': sys.version_info[:3] >= minimum_python}
     checks['retired metadata dependency absent'] = importlib.util.find_spec('mutagen') is None
     errors = {}
     for encoding in ('gb2312', 'gbk', 'big5', 'shift_jis', 'euc_jp', 'euc_kr'):
@@ -247,6 +264,11 @@ def main() -> int:
         engine = MpvEngine(ao='null', vo='null')
         try:
             checks['native core initialized'] = bool(engine._player.mpv_version)
+            try:
+                checks['generated audio decodes through null output'] = _decode_audio(engine, workspace_tmp)
+            except Exception as exc:
+                checks['generated audio decodes through null output'] = False
+                errors['generated audio decodes through null output'] = _exception_text(exc)
             if sys.platform.startswith('linux') or getattr(sys,'frozen',False):
                 numeric = engine._player.ffmpeg_version.split('-')[0]
                 checks['patched bundled FFmpeg'] = tuple(int(x) for x in numeric.split('.')) >= (9,0,2)

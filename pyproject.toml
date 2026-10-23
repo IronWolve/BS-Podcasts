@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bs-podcasts"
-version = "9.32"
+version = "9.40"
 description = "A wide, mobile-inspired desktop podcast player"
 readme = "README.md"
-requires-python = ">=3.14.7"
+requires-python = ">=3.13.15"
 dependencies = [
-  "PySide6>=6.11.2,<7",
+  "PySide6_Essentials==6.9.3; sys_platform == 'linux' and python_version < '3.14'",
+  "PySide6>=6.11.2,<7; sys_platform != 'linux' or python_version >= '3.14'",
   "python-mpv>=1.0.8,<2",
   "requests>=2.34.2,<3",
   "urllib3>=2.8.0,<3",

@@ -8,8 +8,8 @@ Listen, download and organize your podcasts on **Windows, macOS and Linux**.
 Keep your subscriptions, episode details and listening queue together, with
 playback controls always within reach.
 
-**9.32:** More readable titles and refresh messages, smoother scrolling through
-long episodes, and clearer podcast details and tray controls.
+**9.40:** Broader Linux and older-CPU compatibility, complete tray episode
+details without scrolling, and a leaner application with unused code removed.
 
 ## Screenshots
 
@@ -49,7 +49,7 @@ Choose the latest package for your operating system from the repository's
 | --- | --- |
 | Windows x64 | Extract the ZIP and open `BS Podcasts.exe`. Keep the complete `BS Podcasts` folder together, including `_internal`. |
 | macOS — Apple Silicon | Extract the ZIP and open `BS Podcasts.app`. Requires macOS 14 or later. |
-| Linux x86-64 | Make the `.AppImage` executable, then open it. Python and Qt are included; no Python setup is required. This build requires glibc 2.43 or newer. |
+| Linux x86-64 | Make the `.AppImage` executable, then open it. Python and Qt are included; no Python setup is required. Requires glibc 2.35 or newer; the compatibility build also targets older Intel/AMD x86-64 processors. |
 
 The Windows package is unsigned. The macOS package is not notarized, so your
 operating system may display a warning. Only run packages you trust. Close the
