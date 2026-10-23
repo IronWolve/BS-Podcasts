@@ -1,9 +1,10 @@
 """Optional system tray controls using the packaged original mark."""
 import time
+from datetime import datetime
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, QTimer, Qt
 from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QScrollArea, QSizePolicy, QSystemTrayIcon, QVBoxLayout, QWidget, QWidgetAction
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QSizePolicy, QSystemTrayIcon, QVBoxLayout, QWidget, QWidgetAction
 
 from ..assets import BRANDING_DIR
 from ..config import APP_NAME
@@ -50,6 +51,18 @@ def _tray_icon() -> QIcon:
 
 def _shorten(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:max(0, limit - 1)] + "…"
+
+
+def _publication_date(value):
+    if isinstance(value, str) and value:
+        try:
+            date = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            month = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')[date.month - 1]
+            return f'{month} {date.day}, {date.year}'
+        except ValueError:
+            pass
+    return 'Date unavailable'
 
 
 def _menu_icon(name: str) -> QIcon:
@@ -118,7 +131,7 @@ class TrayController:
         menu.setObjectName("trayMenu")
         menu.setToolTipsVisible(True)
         set_local_stylesheet(menu, _compact_menu_style())
-        # The now-playing header: the title, then the podcast and the progress as quieter lines.
+        # Playback progress stays separate from the visible title/podcast/date header.
         self.now_playing = QAction("Nothing playing", menu)
         self.now_playing.setEnabled(False)
         self.now_playing_show = QAction("", menu)
@@ -198,19 +211,14 @@ class TrayController:
 
     def _build_header(self, menu):
         header = QFrame(menu)
+        self._header_frame = header
         header.setObjectName('trayHeader')
         row = QHBoxLayout(header)
         row.setContentsMargins(scaled_px(10), scaled_px(4), scaled_px(8), scaled_px(4))
         row.setSpacing(scaled_px(6))
         self._header_icon = QLabel(header)
         row.addWidget(self._header_icon, 0, Qt.AlignmentFlag.AlignTop)
-        self._header_scroll = QScrollArea(header)
-        self._header_scroll.setObjectName('traySummary')
-        self._header_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._header_scroll.setWidgetResizable(True)
-        self._header_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._header_scroll.setStyleSheet('QScrollArea#traySummary, QScrollArea#traySummary > QWidget, QScrollArea#traySummary > QWidget > QWidget { background: transparent; border: 0; }')
-        content = QWidget()
+        content = self._header_content = QWidget(header)
         labels = QVBoxLayout(content)
         labels.setContentsMargins(0, 0, 0, 0)
         labels.setSpacing(scaled_px(2))
@@ -222,19 +230,26 @@ class TrayController:
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
             labels.addWidget(label)
-        self._header_scroll.setWidget(content)
-        row.addWidget(self._header_scroll)
-        action = QWidgetAction(menu)
+        row.addWidget(content)
+        action = self._header_action = QWidgetAction(menu)
         action.setDefaultWidget(header)
         menu.addAction(action)
         self._update_header(('Nothing playing', '', ''), '', menu.font())
 
     def _update_header(self, texts, glyph, font):
-        changed_track = texts[:2] != getattr(self, '_header_identity', None)
-        self._header_identity = texts[:2]
         width = scaled_px(_MENU_TEXT_WIDTH)
-        self._header_scroll.setFixedWidth(width)
+        key = (texts, glyph, font.key(), width, COLORS['text'], COLORS['muted'], COLORS['accent'])
+        if key == getattr(self, '_header_key', None):
+            return
+        self._header_key = key
+        menu = self._header_frame.parentWidget()
+        anchor = menu.geometry().bottomRight() if menu.isVisible() else None
+        self._header_frame.layout().setContentsMargins(scaled_px(10), scaled_px(4), scaled_px(8), scaled_px(4))
+        self._header_frame.layout().setSpacing(scaled_px(6))
+        self._header_content.layout().setSpacing(scaled_px(2))
+        self._header_content.setFixedWidth(width)
         height = 0
+        visible = 0
         for index, (label, text) in enumerate(zip(self._header_labels, texts)):
             if label.text() != text:
                 label.setText(text)
@@ -245,13 +260,32 @@ class TrayController:
                 label.setFont(face)
             set_local_stylesheet(label, 'color: ' + COLORS['text' if index == 0 else 'muted'] + '; background: transparent;')
             if text:
-                height += max(label.fontMetrics().height(), label.heightForWidth(width - scaled_px(16))) + scaled_px(2)
-        self._header_scroll.setFixedHeight(max(1, min(height, scaled_px(64))))
+                label.ensurePolished()
+                height += max(label.fontMetrics().height(), label.heightForWidth(width))
+                visible += 1
+        height += max(0, visible - 1) * scaled_px(2)
+        self._header_content.setFixedHeight(max(1, height))
         self._header_icon.setFixedSize(scaled_px(16), scaled_px(16))
         self._header_icon.setPixmap(icons.themed_icon(glyph, 'accent', 16).pixmap(scaled_px(16), scaled_px(16)) if glyph else QPixmap())
         self._header_icon.setVisible(bool(glyph))
-        if changed_track:
-            self._header_scroll.verticalScrollBar().setValue(0)
+        self._header_frame.layout().activate()
+        self._header_frame.adjustSize()
+        self._header_action.changed.emit()
+        if anchor is not None:
+            # QWidgetAction's new size reaches QMenu through a queued layout
+            # request; position it after that request, before the next paint.
+            QTimer.singleShot(0, menu, lambda: self._anchor_header(menu, anchor))
+
+    @staticmethod
+    def _anchor_header(menu, anchor):
+        if not menu.isVisible():
+            return
+        menu.adjustSize()
+        screen = QApplication.screenAt(anchor) or menu.screen()
+        area = screen.availableGeometry()
+        left = max(area.left(), min(anchor.x() - menu.width() + 1, area.right() - menu.width() + 1))
+        top = max(area.top(), min(anchor.y() - menu.height() + 1, area.bottom() - menu.height() + 1))
+        menu.move(left, top)
 
     @property
     def available(self):
@@ -346,7 +380,8 @@ class TrayController:
             set_local_stylesheet(self._menu, spacing)
             self._menu.ensurePolished()
         font = self._menu.font() if part("_menu") is not None else QApplication.font()
-        font_key = (font.key(), scaled_px(_MENU_TEXT_WIDTH))
+        date = _publication_date(getattr(snapshot, 'published_at', '')) if source else ''
+        font_key = (font.key(), scaled_px(_MENU_TEXT_WIDTH), date)
         if texts == part("_texts") and font_key == part("_menu_font_key"):
             return
         self._texts = texts
@@ -362,7 +397,7 @@ class TrayController:
                 line.setToolTip(text)
                 line.setVisible(bool(text))
         if hasattr(self, '_header_labels'):
-            self._update_header((title, show, progress), toggle_icon if source else '', font)
+            self._update_header((title, show, date), toggle_icon if source else '', font)
         self.toggle.setText(toggle_label)
         self.toggle.setIcon(_menu_icon(toggle_icon))
         self._toggle_action = toggle_action

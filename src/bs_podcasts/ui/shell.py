@@ -6294,6 +6294,7 @@ class MainWindow(QMainWindow):
             item.duration_seconds,
             item.artwork_path,
             autoplay=True,
+            published_at=getattr(item, 'published_at', ''),
         )
 
     def _play_bookmark(self, item):
@@ -6564,6 +6565,7 @@ class MainWindow(QMainWindow):
                 (lambda: self._playback_command(PlaybackAction.LOAD_STREAM,
                     snapshot.source, snapshot.title, snapshot.show_title,
                     snapshot.duration, snapshot.artwork_path, autoplay=True,
+                    published_at=getattr(snapshot, 'published_at', ''),
                 ))
             )
             self._notify(f"Playback failed: {snapshot.message}", "error", "Retry", retry)

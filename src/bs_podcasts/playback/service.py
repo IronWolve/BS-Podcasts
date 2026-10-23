@@ -85,6 +85,7 @@ class PlaybackSnapshot:
     # Set only on the snapshot handed to listeners for the episode that just
     # became played. The live snapshot is cleared back to 0 without a second emit.
     completed_episode_id: int = 0
+    published_at: str = ""
 
 
 logger = logging.getLogger("bs_podcasts")
@@ -426,6 +427,7 @@ class PlaybackService:
                 show_id=episode.show_id,
                 title=episode.title,
                 show_title=episode.show_title,
+                published_at=getattr(episode, 'published_at', ''),
                 source=source,
                 position=start,
                 duration=float(episode.duration_seconds),
@@ -507,6 +509,7 @@ class PlaybackService:
         artwork_path: str = "",
         autoplay: bool = True,
         cancelled=None,
+        published_at: str = "",
     ):
         """Play a URL-only episode without adding it to the library.
 
@@ -558,6 +561,7 @@ class PlaybackService:
                 state=PlaybackState.LOADING,
                 title=title or "Podcast episode",
                 show_title=show_title,
+                published_at=published_at,
                 source=source,
                 duration=max(0.0, float(duration)),
                 speed=1.0,
@@ -2172,6 +2176,7 @@ class PlaybackService:
             show_id=episode.show_id,
             title=episode.title,
             show_title=episode.show_title,
+            published_at=getattr(episode, 'published_at', ''),
             source=episode.downloaded_path or episode.media_url,
             position=self._recovery_position_for(episode),
             duration=float(episode.duration_seconds),
