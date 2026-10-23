@@ -3086,12 +3086,6 @@ class SettingsPage(BasePage):
         if persist and changed:
             self.setting_changed.emit('ui.settings_category', category)
 
-    def _scroll_to_setting(self, card: QWidget):
-        title = next((title for title, item in self._setting_sections if item is card), '')
-        category = next((name for name, titles in self.CATEGORIES.items() if title in titles), 'General')
-        self.set_category(category)
-        self.settings_scroll.ensureWidgetVisible(card, 0, 24)
-
     def load_downloads(self, auto: bool, limit: int, delete_played: bool = False, download_first: bool = False):
         with quiet_signals(self.auto_download, self.auto_download_limit, self.delete_played, self.download_first):
             self.auto_download.setChecked(auto)

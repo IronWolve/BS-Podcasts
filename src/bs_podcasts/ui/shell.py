@@ -1687,15 +1687,6 @@ class MainWindow(QMainWindow):
         # shared UI pool is busy with first-paint reads at exactly this time.
         self._run_read(read_stale, self._start_quiet_refresh, "scheduled-refresh", pool=self.refresh_jobs)
 
-    @staticmethod
-    def _refresh_cutoff(interval_minutes, now):
-        """last_refresh values older than this are due. The tick repeats every interval and a show's
-        last_refresh is stamped when its fetch finished, a little after the tick that started it; without
-        slack a show refreshed at T+δ still read as fresh at T+I and waited for T+2I, so feeds refreshed at
-        half the configured rate. The slack is half the interval, at most five minutes."""
-        interval = max(0, int(interval_minutes)) * 60
-        return now - interval + min(300, interval // 2)
-
     def _scheduled_refresh(self):
         if self.library is None or self._refresh_batch[0] or getattr(self.refresh, "refresh", None) is None or self._background_paused():
             return

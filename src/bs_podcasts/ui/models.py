@@ -758,40 +758,6 @@ class PodcastDelegate(QStyledItemDelegate):
         painter.restore()
 
 
-def _split_wide_token(metrics, word: str, width: int):
-    """Largest character prefix of `word` that fits `width`, plus the rest.
-
-    Binary search on the pixel width; always yields at least one character
-    so a pathologically narrow column cannot loop forever.
-    """
-    low, high = 1, len(word)
-    while low < high:
-        middle = (low + high + 1) // 2
-        if metrics.horizontalAdvance(word[:middle]) <= width:
-            low = middle
-        else:
-            high = middle - 1
-    return word[:low], word[low:]
-
-
-def _wrap_two_lines(metrics, text: str, width: int, font_key: str = ""):
-    # Podcast cards repeatedly paint the same title at the same snapped card
-    # width. The caller supplies the font identity; metric values also account
-    # for a device-metric change. `font_key` stays optional for older callers.
-    key = (text, int(width), font_key, metrics.height(), metrics.ascent(),
-           metrics.descent(), metrics.leading(), metrics.horizontalAdvance("MW"))
-    cached = _wrapped_titles.get(key)
-    if cached is not None:
-        _wrapped_titles.move_to_end(key)
-        return list(cached)
-    lines = _wrap_two_lines_uncached(metrics, text, width)
-    _wrapped_titles[key] = tuple(lines)
-    if len(_wrapped_titles) > 4096:
-        _wrapped_titles.popitem(last=False)
-    return lines
-
-
-_wrapped_titles = OrderedDict()
 _font_metrics_cache = OrderedDict()
 
 
@@ -807,23 +773,6 @@ def _font_metrics(font):
     else:
         _font_metrics_cache.move_to_end(key)
     return metrics
-
-
-def _wrap_two_lines_uncached(metrics, text: str, width: int):
-    # Compatibility for older private callers; complete titles now wrap.
-    lines, current = [], ''
-    for word in text.split():
-        candidate = (current + ' ' + word).strip()
-        if current and metrics.horizontalAdvance(candidate) > width:
-            lines.append(current)
-            current = ''
-        while metrics.horizontalAdvance(word) > width:
-            head, word = _split_wide_token(metrics, word, width)
-            lines.append(head)
-        current = (current + ' ' + word).strip()
-    if current:
-        lines.append(current)
-    return lines or ['']
 
 
 class EpisodeDelegate(QStyledItemDelegate):
@@ -855,7 +804,6 @@ class EpisodeDelegate(QStyledItemDelegate):
         self.playing_source = ""
         self.playing_active = False
         self._snippets: dict[tuple[int, str], str] = {}
-        self._wrapped_snippets = {}
         self._text_layouts = OrderedDict()
         self._height_floors = OrderedDict()
         self.queued_ids = frozenset()
@@ -1180,26 +1128,6 @@ class EpisodeDelegate(QStyledItemDelegate):
         """Honor the user's preview line count without shortening each line again."""
         pieces = wrapped_text(text, painter.font(), rect.width(), max_lines)
         paint_text_lines(painter, rect, pieces, scaled_px(self.SNIPPET_LINE))
-
-    @staticmethod
-    def _wrap_snippet(text: str, font, width: int, max_lines: int) -> tuple[list[str], bool]:
-        flat = text.replace("\n", " ")
-        # Line offsets count UTF-16 units, not Python characters: slicing the
-        # str with them garbled every line after an emoji.
-        units = flat.encode("utf-16-le", "surrogatepass")
-        layout = QTextLayout(flat, font)
-        layout.beginLayout()
-        pieces = []
-        while len(pieces) < max_lines:
-            line = layout.createLine()
-            if not line.isValid():
-                break
-            line.setLineWidth(width)
-            start, length = line.textStart(), line.textLength()
-            pieces.append(units[2 * start:2 * (start + length)].decode("utf-16-le", "ignore").strip())
-        more = layout.createLine().isValid()
-        layout.endLayout()
-        return pieces, more
 
     def _snippet(self, item) -> str:
         # Enough plain text to fill the configured line count; the limit is
