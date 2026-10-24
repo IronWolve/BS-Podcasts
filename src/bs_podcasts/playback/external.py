@@ -35,6 +35,16 @@ class ExternalPlayerEngine:
     def set_event_handler(self, handler):
         self._handler = handler
 
+    def set_buffer_profile(self, value):
+        pass  # the system player does its own buffering
+
+    def prepare_load(self):
+        # No native core and no event generations: the events this engine sends
+        # carry none, which the service accepts. The guard is what the service's
+        # old stand-in for this call (a pause) amounted to: refuse once shut down.
+        self._guard()
+        return None
+
     def load(self, source: str, start_position: float = 0.0, autoplay: bool = True):
         self._guard()
         # os.startfile and xdg-open resolve whatever they are handed, and

@@ -270,7 +270,13 @@ def ensure_media_source(value, what: str = "Media source", allow_file_url: bool 
     a *remote* UNC path that `os.startfile` will launch through the shell's
     open verb, and that is exactly what feed content must never reach.
     Schemeless `//` and `\\` authorities are the same kind of path.
-    `allow_unc` is the only opt-in; nothing in this app passes it.
+    `allow_unc` is the only opt-in to a remote authority or a network path.
+    One caller passes it: the native engine's own last check (`MpvEngine.load`),
+    because a downloaded episode lives in a folder the user chose, which can be
+    a network share, and the playback service hands that recorded path over
+    unscreened. A source taken from a feed or an import reaches the engine only
+    after the service screened it without this flag; the importer, the
+    external player and every other caller refuse UNC.
     """
     text = str(value or "").strip()
     if not text:

@@ -5,7 +5,7 @@ import logging
 import os
 import uuid
 from threading import Lock, RLock
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from ..privacy import redact
 
@@ -71,6 +71,59 @@ class EngineEvent:
     kind: str
     value: Any = None
     generation: int | None = None
+
+
+@runtime_checkable
+class Engine(Protocol):
+    """Everything PlaybackService asks of an engine (MpvEngine, LazyMpvEngine, ExternalPlayerEngine).
+
+    There are no optional methods: an engine with nothing to do for one
+    (the external player has no buffer or native core) implements it as a
+    no-op, so the service never has to probe for it. `capabilities` says which
+    of the controls below do anything; the ones an engine lacks may raise
+    PlaybackUnavailable, and the service only calls them when the capability
+    is set. `LazyMpvEngine.warm` is an extra the application's startup looks
+    for itself; the service never calls it.
+
+    Events reach the handler as EngineEvent(kind, value, generation). An engine
+    that stamps a generation returns it from `prepare_load`, and the service
+    drops events carrying any other; an engine without generations returns None.
+    """
+
+    capabilities: EngineCapabilities
+
+    def set_event_handler(self, handler: Callable[[EngineEvent], None]) -> None: ...
+
+    def set_buffer_profile(self, value: str) -> None:
+        """Stage the next file's cache policy (see BUFFER_PROFILES)."""
+
+    def prepare_load(self) -> int | None:
+        """Retire the outgoing file's events before a new load; returns its generation, or None."""
+
+    def load(self, source: str, start_position: float = 0.0, autoplay: bool = True) -> None: ...
+
+    def unload(self) -> None:
+        """Release the current file and its cache but keep the engine usable."""
+
+    def play(self) -> None: ...
+
+    def pause(self) -> None: ...
+
+    def seek_absolute(self, seconds: float) -> None: ...
+
+    def skip(self, seconds: float) -> None: ...
+
+    def set_speed(self, speed: float) -> None: ...
+
+    def set_volume(self, volume: float) -> None: ...
+
+    def set_ab_repeat(self, start: float, end: float) -> None: ...
+
+    def clear_ab_repeat(self) -> None: ...
+
+    def set_silence_trim(self, level: str) -> None: ...
+
+    def shutdown(self) -> None: ...
 
 
 class MpvEngine:
@@ -256,9 +309,12 @@ class MpvEngine:
         self._live()
         from ..urlguard import UnsafeUrl, ensure_media_source, is_web_url
         if not is_web_url(source):
-            # The service decides which local files and shares may play; the
-            # native loader must still never see a concat, edl or other
-            # scheme, so only web URLs, local paths and file URLs pass.
+            # UNC is allowed on purpose: the downloads folder is the user's choice
+            # and may be a network share, and the service hands over its recorded
+            # path unscreened. Everything that came from a feed or an import was
+            # already screened there without allow_unc. What the native loader
+            # must still never see is a concat, edl or other scheme, so only web
+            # URLs, local paths and file URLs pass.
             try:
                 ensure_media_source(source, "Playback source", allow_file_url=True, allow_unc=True)
             except UnsafeUrl as exc:
