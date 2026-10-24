@@ -9,20 +9,18 @@ methods, and is told what to show or what to tell playback through the `on_downl
 `DownloadView`, which are held back (in order) while no window is bound.
 """
 import logging
-import threading
 import time
-import weakref
-from collections import deque
 from datetime import datetime, timezone
 from typing import NamedTuple, Protocol
 
-from PySide6.QtCore import QObject, QTimer, Signal, Qt
+from PySide6.QtCore import QTimer
 
 from ..domain import DownloadState
 from ..downloads.auto import DEFAULT_HOURLY_LIMIT, HOURLY_LIMIT_RANGE, AutoDownloadQueue
-from ..jobs import JobResult, JobStatus
+from ..jobs import JobStatus
 from ..services.library import bounded_int
 from ..urlguard import is_web_url
+from .base import Coordinator
 
 _log = logging.getLogger("bs_podcasts")
 
@@ -70,22 +68,19 @@ class DownloadView(Protocol):
         """`started` automatic downloads began; `waiting` more follow within the hourly limit."""
 
 
-class DownloadCoordinator(QObject):
+class DownloadCoordinator(Coordinator):
     """Download bookkeeping, the play-after-download wait and auto-downloads for the whole application session."""
-    _completed = Signal(object)
 
     def __init__(self, library, downloads, playback, jobs, download_jobs=None, play_download_jobs=None,
                  inline=False, parent=None):
-        super().__init__(parent)
+        super().__init__(jobs, inline, parent)
         self.library = library
         self.downloads = downloads  # the DownloadService
         self.playback = playback
-        self.jobs = jobs
         # Transfers run on their own pool; without one they share the general pool.
         self.download_jobs = download_jobs or jobs
         # A play intent's download runs on a pool of its own, so it never waits behind a queue of background ones.
         self.play_download_jobs = play_download_jobs
-        self.inline = inline  # no job runner: reads run on the Qt thread (the private checks only)
         # The job that currently owns each episode's download. A newer one supersedes it (a play intent takes
         # over a ticket still waiting in line), and the superseded job's completion is then ignored.
         self._tickets = {}
@@ -94,68 +89,15 @@ class DownloadCoordinator(QObject):
         self._play_after_request = 0
         self._auto_pending = set()  # shows that imported episodes while background work was paused
         self._auto_queue = AutoDownloadQueue()  # candidates waiting for the hourly budget
-        self._view = None
-        self._parked = deque()  # (callback, args) for a view that was not there to hear them
-        self._pending = set()
-        self._lock = threading.Lock()
-        self._closed = False
-        # Reads that keep one active request and one replaceable latest per key (the window's coalescing).
-        self._read_tokens = {}
-        self._read_active = {}  # key -> (token, future)
-        self._read_waiting = {}  # key -> (work, apply, token)
         # Owned here, so the release of waiting candidates survives the window that queued them.
         self._pump_timer = QTimer(self)
         self._pump_timer.setSingleShot(True)
         self._pump_timer.timeout.connect(self._pump_auto_downloads)
-        self._completed.connect(self._on_completed, Qt.ConnectionType.QueuedConnection)
-
-    # ------------------------------------------------------------- the view
-    def bind(self, view):
-        """Show downloads in `view`, which is told what it missed since the last one let go. None parks
-        everything: a window is being replaced, and a toast shown on the old one would be lost with it."""
-        self._view = weakref.ref(view) if view is not None else None
-        if view is not None and self._parked:
-            QTimer.singleShot(0, self, self._drain)
-
-    def release(self, view, closing=False):
-        """Unbind `view`, but only if the coordinator still points at it: on a theme rebuild the replacement
-        has already bound itself when the old window closes, and unbinding it would park every later event.
-        `closing` is a real Quit: nothing more is started and queued transfers are cancelled."""
-        current = self._view() if self._view is not None else None
-        if current is None or current is view:
-            self._view = None
-        if closing:
-            self.shutdown()
 
     def shutdown(self):
-        """The application is quitting. Idempotent."""
-        self._closed = True
+        """The application is quitting: the release timer stops and queued transfers are cancelled. Idempotent."""
         self._pump_timer.stop()
-        self._parked.clear()
-        self._read_waiting.clear()
-        with self._lock:
-            pending = tuple(self._pending)
-        for future in pending:
-            future.cancel()
-
-    def _live_view(self):
-        return self._view() if self._view is not None else None
-
-    def _tell(self, callback, *args):
-        view = self._live_view()
-        if view is None or self._parked:
-            if not self._closed:  # a drain is pending, or will be when a window binds: keep the order
-                self._parked.append((callback, args))
-            return
-        getattr(view, callback)(*args)
-
-    def _drain(self):
-        while self._parked:
-            view = self._live_view()
-            if view is None:
-                return
-            callback, args = self._parked.popleft()
-            getattr(view, callback)(*args)
+        super().shutdown()
 
     # --------------------------------------------------------------- queries
     @property
@@ -178,11 +120,6 @@ class DownloadCoordinator(QObject):
     def auto_release_armed(self):
         """True while the timer that releases waiting candidates is running."""
         return self._pump_timer.isActive()
-
-    def pending(self):
-        """True while a transfer or an auto-download read has not come back."""
-        with self._lock:
-            return any(not future.done() for future in self._pending)
 
     def background_paused(self):
         return self.library is not None and self.library.setting("background.paused", "0") == "1"
@@ -371,95 +308,9 @@ class DownloadCoordinator(QObject):
         if candidates:
             self._tell("on_auto_downloads_started", len(candidates), len(self._auto_queue))
 
-    # ------------------------------------------------------------------ reads
-    def _read(self, key, work, apply, *, coalesce=True):
-        """Run `work()` on a worker, then `apply(result)` on the Qt thread. A coalescing key keeps one active
-        request and one replaceable latest, so only the newest request's result is applied."""
-        if self._closed:
-            return
-        if self.jobs is None:
-            if not self.inline:
-                raise RuntimeError("A read needs a job runner: pass jobs, or inline=True in a check")
-            apply(work())
-            return
-        token = None
-        if coalesce:
-            token = self._read_tokens.get(key, 0) + 1
-            self._read_tokens[key] = token
-            if key in self._read_active:
-                self._read_waiting[key] = (work, apply, token)
-                future = self._read_active[key][1]
-                if future is not None:
-                    future.cancel()
-                return
-        self._submit_read(work, apply, key, token)
-
-    def _submit_read(self, work, apply, key, token):
-        if token is not None:
-            self._read_active[key] = (token, None)
-
-        def current_work():
-            # An obsolete job may still be in the shared executor's queue.
-            if token is not None and (self._closed or self._read_tokens.get(key) != token):
-                return None
-            return work()
-
-        try:
-            future = self.jobs.submit(current_work)
-        except Exception as exc:
-            self._completed.emit(("read", (key, token, apply), JobResult(JobStatus.ERROR, message=str(exc))))
-            return
-        if token is not None:
-            self._read_active[key] = (token, future)
-        self._track(future, "read", (key, token, apply))
-
-    def _on_read(self, identifier, result):
-        key, token, apply = identifier
-        if token is not None:
-            active = self._read_active.get(key)
-            if active is not None and active[0] == token:
-                self._read_active.pop(key)
-                waiting = self._read_waiting.pop(key, None)
-                if waiting is not None and self._read_tokens.get(key) == waiting[2]:
-                    self._submit_read(waiting[0], waiting[1], key, waiting[2])
-        if token is not None and self._read_tokens.get(key) != token:
-            return
-        if result.status in {JobStatus.OK, JobStatus.EMPTY}:
-            # EMPTY is a read whose work returned None.
-            apply(result.value)
-        else:
-            # Background bookkeeping nobody asked for on screen only logs it.
-            _log.warning("Background read %s failed: %s", key, result.message or "The library could not be read.")
-
-    def _track(self, future, kind, identifier):
-        """Hand a future's outcome back on the Qt thread as one completion tagged `kind`; an exception
-        (a cancelled future included) becomes an error result."""
-        with self._lock:
-            self._pending.add(future)
-
-        def finished(done):
-            with self._lock:
-                self._pending.discard(done)
-            try:
-                result = done.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            try:
-                self._completed.emit((kind, identifier, result))
-            except RuntimeError:
-                pass  # the application is tearing down; nothing is left to receive it
-
-        future.add_done_callback(finished)
-
     # ------------------------------------------------------------ completions
-    def _on_completed(self, payload):
-        kind, identifier, result = payload
-        if self._closed:
-            return
-        if kind == "read":
-            self._on_read(identifier, result)
-        else:
-            self._on_download(identifier, result)
+    def _dispatch(self, kind, identifier, result):
+        self._on_download(identifier, result)
 
     def _on_download(self, identifier, result):
         if not isinstance(identifier, tuple) or len(identifier) != 2:

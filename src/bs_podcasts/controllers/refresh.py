@@ -7,16 +7,14 @@ widget: the window asks through methods and properties, and is told what to show
 callbacks of `RefreshView`, which are held back (in order) while no window is bound.
 """
 import logging
-import threading
-import weakref
-from collections import deque
 from typing import NamedTuple, Protocol
 
-from PySide6.QtCore import QObject, QTimer, Signal, Qt
+from PySide6.QtCore import QTimer
 
 from ..domain import Health
 from ..jobs import JobResult, JobStatus
 from ..services.library import bounded_int
+from .base import Coordinator
 
 _log = logging.getLogger("bs_podcasts")
 # The refresh pool's size: more in flight would only queue behind it.
@@ -67,15 +65,13 @@ class RefreshView(Protocol):
         """The last show came back: clear banners, reload once, summarize."""
 
 
-class RefreshCoordinator(QObject):
+class RefreshCoordinator(Coordinator):
     """Feed-refresh bookkeeping and scheduling for the whole application session."""
-    _completed = Signal(object)
 
     def __init__(self, library, refresh, jobs, refresh_jobs=None, parent=None):
-        super().__init__(parent)
+        super().__init__(jobs, parent=parent)
         self.library = library
         self.refresh = refresh  # the RefreshService
-        self.jobs = jobs
         # Batch refreshes run on their own pool so UI reads never queue behind network fetches;
         # without one they share the general pool.
         self.refresh_jobs = refresh_jobs or jobs
@@ -94,67 +90,19 @@ class RefreshCoordinator(QObject):
         self._quiet = False
         self._catch_up = False  # a Pause dropped feeds of the running batch
         self._resume_requests = set()  # user-requested shows a Pause took out of a batch
-        self._view = None
-        self._parked = deque()  # (callback, args) for a view that was not there to hear them
-        self._pending = set()
-        self._lock = threading.Lock()
-        self._closed = False
         # The scheduler's candidate read: one at a time, the latest request wins.
-        self._read_token = 0
-        self._read_active = None
-        self._read_future = None
-        self._read_waiting = None
+        self._due_token = 0
+        self._due_active = None
+        self._due_future = None
+        self._due_waiting = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.scheduled_refresh)
-        self._completed.connect(self._on_completed, Qt.ConnectionType.QueuedConnection)
-
-    # ------------------------------------------------------------- the view
-    def bind(self, view):
-        """Show progress in `view`, which is told what it missed since the last one let go. None parks
-        everything: a window is being replaced, and a toast shown on the old one would be lost with it."""
-        self._view = weakref.ref(view) if view is not None else None
-        if view is not None and self._parked:
-            QTimer.singleShot(0, self, self._drain)
-
-    def release(self, view, closing=False):
-        """Unbind `view`, but only if the coordinator still points at it: on a theme rebuild the replacement
-        has already bound itself when the old window closes, and unbinding it would park every later event.
-        `closing` is a real Quit: nothing more is started, queued fetches are cancelled and the timer stops."""
-        current = self._view() if self._view is not None else None
-        if current is None or current is view:
-            self._view = None
-        if closing:
-            self.shutdown()
 
     def shutdown(self):
-        """The application is quitting. Idempotent."""
-        self._closed = True
+        """The application is quitting: the timer stops and queued fetches are dropped. Idempotent."""
         self._timer.stop()
         self._waiting.clear()
-        self._parked.clear()
-        with self._lock:
-            pending = tuple(self._pending)
-        for future in pending:
-            future.cancel()
-
-    def _live_view(self):
-        return self._view() if self._view is not None else None
-
-    def _tell(self, callback, *args):
-        view = self._live_view()
-        if view is None or self._parked:
-            if not self._closed:  # a drain is pending, or will be when a window binds: keep the order
-                self._parked.append((callback, args))
-            return
-        getattr(view, callback)(*args)
-
-    def _drain(self):
-        while self._parked:
-            view = self._live_view()
-            if view is None:
-                return
-            callback, args = self._parked.popleft()
-            getattr(view, callback)(*args)
+        super().shutdown()
 
     # --------------------------------------------------------------- queries
     @property
@@ -187,11 +135,6 @@ class RefreshCoordinator(QObject):
 
     def is_manual_in_flight(self, show_id):
         return show_id in self._manual_in_flight
-
-    def pending(self):
-        """True while a fetch or the scheduler's read has not come back."""
-        with self._lock:
-            return any(not future.done() for future in self._pending)
 
     def interval_minutes(self):
         return bounded_int(self.library.setting("refresh.interval_minutes", "60"), 60, 0, 24 * 60)
@@ -235,38 +178,38 @@ class RefreshCoordinator(QObject):
             return library.refresh_candidates(self.interval_minutes() if minutes is None else minutes,
                                               smart=library.setting('refresh.smart', '1') == '1')
 
-        self._read_token += 1
-        request = (self._read_token, pool, work)
-        if self._read_active is not None:
-            self._read_waiting = request
-            if self._read_future is not None:
-                self._read_future.cancel()
+        self._due_token += 1
+        request = (self._due_token, pool, work)
+        if self._due_active is not None:
+            self._due_waiting = request
+            if self._due_future is not None:
+                self._due_future.cancel()
             return
         self._start_read(*request)
 
     def _start_read(self, token, pool, work):
         def current_work():
             # An obsolete job may still be in the pool's queue.
-            if self._closed or self._read_token != token:
+            if self._closed or self._due_token != token:
                 return None
             return work()
 
-        self._read_active = token
+        self._due_active = token
         try:
-            self._read_future = future = pool.submit(current_work)
+            self._due_future = future = pool.submit(current_work)
         except Exception as exc:
-            self._read_active = self._read_future = None
+            self._due_active = self._due_future = None
             _log.warning("Background read scheduled-refresh could not start: %s", exc)
             return
         self._track(future, "candidates", token)
 
     def _on_candidates(self, token, result):
-        if self._read_active == token:
-            self._read_active = self._read_future = None
-            waiting, self._read_waiting = self._read_waiting, None
-            if waiting is not None and self._read_token == waiting[0]:
+        if self._due_active == token:
+            self._due_active = self._due_future = None
+            waiting, self._due_waiting = self._due_waiting, None
+            if waiting is not None and self._due_token == waiting[0]:
                 self._start_read(*waiting)
-        if self._read_token != token:
+        if self._due_token != token:
             return
         if result.status in {JobStatus.OK, JobStatus.EMPTY}:
             self._start_quiet(result.value)
@@ -389,31 +332,7 @@ class RefreshCoordinator(QObject):
         self._track(future, "refresh", (show_id, batch, generation))
         return True
 
-    def _track(self, future, kind, identifier):
-        """Hand a future's outcome back on the Qt thread as one completion tagged `kind`; an exception
-        (a cancelled future included) becomes an error result."""
-        with self._lock:
-            self._pending.add(future)
-
-        def finished(done):
-            with self._lock:
-                self._pending.discard(done)
-            try:
-                result = done.result()
-            except Exception as exc:
-                result = JobResult(JobStatus.ERROR, message=str(exc))
-            try:
-                self._completed.emit((kind, identifier, result))
-            except RuntimeError:
-                pass  # the application is tearing down; nothing is left to receive it
-
-        future.add_done_callback(finished)
-
-    # ------------------------------------------------------------ completions
-    def _on_completed(self, payload):
-        kind, identifier, result = payload
-        if self._closed:
-            return
+    def _dispatch(self, kind, identifier, result):
         if kind == "candidates":
             self._on_candidates(identifier, result)
         else:

@@ -47,18 +47,15 @@ from ..config import APP_NAME, ISSUES_URL, RELEASES_URL, RELEASES_API_URL, app_v
 from ..logging_setup import log_path
 from ..domain import DownloadState, FeedData, FeedEpisodeData, Health
 from ..domain.times import format_hours_minutes, format_media_time
-from ..directories.base import CandidateList
-from ..directories.catalog import CACHE_SECONDS as DIRECTORY_CACHE_SECONDS
-from ..directories.persistent import PersistentDirectoryCache, PersistentFeedDates
 from ..feeds import parser as feed_parser
 from ..downloads import AutomaticCleanupSkipped
 from ..downloads.auto import DEFAULT_HOURLY_LIMIT as AUTO_HOURLY_DEFAULT, HOURLY_LIMIT_RANGE as AUTO_HOURLY_RANGE
 from ..jobs import JobResult, JobRunner, JobStatus
 from ..jobs.commands import CommandQueue
+from ..controllers.discover import Cover, DiscoverCoordinator, PeekFeed, Tints, latest_episode as _latest_episode, newest_item_feed
 from ..controllers.downloads import DownloadCoordinator
 from ..controllers.refresh import RefreshCoordinator
 from ..services.library import LibraryService, bounded_float, bounded_int
-from ..services.preview_cache import FeedResultCache, with_retained_size
 from ..urlguard import is_web_url
 from ..privacy import feed_label, redact
 from ..data.database import is_corruption_error
@@ -157,7 +154,7 @@ _MONTH_ABBREVIATIONS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", 
 class ViewHandoff:
     """The view state one window hands the next: a theme rebuild, or the saved view at launch.
     `saved` is JSON-safe and is the only part written to ui.view_state. `live` holds objects the new window
-    takes over as they are: the previews, the Discover cache and items, and the business bridge and state."""
+    takes over as they are: the Discover items, and the business bridge and state."""
     saved: dict
     live: dict
 
@@ -165,14 +162,6 @@ class ViewHandoff:
 def _item_key(value):
     """A saved list-row key as a tuple, or None when it is not one."""
     return tuple(value) if isinstance(value, (list, tuple)) and all(isinstance(part, (str, int)) for part in value) else None
-
-
-class PeekFeed(FeedData):
-    """A FeedData holding only the newest item, from FeedFetcher.peek_latest."""
-
-
-def _newest_item_feed(title, published_at):
-    return PeekFeed(title="", episodes=(FeedEpisodeData("peek", title, published_at=published_at),))
 
 
 # The window filters every event the application delivers (tooltip hints are
@@ -225,27 +214,10 @@ def feed_limit_message() -> str:
             "Subscribe to save progress, queue and download.")
 
 
-def _fetch_feed_preview(fetcher, feed_url, checkpoint=lambda: None):
-    """Fetch and parse one feed as a preview, on a worker. The details pane and
-    the newest-date scan's fallback both run this, so they cannot drift apart.
-    `checkpoint` runs between the request and the parse (a deadline check)."""
-    from ..feeds.parser import parse_feed
-
-    response = fetcher.fetch(feed_url, reuse_recent=True)
-    checkpoint()
-    feed = with_retained_size(parse_feed(response.content, base_url=response.final_url))
-    _latest_episode(feed)
-    return feed
-
-
-def _latest_episode(feed):
-    """The feed's newest episode, found once and kept on the feed. A Discover
-    apply merges it into every card whose feed is cached, and a cached feed
-    can hold thousands of episodes."""
-    if not hasattr(feed, "_preview_latest"):
-        latest = max(feed.episodes, key=lambda episode: episode.published_at or "") if feed.episodes else None
-        object.__setattr__(feed, "_preview_latest", latest)
-    return feed._preview_latest
+def discover_tints():
+    """The cover tinting Discover's workers use. It is the pixmap module's, which the coordinator may not import."""
+    return Tints(prime=lambda: sample_accents(()),
+                 probe=lambda path: (dominant_color(path, compute=True), artwork_accent_token(path)))
 
 
 def _job_add(jobs, future):
@@ -363,12 +335,12 @@ class MainWindow(QMainWindow):
                                 'sort', 'scroll', 'scroll_units', 'current', 'selected_count',
                                 'podcast_offset', 'podcast_limit', 'episode_anchor')
 
-    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None, inline_work=False, refresh_coordinator=None, download_coordinator=None):
+    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None, inline_work=False, refresh_coordinator=None, download_coordinator=None, discover_coordinator=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self._adopt_services(library, jobs, refresh, directory, playback, downloads, listening, download_jobs,
                              refresh_jobs, network_jobs, commands, artwork_jobs, play_download_jobs, inline_work,
-                             view_state, refresh_coordinator, download_coordinator)
+                             view_state, refresh_coordinator, download_coordinator, discover_coordinator)
         self.setObjectName("mainWindow")
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(scaled_px(760), scaled_px(600))
@@ -387,10 +359,18 @@ class MainWindow(QMainWindow):
         self._business_bridge.bind(self)
         self.refresh_coordinator.bind(self)
         self.download_coordinator.bind(self)
+        if not self._view_restore_queued:
+            self._bind_discover()
+
+    def _bind_discover(self):
+        """Show Discover's outcomes here. A window that restores a saved view binds only once the restore has put
+        the page back as it was (see `_restore_view_state`): an outcome that arrived first would be written over
+        by the restored rows and summary."""
+        self.discover.bind(self)
 
     def _adopt_services(self, library, jobs, refresh, directory, playback, downloads, listening, download_jobs,
                         refresh_jobs, network_jobs, commands, artwork_jobs, play_download_jobs, inline_work, view_state,
-                        refresh_coordinator, download_coordinator):
+                        refresh_coordinator, download_coordinator, discover_coordinator):
         """The services and worker pools this window drives, each with its fallback."""
         self.library = library
         self._incoming_view_state = view_state
@@ -431,6 +411,10 @@ class MainWindow(QMainWindow):
         # Download tickets, a play-after-download wait and the auto-download queue outlive this window likewise.
         self.download_coordinator = download_coordinator or DownloadCoordinator(
             library, downloads, playback, jobs, self.download_jobs, play_download_jobs, inline=inline_work, parent=self)
+        # Directory requests, covers, feed previews and the Newest date scan outlive this window too: a request
+        # in flight when the window is rebuilt is answered to the next one.
+        self.discover = discover_coordinator or DiscoverCoordinator(
+            library, refresh, directory, jobs, self.network_jobs, self.artwork_jobs, discover_tints(), parent=self)
 
     def _init_state(self, view_state):
         """Every field the handlers read, with its starting value, and the timers that drive the window."""
@@ -457,32 +441,11 @@ class MainWindow(QMainWindow):
         # The show behind a Retry on the Podcasts page error banner.
         self._podcast_banner_show_id = 0
         self._local_import_error = None
-        self._discover_operation = ""
-        self._directory_generation = 0
-        self._directory_future = None
-        self._directory_waiting = None
-        self._directory_cancel = threading.Event()
-        self._discover_snapshot_cache = PersistentDirectoryCache()
-        self._discover_date_cache = PersistentFeedDates()
-        self._discover_dates_force = False
-        self._directory_artwork_waiting = []
-        self._directory_artwork_active = set()
-        self._directory_artwork_completed = set()
-        self._discover_value = ""
-        self._discover_limit = 30
-        self._discover_loading = False
-        self._discover_exhausted = False
-        self._discover_result_count = 0
-        self._discover_displayed_key = None
-        self._discover_retry_request = None
         self._discover_visited = bool(view_state and view_state.saved.get("discover_visited"))
-        self._previews = FeedResultCache()
-        self._preview_pending = set()
+        self._view_restore_queued = False  # a saved view is put back once the library has loaded
         # The selected card's feed is requested once the selection rests, so
         # stepping through cards does not queue one download per card passed.
-        self._preview_futures = {}
         self._preview_wanted = ""
-        self._preview_retries = {}
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(300)
@@ -494,26 +457,11 @@ class MainWindow(QMainWindow):
         self._context_timer.setSingleShot(True)
         self._context_timer.setInterval(CONTEXT_SETTLE_MS)
         self._context_timer.timeout.connect(self._flush_context_item)
-        self._discover_newest_pending = set()
-        self._discover_newest_waiting = []
-        self._discover_newest_active = set()
-        self._discover_newest_cancel = threading.Event()
-        self._discover_newest_generation = 0
-        self._discover_newest_futures = {}
+        # The Newest sort's scan itself belongs to the coordinator; these are the rows and text it will merge.
         self._discover_newest_updates = {}
         self._discover_newest_cards = {}
-        self._discover_newest_total = 0
-        self._discover_newest_done = 0
-        self._discover_newest_errors = []
         self._discover_newest_summary = ""
-        self._discover_newest_beyond = 0
-        self._newest_dates = OrderedDict()
         self._discover_scan_toast = False
-        self._discover_scan_cancelled = False
-        # Completed directory results by (operation, value): switching
-        # between For You / charts / categories re-applies instantly instead
-        # of re-fetching; the header Refresh button forces a rescan.
-        self._discover_cache = {}
         self._preview_episodes_url = ""
         self._pending_episodes_url = ""
         self._back_stack = []
@@ -1139,6 +1087,7 @@ class MainWindow(QMainWindow):
         self._back_stack.clear()
         self._update_navigation_controls()
         if state is not None:
+            self._view_restore_queued = True
             self._reload_callbacks.append(lambda: self._restore_view_state(state))
 
     def _save_layout(self):
@@ -1215,16 +1164,13 @@ class MainWindow(QMainWindow):
             "discover_sort": self.discover_page.discover_sort_key(),
             "discover_controls": (self.discover_page.chart.currentIndex(), self.discover_page.category.currentText(), self.discover_page.topic.currentText()),
             "discover_summary": self.discover_page.result_summary.text(),
-            "discover_loading": self._discover_loading,
+            "discover_loading": self.discover.loading,
             # Operation and value; a chart or topic value becomes a list in JSON.
-            "discover_request": [self._discover_operation, self._discover_value],
+            "discover_request": [self.discover.operation, self.discover.value],
         }
+        # The previews, the completed results and the request on screen stay with the coordinator.
         live = {
-            "previews": OrderedDict(self._previews),
             "discover_items": list(self.discover_page.all_items),
-            "discover_cache": dict(self._discover_cache),
-            "discover_request": (self._discover_operation, self._discover_value,
-                                 self._discover_limit, self._discover_exhausted),
             "business_bridge": self._business_bridge,
             "business_state": {name: getattr(self, name) for name in self._BUSINESS_STATE},
         }
@@ -1249,8 +1195,10 @@ class MainWindow(QMainWindow):
             limits = (EPISODES_PAGE_SIZE,
                       max(HISTORY_PAGE_SIZE, int(state.get("history_limit", HISTORY_PAGE_SIZE))))
         except (TypeError, ValueError, OverflowError):
+            self._bind_discover()
             return
         if not 0 <= target < self.page_count:
+            self._bind_discover()
             return
         hero = hero if 0 <= hero < 2**63 else 0
         limits = (min(limits[0], max(EPISODES_PAGE_SIZE, getattr(self, '_episode_total', 0))),
@@ -1259,18 +1207,14 @@ class MainWindow(QMainWindow):
             self._history_limit = limits[1]
             self._request_reload(lambda: self._restore_view_state(handoff))
             return
-        self._previews.update(live.get("previews", {}))
-        self._discover_cache.update(live.get("discover_cache", {}))
         if "discover_items" in live:
             self.discover_page.set_items(live["discover_items"])
-        if "discover_request" in live:
-            (self._discover_operation, self._discover_value,
-             self._discover_limit, self._discover_exhausted) = live["discover_request"]
-            self._discover_displayed_key = (self._discover_operation, repr(self._discover_value))
+            self.discover.shown(self.discover.key(self.discover.operation, self.discover.value),
+                                len(live["discover_items"]))
         else:
             request = self._saved_directory_request(state.get("discover_request"))
             if request is not None:
-                self._discover_operation, self._discover_value = request
+                self.discover.adopt_request(*request)
         controls = state.get("discover_controls")
         if (isinstance(controls, (tuple, list)) and len(controls) == 3
                 and isinstance(controls[0], int) and isinstance(controls[1], str) and isinstance(controls[2], str)):
@@ -1285,6 +1229,10 @@ class MainWindow(QMainWindow):
             page.set_discover_summary(state.get("discover_summary", ""))
             with quiet_signals(page):
                 page.set_discover_sort(state.get("discover_sort", "rank"))
+        # The page is as the last window left it: what Discover held back meanwhile (a request that finished
+        # during the rebuild) is shown on top of that now.
+        self._bind_discover()
+        state["discover_carried"] = "discover_items" in live  # a rebuild, not a saved view read from disk
         self._pending_view_restore = state
         self._restoring_view = True
         try:
@@ -1381,12 +1329,21 @@ class MainWindow(QMainWindow):
         on_discover = self.pages.currentIndex() == PAGE_DISCOVER
         # A request cut short by the last quit, or a restored Discover page
         # with no results (they are not saved): load the saved view's own
-        # request. An unknown request must not run as an empty search.
+        # request. An unknown request must not run as an empty search. A request that was running when the
+        # window was rebuilt was not cut short: the coordinator kept it going, and its outcome comes to this window.
         resume = self.directory is not None and self.jobs is not None and (
             (on_discover and not self.discover_page.all_items)
-            or (state.get("discover_loading") and self._discover_visited))
-        if resume and self._discover_operation:
-            self._start_directory_request(self._discover_operation, self._discover_value)
+            or (state.get("discover_loading") and self._discover_visited and not state.get("discover_carried")))
+        if resume and (self.discover.loading or self.discover.outcome_held):
+            # The last window's request was carried across the rebuild by the coordinator: its outcome arrives
+            # here (or is about to, held back until this window bound), so asking again would only throw the
+            # work away.
+            if self.discover.loading:
+                if not self.discover_page.all_items:
+                    self.discover_page.set_loading(True)
+                self.discover_page.set_load_more_state(False, loading=True)
+        elif resume and self.discover.operation:
+            self._start_directory_request(self.discover.operation, self.discover.value)
         elif resume and on_discover:
             self._show_for_you()
         else:
@@ -1395,7 +1352,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _saved_directory_request(saved):
         """The (operation, value) a saved view state names, or None. Only a
-        request `_directory_request` understands is taken back from disk."""
+        request `DiscoverCoordinator._candidates` understands is taken back from disk."""
         if not isinstance(saved, (list, tuple)) or len(saved) != 2 or not isinstance(saved[0], str):
             return None
         operation, value = saved
@@ -1559,8 +1516,9 @@ class MainWindow(QMainWindow):
                  for item in page.all_items if item.artwork_path}
         # Completed Discover results re-apply from this cache when the user switches back; their covers must
         # survive the prune too, or the switch re-fetches them and each re-fetch repaints from scratch.
-        for _stamp, _limit, items in self._discover_cache.values():
-            paths.update(item.artwork_path for item in items if getattr(item, 'artwork_path', ''))
+        for _stamp, _limit, items in self.discover.cached_results():
+            # Entries are (candidate, cached cover path) pairs, not rows with an artwork_path.
+            paths.update(path for _candidate, path in items if path)
         if self.playback is not None and self.playback.snapshot.artwork_path:
             paths.add(self.playback.snapshot.artwork_path)
         return paths
@@ -1810,7 +1768,7 @@ class MainWindow(QMainWindow):
         if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
         playback = self.playback
-        self._previews.clear()
+        self.discover.clear_previews()
         # Recent Discover searches are text the user typed; the reset removes
         # them with the snapshots they were cached under (the dialog says so).
         self._clear_discover_search_history()
@@ -2170,7 +2128,7 @@ class MainWindow(QMainWindow):
         delete_files = dialog.delete_files.isChecked()
         confirmed_paths = [path for path, _size in preview.get("files", ())] if delete_files else []
         preview = dict(preview)
-        preview['cached_feed'] = self._previews.get(show.feed_url)
+        preview['cached_feed'] = self.discover.preview(show.feed_url)
         preview['visible_rows'] = tuple(self.episode_page.all_items) if self._hero_show_id == show_id else ()
         # Episode IDs are never reused (the stable-ID sequences); dropping the
         # whole fetched-once memory just forgets the removed show's episodes
@@ -4384,7 +4342,7 @@ class MainWindow(QMainWindow):
         # of this podcast would flash the initials placeholder ("a letter").
         card = self._preview_card(feed_url)
         artwork_path = card.artwork_path if card is not None and card.artwork_path else ""
-        feed = self._previews.get(feed_url)
+        feed = self.discover.preview(feed_url)
         if self._preview_episodes_url == feed_url:
             feed = getattr(self, '_preview_page_feed', feed)
 
@@ -4954,7 +4912,7 @@ class MainWindow(QMainWindow):
         elif podcast.feed_url:
             menu.addAction(icons.themed_icon("add", "text", 16), "Subscribe", lambda: self._subscribe_url(podcast.feed_url))
             menu.addAction(icons.themed_icon("episodes", "text", 16), "Show episodes", lambda: self._show_preview_episodes(podcast.feed_url))
-            preview = self._previews.get(podcast.feed_url)
+            preview = self.discover.preview(podcast.feed_url)
             website = (preview.website_url if preview else "") or podcast.website_url
             if website or podcast.directory_url:
                 menu.addSeparator()
@@ -4965,7 +4923,7 @@ class MainWindow(QMainWindow):
         # Links live together at the bottom of every podcast menu.
         website = podcast.website_url
         if not website and podcast.feed_url:
-            preview = self._previews.get(podcast.feed_url)
+            preview = self.discover.preview(podcast.feed_url)
             website = preview.website_url if preview else ""
         if website or podcast.feed_url:
             menu.addSeparator()
@@ -4998,7 +4956,7 @@ class MainWindow(QMainWindow):
         if episode.show_id and self.library is not None:
             return self._stored_show(episode.show_id)
         feed_url = self._preview_episodes_url
-        preview = self._previews.get(feed_url) if feed_url else None
+        preview = self.discover.preview(feed_url) if feed_url else None
         return SimpleNamespace(
             title=getattr(preview, "title", "") or episode.show,
             website_url=getattr(preview, "website_url", ""),
@@ -5038,7 +4996,7 @@ class MainWindow(QMainWindow):
                     # The row's "Podcast feed" stand-in is display text, not an author.
                     item = replace_item(item, author=source.author or "")
             elif item.feed_url:
-                source = self._previews.get(item.feed_url)
+                source = self.discover.preview(item.feed_url)
             self._exec_dialog(PodcastInfoDialog(item, source, self))
 
     def _show_hero_information(self):
@@ -5051,7 +5009,7 @@ class MainWindow(QMainWindow):
         feed_url = self._preview_episodes_url
         if not feed_url:
             return
-        feed = self._previews.get(feed_url)
+        feed = self.discover.preview(feed_url)
         card = next((item for item in self.discover_page.all_items if item.feed_url == feed_url), None)
         if card is None and feed is not None:
             card = ShowRow(
@@ -5408,9 +5366,9 @@ class MainWindow(QMainWindow):
         repository = self.library.repository if self.library is not None else None
         episode_id = getattr(item, "episode_id", 0)
         show_id = getattr(item, "show_id", 0)
-        generation = self._directory_generation
+        generation = self.discover.generation
         feed_url = getattr(item, "feed_url", "") or (self._preview_episodes_url if not episode_id else "")
-        preview = self._previews.get(feed_url)
+        preview = self.discover.preview(feed_url)
         hinted_url = getattr(item, "artwork_url", "") or getattr(preview, "artwork_url", "")
 
         def work():
@@ -5440,8 +5398,9 @@ class MainWindow(QMainWindow):
 
         def apply(result):
             url, path, accent, token = result
-            self._on_directory_artwork("artwork-retry", (generation, url),
-                JobResult(JobStatus.OK, value=(path, accent, True, token)))
+            self.on_discover_cover(url, self.discover.note_cover(generation, url, path), Cover(path, accent, True, token))
+            if self.discover.covers_idle:
+                self.on_discover_covers_idle()
             self._request_reload()
             current = self.context.current_item()
             if isinstance(item, EpisodeRow):
@@ -6504,7 +6463,7 @@ class MainWindow(QMainWindow):
             return
         if snapshot.episode_id is None:
             if snapshot.source:
-                feeds = tuple(self._previews.values())
+                feeds = tuple(self.discover.previews.values())
                 shown = getattr(self, '_preview_page_feed', None)
                 if shown is not None and not any(feed is shown for feed in feeds):
                     feeds = (*feeds, shown)
@@ -7207,7 +7166,7 @@ class MainWindow(QMainWindow):
     def _clear_discover_search_history(self):
         self._discover_search_history = []
         self._save_discover_search_history()
-        self._discover_snapshot_cache.clear()
+        self.discover.clear_saved()
 
     def _show_discover_search_history(self):
         menu = self._create_discover_search_history_menu()
@@ -7314,44 +7273,17 @@ class MainWindow(QMainWindow):
         self.discover_page.set_discover_summary(f"Loading {category} › {topic}…")
         self._start_directory_request("topic", (category, topic))
 
-    DISCOVER_CACHE_SECONDS = DIRECTORY_CACHE_SECONDS
-    # How long a feed's newest date, read by the Newest sort, answers a rescan.
-    NEWEST_DATE_SECONDS = 3600
-    NEWEST_DATE_ENTRIES = 2000
-    # Cards whose feed one Newest scan reads (the Result depth default is 200).
-    NEWEST_SCAN_LIMIT = 200
-
     def _start_directory_request(self, operation: str, value, force: bool = False):
-        self._discover_dates_force = force
-        key = (operation, repr(value))
-        retained_limit = self._discover_limit if (
-            force and self._discover_displayed_key == key and self.discover_page.all_items
-        ) else 0
-        self._directory_cancel.set()
-        self._directory_cancel = threading.Event()
-        self._directory_generation += 1
-        self._directory_waiting = None
-        self._directory_artwork_waiting.clear()
-        self._directory_artwork_completed.clear()
+        cached = self.discover.start(operation, value, force=force)
         # Results from a previous newest-date scan may still arrive, but they
         # no longer belong to the new directory view.
-        self._stop_discover_newest_workers()
-        self._discover_newest_pending.clear()
-        self._discover_newest_waiting.clear()
-        self._discover_newest_active.clear()
         self._discover_newest_updates.clear()
-        self._discover_newest_total = 0
-        self._discover_newest_done = 0
-        self._discover_newest_errors = []
         self._discover_newest_summary = ""
-        self._discover_scan_cancelled = False
         if self._discover_scan_toast:
             # A new directory view abandons the scan; don't leave a sticky
             # progress toast orphaned at the bottom.
             self._discover_scan_toast = False
             self.toast.dismiss_owner("discover-scan")
-        self._discover_operation = operation
-        self._discover_value = value
         if self.discover_page.chart.currentData() == "explore":
             if operation == "recommend":
                 scope_label = "For You"
@@ -7367,35 +7299,8 @@ class MainWindow(QMainWindow):
             if action is not None:
                 action.setToolTip(f"Refresh {scope_label}")
                 action.setAccessibleName(f"Refresh {scope_label}")
-        # Search paints a fast first page, then auto-continues to the full
-        # directory cap in the background (see the result apply); the limit
-        # is per request, so laddering 30→60→90 just re-downloaded the list.
-        self._discover_limit = retained_limit or (min(50, self._discover_maximum_for(operation)) if operation != "chart" else 30)
-        self._discover_exhausted = False
-        self._discover_result_count = 0
-        self._discover_retry_request = None
-        if force:
-            self._discover_cache.pop(key, None)
-            self._newest_dates.clear()
-            # The UI cache is only the outer layer: browse results never
-            # expired and charts held a 900 s TTL underneath, so an explicit
-            # Refresh re-fetched the same stale list from the directory
-            # layer. Refresh means refresh. A search reads neither of those
-            # caches, so it must not empty them for the next category or chart.
-            if operation != "search" and hasattr(self.directory, "invalidate"):
-                self.directory.invalidate()
-        cached = self._discover_cache.get(key)
-        if cached is not None and time.monotonic() - cached[0] < self.DISCOVER_CACHE_SECONDS:
-            # Serve the completed result through the normal apply path: the
-            # subscribed/playing overlays are recomputed, artwork paths are
-            # already local, and no network or worker is touched.
-            cached_limit, cached_value = cached[1], cached[2]
-            self._discover_limit = cached_limit
-            self._discover_loading = True
+        if cached:
             self.discover_page.set_load_more_state(False, loading=True)
-            self._emit_completed(
-                ("directory", (self._directory_generation, (operation, value, cached_limit), False), JobResult(JobStatus.OK, value=cached_value))
-            )
             return
         if not force:
             self.discover_page.set_items([])
@@ -7404,66 +7309,32 @@ class MainWindow(QMainWindow):
             # Keep the current view visible while an explicit refresh runs.
             self.discover_page.set_loading(False)
         self.discover_page.set_load_more_state(False, loading=True)
-        self._submit_directory(operation, value, self._discover_limit)
-
-    def _search_depth(self) -> int:
-        raw = self.library.setting("discover.search_limit", "200") if self.library is not None else "200"
-        try:
-            return max(50, min(200, int(raw)))
-        except ValueError:
-            return 200
-
-    def _discover_maximum_for(self, operation: str) -> int:
-        # Only the sources' real ceilings: the chart API serves at most 200
-        # (measured; 250 → HTTP 400) and one catalog query caps at 200.
-        # Browse and For You merge several queries, so they carry no app cap
-        # and end when a pull returns nothing new. The directory layer fixes
-        # the size of each query and cannot page, so they stop at that size;
-        # the summary says so when they do.
-        if operation in {"chart", "search", "topic"}:
-            return 200
-        return 100000
-
-    def _discover_autoload_target(self, operation: str) -> int:
-        # How much loads by itself; the Result depth setting (default 200).
-        # Scroll or Load more continues past it up to the true ceiling.
-        return min(self._discover_maximum_for(operation), self._search_depth())
-
-    def _discover_maximum(self) -> int:
-        return self._discover_maximum_for(self._discover_operation)
 
     def _load_more_discover(self):
-        if not self._discover_loading and self._discover_retry_request is not None:
+        discover = self.discover
+        if not discover.loading and discover.retry_request is not None:
             self._retry_discover()
             return
-        if self._discover_loading or self._discover_exhausted or not self._discover_operation or self._discover_limit >= self._discover_maximum():
+        if not discover.load_more():
             return
-        # First pull completes the automatic depth in one request; each
-        # manual continuation (scroll / Load more) then asks for a further
-        # 300 until the source has nothing new.
-        target = self._discover_autoload_target(self._discover_operation)
-        if self._discover_limit < target:
-            self._discover_limit = target
-        else:
-            self._discover_limit = min(self._discover_maximum(), self._discover_limit + 300)
-        if isinstance(self._discover_value, tuple):
+        value = discover.value
+        if isinstance(value, tuple):
             # topic=(category, topic) wants the topic; chart=(type, category)
             # falls back to a readable chart name.
-            label = self._discover_value[1] or str(self._discover_value[0]).replace("_", " ").title()
+            label = value[1] or str(value[0]).replace("_", " ").title()
         else:
-            label = self._discover_value or "For You"
+            label = value or "For You"
         self.discover_page.banner.show_state("loading", f"Loading more {label}…")
         self.discover_page.set_discover_summary(f"Loading more {label}…")
         self.discover_page.set_load_more_state(False, loading=True)
-        self._submit_directory(self._discover_operation, self._discover_value, self._discover_limit)
 
     def _show_for_you(self, _label: str = "For You", force: bool = False):
         if self.library is not None and not self._stored_shows_ready:
-            generation = self._directory_generation
+            generation = self.discover.generation
             def apply(shows):
                 self._stored_shows = list(shows)
                 self._stored_shows_ready = True
-                if generation == self._directory_generation and self.pages.currentIndex() == PAGE_DISCOVER:
+                if generation == self.discover.generation and self.pages.currentIndex() == PAGE_DISCOVER:
                     self._show_for_you(_label, force)
             self._run_read(self.library.shows, apply, "recommend-shows")
             return
@@ -7483,23 +7354,22 @@ class MainWindow(QMainWindow):
             self._browse_category("")
 
     def _retry_discover(self):
-        request = self._discover_retry_request
-        if request is None:
+        if self.discover.retry_request is None:
             self._refresh_discover()
             return
-        if self._discover_loading:
+        if self.discover.loading:
             return
         self.discover_page.banner.show_state("loading", "Retrying directory request…")
         self.discover_page.set_load_more_state(False, loading=True)
-        self._submit_directory(*request)
+        self.discover.retry()
 
     def _refresh_discover(self):
         # The header Refresh action is the explicit rescan; view switches
         # serve the cache.
         chart_type = self.discover_page.chart.currentData()
         if chart_type == "explore":
-            operation = self._discover_operation
-            value = self._discover_value
+            operation = self.discover.operation
+            value = self.discover.value
             if operation in {"browse", "topic", "search", "recommend"}:
                 self._start_directory_request(operation, value, force=True)
             else:
@@ -7547,159 +7417,51 @@ class MainWindow(QMainWindow):
         self.discover_page.set_discover_summary(f"Loading {label}{suffix}…")
         self._start_directory_request("chart", (chart_type, category), force=force)
 
-    def _submit_directory(self, operation: str, value, limit: int = 30):
-        self._discover_loading = True
-        self._directory_waiting = (self._directory_generation, (operation, value, limit), self._directory_cancel)
-        self._pump_directory_request()
-
-    def _pump_directory_request(self):
-        if self._closed or self.network_jobs is None or self._directory_future is not None or self._directory_waiting is None:
-            return
-        generation, request, cancel = self._directory_waiting
-        self._directory_waiting = None
-        def work():
-            from ..netlimits import request_scope, Deadline
-            with request_scope(cancel, deadline=Deadline(60, cancel)):
-                snapshot = self._discover_snapshot_cache.load(
-                    request[0], request[1], getattr(self.refresh, "artwork", None)
-                )
-                if snapshot is not None and snapshot["candidates"]:
-                    snapshot['newest_dates'] = self._discover_date_cache.load_many(item[0].feed_url for item in snapshot['candidates'])
-                    self._emit_completed((
-                        "directory-cache", (generation, request),
-                        JobResult(JobStatus.OK, value=snapshot),
-                    ))
-                candidates = self._directory_request(*request)
-                if not cancel.is_set() and not getattr(candidates, "partial", False):
-                    self._discover_snapshot_cache.save(
-                        request[0], request[1], candidates, request[2], previous=snapshot
-                    )
-                return candidates
-        future = self.network_jobs.submit(work)
-        self._directory_future = future
-        def offline_aware(exc):
-            offline = getattr(exc, "network", False)
-            return JobResult(JobStatus.ERROR, message=str(exc) or exc.__class__.__name__, value="offline" if offline else None)
-
-        # The directory path alone tells an outage from other failures.
-        _track_job(self, future, "directory", (generation, request, True), classify=offline_aware)
-
-    def _directory_request(self, operation: str, value, limit: int):
-        sample_accents(())  # Load persisted tint metadata on this worker, not in paint/apply.
-        if operation == "recommend":
-            candidates = self.directory.recommend(self.library.shows(), limit)
-        elif operation == "topic":
-            category, topic = value
-            candidates = self.directory.topic(category, topic, limit)
-        elif operation == "chart":
-            chart_type, category = value
-            candidates = self.directory.chart(chart_type, category, limit)
-        else:
-            callable_ = self.directory.search if operation == "search" else self.directory.browse
-            candidates = callable_(value, limit)
-        artwork_cache = self.refresh.artwork if self.refresh is not None else None
-        partial = getattr(candidates, "partial", False)  # a list that lost results is never kept
-        candidates = list(candidates)
-        if artwork_cache is None:
-            result = CandidateList([(candidate, "") for candidate in candidates], partial)
-        else:
-            cached = artwork_cache.path_for
-            # Publish deterministic paths without decoding every cover here.
-            result = CandidateList([(candidate, str(cached(candidate.artwork_url)) if candidate.artwork_url else '')
-                                    for candidate in candidates], partial)
-        result.newest_dates = self._discover_date_cache.load_many(candidate.feed_url for candidate in candidates)
-        return result
-
     def _queue_directory_artwork(self):
-        seen = self._directory_artwork_completed | {
-            url for generation, url in self._directory_artwork_active
-            if generation == self._directory_generation
-        }
-        waiting = []
-        for item in self.discover_page.all_items:
-            if item.artwork_url and item.artwork_url not in seen:
-                seen.add(item.artwork_url)
-                waiting.append((item.feed_url, item.artwork_url))
-        self._directory_artwork_waiting = waiting
-        self._pump_directory_artwork()
+        self.discover.queue_covers((item.feed_url, item.artwork_url) for item in self.discover_page.all_items)
 
-    def _pump_directory_artwork(self):
-        cache = getattr(self.refresh, 'artwork', None)
-        if self._closed or cache is None or self.artwork_jobs is None:
-            return
-        while self._directory_artwork_waiting and len(self._directory_artwork_active) < 2:
-            feed, url = self._directory_artwork_waiting.pop(0)
-            generation, cancel = self._directory_generation, self._directory_cancel
-            identity = (generation, url)
-            if identity in self._directory_artwork_active or url in self._directory_artwork_completed:
-                continue
-            self._directory_artwork_active.add(identity)
-            def work(url=url, cancel=cancel):
-                from ..netlimits import request_scope, Deadline
-                with request_scope(cancel, deadline=Deadline(60, cancel)):
-                    before = cache.signature(cache.path_for(url))
-                    path = str(cache.fetch(url))
-                    changed = before != cache.signature(Path(path))
-                    accent = dominant_color(path, compute=True)
-                    return path, accent, changed, artwork_accent_token(path)
-            future = self.artwork_jobs.submit(work)
-            _track_job(self, future, 'directory-artwork', identity)
-
-    def _on_directory_artwork(self, kind, identity, result):
-        if kind != "artwork-retry":
-            self._directory_artwork_active.discard(identity)
-        generation, url = identity
-        if generation == self._directory_generation:
-            if result.status == JobStatus.OK:
-                self._directory_artwork_completed.add(url)
-            else:
-                self._directory_artwork_completed.discard(url)
-        if result.status == JobStatus.OK:
-            path, accent, changed, *tokens = result.value
+    # The window is the DiscoverCoordinator's view (controllers/discover.py DiscoverView): the coordinator holds
+    # the requests, the caches and the scan, and these callbacks build the rows and show what arrived. They run
+    # on the Qt thread, in order.
+    def on_discover_cover(self, url, current, cover: Cover):
+        path, accent = cover.path, cover.accent
+        if cover.changed:
             # A repaired file can retain its path and model values. Wake failed
             # decodes even if its request belonged to an earlier category;
             # unchanged cache hits must retain healthy decoded covers.
-            if changed:
-                invalidate_artwork(path, accent_token=tokens[0] if tokens else None)
-        if generation == self._directory_generation and result.status == JobStatus.OK:
-            items = self.discover_page.update_artwork(url, path, accent)
-            # In-place model updates do not emit currentChanged. Refresh only
-            # this podcast's cover, preserving preview details and pane mode.
-            for item in items:
-                if item.artwork_url == url:
-                    self.context.update_podcast_artwork(item)
-                    if item.feed_url == self._preview_episodes_url:
-                        self.episode_page.hero.art.set_artwork(path, initials(self.episode_page.hero.title.text()), item.accent)
-                        updated = []
-                        artwork_changes = {}
-                        for episode in self.episode_page.all_items:
-                            # An episode-level cover remains the row's source; the directory cover only fills
-                            # rows that inherit the podcast artwork (or explicitly use the same URL).
-                            if episode.artwork_url and episode.artwork_url != url:
-                                updated.append(episode)
-                                continue
-                            row = replace_item(episode, artwork_path=path, accent=item.accent)
-                            updated.append(row)
-                            artwork_changes[(row.episode_id, row.artwork_url)] = row
-                        if artwork_changes:
-                            self.episode_page.replace_all_items(updated)
-                            self.episode_page.model.update_artwork_batch(artwork_changes)
-                            self.episode_page.view.viewport().update()
-                        playing = getattr(self.playback, 'snapshot', None)
-                        if playing is not None and not playing.episode_id and any(
-                                episode.media_url == playing.source for episode in self.episode_page.all_items):
-                            self._playback_command(PlaybackAction.UPDATE_PREVIEW_ARTWORK, playing.source, path)
-            for key, (stamp, limit, candidates) in list(self._discover_cache.items()):
-                changed_rows = [index for index, (candidate, old_path) in enumerate(candidates)
-                                if candidate.artwork_url == url and old_path != path]
-                if changed_rows:
-                    updated = list(candidates)
-                    for index in changed_rows:
-                        updated[index] = (candidates[index][0], path)
-                    self._discover_cache[key] = (stamp, limit, updated)
-        if kind != "artwork-retry":
-            self._pump_directory_artwork()
-        if not self._directory_artwork_active and not self._directory_artwork_waiting and self.jobs is not None:
+            invalidate_artwork(path, accent_token=cover.token)
+        if not current:
+            return
+        items = self.discover_page.update_artwork(url, path, accent)
+        # In-place model updates do not emit currentChanged. Refresh only
+        # this podcast's cover, preserving preview details and pane mode.
+        for item in items:
+            if item.artwork_url == url:
+                self.context.update_podcast_artwork(item)
+                if item.feed_url == self._preview_episodes_url:
+                    self.episode_page.hero.art.set_artwork(path, initials(self.episode_page.hero.title.text()), item.accent)
+                    updated = []
+                    artwork_changes = {}
+                    for episode in self.episode_page.all_items:
+                        # An episode-level cover remains the row's source; the directory cover only fills
+                        # rows that inherit the podcast artwork (or explicitly use the same URL).
+                        if episode.artwork_url and episode.artwork_url != url:
+                            updated.append(episode)
+                            continue
+                        row = replace_item(episode, artwork_path=path, accent=item.accent)
+                        updated.append(row)
+                        artwork_changes[(row.episode_id, row.artwork_url)] = row
+                    if artwork_changes:
+                        self.episode_page.replace_all_items(updated)
+                        self.episode_page.model.update_artwork_batch(artwork_changes)
+                        self.episode_page.view.viewport().update()
+                    playing = getattr(self.playback, 'snapshot', None)
+                    if playing is not None and not playing.episode_id and any(
+                            episode.media_url == playing.source for episode in self.episode_page.all_items):
+                        self._playback_command(PlaybackAction.UPDATE_PREVIEW_ARTWORK, playing.source, path)
+
+    def on_discover_covers_idle(self):
+        if self.jobs is not None:
             future = self.jobs.submit(save_accents)
             _job_add(self._pending_jobs, future)  # tracked, so Quit can cancel it like other jobs
             future.add_done_callback(lambda done, jobs=self._pending_jobs: _job_discard(jobs, done))
@@ -7749,7 +7511,7 @@ class MainWindow(QMainWindow):
             return
         if self._preview_episodes_url:
             feed_url = self._preview_episodes_url
-            self._previews.pop(feed_url, None)
+            self.discover.forget_preview(feed_url)
             self._show_preview_episodes(feed_url)
             return
         if self.library is None or self.refresh is None:
@@ -7838,8 +7600,6 @@ class MainWindow(QMainWindow):
     def _build_completion_handlers(self):
         return {
             'play-prepared': self._on_play_prepared,
-            'directory-artwork': self._on_directory_artwork,
-            'directory-cache': self._on_directory_cache,
             'library-changed': lambda *_: self._request_reload(),
             'opml-import': self._on_opml_import,
             'local-import-batch': self._on_local_import_batch,
@@ -7862,15 +7622,12 @@ class MainWindow(QMainWindow):
             "database-repair": self._on_database_repair,
             "database-maintenance": self._on_database_maintenance,
             "export-downloads": self._on_export_downloads,
-            "directory": self._on_directory,
             "read": self._on_read,
             "library": self._on_library,
             "integrity": self._on_integrity,
             "accents": self._on_accents,
             "details": self._on_details,
             "artwork": self._on_artwork,
-            "preview": self._on_preview,
-            "preview-scan": self._on_preview,
         }
 
     def _on_preview_confirmation(self, confirm, failure):
@@ -8156,28 +7913,6 @@ class MainWindow(QMainWindow):
         if self._exec_dialog(dialog) == QDialog.DialogCode.Accepted:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(identifier)))
         return
-    def _on_directory(self, kind, identifier, result):
-        if not isinstance(identifier, tuple) or len(identifier) != 3 or not isinstance(identifier[0], int):
-            logging.getLogger('bs_podcasts').warning('Ignoring directory completion with an invalid identifier')
-            return
-        generation, request, running = identifier
-        if running:
-            self._directory_future = None
-        if generation == self._directory_generation:
-            self._directory_finished(request, result)
-        self._pump_directory_request()
-        return
-
-    def _on_directory_cache(self, kind, identifier, result):
-        generation, request = identifier
-        if (
-            generation == self._directory_generation
-            and self._directory_future is not None
-            and self._discover_loading
-            and result.status == JobStatus.OK
-        ):
-            self._directory_finished(request, result, cache_restore=True)
-        return
     def _on_read(self, kind, identifier, result):
         key, token, apply, *owners = identifier
         if token is not None:
@@ -8253,6 +7988,7 @@ class MainWindow(QMainWindow):
                     logging.getLogger("bs_podcasts").exception("Could not restore a library view")
         else:
             self._reload_callbacks.clear()
+            self._bind_discover()  # no saved view will be restored over Discover now; show what it has
         return
     def _on_integrity(self, kind, identifier, result):
         if result.status == JobStatus.OK and result.value == "ok":
@@ -8359,73 +8095,6 @@ class MainWindow(QMainWindow):
         page = self.pages.currentWidget()
         if hasattr(page, '_episode_artwork_timer'):
             page.artwork_timer().start(60)
-        return
-    def _on_preview(self, kind, identifier, result):
-        if kind == "preview-scan":
-            generation, identifier = identifier
-            if generation != self._discover_newest_generation:
-                return
-            self._discover_newest_futures.pop(identifier, None)
-            self._discover_newest_active.discard(identifier)
-        else:
-            self._preview_pending.discard(identifier)
-            self._preview_futures.pop(identifier, None)
-        newest_scan = identifier in self._discover_newest_pending
-        record = getattr(result.value, '_newest_date_record', None) if result.status == JobStatus.OK else getattr(result.error, '_newest_date_record', None)
-        if record is not None:
-            self._newest_dates[identifier] = record
-            self._newest_dates.move_to_end(identifier)
-        if result.status == JobStatus.OK:
-            self._preview_retries.pop(identifier, None)
-            peek = isinstance(result.value, PeekFeed)
-            if kind == "preview-scan" and peek and record is None and result.value.episodes:
-                newest = result.value.episodes[0]
-                self._newest_dates[identifier] = (time.time(), newest.title, newest.published_at)
-                self._newest_dates.move_to_end(identifier)
-                while len(self._newest_dates) > self.NEWEST_DATE_ENTRIES:
-                    self._newest_dates.popitem(last=False)
-            if newest_scan:
-                card = self._discover_newest_cards.get(identifier)
-                if card is not None:
-                    self._discover_newest_updates[identifier] = self._with_preview(card, result.value)
-                if not peek and (self._pending_episodes_url == identifier or self.context.preview_url() == identifier):
-                    self._store_preview(identifier, result.value)
-            elif not peek:
-                self._store_preview(identifier, result.value)
-            if not peek:
-                # A peek carries one date, not a feed: never the pane's preview.
-                self._apply_preview(identifier, result.value, update_grid=not newest_scan)
-        elif kind != "preview-scan":
-            message = result.message or "unknown error"
-            if result.busy and self._retry_busy_preview(identifier):
-                return
-            self.context.show_preview_error(identifier, message)
-            if self._pending_episodes_url == identifier:
-                self._pending_episodes_url = ""
-                self.episode_page.banner.show_state("error", f"Couldn’t fetch this podcast’s episodes: {message}", retry=True)
-        if newest_scan:
-            if result.status != JobStatus.OK:
-                errors = getattr(self, '_discover_newest_errors', [])
-                if len(errors) < 3:
-                    errors.append(result.message or 'The feed did not respond.')
-                self._discover_newest_errors = errors
-            while len(self._newest_dates) > self.NEWEST_DATE_ENTRIES:
-                self._newest_dates.popitem(last=False)
-            self._discover_newest_pending.discard(identifier)
-            self._discover_newest_done += 1
-            self._update_newest_scan_toast()
-            self._pump_discover_newest_scan()
-            if not self._discover_newest_pending:
-                self._finish_discover_newest_scan()
-        else:
-            self._trim_preview_cache()
-            if kind == "preview-scan":
-                # The card's own preview finished first and took it off the
-                # scan, so this peek was still holding the scan's only slot:
-                # nothing else would start the next one.
-                self._pump_discover_newest_scan()
-                if not self._discover_newest_pending and self._discover_newest_total:
-                    self._finish_discover_newest_scan()
         return
     def _retain_after_download(self, episode_id):
         """Check the retention limits of a podcast whose download just
@@ -8580,78 +8249,49 @@ class MainWindow(QMainWindow):
         self._run_read(lambda: (self.library.repository.get_show(show_id),), apply,
                        f"refresh-notice-{show_id}")
 
-    def _directory_finished(self, request, result, *, cache_restore=False):
-        current = (self._discover_operation, self._discover_value, self._discover_limit)
-        if request != current:
-            # A scroll-triggered continuation can finish after the user has
-            # switched category/topic/chart. Never let that stale result stop
-            # the new spinner or replace the new collection.
-            return
-        operation, value, requested_limit = request
-        cache_key = (operation, repr(value))
-        if (cache_restore and self._discover_displayed_key == cache_key
-                and self.discover_page.all_items):
-            # Disk snapshots seed empty views, never replace a populated view
-            # during pagination or refresh (the snapshot has a smaller cap).
-            return
-        if not cache_restore:
-            self._discover_loading = False
+    def on_discover_failed(self, request, message, offline):
+        if request != self.discover.request:
+            return  # held back through a rebuild, and a newer request has replaced it since
         self.discover_page.set_loading(False)
-        if result.status != JobStatus.OK:
-            self._discover_retry_request = request
-            self.discover_page.set_load_more_state(bool(self.discover_page.all_items), loading=False)
-            if result.value == "offline":
-                self.discover_page.banner.show_state(
-                    "offline", "You appear to be offline. Check the connection and retry.", retry=True
-                )
-            else:
-                self.discover_page.banner.show_state("error", result.message or "Directory search failed.", retry=True)
-            return
-        dates = result.value.get('newest_dates', {}) if cache_restore else getattr(result.value, 'newest_dates', {})
-        for url, record in dates.items():
-            current_date = self._newest_dates.get(url)
-            if current_date is None or record[0] > current_date[0]:
-                self._newest_dates[url] = record
-                self._newest_dates.move_to_end(url)
-        while len(self._newest_dates) > self.NEWEST_DATE_ENTRIES:
-            self._newest_dates.popitem(last=False)
-        if not cache_restore:
-            self._discover_retry_request = None
-        if cache_restore:
-            podcasts = self._apply_directory_snapshot(request, cache_key, result.value)
+        self.discover_page.set_load_more_state(bool(self.discover_page.all_items), loading=False)
+        if offline:
+            self.discover_page.banner.show_state(
+                "offline", "You appear to be offline. Check the connection and retry.", retry=True
+            )
         else:
-            podcasts = self._apply_directory_live(request, cache_key, result.value)
-        self._show_directory_summary(operation, value, podcasts, cache_restore=cache_restore)
+            self.discover_page.banner.show_state("error", message or "Directory search failed.", retry=True)
+
+    def on_discover_results(self, results):
+        request = results.request
+        if request != self.discover.request:
+            return  # held back through a rebuild, and a newer request has replaced it since
+        operation, value, _requested_limit = request
+        cache_key = self.discover.key(operation, value)
+        self.discover_page.set_loading(False)
+        if results.snapshot:
+            podcasts = self._apply_directory_snapshot(results, cache_key)
+        else:
+            podcasts = self._apply_directory_live(results, cache_key)
+        self._show_directory_summary(operation, value, podcasts, cache_restore=results.snapshot)
         if self.discover_page.discover_sort_key() == "newest":
             self._discover_newest_summary = self.discover_page.result_summary.text()
             self._discover_sort_changed("newest")
 
-    def _apply_directory_snapshot(self, request, cache_key, snapshot):
-        """Show a saved directory result while the live request runs. Only the rows and the cache entry change here."""
-        operation, value, requested_limit = request
+    def _apply_directory_snapshot(self, results, cache_key):
+        """Show a saved directory result while the live request runs. Only the rows change here."""
         self.discover_page.banner.show_state("loading", "Showing saved podcasts while checking for updates…")
-        candidates = snapshot["candidates"][:requested_limit]
-        podcasts = self._directory_rows(candidates)
-        self._discover_exhausted = False
+        podcasts = self._directory_rows(results.candidates)
         # Keep the first fresh result eligible for normal auto-pagination;
         # the snapshot is only a temporary display while that request runs.
         self.discover_page.set_load_more_state(False, loading=True)
         self._show_directory_rows(podcasts, cache_key)
-        # The snapshot's save time is wall-clock; keep its age on the clock the cache uses.
-        saved = time.monotonic() - max(0.0, time.time() - snapshot["saved_at"])
-        self._discover_cache[(operation, repr(value))] = (
-            saved, min(snapshot["limit"], requested_limit), candidates
-        )
         return podcasts
 
-    def _apply_directory_live(self, request, cache_key, result_value):
-        """Show a live directory result: pagination state, rows, the cache entry and the next background page."""
-        operation, value, requested_limit = request
-        candidates = result_value or []
-        podcasts = self._directory_rows(candidates)
-        partial = getattr(result_value, 'partial', False)
-        if partial:
-            if self._discover_displayed_key == cache_key:
+    def _apply_directory_live(self, results, cache_key):
+        """Show a live directory result: pagination state, rows and the next background page."""
+        podcasts = self._directory_rows(results.candidates)
+        if results.partial:
+            if self.discover.displayed_key == cache_key:
                 # A failed continuation must not discard already visible results.
                 def result_key(item):
                     return ((item.feed_url, item.directory_url or item.title) if item.is_episode
@@ -8659,31 +8299,18 @@ class MainWindow(QMainWindow):
                 combined = {result_key(item): item for item in self.discover_page.all_items}
                 combined.update({result_key(item): item for item in podcasts})
                 podcasts = list(combined.values())
-            self._discover_retry_request = request
-            self._discover_exhausted = False
-            self._discover_result_count = len(podcasts)
+            self.discover.settle(results, len(podcasts))
             self.discover_page.set_load_more_state(False, loading=False)
             self._show_directory_rows(podcasts, cache_key)
             self.discover_page.banner.show_state('partial',
                 'Some podcasts could not be loaded. Your current results are kept; retry to fetch the rest.', retry=True)
             return podcasts
-        result_count = len(podcasts)
-        self._discover_exhausted = requested_limit >= self._discover_maximum() or result_count <= self._discover_result_count
-        self._discover_result_count = result_count
-        self.discover_page.set_load_more_state(not self._discover_exhausted, loading=False)
+        settled = self.discover.settle(results, len(podcasts))
+        self.discover_page.set_load_more_state(not settled.exhausted, loading=False)
         self._show_directory_rows(podcasts, cache_key)
-        stored = self._discover_cache.get((operation, repr(value)))
-        # A list that lost a term or ran out of time is shown but not kept,
-        # so the next view of this category asks again.
-        if not getattr(candidates, "partial", False) and (stored is None or requested_limit >= stored[1]):
-            self._discover_cache[(operation, repr(value))] = (time.monotonic(), requested_limit, candidates)
-            while len(self._discover_cache) > 24:
-                self._discover_cache.pop(next(iter(self._discover_cache)))
-        if not self._discover_exhausted and requested_limit < self._discover_autoload_target(operation):
+        if settled.autoload:
             # No view stops at its first page: pull up to the configured
             # depth in the background while the user reads the first rows.
-            # Beyond the depth, scrolling or Load more continues to the
-            # ceiling. Artwork for rows already shown is a disk-cache hit.
             self._later(0, self._load_more_discover)
         return podcasts
 
@@ -8728,19 +8355,19 @@ class MainWindow(QMainWindow):
             )
         result = []
         for item in podcasts:
-            known = self._newest_dates.get(item.feed_url)
-            preview = self._previews.get(item.feed_url)
+            known = self.discover.newest_date(item.feed_url)
+            preview = self.discover.preview(item.feed_url)
             if preview is None and known is not None:
-                preview = _newest_item_feed(*known[1:3])
+                preview = newest_item_feed(*known[1:3])
             result.append(self._with_preview(item, preview))
         return result
 
     def _show_directory_rows(self, podcasts, cache_key):
         self.discover_page.set_items(
             podcasts,
-            preserve_scroll=self._discover_displayed_key == cache_key,
+            preserve_scroll=self.discover.displayed_key == cache_key,
         )
-        self._discover_displayed_key = cache_key
+        self.discover.shown(cache_key, len(podcasts))
         view = self.discover_page.view
         if self.discover_page.model.rowCount() and not view.currentIndex().isValid():
             view.setCurrentIndex(self.discover_page.model.index(0, 0))
@@ -8766,16 +8393,16 @@ class MainWindow(QMainWindow):
         else:
             description = f"results for “{value}”"
         if podcasts:
-            if not cache_restore and self._discover_retry_request is None:
+            if not cache_restore and self.discover.retry_request is None:
                 self.discover_page.banner.clear()
-            ending = "Retry to load the remaining results" if self._discover_retry_request else "Scroll for more"
-            if self._discover_exhausted:
+            ending = "Retry to load the remaining results" if self.discover.retry_request else "Scroll for more"
+            if self.discover.exhausted:
                 ending = ("End of the list (the directory limits how many it returns)"
                           if operation in {"browse", "recommend"} else "End of available results")
             suffix = "  ·  saved while updating" if cache_restore else ""
             self.discover_page.set_discover_summary(f"{len(podcasts)} {description}  ·  {ending}{suffix}")
         else:
-            if self._discover_retry_request is None:
+            if self.discover.retry_request is None:
                 self.discover_page.banner.clear()
             # Name what came up empty: a bare "no podcasts matched" left the
             # user guessing which selection or query it was talking about.
@@ -9130,7 +8757,7 @@ class MainWindow(QMainWindow):
         scroll = self.context.selected_scroll.verticalScrollBar().value()
         if isinstance(item, ShowRow):
             self.context.show_podcast(item)
-            feed = self._previews.get(item.feed_url)
+            feed = self.discover.preview(item.feed_url)
             if feed is not None and not item.show_id:
                 self._apply_preview(item.feed_url, feed, update_grid=False)
         else:
@@ -9196,181 +8823,50 @@ class MainWindow(QMainWindow):
         open_web_url(url)
 
     def _discover_sort_changed(self, key: str):
+        discover = self.discover
         if key != "newest":
             # Leaving Newest part-way is a stop: the notice must not say the
             # scan finished for podcasts it never reached.
-            if self._discover_newest_pending or self._discover_newest_total:
-                self._discover_scan_cancelled = True
-                self._finish_discover_newest_scan()
+            if discover.scan_pending or discover.scan_total:
+                self._finish_discover_newest_scan(cancelled=True)
             return
         current_items = {
             item.feed_url: item
             for item in self.discover_page.all_items
             if item.feed_url and not item.show_id
         }
-        current_urls = set(current_items)
-        self._discover_newest_pending.intersection_update(current_urls)
-        missing = [
-            feed_url
-            for feed_url in current_items
-            if (getattr(self, '_discover_dates_force', False)
-                or (feed_url in getattr(self, '_newest_dates', {}) and not PersistentFeedDates.fresh(self._newest_dates[feed_url]))
-                or (not current_items[feed_url].latest_sort_key and feed_url not in self._previews
-                    and not PersistentFeedDates.fresh(getattr(self, '_newest_dates', {}).get(feed_url))))
-        ]
-        # Each card costs a download of its whole feed, so one scan covers a
-        # bounded number of cards, in display order; the rest stay undated.
-        pending = self._discover_newest_pending
-        room = max(0, self.NEWEST_SCAN_LIMIT - self._discover_newest_done - len(pending))
-        fresh = [feed_url for feed_url in missing if feed_url not in pending]
-        self._discover_newest_beyond = max(0, len(fresh) - room)
-        allowed = set(fresh[:room])
-        missing = [feed_url for feed_url in missing if feed_url in pending or feed_url in allowed]
-        if not missing:
-            if self._discover_newest_pending:
+        scan = discover.begin_newest_scan({url: bool(item.latest_sort_key) for url, item in current_items.items()})
+        if not scan.queued:
+            if discover.scan_pending:
                 self._finish_discover_newest_scan()
             return
-        if not self._discover_newest_pending:
-            self._stop_discover_newest_workers()
-            self._discover_newest_cancel = threading.Event()
+        if scan.fresh:
             self._discover_newest_summary = self.discover_page.result_summary.text()
-            self._discover_newest_errors = []
         self._discover_newest_cards = current_items
-        self._discover_newest_pending.update(missing)
-        queued = set(self._discover_newest_waiting) | self._discover_newest_active
-        self._discover_newest_waiting.extend(
-            feed_url
-            for feed_url in missing
-            if feed_url not in self._preview_pending and feed_url not in queued
-        )
-        # Cumulative: rows added mid-scan grow the total instead of
-        # resetting the "N of M" count back to 1.
-        self._discover_newest_total = self._discover_newest_done + len(self._discover_newest_pending)
         self._update_newest_scan_toast()
-        self._pump_discover_newest_scan()
+        discover.pump_newest_scan()
 
     def _update_newest_scan_toast(self):
         """Progress stays in the fixed header; details offer Stop checking."""
-        total = self._discover_newest_total
+        total = self.discover.scan_total
         if not total:
             return
-        done = self._discover_newest_done
+        done = self.discover.scan_done
         message = f"Checking podcast release dates… {done} of {total}. Cards update together."
         self._discover_scan_toast = True
         self.discover_page.banner.show_state('loading', message, cancel=self._cancel_discover_newest_scan)
 
     def _cancel_discover_newest_scan(self):
-        if not self._discover_newest_total:
+        if not self.discover.scan_total:
             return
         self._discover_scan_toast = False
-        self._discover_scan_cancelled = True
-        self._finish_discover_newest_scan()
+        self._finish_discover_newest_scan(cancelled=True)
 
-    def _stop_discover_newest_workers(self):
-        self._discover_newest_cancel.set()
-        self._discover_newest_generation += 1
-        for future in self._discover_newest_futures.values():
-            future.cancel()
-        self._discover_newest_futures.clear()
-        self._discover_newest_active.clear()
-
-    def _pump_discover_newest_scan(self):
-        # One scan at a time leaves a network worker for category changes and
-        # selected-feed previews. Do not queue background work behind it.
-        if self._closed or self._discover_newest_cancel.is_set():
-            return
-        while self._discover_newest_waiting and len(self._discover_newest_active) < 1:
-            feed_url = self._discover_newest_waiting.pop(0)
-            self._discover_newest_active.add(feed_url)
-            self._peek_feed(feed_url)
-
-    def _peek_feed(self, feed_url: str):
-        """Newest-episode date for one Discover card, read in a single
-        request; the full fetch and parse is the fallback (audit F-089)."""
-        generation = self._discover_newest_generation
-        cancel = self._discover_newest_cancel
-        identity = (generation, feed_url)
-        force = getattr(self, '_discover_dates_force', False)
-        known = self._newest_dates.get(feed_url)
-        cached = self._previews.get(feed_url) if not force and (known is None or PersistentFeedDates.fresh(known)) else None
-        if cached is not None:
-            self._emit_completed(("preview-scan", identity, JobResult(JobStatus.OK, value=cached)))
-            return
-        if not force and known is not None and PersistentFeedDates.fresh(known):
-            # Read a short while ago: the same answer, with no request.
-            answer = _newest_item_feed(*known[1:3])
-            object.__setattr__(answer, '_newest_date_record', known)
-            self._emit_completed(("preview-scan", identity, JobResult(JobStatus.OK, value=answer)))
-            return
-        if self.jobs is None or self.refresh is None or feed_url in self._preview_pending:
-            self._discover_newest_active.discard(feed_url)
-            return
-        fetcher = self.refresh.fetcher
-        date_cache = getattr(self, '_discover_date_cache', None)
-
-        def work():
-            from ..netlimits import Deadline, request_scope
-
-            retained = date_cache.load(feed_url) if date_cache is not None else known
-            if not force and PersistentFeedDates.fresh(retained):
-                answer = _newest_item_feed(*retained[1:3])
-                object.__setattr__(answer, '_newest_date_record', retained)
-                return answer
-            deadline = Deadline(60, cancel)
-            try:
-                with request_scope(cancel, deadline=deadline):
-                    answer = read_feed(deadline)
-                newest = _latest_episode(answer)
-                record = (time.time(), newest.title if newest else '', newest.published_at if newest else '',
-                          'ok' if newest and newest.published_at else 'empty')
-                if not cancel.is_set() and date_cache is not None:
-                    date_cache.save(feed_url, record)
-                object.__setattr__(answer, '_newest_date_record', record)
-                return answer
-            except Exception as exc:
-                if not cancel.is_set():
-                    record = (time.time(), retained[1] if retained else '', retained[2] if retained else '', 'error')
-                    if date_cache is not None:
-                        date_cache.save(feed_url, record)
-                    setattr(exc, '_newest_date_record', record)
-                raise
-
-        def read_feed(deadline):
-            from ..feeds.fetch import FeedFetchError
-            from ..netlimits import NetworkDeadline
-            deadline.remaining()
-            peek = None
-            try:
-                peek = fetcher.peek_latest(feed_url)
-            except (NetworkDeadline, FeedFetchError):
-                # A second fetch would only repeat the same failed request.
-                raise
-            except Exception:
-                logging.getLogger("bs_podcasts").warning(
-                    "The newest-date peek for %s failed; reading the whole feed", feed_label(feed_url), exc_info=True)
-            deadline.remaining()
-            if peek is not None:
-                return _newest_item_feed(*peek)
-            return _fetch_feed_preview(fetcher, feed_url, deadline.remaining)
-
-        future = self.network_jobs.submit(work)
-        self._discover_newest_futures[feed_url] = future
-        _track_job(self, future, "preview-scan", identity)
-
-    def _finish_discover_newest_scan(self):
+    def _finish_discover_newest_scan(self, cancelled=False):
         """Merge and sort all scanned dates with one model update."""
-        self._stop_discover_newest_workers()
-        scanned = self._discover_newest_total
-        cancelled = self._discover_scan_cancelled
-        self._discover_scan_cancelled = False
+        summary = self.discover.finish_newest_scan()
         self._discover_scan_toast = False
         self.toast.dismiss_owner("discover-scan")
-        self._discover_newest_pending.clear()
-        self._discover_newest_waiting.clear()
-        self._discover_newest_active.clear()
-        self._discover_newest_total = 0
-        self._discover_newest_done = 0
-        beyond, self._discover_newest_beyond = self._discover_newest_beyond, 0
         if self._discover_newest_summary:
             self.discover_page.set_discover_summary(self._discover_newest_summary)
         self._discover_newest_summary = ""
@@ -9381,33 +8877,31 @@ class MainWindow(QMainWindow):
                 item = replace_item(item, latest_episode_title=update.latest_episode_title,
                                     latest_episode_date=update.latest_episode_date, latest_sort_key=update.latest_sort_key)
             else:
-                item = self._with_preview(item, self._previews.get(item.feed_url))
+                item = self._with_preview(item, self.discover.preview(item.feed_url))
             items.append(item)
         self._discover_newest_updates.clear()
         self._discover_newest_cards = {}
         self.discover_page.set_items(items, preserve_scroll=self.discover_page.discover_sort_key() == 'newest')
         self._trim_preview_cache()
-        if scanned:
+        if summary.scanned:
             if cancelled:
                 message = 'Date checks stopped — saved dates are kept.'
                 self.discover_page.banner.show_state('info', message)
             else:
-                left = f"; {beyond} more are listed without a date" if beyond else ""
-                errors = getattr(self, '_discover_newest_errors', [])
-                if errors:
-                    self.discover_page.banner.show_state('partial', f'Could not check some podcast dates: {errors[0][:240]} Saved dates are kept.')
+                left = f"; {summary.beyond} more are listed without a date" if summary.beyond else ""
+                if summary.errors:
+                    self.discover_page.banner.show_state('partial', f'Could not check some podcast dates: {summary.errors[0][:240]} Saved dates are kept.')
                 else:
-                    self.discover_page.banner.show_state('loaded', f'Podcast dates updated for {scanned} podcasts{left}.')
-        self._discover_newest_errors = []
-        self._discover_dates_force = False
+                    self.discover_page.banner.show_state('loaded', f'Podcast dates updated for {summary.scanned} podcasts{left}.')
+
+    def on_discover_scan_finished(self):
+        self._finish_discover_newest_scan()
 
     def _store_preview(self, feed_url: str, feed):
-        self._previews.protect(self._preview_episodes_url, self._pending_episodes_url)
-        self._previews[feed_url] = feed
+        self.discover.store_preview(feed_url, feed, (self._preview_episodes_url, self._pending_episodes_url))
 
     def _trim_preview_cache(self, maximum: int = 64):
-        self._previews.protect(self._preview_episodes_url, self._pending_episodes_url)
-        self._previews.trim(maximum)
+        self.discover.trim_previews((self._preview_episodes_url, self._pending_episodes_url), maximum)
 
     def _show_preview_episodes(self, feed_url: str, navigate: bool = True, feed=None):
         if not feed_url:
@@ -9442,7 +8936,7 @@ class MainWindow(QMainWindow):
         self._read_tokens["episodes"] = self._read_tokens.get("episodes", 0) + 1
         self._preview_page_revision = getattr(self, '_preview_page_revision', 0) + 1
         self._preview_page_loading = False
-        feed = feed if feed is not None else self._previews.get(feed_url)
+        feed = feed if feed is not None else self.discover.preview(feed_url)
         if feed is None:
             if same_preview and restore_state is None and self.episode_page.all_items:
                 # Refresh keeps the known artwork, hero and rows until new
@@ -9452,7 +8946,7 @@ class MainWindow(QMainWindow):
                 if navigate:
                     self._episode_navigation_prepared = True
                     self.navigation.select(PAGE_EPISODES)
-                self._preview_feed(feed_url)
+                self.discover.request_preview(feed_url)
                 if self.jobs is None or self.refresh is None:
                     self._pending_episodes_url = ''
                     self.episode_page.banner.show_state('error', 'Feed previews are unavailable in this session; showing saved episodes.')
@@ -9490,7 +8984,7 @@ class MainWindow(QMainWindow):
             if navigate:
                 self._episode_navigation_prepared = True
                 self.navigation.select(PAGE_EPISODES)
-            self._preview_feed(feed_url)
+            self.discover.request_preview(feed_url)
             if self.jobs is None or self.refresh is None:
                 self._pending_episodes_url = ""
                 self.episode_page.banner.show_state("error", "Feed previews are unavailable in this session.")
@@ -9541,7 +9035,7 @@ class MainWindow(QMainWindow):
         feed = (getattr(self, '_preview_page_feed', None)
                 if feed_url and getattr(self, '_preview_page_feed_url', feed_url) == feed_url else None)
         if feed is None and feed_url:
-            feed = self._previews.get(feed_url)
+            feed = self.discover.preview(feed_url)
         if feed is None or not page.podcast_paging() or self._closed:
             return
         scope = page._podcast_view_scope()
@@ -9641,7 +9135,7 @@ class MainWindow(QMainWindow):
                     or feed_url != self._preview_episodes_url
                     or feed_identity != id(getattr(self, '_preview_page_feed', None)
                                            if getattr(self, '_preview_page_feed_url', feed_url) == feed_url
-                                           else self._previews.get(feed_url))):
+                                           else self.discover.preview(feed_url))):
                 return
             if scope != page._podcast_view_scope():
                 self._preview_page_loading = False
@@ -9721,8 +9215,8 @@ class MainWindow(QMainWindow):
     def _preview_after_pause(self, feed_url: str):
         """Show the selected card's feed details: at once from the cache or a
         request already on its way, otherwise after the selection rests."""
-        if feed_url in self._previews or feed_url in self._preview_pending:
-            self._preview_feed(feed_url)
+        if self.discover.preview_known(feed_url):
+            self.discover.request_preview(feed_url)
             return
         self._preview_wanted = feed_url
         self._preview_timer.start()
@@ -9738,47 +9232,42 @@ class MainWindow(QMainWindow):
             return
         # A request still waiting in the pool for a card the user has left
         # is dropped; one already running finishes and is cached.
-        for url, future in list(self._preview_futures.items()):
-            if url != feed_url and url != self._pending_episodes_url and future.cancel():
-                self._preview_futures.pop(url, None)
-                self._preview_pending.discard(url)
-                if url in self._discover_newest_pending and url not in self._discover_newest_waiting:
-                    self._discover_newest_waiting.append(url)
-        self._pump_discover_newest_scan()
-        self._preview_feed(feed_url)
+        self.discover.drop_queued_previews(feed_url, self._pending_episodes_url)
+        self.discover.request_preview(feed_url)
 
-    def _retry_busy_preview(self, feed_url: str) -> bool:
-        """A busy answer means the request never ran: ask again shortly while
-        the card is still wanted, a few times, instead of showing an error."""
-        tries = self._preview_retries.get(feed_url, 0)
-        if tries >= 5 or not self._preview_still_wanted(feed_url):
-            self._preview_retries.pop(feed_url, None)
-            return False
-        self._preview_retries[feed_url] = tries + 1
-        self._later(1000, lambda: self._preview_still_wanted(feed_url) and self._preview_feed(feed_url, silent=True))
-        return True
+    # The rest of DiscoverView: feed previews and the Newest scan's reads.
+    def discover_wants_preview(self, feed_url):
+        return self._preview_still_wanted(feed_url)
 
-    def _preview_feed(self, feed_url: str, silent: bool = False):
-        """Fetch a directory result's feed in the background to fill the details pane."""
-        cached = self._previews.get(feed_url)
-        if cached is not None:
-            self._apply_preview(feed_url, cached)
-            return
-        if self.jobs is None or self.refresh is None or feed_url in self._preview_pending:
-            if self.refresh is None and not silent:
-                self.context.show_preview_error(feed_url, "feed fetching is unavailable in this session")
-            return
-        self._preview_pending.add(feed_url)
-        fetcher = self.refresh.fetcher
+    def on_discover_preview_cached(self, feed_url, feed):
+        self._apply_preview(feed_url, feed)
 
-        def work():
-            return _fetch_feed_preview(fetcher, feed_url)
+    def on_discover_preview_unavailable(self, feed_url):
+        self.context.show_preview_error(feed_url, "feed fetching is unavailable in this session")
 
-        future = self.network_jobs.submit(work)
-        self._preview_futures[feed_url] = future
-        # A request dropped while it waited reports nothing: its owner has
-        # already cleared the pending mark.
-        _track_job(self, future, "preview", feed_url, drop_cancelled=True)
+    def on_discover_preview(self, done):
+        feed_url, feed = done.feed_url, done.feed
+        if feed is not None:
+            if done.scanning:
+                card = self._discover_newest_cards.get(feed_url)
+                if card is not None:
+                    self._discover_newest_updates[feed_url] = self._with_preview(card, feed)
+                if not done.peek and (self._pending_episodes_url == feed_url or self.context.preview_url() == feed_url):
+                    self._store_preview(feed_url, feed)
+            elif not done.peek:
+                self._store_preview(feed_url, feed)
+            if not done.peek:
+                # A peek carries one date, not a feed: never the pane's preview.
+                self._apply_preview(feed_url, feed, update_grid=not done.scanning)
+        elif not done.scan:
+            self.context.show_preview_error(feed_url, done.message)
+            if self._pending_episodes_url == feed_url:
+                self._pending_episodes_url = ""
+                self.episode_page.banner.show_state("error", f"Couldn’t fetch this podcast’s episodes: {done.message}", retry=True)
+        if done.scanning:
+            self._update_newest_scan_toast()
+        else:
+            self._trim_preview_cache()
 
     def _apply_preview(self, feed_url: str, feed, update_grid: bool = True):
         current = self.context.current_item()
@@ -9806,7 +9295,7 @@ class MainWindow(QMainWindow):
 
         def apply(payload):
             latest, recent, matched = payload
-            active_feed = (self._previews.get(feed_url)
+            active_feed = (self.discover.preview(feed_url)
                            or (getattr(self, '_preview_page_feed', None)
                                if getattr(self, '_preview_page_feed_url', '') == feed_url else None))
             if active_feed is not None and id(active_feed) != feed_identity:
@@ -10212,10 +9701,6 @@ class MainWindow(QMainWindow):
         self._episode_artwork_waiting.clear()
         for cancel in self._episode_artwork_active.values():
             cancel.set()
-        self._directory_cancel.set()
-        self._stop_discover_newest_workers()
-        self._directory_waiting = None
-        self._directory_artwork_waiting.clear()
         # Release the bridge only if it still points here: on a theme rebuild
         # the replacement has already bound itself, and unbinding it would park
         # every later completion until the next rebuild.
@@ -10223,6 +9708,8 @@ class MainWindow(QMainWindow):
         # Likewise for refresh progress. A real Quit also stops the scheduler and cancels queued fetches.
         self.refresh_coordinator.release(self, closing=not self._keep_services)
         self.download_coordinator.release(self, closing=not self._keep_services)
+        # And for Discover: a real Quit cancels its requests; a rebuild carries them over to the next window.
+        self.discover.release(self, closing=not self._keep_services)
         if not getattr(self, "_quit_drain_started", 0):
             self._save_layout()
             self._save_view_state()
@@ -10230,7 +9717,6 @@ class MainWindow(QMainWindow):
         self._download_reload_timer.stop()
         self._bookmark_timer.stop()
         self._layout_save_timer.stop()
-        self._discover_newest_waiting.clear()
         self._discover_newest_updates.clear()
         self._reload_callbacks.clear()
         if self.playback is not None and hasattr(self.playback, "unsubscribe") and getattr(self, "_playback_listener", None):

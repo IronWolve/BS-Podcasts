@@ -23,6 +23,7 @@ from .artwork import ArtworkCache
 from .assets import icon_path, logo_path, shell_icon_path
 from .config import APP_ID, APP_NAME, app_version, system_reduced_motion
 from .config import cache_dir, data_dir as application_data_dir, default_downloads_dir
+from .controllers.discover import DiscoverCoordinator
 from .controllers.downloads import DownloadCoordinator
 from .controllers.refresh import RefreshCoordinator
 from .data import Database
@@ -37,7 +38,7 @@ from .logging_setup import configure_logging
 from .playback import LazyMpvEngine, PlaybackService
 from .privacy import redact
 from .services import LibraryService, ListeningService
-from .ui.shell import MainWindow, shutdown_exports
+from .ui.shell import MainWindow, discover_tints, shutdown_exports
 from .ui.theme import app_font, apply_app_stylesheet, apply_saved_appearance, apply_theme, load_fonts, resolve_theme
 
 
@@ -1103,6 +1104,11 @@ class _WindowController:
         # that releases it) outlive the window, so a rebuild hands nothing over and re-pumps nothing.
         self.download_coordinator = DownloadCoordinator(
             library, downloads, playback, jobs, download_jobs, play_download_jobs, parent=app)
+        # And Discover: a directory request in flight, the completed results, the previews and the cover queue
+        # outlive the window, so a rebuild neither cancels the request nor hands anything over; its outcome is
+        # shown by the window that replaces the one it was asked from.
+        self.discover_coordinator = DiscoverCoordinator(
+            library, refresh, directory, jobs, network_jobs, artwork_jobs, discover_tints(), parent=app)
         self.logger = logging.getLogger("bs_podcasts")
         self.window = None  # the live main window; None until the first one is built
         self.rebuild_pending = False
@@ -1159,6 +1165,7 @@ class _WindowController:
         app.aboutToQuit.connect(lambda: self.downloads.pause_all())
         app.aboutToQuit.connect(self.refresh_coordinator.shutdown)
         app.aboutToQuit.connect(self.download_coordinator.shutdown)
+        app.aboutToQuit.connect(self.discover_coordinator.shutdown)
         # Last: the settings write queued above is kept and drained with playback.
         app.aboutToQuit.connect(lambda: _finalize_unclosed(self.commands, self.playback))
         # A session-end query may still be cancelled, so only save, never close.
@@ -1186,6 +1193,7 @@ class _WindowController:
             commands=self.commands,
             refresh_coordinator=self.refresh_coordinator,
             download_coordinator=self.download_coordinator,
+            discover_coordinator=self.discover_coordinator,
         )
         self._mark("main-window")
         window.tray = None
@@ -1242,6 +1250,7 @@ class _WindowController:
             old._business_bridge.bind(None)
             self.refresh_coordinator.bind(None)  # progress shown on the old window would be lost with it
             self.download_coordinator.bind(None)  # likewise toasts and the playback commands a completion decides
+            self.discover_coordinator.bind(None)  # and rows built for the old page; a request in flight carries on
         view_state = old._capture_view_state() if old is not None else None
         if old is not None:
             old._keep_services = True  # the services outlive this window
