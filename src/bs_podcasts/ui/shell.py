@@ -55,6 +55,7 @@ from ..downloads import AutomaticCleanupSkipped
 from ..downloads.auto import DEFAULT_HOURLY_LIMIT as AUTO_HOURLY_DEFAULT, HOURLY_LIMIT_RANGE as AUTO_HOURLY_RANGE, AutoDownloadQueue
 from ..jobs import JobResult, JobRunner, JobStatus
 from ..jobs.commands import CommandQueue
+from ..controllers.refresh import RefreshCoordinator
 from ..services.library import LibraryService, bounded_float, bounded_int
 from ..services.preview_cache import FeedResultCache, with_retained_size
 from ..urlguard import is_web_url
@@ -290,7 +291,7 @@ class _JobBridge(QObject):
 class _BusinessBridge(QObject):
     """Application-owned completions survive replacement of their Qt view."""
     completed = Signal(object)
-    KINDS = frozenset({'download', 'refresh', 'artwork', 'details', 'unsubscribe',
+    KINDS = frozenset({'download', 'artwork', 'details', 'unsubscribe',
         'remove-shows', 'reset-library', 'delete-downloads', 'discard-download',
         'opml-import', 'local-import-batch', 'library-changed', 'play-prepared', 'database-repair',
         'database-maintenance', 'database-health', 'integrity', 'export-downloads',
@@ -352,11 +353,9 @@ class _EpisodeMenuContext(NamedTuple):
 class MainWindow(QMainWindow):
     relaunch_requested = Signal()
     _BUSINESS_STATE = ('_pending_jobs', '_download_tickets', '_play_after_download',
-        '_play_after_download_intent', '_play_after_download_request', '_refresh_batch', '_refresh_generation',
-        '_refresh_failed', '_refresh_offline', '_refresh_waiting', '_refresh_in_flight',
-        '_manual_refresh_in_flight', '_refresh_quiet', '_refresh_catch_up', '_refresh_changed', '_details_fetched', '_artwork_fetched',
-        '_refresh_resume_requests', '_auto_download_pending', '_auto_download_queue',
-        '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved', '_settings_desired', '_retained_removals', '_refresh_requested_shows')
+        '_play_after_download_intent', '_play_after_download_request', '_details_fetched', '_artwork_fetched',
+        '_auto_download_pending', '_auto_download_queue',
+        '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved', '_settings_desired', '_retained_removals')
     # Oldest Back and Forward entries past this are dropped: an episode-view
     # entry holds the whole selection, and both stacks are saved with the view.
     _NAVIGATION_HISTORY_LIMIT = 50
@@ -365,12 +364,12 @@ class MainWindow(QMainWindow):
                                 'sort', 'scroll', 'scroll_units', 'current', 'selected_count',
                                 'podcast_offset', 'podcast_limit', 'episode_anchor')
 
-    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None, inline_work=False):
+    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None, inline_work=False, refresh_coordinator=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self._adopt_services(library, jobs, refresh, directory, playback, downloads, listening, download_jobs,
                              refresh_jobs, network_jobs, commands, artwork_jobs, play_download_jobs, inline_work,
-                             view_state)
+                             view_state, refresh_coordinator)
         self.setObjectName("mainWindow")
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(scaled_px(760), scaled_px(600))
@@ -387,16 +386,17 @@ class MainWindow(QMainWindow):
         self._restore_layout()
         QApplication.instance().installEventFilter(self)
         self._business_bridge.bind(self)
+        self.refresh_coordinator.bind(self)
 
     def _adopt_services(self, library, jobs, refresh, directory, playback, downloads, listening, download_jobs,
-                        refresh_jobs, network_jobs, commands, artwork_jobs, play_download_jobs, inline_work, view_state):
+                        refresh_jobs, network_jobs, commands, artwork_jobs, play_download_jobs, inline_work, view_state,
+                        refresh_coordinator):
         """The services and worker pools this window drives, each with its fallback."""
         self.library = library
         self._incoming_view_state = view_state
         self._context_revision = 0
         self._settings_desired = {}
         self._retained_removals = set()
-        self._refresh_requested_shows = set()
         # The stale-feed check runs once; declared here so it exists before
         # any library load, including a window built without a library.
         self._stale_check_done = False
@@ -418,6 +418,10 @@ class MainWindow(QMainWindow):
         self.network_jobs = network_jobs or jobs
         self.artwork_jobs = artwork_jobs or self.network_jobs
         self.refresh = refresh
+        # Feed-refresh state outlives this window: the application passes the one it owns, so a rebuild hands
+        # nothing over. A window built on its own (the private checks) gets a private one.
+        self.refresh_coordinator = refresh_coordinator or RefreshCoordinator(
+            library, refresh, jobs, self.refresh_jobs, parent=self)
         self.directory = directory
         self.playback = playback
         self.downloads = downloads
@@ -447,17 +451,6 @@ class MainWindow(QMainWindow):
         self._update_timer = QTimer(self)
         self._update_timer.setInterval(60 * 60 * 1000)
         self._update_timer.timeout.connect(self._check_for_updates)
-        self._refresh_batch = [0, 0, 0]  # total, done, new episodes
-        self._refresh_generation = 0
-        self._refresh_failed = []
-        self._refresh_offline = []  # failures that were only the network
-        self._refresh_changed = False
-        self._refresh_waiting = []
-        self._refresh_in_flight = set()
-        # Manual "Refresh now" submissions, tracked separately from the batch
-        # bookkeeping so a double-click (or menu + header race) cannot submit
-        # the same show twice (UI-P2-7).
-        self._manual_refresh_in_flight = set()
         # The show behind a Retry on the Podcasts page error banner.
         self._podcast_banner_show_id = 0
         self._local_import_error = None
@@ -558,16 +551,11 @@ class MainWindow(QMainWindow):
         self._play_after_download = 0
         self._play_after_download_intent = 0
         self._play_after_download_request = 0
-        self._refresh_quiet = False
-        self._refresh_catch_up = False  # a Pause dropped feeds of the running batch
-        self._refresh_resume_requests = set()  # user-requested shows a Pause took out of a batch
         self._auto_download_pending = set()  # shows that imported episodes while paused
         self._auto_download_queue = AutoDownloadQueue()  # candidates waiting for the hourly budget
         self._auto_download_pump_armed = False
         self._pane_bookmarks_revision = 0  # raised by each bookmarks-only reload of the details pane
         self._hint_owner = None  # the control whose hint bubble is showing
-        self._refresh_timer = QTimer(self)
-        self._refresh_timer.timeout.connect(self._scheduled_refresh)
         self._cache_timer = QTimer(self)
         self._cache_timer.setInterval(60 * 60 * 1000)
         self._cache_timer.timeout.connect(self._prune_artwork_cache)
@@ -1007,7 +995,7 @@ class MainWindow(QMainWindow):
         self.settings_page.database_reindex_requested.connect(lambda: self._database_maintenance("reindex"))
         self.settings_page.database_optimize_requested.connect(lambda: self._database_maintenance("optimize"))
         self.settings_page.database_repair_requested.connect(self._database_repair)
-        self._arm_refresh_timer()
+        self.refresh_coordinator.arm_timer()
         # The stale-feed check is the heaviest startup task; it now hooks off
         # the first successful library load (see _reload_library) so it can
         # never race the first paint. This long timer is only the fallback
@@ -1667,117 +1655,13 @@ class MainWindow(QMainWindow):
         future = self.jobs.submit(lambda: _integrity_report(database))
         _track_job(self, future, "integrity", None)
 
-    def _arm_refresh_timer(self):
-        minutes = self._refresh_interval() if self.library else 0
-        self._refresh_timer.stop()
-        if minutes > 0:
-            self._refresh_timer.start(min(minutes, 60) * 60 * 1000)
-
-    def _start_quiet_refresh(self, shows):
-        """Apply a scheduler's off-thread show read unless a batch started since."""
-        if shows and not self._refresh_batch[0] and not self._background_paused():
-            self._refresh_shows(shows, quiet=True)
-
     def _refresh_if_stale(self):
         if self._stale_check_done:
             return  # already triggered by the first library load
         self._stale_check_done = True
-        if self.library is None or self.jobs is None or getattr(self.refresh, "refresh", None) is None or self._background_paused():
-            return
-        minutes = self._refresh_interval()
-        if minutes <= 0:
-            return
-        def read_stale():
-            return self.library.refresh_candidates(minutes, smart=self.library.setting('refresh.smart', '1') == '1')
+        self.refresh_coordinator.refresh_if_stale()
 
-        # On the refresh pool: this read exists to feed refreshes, and the
-        # shared UI pool is busy with first-paint reads at exactly this time.
-        self._run_read(read_stale, self._start_quiet_refresh, "scheduled-refresh", pool=self.refresh_jobs)
-
-    def _scheduled_refresh(self):
-        if self.library is None or self._refresh_batch[0] or getattr(self.refresh, "refresh", None) is None or self._background_paused():
-            return
-
-        def read_all():
-            return self.library.refresh_candidates(self._refresh_interval(), smart=self.library.setting('refresh.smart', '1') == '1')
-
-        self._run_read(read_all, self._start_quiet_refresh, "scheduled-refresh")
-
-    def _refresh_shows(self, shows, quiet: bool = False):
-        if quiet and self._background_paused():
-            return
-        if self._refresh_batch[0]:
-            # Join the running batch rather than replacing it: a new
-            # generation would drop its summary and strand its banner and
-            # disabled controls. The batch keeps its mode, so a user Refresh
-            # all stays visible and still ends with one summary.
-            if not quiet and self._refresh_quiet:
-                # The user asked while a background batch ran: show it, and
-                # end it with the summary a Refresh all gives.
-                self._refresh_quiet = False
-                if self.episode_page.header.action:
-                    self.episode_page.header.action.setEnabled(False)
-                total, done, _ = self._refresh_batch
-                self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
-            queued = self._refresh_in_flight.union(self._refresh_waiting)
-            joined = [show_id for show_id in dict.fromkeys(show.id for show in shows) if show_id not in queued]
-            if not joined:
-                return
-            total, done, new_episodes = self._refresh_batch
-            total += len(joined)
-            self._refresh_batch = [total, done, new_episodes]
-            self._refresh_waiting.extend(joined)
-            if not self._refresh_quiet:
-                self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
-            self._pump_refresh_queue()
-            return
-        # A new batch invalidates completions still in flight from the old
-        # one, so they cannot count toward (or prematurely end) this batch.
-        self._refresh_generation += 1
-        self._refresh_batch = [len(shows), 0, 0]
-        self._refresh_failed = []
-        self._refresh_offline = []  # failures that were only the network
-        self._refresh_changed = False
-        self._refresh_waiting = [show.id for show in shows]
-        self._refresh_in_flight.clear()
-        if not quiet:
-            self.episode_page.banner.show_state("loading", f"Refreshing 0 of {len(shows)} podcasts…")
-            if self.episode_page.header.action:
-                self.episode_page.header.action.setEnabled(False)
-        self._refresh_quiet = quiet
-        self._pump_refresh_queue()
-
-    def _wind_down_quiet_batch(self):
-        """Pausing background work starts no more feeds of a background
-        batch; it ends when the feeds already fetching come back. A batch
-        the user started (Refresh all) carries on."""
-        if not self._refresh_batch[0] or not self._refresh_quiet or not self._refresh_in_flight:
-            return
-        _total, done, new_episodes = self._refresh_batch
-        if self._refresh_waiting:
-            self._refresh_catch_up = True  # resuming catches up, even if the batch is still running by then
-        # A show the user asked for while it waited in the batch is refreshed when work resumes; the
-        # scheduled catch-up only takes stale shows and would miss it.
-        self._refresh_resume_requests.update(self._refresh_requested_shows.intersection(self._refresh_waiting))
-        self._refresh_requested_shows.difference_update(self._refresh_waiting)
-        self._refresh_waiting.clear()
-        self._refresh_batch = [done + len(self._refresh_in_flight), done, new_episodes]
-
-    def _pump_refresh_queue(self):
-        """Keep at most two batch refreshes in flight — the refresh pool's size."""
-        deferred = 0
-        while self._refresh_waiting and len(self._refresh_in_flight) < 2:
-            show_id = self._refresh_waiting.pop(0)
-            if show_id in self._manual_refresh_in_flight and deferred < len(self._refresh_waiting):
-                # A manual refresh of this feed is running: take it later, so one outage is not counted
-                # twice against the feed by two back-to-back fetches.
-                self._refresh_waiting.append(show_id)
-                deferred += 1
-                continue
-            self._refresh_in_flight.add(show_id)
-            self._submit_refresh(show_id, batch=True)
-
-    def _summarize_refresh(self, total: int, new_episodes: int, failed: int, offline: int = 0):
+    def _summarize_refresh(self, total: int, new_episodes: int, failed: int, offline: int = 0, quiet: bool = False):
         """At most one in-app message and one desktop notification per batch, whatever happened inside it."""
         parts = [f"Refreshed {total} podcast{'s' if total != 1 else ''}"]
         if new_episodes:
@@ -1796,7 +1680,7 @@ class MainWindow(QMainWindow):
         elif new_episodes:
             self._notify("  ·  ".join(parts), "success", "Show", self._show_new_episodes)
             self._native_notify(APP_NAME, "  ·  ".join(parts), self._show_new_episodes)
-        elif not self._refresh_quiet:
+        elif not quiet:
             self._notify(parts[0])
         if failed and new_episodes:
             # The toast's one action went to the problems; the new episodes
@@ -2771,7 +2655,7 @@ class MainWindow(QMainWindow):
             elif key in {"playback.skip_back", "playback.skip_forward"}:
                 self._apply_skip_settings()
             elif key in {"refresh.interval_minutes", 'refresh.smart'}:
-                self._arm_refresh_timer()
+                self.refresh_coordinator.arm_timer()
             elif key == "background.paused":
                 self.settings_page.set_background_paused(value == "1")
                 self.navigation.set_background_paused(value == "1")
@@ -2779,7 +2663,7 @@ class MainWindow(QMainWindow):
                 if value == "1":
                     if not getattr(self, '_backup_manual', False):
                         self._cancel_backup()
-                    self._wind_down_quiet_batch()
+                    self.refresh_coordinator.wind_down_quiet_batch()
                 else:
                     self._resume_background_work()
             elif key == "ui.density":
@@ -2828,17 +2712,14 @@ class MainWindow(QMainWindow):
         self.relaunch_requested.emit()
 
     def _resume_background_work(self):
-        """Pick up what the pause set aside: the refreshes the user asked for while they waited in a batch,
-        the auto-downloads of shows that imported episodes meanwhile, then the scheduled catch-up."""
-        requests, self._refresh_resume_requests = self._refresh_resume_requests, set()
-        for show_id in sorted(requests):
-            self._submit_refresh(show_id)
+        """Pick up what the pause set aside: the refreshes the user asked for while they waited in a batch
+        and the scheduled catch-up (the coordinator's), then the auto-downloads of shows that imported
+        episodes meanwhile."""
+        self.refresh_coordinator.resume()
         pending, self._auto_download_pending = self._auto_download_pending, set()
         for show_id in sorted(pending):
             self._auto_download(show_id)
         self._pump_auto_downloads()
-        if self._refresh_interval() > 0:
-            self._scheduled_refresh()  # catch up on what the pause skipped
 
     def _background_paused(self) -> bool:
         return self.library is not None and self.library.setting("background.paused", "0") == "1"
@@ -2862,7 +2743,7 @@ class MainWindow(QMainWindow):
         return bounded_float(self.library.setting(key, str(default)), default, low, high)
 
     def _refresh_interval(self) -> int:
-        return self._int_setting("refresh.interval_minutes", 60, 0, 24 * 60)
+        return self.refresh_coordinator.interval_minutes()
 
     def _default_skips(self):
         """Global skip times, bounded the way a new podcast takes them."""
@@ -2949,7 +2830,7 @@ class MainWindow(QMainWindow):
         if not force and not status_only:
             if self.library.setting('background.paused', '0') == '1':
                 return
-            if self._reload_in_flight or self._refresh_batch[0] or self._cache_pruning:
+            if self._reload_in_flight or self.refresh_coordinator.batch_running or self._cache_pruning:
                 self._later(30_000, self._start_backup)
                 return
         service = self._backup_service
@@ -3458,6 +3339,7 @@ class MainWindow(QMainWindow):
             jobs = tuple(self._pending_jobs)
         return (
             any(not future.done() for future in jobs)
+            or self.refresh_coordinator.pending()
             or self.commands.pending()
             or self._reload_timer.isActive()
             or self._download_reload_timer.isActive()
@@ -4015,7 +3897,7 @@ class MainWindow(QMainWindow):
         self._reload_include_detail = self._reload_include_detail or include_detail
         if callback is not None:
             self._reload_callbacks.append(callback)
-        self._reload_timer.setInterval(1500 if self._refresh_batch[0] else 200)
+        self._reload_timer.setInterval(1500 if self.refresh_coordinator.batch_running else 200)
         if not self._reload_timer.isActive():
             self._reload_timer.start()
 
@@ -4087,7 +3969,7 @@ class MainWindow(QMainWindow):
                 return
             after_reload = navigate(show)
             self._request_reload(after_reload)
-            self._submit_refresh(show.id)
+            self.refresh_coordinator.submit(show.id)
 
         self._run_read(work, apply, key, pool=self.commands, coalesce=False, bulk=seed_feed is not None)
 
@@ -4170,7 +4052,7 @@ class MainWindow(QMainWindow):
                 message += f"; {failed} could not be resumed"
             self._notify(message, "error" if failed else "success")
             if resumed:
-                self._refresh_shows([SimpleNamespace(id=show_id) for show_id in resumed])
+                self.refresh_coordinator.refresh_shows([SimpleNamespace(id=show_id) for show_id in resumed])
 
         self._run_command(work, apply)
 
@@ -4203,8 +4085,8 @@ class MainWindow(QMainWindow):
         if added:
             # Joins a running batch; nothing starts while background work is
             # paused, and then no loading banner is left waiting for it.
-            self._refresh_shows(added, quiet=True)
-        if added and self._refresh_batch[0]:
+            self.refresh_coordinator.refresh_shows(added, quiet=True)
+        if added and self.refresh_coordinator.batch_running:
             self.podcast_page.banner.show_state("loading", f"Imported {len(added)} podcast{'s' if len(added) != 1 else ''} — fetching episodes in the background…")
         message = f"Imported {len(added)} subscription{'s' if len(added) != 1 else ''}"
         skipped = getattr(added, 'skipped', 0)
@@ -5070,7 +4952,7 @@ class MainWindow(QMainWindow):
         if podcast.show_id:
             menu.addAction(icons.themed_icon("episodes", "text", 16), "Open episodes", lambda: self._open_podcast(podcast))
             menu.addAction(icons.themed_icon("play", "text", 16), "Play latest", lambda: self._play_latest(podcast.show_id))
-            menu.addAction(icons.themed_icon("refresh", "text", 16), "Refresh now", lambda: self._submit_refresh(podcast.show_id))
+            menu.addAction(icons.themed_icon("refresh", "text", 16), "Refresh now", lambda: self.refresh_coordinator.submit(podcast.show_id))
             if podcast.health == "suspended":
                 menu.addAction("Resume refreshing", lambda: self._rearm_podcast(podcast.show_id))
             menu.addSeparator()
@@ -6278,7 +6160,7 @@ class MainWindow(QMainWindow):
             self._mark_with_undo([], played, show_id=show_id)
 
     def _rearm_podcast(self, show_id: int):
-        if not self._submit_refresh(show_id):
+        if not self.refresh_coordinator.submit(show_id):
             self._notify('This podcast is already refreshing.', 'info')
 
     # ----------------------------------------------------------------- playback
@@ -7947,9 +7829,9 @@ class MainWindow(QMainWindow):
         Refresh all keeps the header action until its batch ends; the show's
         own refresh button is free again either way.
         """
-        if self._hero_show_id and self._hero_show_id in self._manual_refresh_in_flight:
+        if self._hero_show_id and self.refresh_coordinator.is_manual_in_flight(self._hero_show_id):
             return
-        if self._refresh_batch[0] and not self._refresh_quiet:
+        if self.refresh_coordinator.visible_batch_running:
             self.episode_page.hero.refresh.setEnabled(True)
         else:
             self._set_episode_refresh_enabled(True)
@@ -7966,11 +7848,11 @@ class MainWindow(QMainWindow):
             if self.jobs is None or getattr(self.refresh, "refresh", None) is None:
                 self._notify("Feed refresh is unavailable in this session", "info")
                 return
-            if self._submit_refresh(self._hero_show_id):
+            if self.refresh_coordinator.submit(self._hero_show_id):
                 self.episode_page.banner.show_state("loading", "Refreshing this podcast…")
                 self._set_episode_refresh_enabled(False)
-            elif (self._refresh_batch[0] and self._refresh_quiet
-                    and self._hero_show_id not in self._manual_refresh_in_flight):
+            elif (self.refresh_coordinator.quiet_batch_running
+                    and not self.refresh_coordinator.is_manual_in_flight(self._hero_show_id)):
                 # A background batch covers this show and never reports on
                 # this page, so a loading banner here would outlive it.
                 self._notify("This podcast is already refreshing in the background")
@@ -7989,7 +7871,7 @@ class MainWindow(QMainWindow):
         library = self.library
         def apply(shows):
             if shows:
-                self._refresh_shows(shows)
+                self.refresh_coordinator.refresh_shows(shows)
             else:
                 self._request_reload()
                 self.episode_page.banner.show_state('loaded', 'Up to date — no podcasts are due for a check.')
@@ -8004,7 +7886,7 @@ class MainWindow(QMainWindow):
         if not show_id or self.library is None:
             self.podcast_page.banner.clear()
             return
-        if self._submit_refresh(show_id):
+        if self.refresh_coordinator.submit(show_id):
             self.podcast_page.banner.show_state("loading", "Refreshing this podcast…")
         else:
             self._podcast_banner_show_id = show_id
@@ -8012,7 +7894,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_all(self):
         # A visible Refresh all is already running; a background one joins.
-        if self.library is None or (self._refresh_batch[0] and not self._refresh_quiet):
+        if self.library is None or self.refresh_coordinator.visible_batch_running:
             return
         if self.jobs is None or getattr(self.refresh, 'refresh', None) is None:
             self._notify('Feed refresh is unavailable in this session.', 'error')
@@ -8021,39 +7903,9 @@ class MainWindow(QMainWindow):
         if not shows:
             self.episode_page.banner.show_state("empty", "There are no podcasts to refresh.")
             return
-        self._refresh_shows(shows, quiet=False)
+        self.refresh_coordinator.refresh_shows(shows, quiet=False)
         if self.pages.currentIndex() == PAGE_SETTINGS:
             self._notify('Checking all podcasts; you can keep browsing.', 'info')
-
-    def _submit_refresh(self, show_id: int, batch: bool = False) -> bool:
-        if self.jobs is None or self.refresh is None:
-            return False
-        if not batch and (
-            show_id in self._refresh_in_flight
-            or show_id in self._refresh_waiting
-            or show_id in self._manual_refresh_in_flight
-        ):
-            if show_id in self._refresh_waiting or show_id in self._refresh_in_flight:
-                self._refresh_requested_shows.add(show_id)
-                if show_id in self._refresh_waiting:
-                    self._refresh_waiting.remove(show_id)
-                    self._refresh_waiting.insert(0, show_id)
-            # A batch already covers this show, or a manual refresh of it is
-            # already running; a concurrent second refresh of the same feed
-            # would double fail_count on one outage. (RefreshService also
-            # serializes per show, so anything that slips past this guard is
-            # ordered rather than interleaved.)
-            return False
-        if not batch:
-            self._manual_refresh_in_flight.add(show_id)
-        generation = self._refresh_generation
-        explicit = not batch or show_id in self._refresh_requested_shows
-        # Legacy injected fixtures may expose only refresh(); production retry
-        # owns the rearm+fetch transition under the service's per-show lock.
-        operation = (getattr(self.refresh, 'retry', None) if explicit else None) or self.refresh.refresh
-        future = self.refresh_jobs.submit(operation, show_id)
-        _track_job(self, future, "refresh", (show_id, batch, generation))
-        return True
 
     def _reload_refreshed_show(self, show_id: int, *, reveal_latest=False):
         """Refresh just the open podcast, independent of a whole-library batch."""
@@ -8083,8 +7935,11 @@ class MainWindow(QMainWindow):
         # Registry dispatch: one gate above, one lookup
         # here. A new job kind is one method plus one registry line, and the
         # missing-_closed-check class of bug (batch 6) cannot come back.
-        handler = self._completion_handlers().get(kind, self._on_refresh)
+        handler = self._completion_handlers().get(kind, self._on_unknown_completion)
         handler(kind, identifier, result)
+
+    def _on_unknown_completion(self, kind, identifier, result):
+        logging.getLogger('bs_podcasts').warning('Ignoring a %r completion: no handler is registered for it', kind)
 
     def _completion_handlers(self):
         handlers = getattr(self, "_handler_table", None)
@@ -8749,22 +8604,51 @@ class MainWindow(QMainWindow):
             self._notify(result.message or "Download failed", "error", "Retry", lambda: self._download_chosen(identifier))
             self._native_notify(APP_NAME, result.message or "Download failed", lambda: self.navigation.select(PAGE_DOWNLOADS))
         return
-    def _on_refresh(self, kind, identifier, result):
-        if not isinstance(identifier, tuple) or len(identifier) != 3:
-            logging.getLogger('bs_podcasts').warning('Ignoring refresh completion with an invalid identifier')
-            return
-        identifier, batch_refresh, generation = identifier
-        current_batch = not batch_refresh or generation == self._refresh_generation
-        requested = current_batch and identifier in self._refresh_requested_shows
-        if current_batch:
-            self._refresh_requested_shows.discard(identifier)
-        if current_batch and result.status == JobStatus.OK:
-            # A 304 says the server did not change; it does not prove the
-            # visible model contains the episodes already committed locally.
-            self._reload_refreshed_show(identifier, reveal_latest=requested or not batch_refresh)
-        content_changed = result.status == JobStatus.OK and (
-            not getattr(result.value, 'not_modified', False) or bool(getattr(result.value, 'artwork_path', '')))
-        if not batch_refresh:
+    # The window is the RefreshCoordinator's view (controllers/refresh.py RefreshView): it holds the state and
+    # decides when things happen, and these callbacks only show it. They run on the Qt thread, in order.
+    def on_refresh_batch_started(self, total):
+        self.episode_page.banner.show_state("loading", f"Refreshing 0 of {total} podcasts…")
+        if self.episode_page.header.action:
+            self.episode_page.header.action.setEnabled(False)
+
+    def on_refresh_batch_promoted(self, done, total):
+        if self.episode_page.header.action:
+            self.episode_page.header.action.setEnabled(False)
+        self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
+
+    def on_refresh_batch_extended(self, done, total):
+        self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
+
+    def on_refresh_batch_progress(self, done, total, quiet, imported):
+        # Counters only while the batch runs (arithmetic, no DB read);
+        # the single full reload at the end corrects any drift.
+        if imported:
+            self._apply_new_badge(self._new_episode_total + imported)
+        if not quiet:
+            self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
+        elif self.podcast_page.banner.state == "loading":
+            self.podcast_page.banner.show_state("loading", f"Fetching episodes… {done} of {total} podcasts done")
+
+    def on_refresh_batch_finished(self, summary):
+        # An import's loading banner can ride on any batch (OPML
+        # joins a running Refresh all), so none outlives the batch.
+        if self.podcast_page.banner.state == "loading":
+            self.podcast_page.banner.clear()
+        if not summary.quiet:
+            self.episode_page.banner.clear()
+            self._release_episode_refresh()
+        if summary.changed:
+            self._request_reload()  # Includes the open catalogue once.
+        else:
+            self._refresh_show_summaries()
+        self._summarize_refresh(summary.total, summary.new_episodes, summary.failed,
+                                summary.offline, summary.quiet)
+
+    def on_refresh_show_done(self, info):
+        identifier, result = info.show_id, info.result
+        if not info.superseded and result.status == JobStatus.OK:
+            self._reload_refreshed_show(identifier, reveal_latest=info.requested or not info.batch)
+        if not info.batch:
             for item in self.episode_page.model.items():
                 if item.show_id == identifier:
                     self._episode_artwork_attempts.pop((item.episode_id, item.artwork_url), None)
@@ -8777,80 +8661,26 @@ class MainWindow(QMainWindow):
             # superseded batch would otherwise never auto-download (later
             # refreshes report imported=0 for them, so there is no retry).
             self._auto_download(identifier)
-        if batch_refresh:
-            if generation != self._refresh_generation:
-                # Superseded batch: it must not touch the new batch's
-                # bookkeeping — discarding the shared show id would free a
-                # phantom in-flight slot and over-fill the refresh pool.
-                self._update_new_badge()
-                return
-            self._refresh_in_flight.discard(identifier)
-            if requested and getattr(result.value, 'skipped_suspended', False):
-                self._later(0, lambda show_id=identifier: self._submit_refresh(show_id))
-        else:
-            self._manual_refresh_in_flight.discard(identifier)
-            if content_changed:
+        if info.superseded:
+            self._update_new_badge()
+            return
+        if not info.batch:
+            if info.content_changed:
                 # Another show's feed cannot change this podcast's episode
                 # history. Keep its rows/status while updating other collections.
                 self._request_reload(include_detail=self._hero_show_id == identifier)
             else:
                 self._refresh_show_summaries()
-        total, done, new_episodes = self._refresh_batch
-        if batch_refresh and not total:
+        elif not info.batch_total:
             # The batch record was reset mid-flight; keep the views consistent.
             self._request_reload()
-        if total and batch_refresh:
-            self._refresh_changed = self._refresh_changed or content_changed
-            done += 1
-            report = result.value if result.status == JobStatus.OK else None
-            new_episodes += getattr(report, "imported", 0) or 0
-            self._refresh_batch = [total, done, new_episodes]
-            quiet = getattr(self, "_refresh_quiet", False)
-            if done < total:
-                self._pump_refresh_queue()
-                # Counters only while the batch runs (arithmetic, no DB read);
-                # the single full reload at the end corrects any drift.
-                if getattr(report, "imported", 0):
-                    self._apply_new_badge(self._new_episode_total + report.imported)
-                if not quiet:
-                    self.episode_page.banner.show_state("loading", f"Refreshing {done} of {total} podcasts…")
-                elif self.podcast_page.banner.state == "loading":
-                    self.podcast_page.banner.show_state("loading", f"Fetching episodes… {done} of {total} podcasts done")
-            failed = result.status != JobStatus.OK or getattr(result.value, "health", None) in {Health.ERROR, Health.SUSPENDED}
-            if failed:
-                self._refresh_failed.append(identifier)
-                if getattr(report, "network_error", False):
-                    self._refresh_offline.append(identifier)
-            if done >= total:
-                self._refresh_batch = [0, 0, 0]
-                self._refresh_waiting.clear()
-                self._refresh_in_flight.clear()
-                # An import's loading banner can ride on any batch (OPML
-                # joins a running Refresh all), so none outlives the batch.
-                if self.podcast_page.banner.state == "loading":
-                    self.podcast_page.banner.clear()
-                if not quiet:
-                    self.episode_page.banner.clear()
-                    self._release_episode_refresh()
-                if self._refresh_changed:
-                    self._request_reload()  # Includes the open catalogue once.
-                else:
-                    self._refresh_show_summaries()
-                self._summarize_refresh(total, new_episodes, len(self._refresh_failed), len(self._refresh_offline))
-                if self._refresh_catch_up:
-                    # Resuming came while the feeds a Pause let finish were
-                    # still fetching, so it found a batch running and queued
-                    # nothing: the feeds the Pause dropped are due now. Still
-                    # paused, or no automatic refresh: nothing to catch up.
-                    self._refresh_catch_up = False
-                    if self._refresh_interval() > 0:
-                        self._scheduled_refresh()
+        if info.counted:
             # Batch: never one message per feed; problems are shown in place.
             return
         viewing_show = self.pages.currentIndex() == PAGE_EPISODES and self._hero_show_id == identifier
         # A show refresh frees its own controls whatever batch is running.
         self._release_episode_refresh()
-        if self._refresh_batch[0] and not self._refresh_quiet:
+        if info.visible_batch:
             # A visible Refresh all owns the episode banner until it ends;
             # a background batch never uses it, so the result shows below.
             if result.status != JobStatus.OK:
@@ -8874,7 +8704,7 @@ class MainWindow(QMainWindow):
                         self.episode_page.banner.show_state('partial', report.message or 'The podcast refreshed but did not contain playable episodes.')
                     else:
                         self.episode_page.banner.clear()
-                if content_changed:
+                if info.content_changed:
                     self._request_reload(show_status)
                 else:
                     show_status()
@@ -8885,7 +8715,7 @@ class MainWindow(QMainWindow):
             self._podcast_banner_show_id = identifier
         elif report.health == Health.PARTIAL:
             self.podcast_page.banner.show_state("partial", report.message or "The podcast refreshed but did not contain playable episodes.")
-        elif not total:  # a background batch's progress keeps this banner
+        elif not info.batch_total:  # a background batch's progress keeps this banner
             self.podcast_page.banner.clear()
             if self.pages.currentWidget() is not self.discover_page:
                 self._announce_refreshed_show(identifier)
@@ -10557,16 +10387,15 @@ class MainWindow(QMainWindow):
         # the replacement has already bound itself, and unbinding it would park
         # every later completion until the next rebuild.
         self._business_bridge.release(self, closing=not self._keep_services)
+        # Likewise for refresh progress. A real Quit also stops the scheduler and cancels queued fetches.
+        self.refresh_coordinator.release(self, closing=not self._keep_services)
         if not getattr(self, "_quit_drain_started", 0):
             self._save_layout()
             self._save_view_state()
-        self._refresh_timer.stop()
         self._cache_timer.stop()
         self._download_reload_timer.stop()
         self._bookmark_timer.stop()
         self._layout_save_timer.stop()
-        if not self._keep_services:
-            self._refresh_waiting.clear()
         self._discover_newest_waiting.clear()
         self._discover_newest_updates.clear()
         self._reload_callbacks.clear()

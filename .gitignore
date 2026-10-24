@@ -15,6 +15,7 @@
 !/src/bs_podcasts/assets/
 !/src/bs_podcasts/assets/branding/
 !/src/bs_podcasts/assets/fonts/
+!/src/bs_podcasts/controllers/
 !/src/bs_podcasts/data/
 !/src/bs_podcasts/data/migrations/
 !/src/bs_podcasts/data/repositories/
@@ -55,6 +56,8 @@
 !/src/bs_podcasts/assets/fonts/Inter-Variable.ttf
 !/src/bs_podcasts/assets/fonts/OFL.txt
 !/src/bs_podcasts/config.py
+!/src/bs_podcasts/controllers/__init__.py
+!/src/bs_podcasts/controllers/refresh.py
 !/src/bs_podcasts/diagnostics.py
 !/src/bs_podcasts/data/__init__.py
 !/src/bs_podcasts/data/database.py
