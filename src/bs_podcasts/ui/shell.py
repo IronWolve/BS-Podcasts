@@ -54,11 +54,11 @@ from ..jobs import JobResult, JobRunner, JobStatus
 from ..jobs.commands import CommandQueue
 from ..controllers.discover import Cover, DiscoverCoordinator, PeekFeed, Tints, latest_episode as _latest_episode, newest_item_feed
 from ..controllers.downloads import DownloadCoordinator
+from ..controllers.maintenance import BackupRunning, MaintenanceCoordinator
 from ..controllers.refresh import RefreshCoordinator
 from ..services.library import LibraryService, bounded_float, bounded_int
 from ..urlguard import is_web_url
 from ..privacy import feed_label, redact
-from ..data.database import is_corruption_error
 from . import icons
 from .models import EpisodeRow, EpisodeDelegate, EpisodeModel, EpisodeRowsIndex, ItemRoles, ShowRow, artwork_row, download_row, plain_snippet, preview_identity, set_item_tooltips
 from .pixmaps import dominant_color, sample_accents, save_accents, invalidate_artwork, prune_accents, prune_watchers, initials, decode_preview_images, install_previews
@@ -194,20 +194,6 @@ def shutdown_exports(grace_seconds=0.0):
     return _EXPORT_RUNNER.join(max(0.0, grace_seconds))
 
 
-def _integrity_report(database):
-    """The quick check as a worker result: "ok", or {"problem": text} for any
-    damage the check reports or SQLite itself raises while it runs. Other
-    failures (busy, I/O) propagate as errors. The daily check, the Settings
-    check and Repair all classify damage here, so they cannot disagree."""
-    try:
-        return database.check_integrity()
-    except Exception as exc:
-        if is_corruption_error(exc):
-            return {'problem': str(exc)}
-        raise
-
-
-
 def feed_limit_message() -> str:
     """Banner text for a feed the parser cut at its episode cap; the cap is read from the parser at call time."""
     return (f"This large feed was limited to {feed_parser.MAX_EPISODES:,} episodes. "
@@ -266,8 +252,7 @@ class _BusinessBridge(QObject):
     completed = Signal(object)
     KINDS = frozenset({'artwork', 'details', 'unsubscribe',
         'remove-shows', 'reset-library', 'delete-downloads', 'discard-download',
-        'opml-import', 'local-import-batch', 'library-changed', 'play-prepared', 'database-repair',
-        'database-maintenance', 'database-health', 'integrity', 'export-downloads',
+        'opml-import', 'local-import-batch', 'library-changed', 'play-prepared', 'export-downloads',
         # Previews that open a confirmation: a theme change must not drop it.
         'unsubscribe-preview', 'remove-preview', 'reset-preview', 'played-previews',
         'delete-downloads-preview', 'settings-save', 'unsubscribe-ready'})
@@ -335,12 +320,13 @@ class MainWindow(QMainWindow):
                                 'sort', 'scroll', 'scroll_units', 'current', 'selected_count',
                                 'podcast_offset', 'podcast_limit', 'episode_anchor')
 
-    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None, inline_work=False, refresh_coordinator=None, download_coordinator=None, discover_coordinator=None):
+    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None, inline_work=False, refresh_coordinator=None, download_coordinator=None, discover_coordinator=None, maintenance_coordinator=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self._adopt_services(library, jobs, refresh, directory, playback, downloads, listening, download_jobs,
                              refresh_jobs, network_jobs, commands, artwork_jobs, play_download_jobs, inline_work,
-                             view_state, refresh_coordinator, download_coordinator, discover_coordinator)
+                             view_state, refresh_coordinator, download_coordinator, discover_coordinator,
+                             maintenance_coordinator)
         self.setObjectName("mainWindow")
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(scaled_px(760), scaled_px(600))
@@ -359,6 +345,7 @@ class MainWindow(QMainWindow):
         self._business_bridge.bind(self)
         self.refresh_coordinator.bind(self)
         self.download_coordinator.bind(self)
+        self.maintenance.bind(self)
         if not self._view_restore_queued:
             self._bind_discover()
 
@@ -370,7 +357,7 @@ class MainWindow(QMainWindow):
 
     def _adopt_services(self, library, jobs, refresh, directory, playback, downloads, listening, download_jobs,
                         refresh_jobs, network_jobs, commands, artwork_jobs, play_download_jobs, inline_work, view_state,
-                        refresh_coordinator, download_coordinator, discover_coordinator):
+                        refresh_coordinator, download_coordinator, discover_coordinator, maintenance_coordinator):
         """The services and worker pools this window drives, each with its fallback."""
         self.library = library
         self._incoming_view_state = view_state
@@ -415,6 +402,10 @@ class MainWindow(QMainWindow):
         # in flight when the window is rebuilt is answered to the next one.
         self.discover = discover_coordinator or DiscoverCoordinator(
             library, refresh, directory, jobs, self.network_jobs, self.artwork_jobs, discover_tints(), parent=self)
+        # Backups, update checks and the database jobs likewise: a backup in flight when the window is rebuilt
+        # carries on, and is reported to the next one.
+        self.maintenance = maintenance_coordinator or MaintenanceCoordinator(
+            library, jobs, self.network_jobs, inline=inline_work, parent=self)
 
     def _init_state(self, view_state):
         """Every field the handlers read, with its starting value, and the timers that drive the window."""
@@ -430,14 +421,6 @@ class MainWindow(QMainWindow):
         self._last_mode = None
         self._pending_jobs = set()
         self._about_dialog = None
-        self._latest_update = None
-        self._update_checked_at = 0.0
-        self._update_error = ""
-        self._update_check_busy = False
-        self._update_check_manual = False
-        self._update_timer = QTimer(self)
-        self._update_timer.setInterval(60 * 60 * 1000)
-        self._update_timer.timeout.connect(self._check_for_updates)
         # The show behind a Retry on the Podcasts page error banner.
         self._podcast_banner_show_id = 0
         self._local_import_error = None
@@ -926,13 +909,10 @@ class MainWindow(QMainWindow):
         self._apply_notification_timeout()
         self.navigation.set_background_paused(self._background_paused())
         self.settings_page.statistics_requested.connect(self._refresh_statistics)
-        self.settings_page.update_check_requested.connect(lambda: self._check_for_updates(manual=True))
-        from ..services.updates import cached_update
-        self._latest_update = cached_update(app_version(), self.library.setting('updates.cached_release', ''))
-        self._update_checked_at = self._float_setting('updates.last_check', 0.0, 0.0, time.time())
+        self.settings_page.update_check_requested.connect(lambda: self.maintenance.check_for_updates(manual=True))
+        self.maintenance.arm_updates()  # restores the saved release record the first time only
         self._refresh_update_views()
-        self._arm_update_timer()
-        self.settings_page.database_health_requested.connect(self._database_health)
+        self.settings_page.database_health_requested.connect(self.maintenance.check_database)
         self.settings_page.database_reindex_requested.connect(lambda: self._database_maintenance("reindex"))
         self.settings_page.database_optimize_requested.connect(lambda: self._database_maintenance("optimize"))
         self.settings_page.database_repair_requested.connect(self._database_repair)
@@ -943,8 +923,8 @@ class MainWindow(QMainWindow):
         # for a load that errors out.
         self._stale_check_done = False
         self._later(8000, self._refresh_if_stale)
-        self._later(2500, self._check_database_if_due)
-        self._later(5000, lambda: self._check_for_updates(manual=False))
+        self._later(2500, self.maintenance.check_database_if_due)
+        self._later(5000, lambda: self.maintenance.check_for_updates(manual=False))
         self.settings_page.set_shortcuts(self.shortcuts.bindings())
         # Paths are cheap and should be available immediately; byte totals
         # stat() every cached image, so they are computed when the Settings
@@ -1592,20 +1572,6 @@ class MainWindow(QMainWindow):
         self._exec_dialog(ShortcutsDialog(groups, self))
 
     # -------------------------------------------------------- scheduled refresh
-    def _check_database_if_due(self):
-        """Run the expensive safety scan in the background, at most daily."""
-        if self.library is None or self.jobs is None or self._closed:
-            return
-        try:
-            last_check = float(self.library.setting("database.last_quick_check", "0"))
-        except (TypeError, ValueError):
-            last_check = 0.0
-        if 0 <= time.time() - last_check < 24 * 60 * 60:
-            return
-        database = self.library.repository.database
-        future = self.jobs.submit(lambda: _integrity_report(database))
-        _track_job(self, future, "integrity", None)
-
     def _refresh_if_stale(self):
         if self._stale_check_done:
             return  # already triggered by the first library load
@@ -1839,7 +1805,7 @@ class MainWindow(QMainWindow):
             info['updates'] = self._update_view_state()
             dialog = AboutDialog(info, self)
             self._about_dialog = dialog
-            dialog.update_check_requested.connect(lambda: self._check_for_updates(manual=True))
+            dialog.update_check_requested.connect(lambda: self.maintenance.check_for_updates(manual=True))
             dialog.update_notify_changed.connect(lambda enabled: self._save_setting('updates.notify', '1' if enabled else '0'))
             try:
                 self._exec_dialog(dialog)
@@ -2595,14 +2561,11 @@ class MainWindow(QMainWindow):
                     self.toast.dismiss_owner('app-update')
                 self._refresh_update_views()
                 if key == 'updates.enabled':
-                    self._arm_update_timer()
+                    self.maintenance.arm_updates()
                     if value == '1':
-                        self._check_for_updates()
+                        self.maintenance.check_for_updates()
             elif key.startswith('backups.'):
-                self._backup_status_dirty = True
-                if key == 'backups.enabled' and value == '0':
-                    self._cancel_backup()
-                self._backup_status_timer.start()
+                self.maintenance.backup_setting_changed(key, value)
             elif key in {"playback.skip_back", "playback.skip_forward"}:
                 self._apply_skip_settings()
             elif key in {"refresh.interval_minutes", 'refresh.smart'}:
@@ -2612,8 +2575,7 @@ class MainWindow(QMainWindow):
                 self.navigation.set_background_paused(value == "1")
                 self._notify("Background work paused" if value == "1" else "Background work resumed", "info")
                 if value == "1":
-                    if not getattr(self, '_backup_manual', False):
-                        self._cancel_backup()
+                    self.maintenance.pause_background()
                     self.refresh_coordinator.wind_down_quiet_batch()
                 else:
                     self._resume_background_work()
@@ -2731,139 +2693,56 @@ class MainWindow(QMainWindow):
         self._run_read(work, apply, "reconcile-missing", coalesce=False)
 
     def _wire_backups(self):
-        from ..services.backups import BackupService
-        self._backup_service = BackupService(self.library.repository)
-        self._backup_thread = None
-        self._backup_cancel = threading.Event()
-        self._backup_result = []
-        self._backup_status_dirty = False
-        self._backup_last_status = {}
-        self._backup_manual = False
-        self._backup_requested = False
-        self._backup_delete_confirming = False
-        self._backup_poll = QTimer(self)
-        self._backup_poll.setInterval(100)
-        self._backup_poll.timeout.connect(self._poll_backup)
-        self._backup_timer = QTimer(self)
-        self._backup_timer.setInterval(60 * 60 * 1000)
-        self._backup_timer.timeout.connect(self._start_backup)
-        self._backup_timer.start()
-        self._backup_status_timer = QTimer(self)
-        self._backup_status_timer.setSingleShot(True)
-        self._backup_status_timer.setInterval(300)
-        self._backup_status_timer.timeout.connect(lambda: self._start_backup(status_only=True))
+        maintenance = self.maintenance
         enabled = self.library.setting('backups.enabled', '1') == '1'
         interval = self.library.setting('backups.interval_days', '7')
         keep = self.library.setting('backups.keep', '2')
         self.settings_page.load_backup_options(enabled, interval if interval in {'1', '7', '30'} else '7',
                                                keep if keep in {'1', '2'} else '2')
-        self.settings_page.backup_now_requested.connect(lambda: self._start_backup(force=True))
-        self.settings_page.cancel_backup_requested.connect(self._cancel_backup)
-        self.settings_page.delete_backups_requested.connect(lambda: self._start_backup(force=True, operation='preview-delete'))
-        self._later(60_000, self._start_backup)
+        self.settings_page.backup_now_requested.connect(lambda: maintenance.start_backup(force=True))
+        self.settings_page.cancel_backup_requested.connect(maintenance.cancel_backup)
+        self.settings_page.delete_backups_requested.connect(lambda: maintenance.start_backup(force=True, operation='preview-delete'))
+        maintenance.arm_backups()
+        self._later(60_000, maintenance.start_backup)
+        # A backup that began under the window this one replaces is still running: show it.
+        running = maintenance.backup_progress()
+        if running is not None:
+            self.on_backup_running(running)
 
-    def _start_backup(self, *, force=False, status_only=False, operation='backup', previews=()):
-        if self._closed or self.library is None or not hasattr(self, '_backup_service'):
-            return
-        if self._backup_delete_confirming:
-            return
-        if self._backup_thread is not None:
-            if status_only:
-                self._backup_status_dirty = True
-            elif force and operation == 'backup' and self._backup_status_only:
-                self._backup_requested = True
-                self.settings_page.set_backup_status(self._backup_last_status, running=True,
-                                                   message='Backup queued after the storage check…')
-            return
-        if not force and not status_only:
-            if self.library.setting('background.paused', '0') == '1':
-                return
-            if self._reload_in_flight or self.refresh_coordinator.batch_running or self._cache_pruning:
-                self._later(30_000, self._start_backup)
-                return
-        service = self._backup_service
-        cancellation = self._backup_cancel = threading.Event()
-        mailbox = self._backup_result = []
-        self._backup_manual = force
-        self._backup_operation = operation
-        self._backup_status_only = status_only
-        self._backup_status_dirty = False
-        def work():
-            try:
-                if status_only:
-                    result = service.status()
-                elif operation == 'preview-delete':
-                    result = {'previews': service.deletion_preview(cancelled=cancellation)}
-                elif operation == 'delete':
-                    result = service.delete_confirmed(previews, cancelled=cancellation)
-                else:
-                    result = service.run(force=force, cancelled=cancellation)
-            except Exception as exc:
-                result = ({'state': 'cancelled', 'cancelled': True} if cancellation.is_set()
-                          else {'state': 'error', 'error': redact(exc)})
-            mailbox.append(result)
-        self._backup_thread = threading.Thread(target=work, name='bs-backup', daemon=True)
-        try:
-            self._backup_thread.start()
-        except Exception as exc:
-            self._backup_thread = None
-            self.settings_page.set_backup_status({'error': f'Could not start backup: {redact(exc)}'})
-            return
-        if not status_only:
-            message = {'preview-delete': 'Checking backups…', 'delete': 'Deleting confirmed backups…'}.get(operation)
-            self.settings_page.set_backup_status(self._backup_last_status, running=True, message=message)
+    # ---- the MaintenanceView the coordinator reports to
+    def backup_should_wait(self):
+        return self._reload_in_flight or self.refresh_coordinator.batch_running or self._cache_pruning
+
+    def on_backup_running(self, info: BackupRunning):
+        if not info.status_only:
+            message = {'preview-delete': 'Checking backups…', 'delete': 'Deleting confirmed backups…'}.get(info.operation)
+            self.settings_page.set_backup_status(info.status, running=True, cancelling=info.cancelling, message=message)
         self.settings_page.backup_delete.setEnabled(False)
-        self._backup_poll.start()
 
-    def _cancel_backup(self):
-        self._backup_requested = False
-        if getattr(self, '_backup_thread', None) is None:
-            return
-        self._backup_cancel.set()
-        if not self._backup_status_only:
-            self.settings_page.set_backup_status(self._backup_last_status, running=True, cancelling=True)
+    def on_backup_queued(self, status):
+        self.settings_page.set_backup_status(status, running=True, message='Backup queued after the storage check…')
 
-    def _poll_backup(self):
-        worker = self._backup_thread
-        if worker is None or worker.is_alive():
-            return
-        self._backup_poll.stop()
-        self._backup_thread = None
-        if self._closed:
-            return
-        status = self._backup_result[-1] if self._backup_result else {'error': 'The backup worker stopped unexpectedly.'}
-        if self._backup_operation in {'preview-delete', 'delete'} and not self._backup_status_only:
-            try:
-                self._finish_backup_deletion(status)
-            finally:
-                if self._backup_status_dirty and not self._closed:
-                    self._backup_status_timer.start()
-            return
-        self._backup_last_status = status
+    def on_backup_start_failed(self, message):
+        self.settings_page.set_backup_status({'error': message})
+
+    def on_backup_finished(self, done):
+        status = done.status
         self.settings_page.set_backup_status(status)
-        error = status.get('error') or status.get('last_error')
-        if error and not self._backup_status_only:
-            logging.getLogger('bs_podcasts').warning('Library backup: %s', redact(error))
-        if self._backup_manual:
-            if status.get('created'):
+        if done.manual:
+            if done.created:
                 self._notify('Library backup saved and verified', 'success')
-            elif error:
-                self._notify(f'Backup failed: {error}', 'error')
-        if status.get('created') and self.pages.currentIndex() == PAGE_SETTINGS:
+            elif done.error:
+                self._notify(f'Backup failed: {done.error}', 'error')
+        if done.created and self.pages.currentIndex() == PAGE_SETTINGS:
             self._refresh_storage_settings()
-        if self._backup_status_dirty:
-            self._backup_status_timer.start()
-        if self._backup_requested:
-            self._backup_requested = False
-            self._start_backup(force=True)
 
-    def _finish_backup_deletion(self, result):
-        self._backup_last_status = result.get('status', self._backup_last_status)
-        self.settings_page.set_backup_status(self._backup_last_status)
+    def on_backup_cleanup(self, done):
+        result = done.result
+        self.settings_page.set_backup_status(done.status)
         if result.get('error'):
-            self._notify(f"Could not {('list' if self._backup_operation == 'preview-delete' else 'delete')} backups: {result['error']}", 'error')
+            self._notify(f"Could not {('list' if done.operation == 'preview-delete' else 'delete')} backups: {result['error']}", 'error')
             return
-        if self._backup_operation == 'preview-delete':
+        if done.operation == 'preview-delete':
             if result.get('cancelled'):
                 return
             previews = result.get('previews', ())
@@ -2880,13 +2759,13 @@ class MainWindow(QMainWindow):
                 'Your current library and downloaded audio are not deleted. These backup copies cannot be recovered by the app.\n\n' + schedule,
                 'Delete backups', destructive=True, parent=self)
             dialog.add_file_listing(f'{item.path}  ({self._format_bytes(item.bytes_reclaimed)})' for item in previews)
-            self._backup_delete_confirming = True
+            self.maintenance.confirm_deletion(True)
             try:
                 accepted = self._exec_dialog(dialog) == QDialog.DialogCode.Accepted
             finally:
-                self._backup_delete_confirming = False
+                self.maintenance.confirm_deletion(False)
             if accepted:
-                self._start_backup(force=True, operation='delete', previews=previews)
+                self.maintenance.start_backup(force=True, operation='delete', previews=previews)
             return
         count = result.get('deleted', 0)
         message = f'Deleted {count} backup{("s" if count != 1 else "")} · freed {self._format_bytes(result.get("bytes", 0))}'
@@ -2906,7 +2785,7 @@ class MainWindow(QMainWindow):
             return
         self.settings_page.set_storage_info(*self._storage_info(False))
         if include_usage:
-            self._start_backup(status_only=True)
+            self.maintenance.start_backup(status_only=True)
             self._run_read(
                 lambda: self._storage_info(True),
                 lambda values: self.settings_page.set_storage_info(*values),
@@ -3289,6 +3168,7 @@ class MainWindow(QMainWindow):
             any(not future.done() for future in jobs)
             or self.refresh_coordinator.pending()
             or self.download_coordinator.pending()
+            or self.maintenance.pending()
             or self.commands.pending()
             or self._reload_timer.isActive()
             or self._download_reload_timer.isActive()
@@ -3302,7 +3182,7 @@ class MainWindow(QMainWindow):
     # other read reports on the page that was showing when it was asked for.
     _PAGE_READS = {"downloads": "download_page", "bookmarks": "bookmark_page", "queue": "playlist_page"}
     _BACKGROUND_READS = ("new-badge", "reconcile-missing", "download-capacity", "show-summaries", "scheduled-refresh",
-                         "visible-artwork", "settings-reload", "playback-metadata", "history-times", "download-rows",
+                         "visible-artwork", "playback-metadata", "history-times", "download-rows",
                          "download-notice-", "refresh-notice-", "retention-")
 
     def _read_owner(self, key: str):
@@ -3500,83 +3380,51 @@ class MainWindow(QMainWindow):
         return format_hours_minutes(seconds)
 
     def _update_view_state(self):
-        update = self._latest_update
+        maintenance = self.maintenance
+        update, checked_at, busy = maintenance.latest_update, maintenance.update_checked_at, maintenance.update_busy
         checked = 'Not checked'
-        if self._update_checked_at:
+        if checked_at:
             try:
-                checked = datetime.fromtimestamp(self._update_checked_at).astimezone().strftime('%b %d, %Y at %I:%M %p')
+                checked = datetime.fromtimestamp(checked_at).astimezone().strftime('%b %d, %Y at %I:%M %p')
             except (OverflowError, OSError, ValueError):
                 pass
-        status = ('Checking GitHub…' if self._update_check_busy else self._update_error
+        status = ('Checking GitHub…' if busy else maintenance.update_error
                   or (update.status if update is not None else 'Check GitHub for the latest release. Updates are never installed automatically.'))
         return {'available': update.available if update is not None else '',
                 'has_result': update is not None,
-                'checked': checked, 'status': status, 'busy': self._update_check_busy,
+                'checked': checked, 'status': status, 'busy': busy,
                 'url': update.url if update is not None else '',
                 'notify': self.library is not None and self.library.setting('updates.notify', '1') == '1',
                 'can_check': self.library is not None and self.jobs is not None and bool(RELEASES_API_URL)}
 
     def _refresh_update_views(self):
         state = self._update_view_state()
-        latest = state['available'] or ('No releases' if self._latest_update is not None else 'Not checked')
+        latest = state['available'] or ('No releases' if self.maintenance.latest_update is not None else 'Not checked')
         self.settings_page.set_update_status(
             f"Installed {app_version()} · Latest on GitHub: {latest}\n{state['status']}", state['busy'])
         self.settings_page.load_update_notifications(state['notify'])
         if self._about_dialog is not None:
             self._about_dialog.set_update_state(state)
 
-    def _arm_update_timer(self):
-        if self.library is not None and self.library.setting('updates.enabled', '1') == '1':
-            self._update_timer.start()
-        else:
-            self._update_timer.stop()
-
-    def _check_for_updates(self, manual: bool = False):
-        if self.library is None or self._closed:
-            return
-        if not RELEASES_API_URL:
-            self._update_error = "This build has no GitHub release service configured."
-            self._refresh_update_views()
-            return
-        if not manual and self.library.setting("updates.enabled", "1") != "1":
-            return
-        if self._update_check_busy:
-            self._update_check_manual = self._update_check_manual or manual
-            return
-        if not manual:
-            try:
-                last = float(self.library.setting("updates.last_check", "0"))
-            except (TypeError, ValueError):
-                last = 0.0
-            if self._latest_update is not None and 0 <= time.time() - last < 24 * 60 * 60:
-                return
-        if self.jobs is None:
-            self._update_error = "Update checks are unavailable in this session. Restart the app to try again."
-            self._refresh_update_views()
-            return
-        from ..services.updates import check_for_update
-        self._update_check_busy = True
-        self._update_check_manual = manual
-        self._update_error = ""
+    def on_update_state_changed(self):
         self._refresh_update_views()
-        try:
-            self._run_task("update-check", lambda: check_for_update(app_version()), manual, pool=self.network_jobs)
-        except RuntimeError:
-            self._update_check_busy = False
-            self._update_error = "Couldn’t start the update check. Please try again."
-            self._refresh_update_views()
 
-    def _database_health(self):
-        if self.library is None:
-            return
-        self.settings_page.set_database_status("Checking…")
-        database = self.library.repository.database
-        self._run_task("database-health", lambda: _integrity_report(database))
+    def on_update_checked(self, info):
+        update = info.update
+        saved = {'updates.last_check': str(info.checked_at), 'updates.cached_release': update.to_cache()}
+        if info.announce:
+            saved['updates.last_notified'] = update.available
+            if self._about_dialog is None:
+                self.toast.show_message(f"BS Podcasts {update.available} is available", "info", "View release",
+                                        lambda: self._open_url(update.url or RELEASES_URL), owner='app-update')
+        self._persist_ui_settings(saved)
+        self._refresh_update_views()
 
+    # ---- database health, maintenance and repair: the coordinator runs them; the confirmations are here
     def _database_maintenance(self, operation: str):
         if self.library is None:
             return
-        label = "Reindex" if operation == "reindex" else "Optimize"
+        label = self.maintenance.maintenance_label(operation)
         dialog = ConfirmDialog(
             f"{label} the library database?",
             "A backup is created first. Playback can continue, but library changes wait until maintenance finishes.",
@@ -3584,31 +3432,12 @@ class MainWindow(QMainWindow):
         )
         if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             return
-        database = self.library.repository.database
-        self.settings_page.set_database_status(f"{label} in progress…")
-
-        def work():
-            backup = database.backup()
-            getattr(database, operation)()
-            return str(backup)
-
-        self._run_task("database-maintenance", work, label)
+        self.maintenance.run_database_maintenance(operation)
 
     def _database_repair(self):
-        if self.library is None:
-            return
-        database = self.library.repository.database
-        self.settings_page.set_database_status("Checking…")
-        def work():
-            try:
-                report = _integrity_report(database)
-            except Exception as exc:
-                return "error", str(exc)
-            return ("damaged", "") if isinstance(report, dict) else ("healthy", "")
-        self._run_read(work, self._confirm_database_repair, "repair-check")
+        self.maintenance.check_before_repair()
 
-    def _confirm_database_repair(self, result):
-        status, message = result
+    def on_database_repair_checked(self, status, message):
         if status != "damaged":
             self.settings_page.set_database_status(
                 "Healthy · no repair needed" if status == "healthy" else f"Could not check right now: {message}")
@@ -3621,8 +3450,31 @@ class MainWindow(QMainWindow):
         if self._exec_dialog(dialog) != QDialog.DialogCode.Accepted:
             self.settings_page.set_database_status("Damaged · repair not started", repair_available=True)
             return
-        self.settings_page.set_database_status("Repair in progress…")
-        self._run_task("database-repair", self.library.repository.database.repair)
+        self.maintenance.repair_database()
+
+    def on_database_status(self, text, repair_available):
+        self.settings_page.set_database_status(text, repair_available)
+
+    def on_database_notice(self, message, tone):
+        self._notify(message, tone)
+
+    def on_database_checked(self, checked_at):
+        self._persist_ui_settings({"database.last_quick_check": str(checked_at)})
+
+    def on_database_damaged(self, problem):
+        # The same status the Settings check gives, so Repair is there to use.
+        self.settings_page.set_database_status(
+            f"Problem found: {problem}. Repair is now available.", repair_available=True)
+        self._notify(
+            "Library integrity check failed — repair is available in Settings; "
+            "inspect the data folder before making other changes.",
+            "error",
+            "Open folder",
+            self._open_data_folder,
+        )
+
+    def on_database_repaired(self):
+        self._request_reload()
 
     def _reload_library_async(self, *, include_detail=True):
         if self.library is None or self.jobs is None or self._closed:
@@ -7612,19 +7464,14 @@ class MainWindow(QMainWindow):
             "delete-downloads": self._on_delete_downloads,
             "played-previews": self._on_played_previews,
             "statistics": self._on_statistics,
-            "update-check": self._on_update_check,
             "remove-preview": self._on_remove_preview,
             "reset-preview": self._on_preview_confirmation(self._confirm_reset_library, "Couldn't read what would be removed"),
             "delete-downloads-preview": self._on_preview_confirmation(self._confirm_delete_downloads, "Couldn't read those downloads"),
             "remove-shows": self._on_remove_shows,
             "reset-library": self._on_remove_shows,
-            "database-health": self._on_database_health,
-            "database-repair": self._on_database_repair,
-            "database-maintenance": self._on_database_maintenance,
             "export-downloads": self._on_export_downloads,
             "read": self._on_read,
             "library": self._on_library,
-            "integrity": self._on_integrity,
             "accents": self._on_accents,
             "details": self._on_details,
             "artwork": self._on_artwork,
@@ -7779,30 +7626,6 @@ class MainWindow(QMainWindow):
             f"Top podcasts: {top}"
         )
         return
-    def _on_update_check(self, kind, identifier, result):
-        manual = bool(identifier) or self._update_check_manual
-        self._update_check_busy = self._update_check_manual = False
-        if result.status != JobStatus.OK:
-            self._update_error = f"Couldn’t check GitHub: {result.message or 'The check did not finish. Please try again.'}"
-            self._refresh_update_views()
-            return
-        update = result.value
-        if getattr(update, 'error', ''):
-            self._update_error = update.error
-            self._refresh_update_views()
-            return
-        self._latest_update, self._update_checked_at, self._update_error = update, time.time(), ""
-        saved = {'updates.last_check': str(self._update_checked_at), 'updates.cached_release': update.to_cache()}
-        enabled = self.library.setting('updates.notify', '1') == '1'
-        background_enabled = manual or self.library.setting('updates.enabled', '1') == '1'
-        if update.newer and enabled and background_enabled and self.library.setting('updates.last_notified', '') != update.available:
-            saved['updates.last_notified'] = update.available
-            if self._about_dialog is None:
-                self.toast.show_message(f"BS Podcasts {update.available} is available", "info", "View release",
-                                        lambda: self._open_url(update.url or RELEASES_URL), owner='app-update')
-        self._persist_ui_settings(saved)
-        self._refresh_update_views()
-        return
     def _on_remove_preview(self, kind, identifier, result):
         self.podcast_page.banner.clear()
         if result.status != JobStatus.OK:
@@ -7840,53 +7663,6 @@ class MainWindow(QMainWindow):
             if kept:
                 message += f" · kept {kept} that recovered"
             self._notify(message + left, tone)
-        return
-    def _on_database_health(self, kind, identifier, result):
-        if result.status == JobStatus.OK and result.value == "ok":
-            self.settings_page.set_database_status("Healthy · quick check passed")
-            self._persist_ui_settings({"database.last_quick_check": str(time.time())})
-        elif result.status == JobStatus.OK and isinstance(result.value, dict) and 'problem' in result.value:
-            self.settings_page.set_database_status(
-                f"Problem found: {result.value['problem']}. Repair is now available.",
-                repair_available=True,
-            )
-        else:
-            self.settings_page.set_database_status(f"Could not check right now: {result.message or result.value}", repair_available=False)
-        return
-    def _on_database_repair(self, kind, identifier, result):
-        if result.status == JobStatus.OK:
-            self.library.repository.invalidate_settings_cache()
-            lost = getattr(self.library.repository.database, "last_repair_lost", None) or {}
-            # Rows the repair could not read are gone from the new library;
-            # say which, instead of a plain "complete".
-            missing = ", ".join(f"{table}: {'all rows' if count is None else f'{count} row' + ('s' if count != 1 else '')}"
-                                for table, count in sorted(lost.items()))
-            self.settings_page.set_database_status('Repair finished — reloading settings…')
-            def reloaded(_settings):
-                self.settings_page.set_database_status(
-                    f"Repair complete · damaged original saved at {result.value}"
-                    + (f" · could not recover {missing}" if missing else ""))
-                if missing:
-                    self._notify(f"Repair could not recover every row ({missing}); the damaged original was kept", "error")
-                self._request_reload()
-            self._run_read(self.library.repository.reload_settings, reloaded, 'settings-reload')
-        else:
-            self.settings_page.set_database_status(
-                f"Repair failed: {result.message}. The original database was not replaced.",
-                repair_available=True,
-            )
-        return
-    def _on_database_maintenance(self, kind, identifier, result):
-        if result.status == JobStatus.OK:
-            self.settings_page.set_database_status(
-                f"{identifier} complete · backup: {result.value}"
-            )
-            self._notify(f"Database {identifier.lower()} complete", "success")
-        else:
-            self.settings_page.set_database_status(
-                f"{identifier} failed: {result.message}"
-            )
-            self._notify(f"Database {identifier.lower()} failed", "error")
         return
     def _on_export_downloads(self, kind, identifier, result):
         if result.status != JobStatus.OK:
@@ -7935,10 +7711,7 @@ class MainWindow(QMainWindow):
             page = self.episode_page if key == 'preview-page' else owners[0] if owners else self.pages.currentWidget()
             if page is None:
                 logging.getLogger("bs_podcasts").warning("Background read %s failed: %s", key, message)
-                if key == 'settings-reload':
-                    self.settings_page.set_database_status(f"Settings could not be reloaded: {message}", repair_available=False)
-                    self._notify(message, "error")
-                elif not key.startswith(self._BACKGROUND_READS):
+                if not key.startswith(self._BACKGROUND_READS):
                     self._notify(message, "error")
                 return
             if getattr(page, "banner", None) is not None:
@@ -7989,25 +7762,6 @@ class MainWindow(QMainWindow):
         else:
             self._reload_callbacks.clear()
             self._bind_discover()  # no saved view will be restored over Discover now; show what it has
-        return
-    def _on_integrity(self, kind, identifier, result):
-        if result.status == JobStatus.OK and result.value == "ok":
-            self._persist_ui_settings({"database.last_quick_check": str(time.time())})
-        elif result.status == JobStatus.OK and isinstance(result.value, dict) and 'problem' in result.value:
-            message = str(result.value['problem'])
-            logging.getLogger("bs_podcasts").error("Library integrity check failed: %s", message)
-            # The same status the Settings check gives, so Repair is there to use.
-            self.settings_page.set_database_status(
-                f"Problem found: {message}. Repair is now available.", repair_available=True)
-            self._notify(
-                "Library integrity check failed — repair is available in Settings; "
-                "inspect the data folder before making other changes.",
-                "error",
-                "Open folder",
-                self._open_data_folder,
-            )
-        else:
-            logging.getLogger('bs_podcasts').warning('Background library check could not run: %s', result.message or result.value)
         return
     def _on_accents(self, kind, identifier, result):
         self._accents_priming = False
@@ -9668,12 +9422,10 @@ class MainWindow(QMainWindow):
             event.ignore()
             self._minimize_to_tray()
             return
-        if hasattr(self, '_backup_cancel'):
-            self._backup_cancel.set()
-            self._backup_timer.stop()
-            self._backup_status_timer.stop()
-            self._backup_poll.stop()
         if not self._keep_services:
+            # A Quit starts the backup stopping now, while the drain below waits for storage; a rebuild leaves it
+            # running (the coordinator reports it to the next window).
+            self.maintenance.cancel_backup()
             if not getattr(self, "_quit_drain_started", 0):
                 self._quit_drain_started = time.monotonic()
                 self._save_layout()
@@ -9710,6 +9462,8 @@ class MainWindow(QMainWindow):
         self.download_coordinator.release(self, closing=not self._keep_services)
         # And for Discover: a real Quit cancels its requests; a rebuild carries them over to the next window.
         self.discover.release(self, closing=not self._keep_services)
+        # And for backups, updates and the database jobs: a real Quit stops the timers and cancels the backup.
+        self.maintenance.release(self, closing=not self._keep_services)
         if not getattr(self, "_quit_drain_started", 0):
             self._save_layout()
             self._save_view_state()

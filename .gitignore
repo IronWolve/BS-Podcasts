@@ -60,6 +60,7 @@
 !/src/bs_podcasts/controllers/base.py
 !/src/bs_podcasts/controllers/discover.py
 !/src/bs_podcasts/controllers/downloads.py
+!/src/bs_podcasts/controllers/maintenance.py
 !/src/bs_podcasts/controllers/refresh.py
 !/src/bs_podcasts/diagnostics.py
 !/src/bs_podcasts/data/__init__.py

@@ -25,6 +25,7 @@ from .config import APP_ID, APP_NAME, app_version, system_reduced_motion
 from .config import cache_dir, data_dir as application_data_dir, default_downloads_dir
 from .controllers.discover import DiscoverCoordinator
 from .controllers.downloads import DownloadCoordinator
+from .controllers.maintenance import MaintenanceCoordinator
 from .controllers.refresh import RefreshCoordinator
 from .data import Database
 from .data.database import DatabaseIntegrityError, is_corruption_error
@@ -778,25 +779,6 @@ def _join_playback_shutdown(commands, playback, deadline) -> int:
     return busy + playback.join_persistence(max(0.0, deadline - time.monotonic()))
 
 
-def _cancel_backup_worker(window, grace_seconds: float = 0.5, *, warn_if_busy: bool = True) -> int:
-    """Give the cancellable backup a short chance to leave library storage."""
-    if window is None:
-        return 0
-    cancellation = getattr(window, "_backup_cancel", None)
-    worker = getattr(window, "_backup_thread", None)
-    if cancellation is not None:
-        cancellation.set()
-    if worker is None or worker is threading.current_thread():
-        return 0
-    worker.join(max(0.0, grace_seconds))
-    busy = int(worker.is_alive())
-    if busy and warn_if_busy:
-        logging.getLogger("bs_podcasts").warning(
-            "Library backup is still stopping after %.1f s; shutdown will continue.", grace_seconds
-        )
-    return busy
-
-
 def _finalize_unclosed(commands, playback, grace_seconds: float = 2.0) -> int:
     """Finish playback and kept commands when the quit bypassed the window.
 
@@ -1109,6 +1091,9 @@ class _WindowController:
         # shown by the window that replaces the one it was asked from.
         self.discover_coordinator = DiscoverCoordinator(
             library, refresh, directory, jobs, network_jobs, artwork_jobs, discover_tints(), parent=app)
+        # And backups, update checks and the database jobs: the hourly timers, a backup in flight and its worker
+        # thread outlive the window, so a rebuild cancels nothing and quitting needs no window to stop the backup.
+        self.maintenance_coordinator = MaintenanceCoordinator(library, jobs, network_jobs, parent=app)
         self.logger = logging.getLogger("bs_podcasts")
         self.window = None  # the live main window; None until the first one is built
         self.rebuild_pending = False
@@ -1146,9 +1131,9 @@ class _WindowController:
         app.aboutToQuit.connect(lambda: _close_local_server(server))
         app.aboutToQuit.connect(lambda: shutdown_exports(0.2))
         app.aboutToQuit.connect(lambda: self.window._save_layout() if self.window is not None else None)
-        app.aboutToQuit.connect(
-            lambda: _cancel_backup_worker(self.window, grace_seconds=0.0, warn_if_busy=False)
-        )
+        # Early, so the backup is already winding down while the rest of the sequence runs; it is joined last
+        # (shut_down), within the exit deadline.
+        app.aboutToQuit.connect(self.maintenance_coordinator.shutdown)
         # window.tray and window.mpris are None until desktop integration ran.
         # Hiding the tray here removes the icon before the drain, and before a
         # forced exit that skips the toolkit's own cleanup.
@@ -1194,6 +1179,7 @@ class _WindowController:
             refresh_coordinator=self.refresh_coordinator,
             download_coordinator=self.download_coordinator,
             discover_coordinator=self.discover_coordinator,
+            maintenance_coordinator=self.maintenance_coordinator,
         )
         self._mark("main-window")
         window.tray = None
@@ -1251,6 +1237,7 @@ class _WindowController:
             self.refresh_coordinator.bind(None)  # progress shown on the old window would be lost with it
             self.download_coordinator.bind(None)  # likewise toasts and the playback commands a completion decides
             self.discover_coordinator.bind(None)  # and rows built for the old page; a request in flight carries on
+            self.maintenance_coordinator.bind(None)  # and a backup's outcome: it is shown by the window that replaces this one
         view_state = old._capture_view_state() if old is not None else None
         if old is not None:
             old._keep_services = True  # the services outlive this window
@@ -1363,10 +1350,7 @@ class _WindowController:
         busy += shutdown_exports(max(0.0, deadline - time.monotonic()))
         from .ui.pixmaps import shutdown_decodes
         busy += shutdown_decodes(max(0.0, deadline - time.monotonic()))
-        backup_thread = getattr(self.window, "_backup_thread", None) if self.window is not None else None
-        if backup_thread is not None and backup_thread is not threading.current_thread():
-            backup_thread.join(max(0.0, deadline - time.monotonic()))
-            busy += int(backup_thread.is_alive())
+        busy += self.maintenance_coordinator.join(max(0.0, deadline - time.monotonic()))
         if busy:
             self.logger.warning("Exiting with %d background job(s) still running.", busy)
             if not _close_busy_database(self.database, grace_seconds=0.1):
