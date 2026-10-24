@@ -52,6 +52,7 @@ from ..directories.catalog import CACHE_SECONDS as DIRECTORY_CACHE_SECONDS
 from ..directories.persistent import PersistentDirectoryCache, PersistentFeedDates
 from ..feeds import parser as feed_parser
 from ..downloads import AutomaticCleanupSkipped
+from ..downloads.auto import DEFAULT_HOURLY_LIMIT as AUTO_HOURLY_DEFAULT, HOURLY_LIMIT_RANGE as AUTO_HOURLY_RANGE, AutoDownloadQueue
 from ..jobs import JobResult, JobRunner, JobStatus
 from ..jobs.commands import CommandQueue
 from ..services.library import LibraryService, bounded_float, bounded_int
@@ -354,7 +355,7 @@ class MainWindow(QMainWindow):
         '_play_after_download_intent', '_play_after_download_request', '_refresh_batch', '_refresh_generation',
         '_refresh_failed', '_refresh_offline', '_refresh_waiting', '_refresh_in_flight',
         '_manual_refresh_in_flight', '_refresh_quiet', '_refresh_catch_up', '_refresh_changed', '_details_fetched', '_artwork_fetched',
-        '_refresh_resume_requests', '_auto_download_pending',
+        '_refresh_resume_requests', '_auto_download_pending', '_auto_download_queue',
         '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved', '_settings_desired', '_retained_removals', '_refresh_requested_shows')
     # Oldest Back and Forward entries past this are dropped: an episode-view
     # entry holds the whole selection, and both stacks are saved with the view.
@@ -561,6 +562,8 @@ class MainWindow(QMainWindow):
         self._refresh_catch_up = False  # a Pause dropped feeds of the running batch
         self._refresh_resume_requests = set()  # user-requested shows a Pause took out of a batch
         self._auto_download_pending = set()  # shows that imported episodes while paused
+        self._auto_download_queue = AutoDownloadQueue()  # candidates waiting for the hourly budget
+        self._auto_download_pump_armed = False
         self._pane_bookmarks_revision = 0  # raised by each bookmarks-only reload of the details pane
         self._hint_owner = None  # the control whose hint bubble is showing
         self._refresh_timer = QTimer(self)
@@ -658,6 +661,9 @@ class MainWindow(QMainWindow):
         for name, value in live.get('business_state', {}).items():
             if name in self._BUSINESS_STATE:
                 setattr(self, name, value)
+        if len(self._auto_download_queue):
+            # The retired window's release timer died with it.
+            self._later(1000, self._pump_auto_downloads)
 
     def _build_frame(self):
         """The frame: rail, page stack beside the details pane, player bar, toast and overlays."""
@@ -975,6 +981,7 @@ class MainWindow(QMainWindow):
             self.library.setting("downloads.auto", "0") == "1", self._int_setting("downloads.auto_limit", 3, 1, 10),
             self.library.setting("downloads.delete_played", "0") == "1",
             self.library.setting("playback.download_first", "0") == "1",
+            self._int_setting("downloads.auto_hourly", AUTO_HOURLY_DEFAULT, *AUTO_HOURLY_RANGE),
         )
         self.settings_page.load_refresh_interval(self._refresh_interval(), self.library.setting('refresh.smart', '1') == '1')
         self.settings_page.refresh_all_requested.connect(self._refresh_all)
@@ -2829,6 +2836,7 @@ class MainWindow(QMainWindow):
         pending, self._auto_download_pending = self._auto_download_pending, set()
         for show_id in sorted(pending):
             self._auto_download(show_id)
+        self._pump_auto_downloads()
         if self._refresh_interval() > 0:
             self._scheduled_refresh()  # catch up on what the pause skipped
 
@@ -5513,7 +5521,8 @@ class MainWindow(QMainWindow):
             # The import that triggered this is the only trigger; keep the show for the resume.
             self._auto_download_pending.add(show_id)
             return
-        self._run_read(lambda: self._auto_download_candidates(show_id), self._start_auto_downloads, f"auto-download-{show_id}")
+        self._run_read(lambda: self._auto_download_candidates(show_id),
+                       lambda candidates: self._queue_auto_downloads(show_id, candidates), f"auto-download-{show_id}")
 
     def _auto_download_candidates(self, show_id):
         show = self.library.repository.get_show(show_id)
@@ -5552,13 +5561,65 @@ class MainWindow(QMainWindow):
                 break
         return [episode.id for episode in candidates]
 
-    def _start_auto_downloads(self, candidates):
+    def _queue_auto_downloads(self, show_id, candidates):
         if self._background_paused():
+            self._auto_download_pending.add(show_id)
             return
-        for episode_id in candidates:
+        if self._auto_download_queue.add(show_id, candidates):
+            self._pump_auto_downloads()
+
+    def _pump_auto_downloads(self):
+        """Start the waiting candidates the hourly budget allows, and come back when it allows more."""
+        self._auto_download_pump_armed = False
+        if self.library is None or self.downloads is None or self._closed or self._background_paused():
+            return  # resuming background work pumps again
+        queue = self._auto_download_queue
+        queue.hourly_limit = self._int_setting("downloads.auto_hourly", AUTO_HOURLY_DEFAULT, *AUTO_HOURLY_RANGE)
+        released = queue.take()
+        if released:
+            self._run_read(lambda: self._still_auto_downloadable(released), self._start_auto_downloads,
+                           f"auto-download-start-{released[0]}", coalesce=False)
+        wait = queue.seconds_until_release()
+        if wait and not self._auto_download_pump_armed:
+            self._auto_download_pump_armed = True
+            self._later(int(min(wait, 3600) * 1000) + 1000, self._pump_auto_downloads)
+
+    def _still_auto_downloadable(self, episode_ids):
+        """The released ids that still qualify: a candidate can wait an hour, and meanwhile be played,
+        downloaded by hand, removed, or its show's auto-download turned off."""
+        repository = self.library.repository
+        active = {record.episode_id for record in self.downloads.records()}
+        default = self.library.setting("downloads.auto", "0") == "1"
+        shows, kept = {}, []
+        for episode_id in episode_ids:
+            episode = repository.get_episode(episode_id)
+            if episode is None or not episode.is_new or episode.downloaded_path or episode_id in active:
+                continue
+            if episode.show_id not in shows:
+                shows[episode.show_id] = repository.get_show(episode.show_id)
+            show = shows[episode.show_id]
+            if show is None or not (show.auto_download_override if show.auto_download_override is not None else default):
+                continue
+            kept.append((episode.show_id, episode_id))
+        return kept, len(episode_ids) - len(kept)
+
+    def _start_auto_downloads(self, result):
+        candidates, dropped = result
+        self._auto_download_queue.refund(dropped)
+        if self._background_paused():
+            # Paused while the check ran: back in line for the resume, budget returned.
+            self._auto_download_queue.refund(len(candidates))
+            for show_id, episode_id in candidates:
+                self._auto_download_queue.add(show_id, [episode_id])
+            return
+        for _show_id, episode_id in candidates:
             self._download_episode(episode_id, quiet=True)
         if candidates:
-            self._notify(f"Auto-downloading {len(candidates)} new episode{'s' if len(candidates) != 1 else ''}", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
+            waiting = len(self._auto_download_queue)
+            message = f"Auto-downloading {len(candidates)} new episode{'s' if len(candidates) != 1 else ''}"
+            if waiting:
+                message += f" · {waiting} more follow within the hourly limit"
+            self._notify(message, "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
 
     # ------------------------------------------------- listening details fetch
     def _ensure_listening_details(self, episode):

@@ -78,7 +78,9 @@ def shareable_url(url: str) -> str:
 
     Private feeds often carry their access token in the userinfo or in a query
     value. An export is shared with other people, so it keeps the address
-    shape and not the token."""
+    shape and not the token. A token embedded in the path survives: it cannot
+    be told apart from a public feed id. The app's own export keeps addresses
+    exactly as stored and warns that the file is private."""
     try:
         parts = urlsplit(url)
     except ValueError:

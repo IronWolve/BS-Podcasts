@@ -112,6 +112,7 @@
 !/src/bs_podcasts/domain/models.py
 !/src/bs_podcasts/domain/times.py
 !/src/bs_podcasts/downloads/__init__.py
+!/src/bs_podcasts/downloads/auto.py
 !/src/bs_podcasts/downloads/service.py
 !/src/bs_podcasts/feeds/__init__.py
 !/src/bs_podcasts/feeds/fetch.py

@@ -15,6 +15,21 @@ _request_context = threading.local()
 _rate_limited_until = {}
 _rate_limit_lock = threading.Lock()
 _RATE_LIMIT_CAP = 6 * 60 * 60
+# A 429 without a usable Retry-After still says "slow down": background work
+# backs off from that host for a minute, doubling on each further refusal up to
+# an hour, and a successful answer from the host forgets the strikes. A bare
+# 503 is left alone: shared feed hosts answer it for one broken feed, and
+# cooling the host would stall every other show on it.
+_OVERLOAD_STATUSES = (429,)
+_OVERLOAD_BACKOFF = 60.0
+_OVERLOAD_BACKOFF_CAP = 60 * 60
+_overload_strikes = {}
+# Background request starts per host are spaced at least a session's
+# `host_interval` apart: a refresh of hundreds of feeds on one podcast host, or
+# a run of downloads through one tracker, becomes a steady trickle instead of
+# a burst. Playback is never paced.
+_host_next_start = {}
+_host_pace_lock = threading.Lock()
 
 
 def _rate_limit_message(host: str, seconds: float = 0.0) -> str:
@@ -62,6 +77,43 @@ def _rate_limit_remaining(host: str, foreground: bool = False) -> float:
         if not foreground:
             until = max(until, _rate_limited_until.get((host, False), 0.0))
     return max(0.0, until - time.monotonic())
+
+
+def _overload_backoff(host: str) -> float:
+    """The next default cooldown for a host that refused without saying for how long."""
+    with _rate_limit_lock:
+        strikes = _overload_strikes.get(host, 0)
+        _overload_strikes[host] = strikes + 1
+        if len(_overload_strikes) > 4096:
+            _overload_strikes.pop(next(iter(_overload_strikes)))
+    return min(_OVERLOAD_BACKOFF * 2 ** min(strikes, 16), _OVERLOAD_BACKOFF_CAP)
+
+
+def _forget_overload(host: str) -> None:
+    if _overload_strikes:
+        with _rate_limit_lock:
+            _overload_strikes.pop(host, None)
+
+
+def _pace_host(host: str, interval: float, state) -> None:
+    """Wait for this request's start slot on `host`. Slots are reserved in
+    arrival order, so concurrent workers queue behind one another instead of
+    all waking at once; the wait honours the request's deadline and cancel."""
+    if not host or interval <= 0:
+        return
+    import time
+    with _host_pace_lock:
+        now = time.monotonic()
+        start = max(now, _host_next_start.get(host, 0.0))
+        _host_next_start[host] = start + interval
+        if len(_host_next_start) > 4096:
+            for name in [name for name, value in _host_next_start.items() if value <= now]:
+                del _host_next_start[name]
+    wait = start - now
+    while wait > 0:
+        step = min(.05, wait, state.remaining())
+        state.cancelled.wait(step)
+        wait -= step
 
 
 def _refuse_while_rate_limited(url, foreground: bool) -> None:
@@ -119,12 +171,20 @@ def _url_origin(url):
 
 def _fail_long_retry_after(response, state, request_host: str) -> None:
     """A Retry-After past the deadline is a rate limit, not a timeout."""
-    if getattr(response, "status_code", None) not in (429, 500, 502, 503, 504):
+    status = getattr(response, "status_code", None)
+    response_host = _request_host(getattr(response, "url", "") or "")
+    if status is not None and status < 400:
+        _forget_overload(response_host or request_host)
+    if status not in (429, 500, 502, 503, 504):
         return
     seconds = _retry_after_seconds(response)
     if seconds is None:
+        if status in _OVERLOAD_STATUSES and not getattr(state, "foreground", False):
+            # The response itself still reaches the caller as an ordinary
+            # failure; only later background requests wait.
+            host = response_host or request_host
+            _remember_rate_limit(host, _overload_backoff(host), False)
         return
-    response_host = _request_host(getattr(response, "url", "") or "")
     # Short waits also apply to subsequent requests for the same host. Never
     # sleep/drain the error body here; callers can retry after the cooldown.
     # Only the host that answered is cooled (not the first hop of a redirect
@@ -223,13 +283,16 @@ class SessionSlot:
         setattr(instance, self._attr, value)
 
 
-def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_retries: bool = True, max_redirects: int = 8, total_timeout: float = 60, max_response_bytes=20 * 1024 * 1024, foreground=False):
+def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_retries: bool = True, max_redirects: int = 8, total_timeout: float = 60, max_response_bytes=20 * 1024 * 1024, foreground=False, host_interval: float = 0.0):
     """A Session safe to share across the job pool.
 
     `retries` covers connection errors and optional read retries, not status
     answers. 429/5xx fail without draining/retrying their bodies; Retry-After
-    sets a bounded host cooldown. Long streaming transfers pass
+    sets a bounded host cooldown, and a background 429 without one a
+    growing default cooldown. Long streaming transfers pass
     `read_retries=False` so a mid-body failure is reported for caller resume.
+    `host_interval` spaces this session's background request starts to one
+    host at least that many seconds apart.
     """
     from requests import Session
     from .safe_transport import guarded_adapter
@@ -275,6 +338,11 @@ def make_session(pool: int = 8, retries: int = 2, backoff: float = 0.5, read_ret
                 }
             host = _request_host(url)
             _refuse_while_rate_limited(url, state.foreground)
+            if host_interval > 0 and not state.foreground:
+                try:
+                    _pace_host(host, host_interval, state)
+                except NetworkDeadline as exc:
+                    raise Timeout(str(exc)) from exc
             def work():
                 _request_context.state = state
                 try:

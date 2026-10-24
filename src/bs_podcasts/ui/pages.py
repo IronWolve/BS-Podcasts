@@ -44,6 +44,7 @@ from .widgets import PlainTextLabel, wheel_needs_focus, exec_menu, FlowLayout
 from .shortcuts import set_literal_tooltip
 from .theme import COLORS, SPACE, TEXT_SIZES, available_ui_fonts, reduced_motion, scaled_px, system_theme, theme_name
 from ..directories.catalog import CATEGORY_IDS, CATEGORY_TOPICS
+from ..downloads.auto import DEFAULT_HOURLY_LIMIT as AUTO_HOURLY_DEFAULT, HOURLY_LIMIT_RANGE as AUTO_HOURLY_RANGE
 
 
 FILTER_DEBOUNCE_MS = 200
@@ -2633,12 +2634,21 @@ class SettingsPage(BasePage):
         self.auto_download = QCheckBox("Auto-download new episodes")
         self.auto_download_limit = QSpinBox()
         self.auto_download_limit.setRange(1, 10)
-        self.auto_download_limit.setSuffix(" per refresh")
+        self.auto_download_limit.setSuffix(" per podcast")
+        self.auto_download_limit.setToolTip("New episodes taken from each podcast when it refreshes")
         self.auto_download_limit.setFixedWidth(scaled_px(self.FIELD_WIDTH))
+        # One refresh of a large library would otherwise multiply the per-podcast
+        # limit across every show; the rest wait their turn (see downloads/auto.py).
+        self.auto_download_hourly = QSpinBox()
+        self.auto_download_hourly.setRange(*AUTO_HOURLY_RANGE)
+        self.auto_download_hourly.setSuffix(" per hour")
+        self.auto_download_hourly.setToolTip("Automatic downloads started across all podcasts; the rest wait their turn")
+        self.auto_download_hourly.setFixedWidth(scaled_px(self.FIELD_WIDTH))
         self.delete_played = QCheckBox("Delete downloads once an episode is played")
         self.download_first = QCheckBox("Download before playing (no streaming)")
         downloads_form.addRow("After a refresh", self.auto_download)
         downloads_form.addRow("At most", self.auto_download_limit)
+        downloads_form.addRow("In total", self.auto_download_hourly)
         downloads_form.addRow("Playback", self.download_first)
         downloads_form.addRow("Housekeeping", self.delete_played)
         cleanup = self._action('Delete played downloads…', self.cleanup_played_requested, danger=True)
@@ -2651,6 +2661,7 @@ class SettingsPage(BasePage):
         self.settings_content.addWidget(downloads_card)
         self.auto_download.toggled.connect(lambda value: self.setting_changed.emit("downloads.auto", "1" if value else "0"))
         self.auto_download_limit.valueChanged.connect(lambda value: self.setting_changed.emit("downloads.auto_limit", str(value)))
+        self.auto_download_hourly.valueChanged.connect(lambda value: self.setting_changed.emit("downloads.auto_hourly", str(value)))
 
     def _build_appearance_section(self):
         # Appearance ------------------------------------------------------------
@@ -2701,7 +2712,8 @@ class SettingsPage(BasePage):
         for field, name in (
             (self.speed, "Playback speed"), (self.skip_back, "Skip back"), (self.skip_forward, "Skip forward"),
             (self.refresh_interval, "Refresh interval"), (self.search_depth, "Search result depth"),
-            (self.auto_download_limit, "Auto-download limit"), (self.theme, "Theme"), (self.density, "Density"),
+            (self.auto_download_limit, "Auto-download limit per podcast"),
+            (self.auto_download_hourly, "Auto-download limit per hour"), (self.theme, "Theme"), (self.density, "Density"),
             (self.text_size, "Text size"), (self.ui_font, "Font"), (self.episode_lines, "Episode description lines"),
         ):
             field.setAccessibleName(name)
@@ -2712,7 +2724,8 @@ class SettingsPage(BasePage):
         self.episode_lines.valueChanged.connect(lambda value: self.setting_changed.emit("ui.episode_lines", str(value)))
         wheel_needs_focus(
             self.speed, self.skip_back, self.skip_forward, self.refresh_interval, self.search_depth,
-            self.auto_download_limit, self.theme, self.density, self.text_size, self.ui_font, self.episode_lines,
+            self.auto_download_limit, self.auto_download_hourly, self.theme, self.density, self.text_size,
+            self.ui_font, self.episode_lines,
         )
 
     def _build_desktop_section(self):
@@ -3086,10 +3099,13 @@ class SettingsPage(BasePage):
         if persist and changed:
             self.setting_changed.emit('ui.settings_category', category)
 
-    def load_downloads(self, auto: bool, limit: int, delete_played: bool = False, download_first: bool = False):
-        with quiet_signals(self.auto_download, self.auto_download_limit, self.delete_played, self.download_first):
+    def load_downloads(self, auto: bool, limit: int, delete_played: bool = False, download_first: bool = False,
+                       hourly: int = AUTO_HOURLY_DEFAULT):
+        with quiet_signals(self.auto_download, self.auto_download_limit, self.auto_download_hourly,
+                           self.delete_played, self.download_first):
             self.auto_download.setChecked(auto)
             self.auto_download_limit.setValue(limit)
+            self.auto_download_hourly.setValue(hourly)
             self.delete_played.setChecked(delete_played)
             self.download_first.setChecked(download_first)
 
@@ -3197,7 +3213,7 @@ class SettingsPage(BasePage):
             nav.setSpacing(SPACE['xs'])
         for field in (
             self.speed, self.skip_back, self.skip_forward, self.refresh_interval,
-            self.auto_download_limit, self.theme, self.density, self.text_size,
+            self.auto_download_limit, self.auto_download_hourly, self.theme, self.density, self.text_size,
             self.episode_lines, self.search_depth, self.backup_interval, self.backup_keep, self.buffer_profile,
         ):
             self._fit_field(field, width)

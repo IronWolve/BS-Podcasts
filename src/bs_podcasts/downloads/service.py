@@ -307,7 +307,10 @@ class DownloadService:
     # pass through nine or more ad/tracker hops (a real one failed with
     # "Exceeded 8 redirects" on 2026-09-01). Every hop is still re-validated
     # by the session's redirect guard, so a longer leash costs no safety.
-    session = SessionSlot(read_retries=False, max_redirects=20, total_timeout=4 * 3600, max_response_bytes=None)
+    # Transfers to one host (often a shared tracker or CDN) start at least a
+    # second apart, resumes included.
+    session = SessionSlot(read_retries=False, max_redirects=20, total_timeout=4 * 3600, max_response_bytes=None,
+                          host_interval=1.0)
 
     def __init__(
         self,

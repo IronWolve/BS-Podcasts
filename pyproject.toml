@@ -7,6 +7,9 @@ name = "bs-podcasts"
 version = "9.40"
 description = "A wide, mobile-inspired desktop podcast player"
 readme = "README.md"
+# 3.13.15 is the floor for the Linux compatibility build only; Windows and
+# macOS need 3.14.7, which requires-python cannot express per platform. The
+# self-check (selfcheck.py) enforces the per-platform floor.
 requires-python = ">=3.13.15"
 dependencies = [
   "PySide6_Essentials==6.9.3; sys_platform == 'linux' and python_version < '3.14'",
@@ -14,6 +17,8 @@ dependencies = [
   "python-mpv>=1.0.8,<2",
   "requests>=2.34.2,<3",
   "urllib3>=2.8.0,<3",
+  # Imported directly by urlguard for host normalization, not only through requests.
+  "idna>=3.7,<4",
 ]
 
 [project.scripts]

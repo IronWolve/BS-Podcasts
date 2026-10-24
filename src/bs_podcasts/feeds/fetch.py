@@ -210,8 +210,11 @@ class FeedFetcher:
     # backstop is also a response error, never a network timeout.
     # A feed may be up to the byte cap, so the budget for the whole transfer
     # is longer than the 60 seconds a small request gets: 20 MB needs about
-    # 170 KB/s to finish in 120 seconds.
-    session = SessionSlot(max_redirects=5, max_response_bytes=MAX_RESPONSE_BYTES + 1024 * 1024, total_timeout=120)
+    # 170 KB/s to finish in 120 seconds. Requests to one host start at most
+    # twice a second: many shows share a podcast host, and a refresh of all of
+    # them should not arrive as a burst.
+    session = SessionSlot(max_redirects=5, max_response_bytes=MAX_RESPONSE_BYTES + 1024 * 1024, total_timeout=120,
+                          host_interval=0.5)
 
     def __init__(self, session=None):
         self.session = session
