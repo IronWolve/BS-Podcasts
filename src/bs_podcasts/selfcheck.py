@@ -146,6 +146,14 @@ def _storage_checks(root, checks, errors):
             versions = [row['version'] for row in connection.execute(
                 'SELECT version FROM schema_migrations ORDER BY version').fetchall()]
         checks['library database opens'] = True
+        # A changed shipped migration is only a warning for a user's library (it must still
+        # open), so this is where it fails loudly. Every applied row also carries its checksum.
+        with database.connect() as connection:
+            unrecorded = connection.execute('SELECT COUNT(*) FROM schema_migrations WHERE checksum IS NULL').fetchone()[0]
+        checks['migration checksums match shipped files'] = not database.migration_warnings and unrecorded == 0
+        if not checks['migration checksums match shipped files']:
+            errors['migration checksums match shipped files'] = (
+                '; '.join(database.migration_warnings) or f'{unrecorded} applied migration(s) have no checksum')
         shipped = len(list((Path(__file__).parent / 'data/migrations').glob('[0-9]*.sql')))
         checks['migrations applied'] = bool(versions) and versions == list(range(1, len(versions) + 1)) and len(versions) == shipped
         previous_cache = os.environ.get('BS_PODCASTS_CACHE_DIR')
@@ -162,6 +170,11 @@ def _storage_checks(root, checks, errors):
             show = LocalAudioImporter(repository).import_file(audio)
             episode = repository.list_episodes(show.id)[0]
             checks['isolated local audio metadata'] = show.source == 'local' and episode.duration_seconds == 1
+            with database.connect() as connection:
+                drift = Database.show_counter_drift(connection)
+            checks['show counters match a recount'] = not drift
+            if drift:
+                errors['show counters match a recount'] = f'{len(drift)} show(s) differ from a recount'
         except Exception as exc:
             checks['isolated local audio metadata'] = False
             errors['isolated local audio metadata'] = _exception_text(exc)

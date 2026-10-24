@@ -3,6 +3,7 @@
 from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from datetime import datetime
+import hashlib
 import logging
 import os
 import re
@@ -36,6 +37,17 @@ _PROCESS_START = time.time()
 
 class _Connection(sqlite3.Connection):
     """Weak-referenceable handle, still used by only one query thread."""
+
+    def execute(self, sql, *args):
+        # connect() scopes nest on this one handle, so a second explicit BEGIN
+        # means a scope inside another one's transaction wanted to own it.
+        # SQLite's own text ("cannot start a transaction within a transaction")
+        # does not say that the caller, not SQLite, is the problem.
+        if self.in_transaction and isinstance(sql, str) and sql.lstrip()[:5].upper() == "BEGIN":
+            raise sqlite3.OperationalError(
+                "BEGIN inside an open transaction: a nested connect() scope shares its caller's "
+                "transaction. Only the outermost scope may start one (BEGIN IMMEDIATE before any write).")
+        return super().execute(sql, *args)
 
 
 class DatabaseIntegrityError(RuntimeError):
@@ -213,6 +225,8 @@ class Database:
         self._backup_retention_lock = threading.Lock()
         self._scheduled_backup_lock = threading.Lock()
         self.last_repair_lost = {}
+        # Applied migrations whose shipped file changed (see _verify_migration_checksums).
+        self.migration_warnings = []
         self._preexisting = self.path.is_file() and self.path.stat().st_size > 0
 
     def _sweep_interrupted_copies(self):
@@ -385,6 +399,13 @@ class Database:
             raise
         if result != "ok":
             raise DatabaseIntegrityError(result)
+        # The daily and Settings checks already run on a worker and scan the
+        # file; the counter drift check rides along here instead of slowing
+        # startup. A failure to heal is not damage, so it never fails the check.
+        try:
+            self.heal_show_counters()
+        except sqlite3.Error:
+            _log.warning("Could not check the cached episode counters", exc_info=True)
         return result
 
     def _thread_connection(self) -> sqlite3.Connection:
@@ -449,20 +470,79 @@ class Database:
 
     @contextmanager
     def connect(self):
+        """One transaction per outermost scope, on the thread's one handle.
+
+        The handle is shared, so scopes nest. Only the outermost exit commits
+        or rolls back; an inner scope that began inside an open transaction
+        gets a SAVEPOINT, so its failure undoes just its own writes and a
+        caller that catches the error keeps everything it had done. An inner
+        scope that found no transaction open needs none: whatever is pending
+        when it fails is its own (Python opens the transaction lazily at the
+        first write, or the scope's explicit BEGIN IMMEDIATE did), and on
+        success the outer scope's commit covers it. Nothing an inner scope
+        wrote is durable before the outermost scope exits cleanly.
+        """
         with self._lock.shared():
             connection = self._thread_connection()
+            depth = getattr(self._connections, "depth", 0)
+            savepoint = None
+            was_open = connection.in_transaction
+            if depth and was_open:
+                savepoint = f"bs_scope_{depth}"
+                connection.execute(f"SAVEPOINT {savepoint}")
+            self._connections.depth = depth + 1
             try:
                 yield connection
-                connection.commit()
+                if not depth:
+                    connection.commit()
+                elif savepoint and connection.in_transaction:
+                    # A body that committed or rolled back took the savepoint with it.
+                    try:
+                        connection.execute(f"RELEASE {savepoint}")
+                    except sqlite3.OperationalError:
+                        pass
             except BaseException:
-                try:
-                    connection.rollback()
-                except sqlite3.Error:
-                    # The handle itself is unusable; drop it so the next call
-                    # on this thread opens a fresh one rather than reusing a
-                    # broken connection forever.
-                    self._drop_thread_connection()
+                if depth:
+                    self._rollback_scope(connection, savepoint)
+                else:
+                    try:
+                        connection.rollback()
+                    except sqlite3.Error:
+                        # The handle itself is unusable; drop it so the next call
+                        # on this thread opens a fresh one rather than reusing a
+                        # broken connection forever.
+                        self._drop_thread_connection()
                 raise
+            finally:
+                self._connections.depth = depth
+
+    @staticmethod
+    def _rollback_scope(connection, savepoint):
+        """Undo a nested scope's writes without ending its caller's transaction."""
+        if not connection.in_transaction:
+            return
+        if savepoint is not None:
+            try:
+                connection.execute(f"ROLLBACK TO {savepoint}")
+                connection.execute(f"RELEASE {savepoint}")
+                return
+            except sqlite3.Error:
+                # The savepoint is gone (the body committed and began again) or the handle
+                # is failing. Leaving the half-written scope in the caller's transaction
+                # would commit it later, so end the transaction instead.
+                _log.warning("Nested database scope could not roll back to its savepoint; "
+                             "the enclosing transaction was rolled back", exc_info=True)
+        try:
+            connection.rollback()
+        except sqlite3.Error:
+            pass
+
+    @staticmethod
+    def _migration_checksum(migration) -> str:
+        # LF-normalized so a checkout with CRLF line endings (autocrlf on
+        # Windows) hashes like the file that was applied.
+        text = migration.read_bytes().decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _initialize(self):
         self._sweep_interrupted_copies()
@@ -477,6 +557,7 @@ class Database:
         if self._preexisting:
             applied = self._applied_versions_readonly()
             self._refuse_newer_schema(applied, shipped)
+            self._refuse_migration_gap(applied, shipped)
             if shipped - applied:
                 self._backup_before_migration()
         with self.connect() as connection:
@@ -487,23 +568,38 @@ class Database:
                 "CREATE TABLE IF NOT EXISTS schema_migrations "
                 "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
             )
+            # The checksum column is added here rather than by a numbered
+            # migration: schema_migrations is created by this runner, not by
+            # a migration file, so a migration that altered it would fail
+            # wherever the migration files are replayed alone (the repair
+            # validator's scratch database, a test). The column is nullable and
+            # nothing reads it but this runner, so a library opened by an older
+            # build keeps working, and that build's rows simply get backfilled.
+            if not any(row[1] == "checksum" for row in connection.execute("PRAGMA table_info(schema_migrations)")):
+                connection.execute("ALTER TABLE schema_migrations ADD COLUMN checksum TEXT")
 
         with self.connect() as connection:
-            applied_versions = {
-                row["version"]
-                for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
+            recorded = {
+                row["version"]: row["checksum"]
+                for row in connection.execute("SELECT version, checksum FROM schema_migrations").fetchall()
             }
+        applied_versions = set(recorded)
         self._refuse_newer_schema(applied_versions, shipped)
+        # Before anything is applied: a pending migration older than one that
+        # already ran would be applied on top of a schema it was never written for.
+        self._refuse_migration_gap(applied_versions, shipped)
         self._refuse_missing_search_module()
+        self._verify_migration_checksums(migrations, recorded)
         pending = [migration for migration in migrations if int(migration.name.split("_", 1)[0]) not in applied_versions]
         for migration in pending:
             version = int(migration.name.split("_", 1)[0])
+            checksum = self._migration_checksum(migration)
             try:
                 with self.connect() as connection:
                     script = migration.read_text(encoding="utf-8")
                     connection.executescript(
                         "BEGIN IMMEDIATE;\n" + script
-                        + f"\nINSERT INTO schema_migrations(version) VALUES ({version});\nCOMMIT;"
+                        + f"\nINSERT INTO schema_migrations(version, checksum) VALUES ({version}, '{checksum}');\nCOMMIT;"
                     )
             except sqlite3.OperationalError as exc:
                 optional_search = migration.name in {
@@ -514,11 +610,60 @@ class Database:
                     raise
                 # Builds without optional FTS support keep the literal search
                 # path. Do not fail startup or repeat a full upgrade backup.
+                # The version is still recorded, so the skipped migration
+                # leaves no gap for the out-of-order check to reject.
                 with self.connect() as connection:
-                    connection.execute("INSERT INTO schema_migrations(version) VALUES (?)", (version,))
+                    connection.execute("INSERT INTO schema_migrations(version, checksum) VALUES (?, ?)",
+                                       (version, checksum))
                 _log.info("Indexed episode search is unavailable in this SQLite runtime; using literal search")
         if pending and self._preexisting:
             self._prune_backups()
+
+    def _verify_migration_checksums(self, migrations, recorded):
+        """Backfill missing checksums; report applied migrations whose file changed.
+
+        A mismatch means the schema this library was built with is not the
+        one the shipped file describes (an edited migration, or a library from
+        another branch). It is a warning, never a refusal: the user's library
+        must still open. `migration_warnings` carries it to the self-check.
+        """
+        backfill = []
+        for migration in migrations:
+            version = int(migration.name.split("_", 1)[0])
+            if version not in recorded:
+                continue
+            checksum = self._migration_checksum(migration)
+            stored = recorded[version]
+            if not stored:
+                backfill.append((checksum, version))
+            elif stored != checksum:
+                self.migration_warnings.append(
+                    f"Migration {migration.name} differs from the version this library was built with")
+                _log.warning("Migration %s differs from the version applied to this library "
+                             "(recorded %s, shipped %s)", migration.name, stored[:12], checksum[:12])
+        if backfill:
+            with self.connect() as connection:
+                # Rows from before checksums existed are trusted as shipped now;
+                # the guard keeps a concurrent writer's value.
+                connection.executemany(
+                    "UPDATE schema_migrations SET checksum=? WHERE version=? AND checksum IS NULL", backfill)
+
+    @staticmethod
+    def _refuse_migration_gap(applied, shipped):
+        # Shipped migrations are applied in order and recorded even when the
+        # optional search index is skipped, so a missing version below the
+        # newest applied one is not something this runner produces: a
+        # damaged record, a restored partial copy, or a library from a
+        # branch that numbered migrations differently. Applying the gap now
+        # would run an old migration against a newer schema.
+        newest = max(applied, default=0)
+        missing = sorted(version for version in shipped if version < newest and version not in applied)
+        if missing:
+            listed = ", ".join(str(version) for version in missing[:5]) + (", ..." if len(missing) > 5 else "")
+            raise sqlite3.DatabaseError(
+                f"This library's format record is missing migration(s) {listed} although newer ones "
+                f"(up to {newest}) were applied, so it cannot be upgraded safely. "
+                "It was left unchanged. Restore a library backup.")
 
     def _refuse_missing_search_module(self):
         # Migration 025 skips the search index on a runtime without FTS5, but
@@ -974,24 +1119,64 @@ class Database:
                     "INSERT INTO entity_sequences(kind, value) VALUES (?, ?) "
                     "ON CONFLICT(kind) DO UPDATE SET value=MAX(value, excluded.value)", (kind, highest))
         if "episodes" in lost:
-            # Per-show counts are cached (migration 014) and only adjusted by
-            # triggers; recount them for the episodes that were kept. The
-            # cached latest episode goes with them: a lost newest episode
-            # otherwise stays named, and a later insert only replaces it by
-            # sorting after it (the expression is migration 023's).
-            destination.execute(
-                "UPDATE shows SET episode_count=(SELECT COUNT(*) FROM episodes e WHERE e.show_id=shows.id), "
-                "new_count=(SELECT COUNT(*) FROM episodes e WHERE e.show_id=shows.id AND e.is_new=1)"
-            )
-            destination.execute(
-                "UPDATE shows SET (latest_key, latest_episode_title, latest_episode_published_at)=("
-                "SELECT COALESCE(NULLIF(published_at,''),'0') || printf('!%012d',id), title, published_at "
-                "FROM (SELECT id,title,published_at FROM episodes WHERE show_id=shows.id "
-                "ORDER BY published_at DESC,id DESC LIMIT 1) "
-                "UNION ALL SELECT '', '', '' LIMIT 1)"
-            )
+            # Per-show counts and the latest episode are cached (migrations 014-028)
+            # and only adjusted by triggers; recount them for the episodes that were
+            # kept. A lost newest episode otherwise stays named, and a later insert
+            # only replaces it by sorting after it.
+            cls.rebuild_show_counters(destination)
         cls._validate_repaired_schema(destination, applied)
         return lost
+
+    # The cached per-show values are kept by triggers (migrations 014, 021, 023,
+    # 024, 028). This is the one definition of what they must equal, shared by
+    # the drift check and every rebuild; the key expression is migration 024's.
+    _LATEST_EPISODE = (
+        "(SELECT COALESCE(NULLIF(published_at,''),'0') || printf('!%012d',id),title,published_at "
+        "FROM (SELECT id,title,published_at FROM episodes WHERE show_id=shows.id "
+        "ORDER BY published_at DESC,id DESC LIMIT 1) "
+        "UNION ALL SELECT '','','' LIMIT 1)")
+
+    @classmethod
+    def show_counter_drift(cls, connection) -> list:
+        """Ids of shows whose cached counters or latest episode differ from a recount.
+
+        Counts come from one pass over episodes; the latest episode is one
+        indexed lookup per show (episodes_show_latest), so the cost is a single
+        scan plus one probe per show.
+        """
+        return [row[0] for row in connection.execute(
+            "WITH agg AS (SELECT show_id, COUNT(*) AS total, SUM(is_new=1) AS fresh "
+            "FROM episodes GROUP BY show_id) "
+            "SELECT s.id FROM shows s LEFT JOIN agg a ON a.show_id=s.id "
+            "WHERE s.episode_count IS NOT COALESCE(a.total,0) OR s.new_count IS NOT COALESCE(a.fresh,0) "
+            "OR (s.latest_key,s.latest_episode_title,s.latest_episode_published_at) IS NOT "
+            + cls._LATEST_EPISODE.replace("shows.id", "s.id")).fetchall()]
+
+    @classmethod
+    def rebuild_show_counters(cls, connection) -> int:
+        """Recount the cached per-show values from episodes; returns shows corrected.
+
+        Only drifted rows are written, so a healthy library is read and never
+        dirtied. The caller owns the transaction.
+        """
+        drifted = cls.show_counter_drift(connection)
+        for start in range(0, len(drifted), 500):
+            chunk = drifted[start:start + 500]
+            connection.execute(
+                "UPDATE shows SET "
+                "episode_count=(SELECT COUNT(*) FROM episodes e WHERE e.show_id=shows.id), "
+                "new_count=(SELECT COUNT(*) FROM episodes e WHERE e.show_id=shows.id AND e.is_new=1), "
+                "(latest_key,latest_episode_title,latest_episode_published_at)=" + cls._LATEST_EPISODE
+                + " WHERE id IN (" + ",".join("?" * len(chunk)) + ")", chunk)
+        return len(drifted)
+
+    def heal_show_counters(self) -> int:
+        """Check the cached counters and correct any drift; returns shows corrected."""
+        with self.connect() as connection:
+            corrected = self.rebuild_show_counters(connection)
+        if corrected:
+            _log.warning("Corrected drifted episode counters for %d show(s)", corrected)
+        return corrected
 
     @classmethod
     def _validate_repaired_schema(cls, destination, applied):

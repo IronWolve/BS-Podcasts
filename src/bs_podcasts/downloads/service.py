@@ -1504,12 +1504,17 @@ class DownloadService:
                 raise AutomaticCleanupSkipped("This download changed or is now protected from automatic cleanup; it was kept.")
             # This one-episode transaction spans the check, the unlinks and row
             # retirement, so a concurrent favorite/verification write cannot
-            # overtake deletion. Commit ordering: the nested remove() call's
-            # connect() commits this shared transaction when it exits, so
-            # remove() must stay the last write in the body. A commit placed
-            # before an unlink would end the protection without any sign.
+            # overtake deletion. The nested remove()/progress() scopes share
+            # this transaction and commit only when this scope exits. A commit
+            # placed before an unlink would end the protection without any sign.
             # Only a sharing-violation wait leaves this transaction (_SharingBusy).
-            yield
+            try:
+                yield
+            except DownloadError:
+                # An unlink failed: the failure the body just recorded on the
+                # row (progress()) must outlive the error, not roll back with it.
+                connection.commit()
+                raise
 
     def _delete_confirmed_record(self, record, confirmed_paths):
         episode_id = record.episode_id
