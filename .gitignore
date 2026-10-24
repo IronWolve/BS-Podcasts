@@ -57,6 +57,7 @@
 !/src/bs_podcasts/assets/fonts/OFL.txt
 !/src/bs_podcasts/config.py
 !/src/bs_podcasts/controllers/__init__.py
+!/src/bs_podcasts/controllers/downloads.py
 !/src/bs_podcasts/controllers/refresh.py
 !/src/bs_podcasts/diagnostics.py
 !/src/bs_podcasts/data/__init__.py

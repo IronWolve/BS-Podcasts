@@ -23,6 +23,7 @@ from .artwork import ArtworkCache
 from .assets import icon_path, logo_path, shell_icon_path
 from .config import APP_ID, APP_NAME, app_version, system_reduced_motion
 from .config import cache_dir, data_dir as application_data_dir, default_downloads_dir
+from .controllers.downloads import DownloadCoordinator
 from .controllers.refresh import RefreshCoordinator
 from .data import Database
 from .data.database import DatabaseIntegrityError, is_corruption_error
@@ -1098,6 +1099,10 @@ class _WindowController:
         # Feed-refresh state belongs to the session, not to a window: it survives every rebuild, so
         # nothing about it is captured from the old window or handed to the new one.
         self.refresh_coordinator = RefreshCoordinator(library, refresh, jobs, refresh_jobs, parent=app)
+        # Likewise downloads: the tickets, a play-after-download wait and the auto-download queue (with the timer
+        # that releases it) outlive the window, so a rebuild hands nothing over and re-pumps nothing.
+        self.download_coordinator = DownloadCoordinator(
+            library, downloads, playback, jobs, download_jobs, play_download_jobs, parent=app)
         self.logger = logging.getLogger("bs_podcasts")
         self.window = None  # the live main window; None until the first one is built
         self.rebuild_pending = False
@@ -1153,6 +1158,7 @@ class _WindowController:
         )
         app.aboutToQuit.connect(lambda: self.downloads.pause_all())
         app.aboutToQuit.connect(self.refresh_coordinator.shutdown)
+        app.aboutToQuit.connect(self.download_coordinator.shutdown)
         # Last: the settings write queued above is kept and drained with playback.
         app.aboutToQuit.connect(lambda: _finalize_unclosed(self.commands, self.playback))
         # A session-end query may still be cancelled, so only save, never close.
@@ -1179,6 +1185,7 @@ class _WindowController:
             view_state=view_state,
             commands=self.commands,
             refresh_coordinator=self.refresh_coordinator,
+            download_coordinator=self.download_coordinator,
         )
         self._mark("main-window")
         window.tray = None
@@ -1234,6 +1241,7 @@ class _WindowController:
             # counters the replacement never sees (its copy is taken next).
             old._business_bridge.bind(None)
             self.refresh_coordinator.bind(None)  # progress shown on the old window would be lost with it
+            self.download_coordinator.bind(None)  # likewise toasts and the playback commands a completion decides
         view_state = old._capture_view_state() if old is not None else None
         if old is not None:
             old._keep_services = True  # the services outlive this window

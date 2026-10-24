@@ -52,9 +52,10 @@ from ..directories.catalog import CACHE_SECONDS as DIRECTORY_CACHE_SECONDS
 from ..directories.persistent import PersistentDirectoryCache, PersistentFeedDates
 from ..feeds import parser as feed_parser
 from ..downloads import AutomaticCleanupSkipped
-from ..downloads.auto import DEFAULT_HOURLY_LIMIT as AUTO_HOURLY_DEFAULT, HOURLY_LIMIT_RANGE as AUTO_HOURLY_RANGE, AutoDownloadQueue
+from ..downloads.auto import DEFAULT_HOURLY_LIMIT as AUTO_HOURLY_DEFAULT, HOURLY_LIMIT_RANGE as AUTO_HOURLY_RANGE
 from ..jobs import JobResult, JobRunner, JobStatus
 from ..jobs.commands import CommandQueue
+from ..controllers.downloads import DownloadCoordinator
 from ..controllers.refresh import RefreshCoordinator
 from ..services.library import LibraryService, bounded_float, bounded_int
 from ..services.preview_cache import FeedResultCache, with_retained_size
@@ -291,7 +292,7 @@ class _JobBridge(QObject):
 class _BusinessBridge(QObject):
     """Application-owned completions survive replacement of their Qt view."""
     completed = Signal(object)
-    KINDS = frozenset({'download', 'artwork', 'details', 'unsubscribe',
+    KINDS = frozenset({'artwork', 'details', 'unsubscribe',
         'remove-shows', 'reset-library', 'delete-downloads', 'discard-download',
         'opml-import', 'local-import-batch', 'library-changed', 'play-prepared', 'database-repair',
         'database-maintenance', 'database-health', 'integrity', 'export-downloads',
@@ -352,9 +353,7 @@ class _EpisodeMenuContext(NamedTuple):
 
 class MainWindow(QMainWindow):
     relaunch_requested = Signal()
-    _BUSINESS_STATE = ('_pending_jobs', '_download_tickets', '_play_after_download',
-        '_play_after_download_intent', '_play_after_download_request', '_details_fetched', '_artwork_fetched',
-        '_auto_download_pending', '_auto_download_queue',
+    _BUSINESS_STATE = ('_pending_jobs', '_details_fetched', '_artwork_fetched',
         '_episode_artwork_active', '_episode_artwork_attempts', '_episode_artwork_resolved', '_settings_desired', '_retained_removals')
     # Oldest Back and Forward entries past this are dropped: an episode-view
     # entry holds the whole selection, and both stacks are saved with the view.
@@ -364,12 +363,12 @@ class MainWindow(QMainWindow):
                                 'sort', 'scroll', 'scroll_units', 'current', 'selected_count',
                                 'podcast_offset', 'podcast_limit', 'episode_anchor')
 
-    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None, inline_work=False, refresh_coordinator=None):
+    def __init__(self, library=None, jobs=None, refresh=None, directory=None, playback=None, downloads=None, listening=None, download_jobs=None, refresh_jobs=None, network_jobs=None, parent=None, view_state=None, commands=None, artwork_jobs=None, play_download_jobs=None, inline_work=False, refresh_coordinator=None, download_coordinator=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self._adopt_services(library, jobs, refresh, directory, playback, downloads, listening, download_jobs,
                              refresh_jobs, network_jobs, commands, artwork_jobs, play_download_jobs, inline_work,
-                             view_state, refresh_coordinator)
+                             view_state, refresh_coordinator, download_coordinator)
         self.setObjectName("mainWindow")
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(scaled_px(760), scaled_px(600))
@@ -387,10 +386,11 @@ class MainWindow(QMainWindow):
         QApplication.instance().installEventFilter(self)
         self._business_bridge.bind(self)
         self.refresh_coordinator.bind(self)
+        self.download_coordinator.bind(self)
 
     def _adopt_services(self, library, jobs, refresh, directory, playback, downloads, listening, download_jobs,
                         refresh_jobs, network_jobs, commands, artwork_jobs, play_download_jobs, inline_work, view_state,
-                        refresh_coordinator):
+                        refresh_coordinator, download_coordinator):
         """The services and worker pools this window drives, each with its fallback."""
         self.library = library
         self._incoming_view_state = view_state
@@ -428,6 +428,9 @@ class MainWindow(QMainWindow):
         if library is not None:
             library.downloads = downloads
         self.listening = listening
+        # Download tickets, a play-after-download wait and the auto-download queue outlive this window likewise.
+        self.download_coordinator = download_coordinator or DownloadCoordinator(
+            library, downloads, playback, jobs, self.download_jobs, play_download_jobs, inline=inline_work, parent=self)
 
     def _init_state(self, view_state):
         """Every field the handlers read, with its starting value, and the timers that drive the window."""
@@ -537,9 +540,8 @@ class MainWindow(QMainWindow):
         # click-time dedup reads this instead of querying SQLite on the Qt thread.
         self._download_records_seen = {}
         # Episodes whose download started, finished or stopped and whose rows
-        # still need re-reading (see _download_state_changed).
+        # still need re-reading (see on_download_state_changed).
         self._download_rows_pending = set()
-        self._download_tickets = {}
         self._samples_lock = threading.Lock()
         self._unsubscribing = set()
         # Retention dialogs open now, and shows whose check came in meanwhile.
@@ -548,12 +550,6 @@ class MainWindow(QMainWindow):
         self._playback_revision = 0
         self._handled_completion = None
         self._new_episode_total = 0
-        self._play_after_download = 0
-        self._play_after_download_intent = 0
-        self._play_after_download_request = 0
-        self._auto_download_pending = set()  # shows that imported episodes while paused
-        self._auto_download_queue = AutoDownloadQueue()  # candidates waiting for the hourly budget
-        self._auto_download_pump_armed = False
         self._pane_bookmarks_revision = 0  # raised by each bookmarks-only reload of the details pane
         self._hint_owner = None  # the control whose hint bubble is showing
         self._cache_timer = QTimer(self)
@@ -649,9 +645,6 @@ class MainWindow(QMainWindow):
         for name, value in live.get('business_state', {}).items():
             if name in self._BUSINESS_STATE:
                 setattr(self, name, value)
-        if len(self._auto_download_queue):
-            # The retired window's release timer died with it.
-            self._later(1000, self._pump_auto_downloads)
 
     def _build_frame(self):
         """The frame: rail, page stack beside the details pane, player bar, toast and overlays."""
@@ -683,7 +676,7 @@ class MainWindow(QMainWindow):
         self.context.play_episode_requested.connect(self._play_or_toggle)
         self.context.play_preview_requested.connect(self._play_preview_episode)
         self.context.queue_episode_requested.connect(self._queue_episode)
-        self.context.download_episode_requested.connect(self._download_episode)
+        self.context.download_episode_requested.connect(lambda episode_id: self.download_coordinator.download(episode_id))
         self.context.play_latest_requested.connect(self._play_latest)
         self.context.open_show_requested.connect(self._open_show_id)
         self.context.preview_episodes_requested.connect(self._show_preview_episodes)
@@ -2515,7 +2508,7 @@ class MainWindow(QMainWindow):
         if ids and not self._confirm_bulk(len(ids), "Download"):
             return
         for episode_id in ids:
-            self._download_chosen(episode_id, quiet=True)
+            self.download_coordinator.choose(episode_id, quiet=True)
         if ids:
             self._notify(f"Queued {len(ids)} download{'s' if len(ids) != 1 else ''}", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
 
@@ -2713,13 +2706,10 @@ class MainWindow(QMainWindow):
 
     def _resume_background_work(self):
         """Pick up what the pause set aside: the refreshes the user asked for while they waited in a batch
-        and the scheduled catch-up (the coordinator's), then the auto-downloads of shows that imported
-        episodes meanwhile."""
+        and the scheduled catch-up (the refresh coordinator's), then the auto-downloads of shows that imported
+        episodes meanwhile (the download coordinator's)."""
         self.refresh_coordinator.resume()
-        pending, self._auto_download_pending = self._auto_download_pending, set()
-        for show_id in sorted(pending):
-            self._auto_download(show_id)
-        self._pump_auto_downloads()
+        self.download_coordinator.resume_background()
 
     def _background_paused(self) -> bool:
         return self.library is not None and self.library.setting("background.paused", "0") == "1"
@@ -3340,6 +3330,7 @@ class MainWindow(QMainWindow):
         return (
             any(not future.done() for future in jobs)
             or self.refresh_coordinator.pending()
+            or self.download_coordinator.pending()
             or self.commands.pending()
             or self._reload_timer.isActive()
             or self._download_reload_timer.isActive()
@@ -3354,7 +3345,7 @@ class MainWindow(QMainWindow):
     _PAGE_READS = {"downloads": "download_page", "bookmarks": "bookmark_page", "queue": "playlist_page"}
     _BACKGROUND_READS = ("new-badge", "reconcile-missing", "download-capacity", "show-summaries", "scheduled-refresh",
                          "visible-artwork", "settings-reload", "playback-metadata", "history-times", "download-rows",
-                         "download-notice-", "refresh-notice-", "auto-download-", "retention-")
+                         "download-notice-", "refresh-notice-", "retention-")
 
     def _read_owner(self, key: str):
         if key in self._PAGE_READS:
@@ -3517,7 +3508,7 @@ class MainWindow(QMainWindow):
         if playback is None:
             return
         if supersedes:
-            self._play_after_download = 0
+            self.download_coordinator.cancel_play_after()
             token = commands.supersede()
             if cancellable:
                 kwargs["cancelled"] = lambda: not commands.current(token)
@@ -5248,7 +5239,7 @@ class MainWindow(QMainWindow):
             for icon, label, callback in state_actions:
                 destination.addAction(icons.themed_icon(icon, "text", 16), label, callback)
             if not state_actions and not downloaded:
-                menu.addAction(icons.themed_icon("download", "text", 16), 'Download', lambda: self._download_chosen(episode.episode_id))
+                menu.addAction(icons.themed_icon("download", "text", 16), 'Download', lambda: self.download_coordinator.choose(episode.episode_id))
         elif many:
             missing = sum(1 for item in targets if is_web_url(item.media_url) and not item.downloaded_path)
             if missing:
@@ -5395,113 +5386,6 @@ class MainWindow(QMainWindow):
             return len(missing)
 
         self._run_command(work, lambda _count: self._reload_queue())
-
-    def _auto_download(self, show_id: int):
-        if self.library is None or self.downloads is None:
-            return
-        if self._background_paused():
-            # The import that triggered this is the only trigger; keep the show for the resume.
-            self._auto_download_pending.add(show_id)
-            return
-        self._run_read(lambda: self._auto_download_candidates(show_id),
-                       lambda candidates: self._queue_auto_downloads(show_id, candidates), f"auto-download-{show_id}")
-
-    def _auto_download_candidates(self, show_id):
-        show = self.library.repository.get_show(show_id)
-        if show is None:
-            return []
-        enabled = (
-            show.auto_download_override
-            if show.auto_download_override is not None
-            else self.library.setting("downloads.auto", "0") == "1"
-        )
-        if not enabled:
-            return []
-        limit = show.auto_download_limit or self._int_setting("downloads.auto_limit", 3, 1, 10)
-        active = {record.episode_id for record in self.downloads.records()}
-        recent = self.library.episodes(show_id=show_id, limit=max(limit * 3, show.retention_keep or 0))
-        candidates, ordinary_rank = [], 0
-        cutoff = time.time() - max(0, show.retention_days or 0) * 86400
-        for episode in recent:
-            protected = episode.favorite or (episode.position_seconds > 0 and not episode.played)
-            if not episode.favorite:
-                ordinary_rank += 1
-            if not protected and show.retention_keep and ordinary_rank > show.retention_keep:
-                continue
-            if not protected and show.retention_days:
-                try:
-                    parsed = datetime.fromisoformat(episode.published_at.replace('Z', '+00:00'))
-                    if parsed.tzinfo is None:
-                        parsed = parsed.replace(tzinfo=timezone.utc)
-                    if parsed.timestamp() < cutoff:
-                        continue
-                except (ValueError, TypeError, OverflowError, OSError):
-                    pass  # Unknown dates cannot justify excluding a new episode.
-            if episode.is_new and not episode.downloaded_path and episode.id not in active and is_web_url(episode.media_url):
-                candidates.append(episode)
-            if len(candidates) >= limit:
-                break
-        return [episode.id for episode in candidates]
-
-    def _queue_auto_downloads(self, show_id, candidates):
-        if self._background_paused():
-            self._auto_download_pending.add(show_id)
-            return
-        if self._auto_download_queue.add(show_id, candidates):
-            self._pump_auto_downloads()
-
-    def _pump_auto_downloads(self):
-        """Start the waiting candidates the hourly budget allows, and come back when it allows more."""
-        self._auto_download_pump_armed = False
-        if self.library is None or self.downloads is None or self._closed or self._background_paused():
-            return  # resuming background work pumps again
-        queue = self._auto_download_queue
-        queue.hourly_limit = self._int_setting("downloads.auto_hourly", AUTO_HOURLY_DEFAULT, *AUTO_HOURLY_RANGE)
-        released = queue.take()
-        if released:
-            self._run_read(lambda: self._still_auto_downloadable(released), self._start_auto_downloads,
-                           f"auto-download-start-{released[0]}", coalesce=False)
-        wait = queue.seconds_until_release()
-        if wait and not self._auto_download_pump_armed:
-            self._auto_download_pump_armed = True
-            self._later(int(min(wait, 3600) * 1000) + 1000, self._pump_auto_downloads)
-
-    def _still_auto_downloadable(self, episode_ids):
-        """The released ids that still qualify: a candidate can wait an hour, and meanwhile be played,
-        downloaded by hand, removed, or its show's auto-download turned off."""
-        repository = self.library.repository
-        active = {record.episode_id for record in self.downloads.records()}
-        default = self.library.setting("downloads.auto", "0") == "1"
-        shows, kept = {}, []
-        for episode_id in episode_ids:
-            episode = repository.get_episode(episode_id)
-            if episode is None or not episode.is_new or episode.downloaded_path or episode_id in active:
-                continue
-            if episode.show_id not in shows:
-                shows[episode.show_id] = repository.get_show(episode.show_id)
-            show = shows[episode.show_id]
-            if show is None or not (show.auto_download_override if show.auto_download_override is not None else default):
-                continue
-            kept.append((episode.show_id, episode_id))
-        return kept, len(episode_ids) - len(kept)
-
-    def _start_auto_downloads(self, result):
-        candidates, dropped = result
-        self._auto_download_queue.refund(dropped)
-        if self._background_paused():
-            # Paused while the check ran: back in line for the resume, budget returned.
-            self._auto_download_queue.refund(len(candidates))
-            for show_id, episode_id in candidates:
-                self._auto_download_queue.add(show_id, [episode_id])
-            return
-        for _show_id, episode_id in candidates:
-            self._download_episode(episode_id, quiet=True)
-        if candidates:
-            waiting = len(self._auto_download_queue)
-            message = f"Auto-downloading {len(candidates)} new episode{'s' if len(candidates) != 1 else ''}"
-            if waiting:
-                message += f" · {waiting} more follow within the hourly limit"
-            self._notify(message, "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
 
     # ------------------------------------------------- listening details fetch
     def _ensure_listening_details(self, episode):
@@ -5803,12 +5687,12 @@ class MainWindow(QMainWindow):
         if state in {"downloading", "queued"}:
             return [("pause", "Pause download", lambda: self._pause_download(episode_id))]
         if state == "paused":
-            return [("play", "Resume download", lambda: self._download_chosen(episode_id)),
+            return [("play", "Resume download", lambda: self.download_coordinator.choose(episode_id)),
                     ("close", "Discard paused download", lambda: self._discard_download(episode_id))]
         if state == "error":
             # A failed download could only be retried; nothing let the user
             # clear the red ERROR badge off the row.
-            return [("download", "Retry download", lambda: self._download_chosen(episode_id)),
+            return [("download", "Retry download", lambda: self.download_coordinator.choose(episode_id)),
                     ("close", "Clear failed download", lambda: self._discard_download(episode_id))]
         return []
 
@@ -5827,7 +5711,7 @@ class MainWindow(QMainWindow):
             if not getattr(record, "length_verified", False):
                 menu.addAction("Verify download length…", lambda: self._verify_download_length(episode_id))
         elif not state_actions:
-            menu.addAction(icons.themed_icon("download", "text", 16), "Download episode", lambda: self._download_chosen(episode_id))
+            menu.addAction(icons.themed_icon("download", "text", 16), "Download episode", lambda: self.download_coordinator.choose(episode_id))
         exec_menu(menu, global_position)
 
     def _open_external_episode(self, episode_id: int):
@@ -6169,7 +6053,7 @@ class MainWindow(QMainWindow):
             if self.playback is None:
                 self._notify("Playback is not available", "error")
             return
-        self._play_after_download = 0
+        self.download_coordinator.cancel_play_after()
         library, playback, commands = self.library, self.playback, self.commands
         token = commands.supersede()
         current = lambda: commands.current(token)
@@ -6212,7 +6096,7 @@ class MainWindow(QMainWindow):
             self._notify("Playback is not available", "error")
             return
         # A different playback intent supersedes any queued play-on-download.
-        self._play_after_download = 0
+        self.download_coordinator.cancel_play_after()
         if not item.media_url:
             self._notify("This preview has no playable media URL", "error")
             return
@@ -6235,7 +6119,7 @@ class MainWindow(QMainWindow):
         if self.playback is None or not item.episode_id:
             return
         # A different playback intent supersedes any queued play-on-download.
-        self._play_after_download = 0
+        self.download_coordinator.cancel_play_after()
         playback, commands = self.playback, self.commands
         token = commands.supersede()
         cancelled = lambda: not commands.current(token)
@@ -6244,7 +6128,7 @@ class MainWindow(QMainWindow):
 
     def _play_next(self):
         if self.playback is not None:
-            self._play_after_download = 0
+            self.download_coordinator.cancel_play_after()
             self._playback_command(PlaybackAction.NEXT)
 
     def _queue_row_episode(self, episode_id: int):
@@ -6294,7 +6178,7 @@ class MainWindow(QMainWindow):
         exec_menu(menu, view.viewport().mapToGlobal(view.visualRect(index).center()))
 
     def _play_pause(self):
-        self._play_after_download = 0
+        self.download_coordinator.cancel_play_after()
         if self.playback is not None:
             self._playback_command(PlaybackAction.PLAY_PAUSE)
 
@@ -6467,24 +6351,8 @@ class MainWindow(QMainWindow):
         request = getattr(snapshot, 'download_request', 0)
         if request and state == 'loading' and self.playback is not None:
             live = self.playback.snapshot
-            if (live.episode_id, live.download_request) == (episode_id, request) and (
-                    self._play_after_download, self._play_after_download_request) != (episode_id, request):
-                self._play_after_download = episode_id
-                self._play_after_download_request = request
-                self._play_after_download_intent = self.playback.intent_revision
-                if self.downloads is not None and self.jobs is not None:
-                    ticket = self._download_chosen(episode_id, quiet=True, priority=True)
-                    if ticket is None and not self.downloads.is_active(episode_id):
-                        # Refused (the episode is being removed) and no running
-                        # transfer will answer this wait: end it now.
-                        self._play_after_download = 0
-                        self._playback_command(PlaybackAction.DOWNLOAD_FAILED, episode_id, request,
-                                               'This episode cannot be downloaded right now. Try again, or stream it.')
-                    else:
-                        self._notify("Downloading before playing…", "loading", "Stream instead",
-                                     lambda: self._play_episode(episode_id, force_stream=True))
-                else:
-                    self._playback_command(PlaybackAction.DOWNLOAD_FAILED, episode_id, request, 'Downloads are unavailable; no stream was opened.')
+            if (live.episode_id, live.download_request) == (episode_id, request):
+                self.download_coordinator.play_after_download(episode_id, request)
         if state_changed:
             if source:
                 self.setWindowTitle(f"{snapshot.title} — {snapshot.show_title or APP_NAME}")
@@ -6723,37 +6591,57 @@ class MainWindow(QMainWindow):
         return mapping.get(value, value or "")
 
     # ---------------------------------------------------------------- downloads
-    def _download_chosen(self, episode_id: int, **kwargs):
-        """Queue a download the user asked for. Retention asks before it removes
-        that file; the app's own new-episode downloads do not come through here."""
-        ticket = self._download_episode(episode_id, **kwargs)
-        if ticket is not None:
-            self._persist_ui_settings({self.CHOSEN_KEY.format(episode_id): "1"})
-        return ticket
+    # The window is the DownloadCoordinator's view (controllers/downloads.py DownloadView): the coordinator
+    # holds the tickets, the play-after-download wait and the auto-download queue, and decides what happens.
+    # These callbacks only show it or carry out the playback command it decided on. They run on the Qt thread,
+    # in order, and are held back while a rebuild leaves no window bound.
+    def on_download_started(self, episode_id):
+        self._notify("Download started", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
 
-    def _download_episode(self, episode_id: int, quiet: bool = False, priority: bool = False):
-        """Queue a download; returns its ticket, or None when none was created."""
-        if self.downloads is None or self.jobs is None or not episode_id:
-            return None
-        # `priority` is a play intent: it takes over a ticket still waiting
-        # in line (the old job then returns without transferring).
-        ticket = self.downloads.queue(episode_id, priority=True) if priority else self.downloads.queue(episode_id)
-        if ticket is None:
-            return None
-        self._download_tickets[episode_id] = ticket
-        runner = (self.play_download_jobs or self.download_jobs) if priority else self.download_jobs
-        future = runner.submit(self.downloads.download, episode_id, ticket)
-        self._download_state_changed(episode_id)
-        _track_job(self, future, "download", (episode_id, ticket))
-        if not quiet:
-            self._notify("Download started", "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
-        return ticket
+    def on_download_chosen(self, episode_id):
+        self._persist_ui_settings({self.CHOSEN_KEY.format(episode_id): "1"})
+
+    def on_download_waiting_to_play(self, episode_id):
+        self._notify("Downloading before playing…", "loading", "Stream instead",
+                     lambda: self._play_episode(episode_id, force_stream=True))
+
+    def on_download_playback_ready(self, episode_id, request):
+        self._playback_command(PlaybackAction.COMPLETE_DOWNLOAD, episode_id, request)
+
+    def on_download_playback_failed(self, episode_id, request, message):
+        self._playback_command(PlaybackAction.DOWNLOAD_FAILED, episode_id, request, message)
+
+    def on_download_play(self, episode_id):
+        self._play_episode(episode_id)
+
+    def on_download_retention(self, episode_id):
+        self._retain_after_download(episode_id)
+
+    def on_download_completed(self, episode_id):
+        def apply(episode):
+            title = episode.title if episode else 'episode'
+            self._notify(f"Downloaded {title}", "success", "Play", lambda: self._play_episode(episode_id))
+            self._native_notify(APP_NAME, f"Downloaded {title}", lambda: self._play_episode(episode_id))
+            if episode is not None:
+                self._apply_retention(episode.show_id, keep=(episode_id,), background=True)
+        self._run_read(lambda: (self.library.episode(episode_id) if self.library else None,),
+                       lambda rows: apply(rows[0]), f"download-notice-{episode_id}")
+
+    def on_download_failed(self, episode_id, message):
+        self._notify(message, "error", "Retry", lambda: self.download_coordinator.choose(episode_id))
+        self._native_notify(APP_NAME, message, lambda: self.navigation.select(PAGE_DOWNLOADS))
+
+    def on_auto_downloads_started(self, started, waiting):
+        message = f"Auto-downloading {started} new episode{'s' if started != 1 else ''}"
+        if waiting:
+            message += f" · {waiting} more follow within the hourly limit"
+        self._notify(message, "info", "Show", lambda: self.navigation.select(PAGE_DOWNLOADS))
 
     def _pause_download(self, episode_id: int):
-        if self._play_after_download == episode_id:
-            self._play_after_download = 0
+        paused = self.download_coordinator.pause(episode_id)
+        if paused.ended_wait:
             self._playback_command(PlaybackAction.PAUSE)
-        if self.downloads is not None and self.downloads.cancel(episode_id):
+        if paused.paused:
             self._request_reload()
             self._notify("Download paused — resume any time from its menu")
 
@@ -6890,10 +6778,10 @@ class MainWindow(QMainWindow):
     def _pause_all_downloads(self):
         if self.downloads is None:
             return
-        self._play_after_download = 0
-        if self.playback is not None and self.playback.snapshot.download_request:
+        stopped = self.download_coordinator.pause_all()
+        if stopped.ended_wait:
             self._playback_command(PlaybackAction.PAUSE)
-        paused = self.downloads.pause_all()
+        paused = stopped.paused
         self._request_reload()
         if not paused:
             self._notify("No downloads are running")
@@ -6909,7 +6797,7 @@ class MainWindow(QMainWindow):
         if not self._download_reload_timer.isActive():
             self._download_reload_timer.start()
 
-    def _download_state_changed(self, episode_id: int):
+    def on_download_state_changed(self, episode_id: int):
         """A download started, finished or stopped. Only that episode's rows
         change, so they are re-read on the progress flush's timer instead of
         reloading the library; changes within one tick share one read."""
@@ -7983,7 +7871,6 @@ class MainWindow(QMainWindow):
             "artwork": self._on_artwork,
             "preview": self._on_preview,
             "preview-scan": self._on_preview,
-            "download": self._on_download,
         }
 
     def _on_preview_confirmation(self, confirm, failure):
@@ -8550,60 +8437,6 @@ class MainWindow(QMainWindow):
             lambda: (library.episode(episode_id),),
             lambda rows: rows[0] is not None and self._apply_retention(rows[0].show_id, keep=(episode_id,), background=True),
             f"retention-after-download-{episode_id}")
-    def _on_download(self, kind, identifier, result):
-        if isinstance(identifier, tuple):
-            identifier, ticket = identifier
-            if self._download_tickets.get(identifier) is not ticket:
-                return
-            self._download_tickets.pop(identifier, None)
-        self._download_state_changed(identifier)
-        # A finished job is not a finished download. download() also
-        # returns normally when it was absorbed as a duplicate of a live
-        # transfer, or when the user paused mid-retry; announcing those as
-        # "Downloaded" (with a Play action for a file that does not exist)
-        # was reachable on any ordinary double-click.
-        record = result.value if result.status == JobStatus.OK else None
-        complete = getattr(record, "state", None) == DownloadState.COMPLETE
-        request = getattr(getattr(self.playback, 'snapshot', None), 'download_request', 0)
-        if request and getattr(self.playback.snapshot, 'episode_id', 0) == identifier:
-            if complete:
-                self._play_after_download = 0
-                self._playback_command(PlaybackAction.COMPLETE_DOWNLOAD, identifier, request)
-                self._retain_after_download(identifier)
-                return
-            if result.status not in {JobStatus.OK, JobStatus.EMPTY}:
-                self._play_after_download = 0
-                self._playback_command(PlaybackAction.DOWNLOAD_FAILED, identifier, request, result.message or 'Download failed')
-            elif self._play_after_download == identifier and str(self.playback.snapshot.state) == 'loading':
-                # The job ended without a finished file and nothing else will
-                # answer this wait. Say so and leave Play to try again. A wait
-                # the user paused already has its notice and is not asked again.
-                self._play_after_download = 0
-                paused = getattr(record, 'state', None) == DownloadState.PAUSED
-                self._playback_command(PlaybackAction.DOWNLOAD_FAILED, identifier, request,
-                    'The download was paused before it finished. Press Play to resume it.' if paused else
-                    'The download ended before the episode was ready. Press Play to try again.')
-        if complete and self._play_after_download == identifier:
-            self._play_after_download = 0
-            if self._play_after_download_intent == getattr(self.playback, 'intent_revision', 0):
-                self._play_episode(identifier)
-                self._retain_after_download(identifier)
-                return
-        if complete:
-            def apply(episode):
-                title = episode.title if episode else 'episode'
-                self._notify(f"Downloaded {title}", "success", "Play", lambda: self._play_episode(identifier))
-                self._native_notify(APP_NAME, f"Downloaded {title}", lambda: self._play_episode(identifier))
-                if episode is not None:
-                    self._apply_retention(episode.show_id, keep=(identifier,), background=True)
-            self._run_read(lambda: (self.library.episode(identifier) if self.library else None,),
-                           lambda rows: apply(rows[0]), f"download-notice-{identifier}")
-        elif result.status in {JobStatus.OK, JobStatus.EMPTY}:
-            return  # paused or deduped: nothing transferred, say nothing
-        else:
-            self._notify(result.message or "Download failed", "error", "Retry", lambda: self._download_chosen(identifier))
-            self._native_notify(APP_NAME, result.message or "Download failed", lambda: self.navigation.select(PAGE_DOWNLOADS))
-        return
     # The window is the RefreshCoordinator's view (controllers/refresh.py RefreshView): it holds the state and
     # decides when things happen, and these callbacks only show it. They run on the Qt thread, in order.
     def on_refresh_batch_started(self, total):
@@ -8660,7 +8493,7 @@ class MainWindow(QMainWindow):
             # Before any stale-generation exit: episodes imported by a
             # superseded batch would otherwise never auto-download (later
             # refreshes report imported=0 for them, so there is no retry).
-            self._auto_download(identifier)
+            self.download_coordinator.auto_download(identifier)
         if info.superseded:
             self._update_new_badge()
             return
@@ -10389,6 +10222,7 @@ class MainWindow(QMainWindow):
         self._business_bridge.release(self, closing=not self._keep_services)
         # Likewise for refresh progress. A real Quit also stops the scheduler and cancels queued fetches.
         self.refresh_coordinator.release(self, closing=not self._keep_services)
+        self.download_coordinator.release(self, closing=not self._keep_services)
         if not getattr(self, "_quit_drain_started", 0):
             self._save_layout()
             self._save_view_state()
